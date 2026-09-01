@@ -1,5 +1,11 @@
 # CAL partition layout - 4MB ESP32-WROOM-32E
 #
+# FORMAT NOTE: no trailing comments on the data rows below. The generator reads
+# the column after Size as the flags field, so a "# ..." there is parsed as a
+# flag and the build fails with "CSV flag column contains unknown flag". Sizes
+# written with thousands separators make it worse, since those commas are column
+# separators. Everything explanatory therefore lives up here.
+#
 # Asymmetric on purpose. A conventional dual-slot OTA layout gives two equal
 # ~1.875MB app partitions, and the product application measured 2,166,784 bytes
 # - about 196KB over that line. Splitting the flash unevenly instead removes the
@@ -38,7 +44,7 @@
 # Name,     Type, SubType,  Offset,   Size,     Notes
 nvs,        data, nvs,      0x9000,   0x5000,
 otadata,    data, ota,      0xE000,   0x2000,
-factory,    app,  factory,  0x10000,  0x160000, # CAL - 1,441,792 bytes
-ota_0,      app,  ota_0,    0x170000, 0x250000, # application - 2,424,832 bytes
-spiffs,     data, spiffs,   0x3C0000, 0x30000,  # cached branding assets (LittleFS)
+factory,    app,  factory,  0x10000,  0x160000,
+ota_0,      app,  ota_0,    0x170000, 0x250000,
+spiffs,     data, spiffs,   0x3C0000, 0x30000,
 coredump,   data, coredump, 0x3F0000, 0x10000,
