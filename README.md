@@ -88,7 +88,7 @@ Nothing here is proven on hardware.
 
 ## The boot ladder
 
-`setup()` in `DiscoverAroundMe-CAL.ino` is the whole of CAL's control flow, and
+`setup()` in `CAL.ino` is the whole of CAL's control flow, and
 it is written to be read top to bottom.
 
 1. **Display first, within about two seconds of power.** A dark screen is
