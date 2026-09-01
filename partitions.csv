@@ -1,0 +1,44 @@
+# CAL partition layout - 4MB ESP32-WROOM-32E
+#
+# Asymmetric on purpose. A conventional dual-slot OTA layout gives two equal
+# ~1.875MB app partitions, and the product application measured 2,166,784 bytes
+# - about 196KB over that line. Splitting the flash unevenly instead removes the
+# ceiling entirely: CAL is small and permanent, the application slot is large.
+#
+# factory holds CAL and is never written by OTA. It is therefore the recovery
+# image: a bad application build drops back here rather than bricking the unit,
+# which matters because the device cannot be serviced remotely.
+#
+# Consequence: with a single OTA slot the application cannot update itself (it
+# cannot write the partition it is executing from). Updates reboot into CAL,
+# which performs the download and hands back. See README.
+#
+# SIZING, MEASURED RATHER THAN ESTIMATED
+# --------------------------------------
+# CAL compiled to 1,318,843 bytes on 2026-09-01 (esp32 core 3.3.11, LovyanGFX,
+# NetworkClientSecure/mbedTLS, LittleFS, WebServer, ArduinoJson). An earlier
+# draft of this table gave factory 0x130000 = 1,245,184 bytes, which CAL exceeded
+# by roughly 72KB. The split below was moved to fit the measured figure with room
+# to grow, not the other way round.
+#
+# factory 0x160000 = 1,441,792  ->  122,949 bytes spare over the measured build (8.5%)
+# ota_0   0x250000 = 2,424,832  ->  258,048 bytes spare over the 2,166,784 application
+#
+# The application slot is still larger than the current application, so the
+# Bluetooth/A2DP stack does not have to be removed to make OTA possible. That
+# was only ever forced by the equal-slot assumption.
+#
+# Re-measure both figures before trusting this table again. CAL is the partition
+# that cannot be resized in the field: every unit already flashed keeps whatever
+# table it was given, so growing factory later means recovering hardware.
+#
+# App partitions must start on a 64KB boundary. 0x10000, 0x170000 and the sizes
+# below all satisfy that, and the table fills the 4MB device exactly.
+#
+# Name,     Type, SubType,  Offset,   Size,     Notes
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xE000,   0x2000,
+factory,    app,  factory,  0x10000,  0x160000, # CAL - 1,441,792 bytes
+ota_0,      app,  ota_0,    0x170000, 0x250000, # application - 2,424,832 bytes
+spiffs,     data, spiffs,   0x3C0000, 0x30000,  # cached branding assets (LittleFS)
+coredump,   data, coredump, 0x3F0000, 0x10000,

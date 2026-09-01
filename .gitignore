@@ -1,0 +1,14 @@
+# arduino-cli build output. Deliberately not committed from here: the binaries
+# that matter are published as release artifacts with their checksums, and a
+# 1.3MB image committed on every build would dominate the repository within a
+# few dozen commits.
+build/
+*.elf
+*.map
+
+# Editor / OS cruft
+.vs/
+.vscode/
+*.user
+Thumbs.db
+.DS_Store
