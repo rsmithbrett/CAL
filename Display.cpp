@@ -50,6 +50,66 @@ void centeredText(const String& text, int y, uint32_t colour, uint8_t size) {
   lcd.drawString(text, kScreenW / 2, y);
 }
 
+// Greedy word-wrap, measured with the real font metrics (lcd.textWidth) rather than a
+// guessed characters-per-line budget - the two failure/status text callers below take
+// server-supplied strings verbatim ("the wording shown on screen comes from the server
+// rather than from a table compiled in here", per Enrollment.cpp), so CAL has no control
+// over their length and cannot assume any sentence fits on one line at any text size.
+// Draws up to maxLines and silently drops anything past that rather than running off the
+// bottom of the screen - a truncated-but-legible message beats an overflowing one. Returns
+// how many lines it actually drew, so a caller stacking more text below can place it after
+// however many lines this one sentence turned out to need, rather than at a fixed offset
+// sized for a single line.
+int wrappedCenteredText(const String& text, int y, uint32_t colour, uint8_t size,
+                        int lineHeight, int maxLines) {
+  lcd.setTextColor(colour, kBg);
+  lcd.setTextSize(size);
+  lcd.setTextDatum(top_center);
+
+  constexpr int kMargin = 8;
+  const int maxWidth = kScreenW - kMargin * 2;
+  const int textLen = static_cast<int>(text.length());
+
+  int lineStart = 0;
+  int lastSpace = -1;
+  int cursorY = y;
+  int linesDrawn = 0;
+
+  for (int i = 0; i <= textLen && linesDrawn < maxLines; ++i) {
+    const bool atEnd = (i == textLen);
+    const bool isSpace = !atEnd && text.charAt(i) == ' ';
+    if (isSpace) {
+      lastSpace = i;
+    }
+    if (!atEnd && !isSpace) {
+      continue;
+    }
+
+    const String candidate = text.substring(lineStart, i);
+    if (lcd.textWidth(candidate) <= maxWidth) {
+      if (atEnd) {
+        lcd.drawString(candidate, kScreenW / 2, cursorY);
+        linesDrawn++;
+      }
+      continue;
+    }
+
+    // This word pushed the line over the limit. Break at the space before it
+    // rather than mid-word - unless the line is a single word with nothing to
+    // break at, in which case it goes out on its own and overflows rather
+    // than looping on a word that will never fit.
+    const int breakAt = (lastSpace > lineStart) ? lastSpace : i;
+    lcd.drawString(text.substring(lineStart, breakAt), kScreenW / 2, cursorY);
+    cursorY += lineHeight;
+    linesDrawn++;
+    lineStart = (lastSpace > lineStart) ? lastSpace + 1 : breakAt;
+    lastSpace = -1;
+    i = lineStart - 1;  // re-examine from the new line's start on the next iteration
+  }
+
+  return linesDrawn;
+}
+
 }  // namespace
 
 void begin() {
@@ -109,16 +169,20 @@ bool showBrandSplash() {
 
 void showStatus(const String& headline, const String& detail) {
   clear();
-  centeredText(headline, 95, kInk, 2);
+  // Both wrapped, not just positioned with fixed offsets: headline in particular
+  // can be a server-supplied sentence (see the enrollment "waiting"/"refused"
+  // messages) with no length CAL controls, and detail's start position follows
+  // however many lines the headline actually needed rather than assuming one.
+  const int headlineLines = wrappedCenteredText(headline, 85, kInk, 2, 22, 3);
   if (detail.length() > 0) {
-    centeredText(detail, 130, kMuted, 1);
+    wrappedCenteredText(detail, 85 + headlineLines * 22 + 12, kMuted, 1, 14, 3);
   }
 }
 
 void showFailure(const String& headline, const String& whatToDo) {
   clear();
-  centeredText(headline, 85, kWarn, 2);
-  centeredText(whatToDo, 125, kMuted, 1);
+  const int headlineLines = wrappedCenteredText(headline, 75, kWarn, 2, 22, 3);
+  wrappedCenteredText(whatToDo, 75 + headlineLines * 22 + 12, kMuted, 1, 14, 3);
 }
 
 void showQr(const String& url, const String& caption, const String& subCaption) {
@@ -159,14 +223,12 @@ void showQr(const String& url, const String& caption, const String& subCaption) 
   }
 
   int y = y0 + side + 8;
-  centeredText(caption, y, kInk, 2);
-  y += 24;
+  y += wrappedCenteredText(caption, y, kInk, 2, 22, 2) * 22;
   if (subCaption.length() > 0) {
-    centeredText(subCaption, y, kAccent, 2);
-    y += 22;
+    y += wrappedCenteredText(subCaption, y, kAccent, 2, 22, 2) * 22;
   }
   // The address in characters as well as in the code, because cameras fail.
-  centeredText(url, y, kMuted, 1);
+  wrappedCenteredText(url, y, kMuted, 1, 14, 2);
 }
 
 void showUpdateProgress(uint8_t percent, const String& version) {

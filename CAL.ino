@@ -32,6 +32,33 @@ bool mustContactServer() {
   return Identity::updateRequested() || !Updater::haveBootableApplication();
 }
 
+/// The BOOT button - the same one already used to enter flash mode over USB,
+/// so there is nothing new for anyone to learn. Holding it through power-on
+/// clears remembered WiFi networks and forces re-provisioning. This is the
+/// only user-accessible recovery path for "this device is on the wrong
+/// network" or "we moved it to a new house" - there is no touch UI and no
+/// menu, and CAL must not need one to recover from a bad WiFi credential.
+constexpr uint8_t kBootButtonPin = 0;
+constexpr uint32_t kWifiResetHoldMs = 3000;
+
+bool wifiResetRequested() {
+  pinMode(kBootButtonPin, INPUT_PULLUP);
+  if (digitalRead(kBootButtonPin) != LOW) {
+    return false;
+  }
+
+  Display::showStatus("Keep holding BOOT to reset WiFi", "Release now to cancel");
+  const uint32_t deadline = millis() + kWifiResetHoldMs;
+  while (millis() < deadline) {
+    if (digitalRead(kBootButtonPin) != LOW) {
+      // Released before the hold completed - a stray press, not a request.
+      return false;
+    }
+    delay(50);
+  }
+  return true;
+}
+
 /// Shows a terminal condition and stops.
 ///
 /// Deliberately not rebooting in a loop. A unit repeating a failed boot every
@@ -99,6 +126,20 @@ void setup() {
 
   Identity::begin();
 
+  // Only takes effect on a boot that goes on to actually join WiFi itself -
+  // see mustContactServer() below. A device that already has a working
+  // application installed hands off to it immediately without CAL touching
+  // WiFi at all, so clearing the list here does nothing observable until
+  // the next boot where CAL is the one doing the joining (no app installed
+  // yet, or an update was requested). That covers today's real case - first
+  // setup with the wrong network chosen - not "move an already-running
+  // device to a new house," which is the application's own concern.
+  if (wifiResetRequested()) {
+    Identity::clearNetworks();
+    Display::showStatus("WiFi reset", "Setting up again...");
+    delay(1000);
+  }
+
   // A unit holding no secret is newly flashed, not faulty. Every device is
   // written with the identical image; which device it is gets established
   // below, once it is on a network and can report its hardware address.
@@ -119,6 +160,12 @@ void setup() {
                       "Restart the device to set up the network again.");
     }
   }
+
+  // TEMPORARY diagnostic instrumentation for the first real-hardware test -
+  // remove once discovery has succeeded at least once on real hardware.
+  Serial.printf("[wifi] joined SSID=%s IP=%s RSSI=%d dBm channel=%d\n",
+                WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
+                WiFi.RSSI(), WiFi.channel());
 
   Display::showStatus("Checking the time", "Needed before a secure connection");
   if (!Service::synchroniseTime()) {

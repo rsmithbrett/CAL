@@ -49,8 +49,8 @@ the family name.
 
 ## Partition layout
 
-`partitions_cal.csv`. Asymmetric on purpose, and this is the single decision the
-whole project rests on.
+`partitions.csv`, at the repo root. Asymmetric on purpose, and this is the
+single decision the whole project rests on.
 
 The server-side README records the measurement that forced it: the product
 application, as flashed, is **2,166,784 bytes**, while the largest app slot in a
@@ -64,13 +64,14 @@ executing. Splitting the flash unevenly satisfies that and removes the ceiling:
 |---|---|---|---|---:|---:|---|
 | `nvs` | data | nvs | `0x9000` | `0x5000` | 20,480 | Device secret, WiFi, installed version, flags |
 | `otadata` | data | ota | `0xE000` | `0x2000` | 8,192 | Which app partition boots |
-| `factory` | app | factory | `0x10000` | `0x130000` | 1,245,184 | **CAL** — never written by OTA |
-| `ota_0` | app | ota_0 | `0x140000` | `0x280000` | 2,621,440 | The product application |
+| `factory` | app | factory | `0x10000` | `0x160000` | 1,441,792 | **CAL** — never written by OTA |
+| `ota_0` | app | ota_0 | `0x170000` | `0x250000` | 2,424,832 | The product application |
 | `spiffs` | data | spiffs | `0x3C0000` | `0x30000` | 196,608 | Cached branding assets |
 | `coredump` | data | coredump | `0x3F0000` | `0x10000` | 65,536 | |
 
-That fills 4 MB exactly, with nothing left over. The application slot is now
-**2,621,440 bytes against a 2,166,784-byte build** — roughly 455 KB of headroom
+That fills 4 MB exactly, with nothing left over. `factory` was sized against a
+measured CAL build (see below) rather than a guess, with room to grow; `ota_0`
+is **2,424,832 bytes against a 2,166,784-byte build** — about 258 KB of headroom
 where there was previously a 196 KB deficit. The consequence worth stating
 plainly: the previously proposed remedy of dropping the ESP32-A2DP Bluetooth
 audio stack to reclaim 300–500 KB is **no longer required by the size ceiling**.
@@ -82,9 +83,13 @@ default; the partition is formatted and used as LittleFS despite the name. That
 is conventional, not an oversight, but it is the kind of detail that reads as a
 bug six months later.
 
-**The open risk is CAL's own size.** The layout works only if CAL compiles to
-under 1,245,184 bytes, and CAL has not yet been measured — see Open questions.
-Nothing here is proven on hardware.
+**CAL's own size is measured, not guessed, and re-verified on every build.**
+`ci/build-firmware.sh` compiles CAL, and the layout above is what actually gets
+used - see *Building*, below, for how that was confirmed rather than assumed.
+As of the last build: **1,318,891 bytes**, comfortably inside the 1,441,792-byte
+`factory` partition. Re-measure before trusting these numbers if the firmware
+grows meaningfully - `factory` cannot be resized for a unit already flashed.
+Nothing here is proven on hardware yet - see Open questions.
 
 ## The boot ladder
 
@@ -196,15 +201,25 @@ provisioning PC — it goes from the server, through the page, onto the flash.
 
 Two things about this are worth knowing before anyone tries it:
 
-- **WebSerial requires a secure context** (HTTPS, or `localhost`). The flasher is
-  consequently blocked on the same outstanding TLS work already listed as a
-  blocking item on the server side. There is no way around this; it is a browser
-  rule, not a configuration.
+- **WebSerial requires a secure context** (HTTPS, or `localhost`). This was
+  blocked on the server's own TLS work, which has since gone live
+  (`api.discoveraroundme.com` serves a valid Let's Encrypt certificate) - so
+  this specific blocker is resolved. It is still a hard browser rule, not a
+  configuration, for whatever flasher runs where.
 - **The CH340C USB-serial driver is the most likely first-contact failure.** On
   Windows the board frequently enumerates as an unknown device until the driver
   is installed, and the symptom a non-technical operator sees is simply that no
   port appears in the browser's picker. Whatever documentation ships with the
   flasher needs to lead with this rather than mention it at the end.
+
+**What exists today is narrower than what this section describes.** The server
+now has a public, unauthenticated `/cal` page for the simplest case - a fresh
+unit that only needs generic CAL firmware, no server-issued secret involved,
+CH340 driver links leading the page as called for above, and a link out to
+Espressif's own `esptool-js` for the actual WebSerial flash. It does not sign
+anyone in, mint a device record, or generate an NVS secret image - the
+operator-authenticated, secret-injecting flasher this section actually
+describes for bulk provisioning is still designed, not built.
 
 ## Discovery: a name, and nothing else
 
@@ -279,10 +294,16 @@ declare the network dead and drop back to cellular partway through setup.
 ## Building
 
 ```bash
-arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" .
+ci/build-firmware.sh
 ```
 
-Toolchain this has been developed against:
+This is the entire build procedure - install the pinned toolchain, compile,
+checksum - kept in one script rather than only in CI config so it runs
+identically by hand or inside any CI provider. See **Shipping** below for how
+a push to `main` turns this into a published release with no further action.
+
+Toolchain, pinned in that script and matching what this has been measured
+against:
 
 | | Version |
 |---|---|
@@ -302,38 +323,52 @@ licensed, and do not clash with `esp_qrcode_*`. Keeping the copy in-tree also
 means the QR code CAL renders is fixed for the service life of the factory
 partition, which is the right property for a component that cannot be updated.
 
-Note what that command does **not** do: it builds against the stock `min_spiffs`
-scheme, not `partitions_cal.csv`. The custom table is written but not yet wired
-into the build. A successful compile with `min_spiffs` therefore proves the code
-builds and gives a size figure against a *1,966,080-byte* budget — it does not
-demonstrate that CAL fits the 1,245,184-byte `factory` partition it is actually
-destined for, which is a considerably tighter target.
+**The custom `partitions.csv` at the repo root is what actually gets built.**
+Naming a `PartitionScheme` on the `arduino-cli compile` command line (the
+build script still passes `min_spiffs`, for no effect) does not matter: the
+ESP32 Arduino core detects a `partitions.csv` sitting in the sketch root and
+uses it in preference to any named scheme, silently. This was verified, not
+assumed - by decoding the actual compiled `CAL.ino.partitions.bin` output
+byte-for-byte (the `0xAA50`-magic partition-table binary format) rather than
+trusting `arduino-cli`'s own build summary, which reports "% of X bytes"
+against the *named* scheme's static memory map regardless of which table was
+actually used, and will happily report against the wrong one.
+
+## Shipping
+
+Push to `main` and CI does the rest - no manual build, no manual release, no
+version number to choose. See `VERSIONING.md` for the exact scheme
+(`vYYYY.MM.DD.NNNN`, entirely date- and counter-derived) and
+`.github/workflows/build-and-release.yml` for the pipeline, which is a thin
+wrapper around `ci/build-firmware.sh` plus the two steps that are genuinely
+GitHub-specific (finding the next same-day release number, publishing to a
+GitHub Release) - so moving to a different CI provider later means replacing
+a few lines of YAML, not re-deriving the build.
+
+Every push publishes to the rolling **`latest`** release (same tag, same
+download URLs, every time - this is what a device-setup page should link to)
+and to a new, **permanent** `vYYYY.MM.DD.NNNN` release that is never reused.
 
 ## Open questions
 
-- **CAL's compiled size is unmeasured.** The entire asymmetric layout depends on
-  CAL fitting in 1,245,184 bytes, and no build has produced a number yet.
-  LovyanGFX, WiFi, TLS, HTTPClient, LittleFS and the Update library are not
-  small, and there is no headroom estimate worth quoting. This is the single
-  open risk that could send the partition sizes back to the drawing board, and
-  measuring it is in progress.
-- **`partitions_cal.csv` is not wired into the build.** It needs a
-  `boards.local.txt` entry or an equivalent custom-scheme registration before
-  anything can be flashed with it. Until then the file documents an intention
-  rather than describing a build.
-- **`Provisioning::run()` never returns false.** Its contract says it gives up
-  if the household abandons setup, but the implementation loops until
-  credentials are accepted. There is no abandonment timeout.
+- **`Provisioning::run()`'s abandonment timeout is untested on hardware.** The
+  code now gives up and returns `false` after 15 minutes with nobody
+  submitting credentials (`Config::kProvisioningAbandonTimeoutMs`), matching
+  its documented contract - but "nothing has run on hardware" below applies
+  to this exactly as much as everything else.
 - **No automated tests, at all.** There is no test harness in this repository
   and no obvious one to reach for: the code is inseparable from ESP32
   peripherals, NVS, WiFi and TLS, none of which have a usable stub here. The
-  testing story for this firmware is genuinely unsolved, and the size
-  measurement above is currently the only mechanical verification of anything.
-  This is a real gap, not a deferred chore — the server side treats a test
-  project as shipping alongside the logic it covers, and nothing equivalent
-  exists here.
-- **Nothing has run on hardware.** Every behaviour described in this document is
-  designed and written; none of it is proven on a device.
+  testing story for this firmware is genuinely unsolved. This is a real gap,
+  not a deferred chore — the server side treats a test project as shipping
+  alongside the logic it covers, and nothing equivalent exists here.
+- **Nothing has run on hardware.** Every behaviour described in this document
+  is designed and written and, as of the build-to-ship pipeline above,
+  mechanically reproducible - none of it is proven on a device.
 - **The application's side of the contract does not exist yet.** Setting
   `updreq` and clearing the boot-attempt counter are CAL's expectations of an
   application that has not been written to meet them.
+- **The operator-authenticated, secret-injecting flasher is still just
+  designed.** See *Provisioning: how a device gets its secret*, above - what
+  exists today (the server's public `/cal` page) covers a fresh unit that
+  only needs generic firmware, not bulk provisioning with per-device secrets.

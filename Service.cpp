@@ -31,17 +31,23 @@ bool synchroniseTime() {
 Discovery fetchDiscovery() {
   Discovery out;
 
+  // TEMPORARY diagnostic instrumentation for the first real-hardware test -
+  // "Cannot reach the service" on screen has no visibility into which of
+  // DNS/TLS/HTTP/heap actually failed. Remove once a device has completed
+  // this call successfully at least once.
+  Serial.printf("[discovery] free heap before TLS: %u bytes\n", ESP.getFreeHeap());
+
   NetworkClientSecure client;
   if (!Tls::configure(client)) {
-    // No trust source means no safe request. The device presents its secret on
-    // every call, so continuing unvalidated would hand that credential to
-    // anything on the household network able to intercept.
+    Serial.println("[discovery] Tls::configure failed - empty cert bundle");
     return out;
   }
 
   HTTPClient http;
   const String url = String("https://") + Config::kServiceHost + Config::kWellKnownPath;
+  Serial.printf("[discovery] GET %s\n", url.c_str());
   if (!http.begin(client, url)) {
+    Serial.println("[discovery] http.begin() failed (malformed URL?)");
     return out;
   }
 
@@ -55,7 +61,12 @@ Discovery fetchDiscovery() {
   }
 
   const int status = http.GET();
+  Serial.printf("[discovery] HTTPClient status: %d, free heap after: %u bytes\n",
+                status, ESP.getFreeHeap());
   if (status != 200) {
+    // Negative values here are HTTPClient's own error codes (connection
+    // refused, TLS failure, DNS failure, timeout) - see HTTPClient.h's
+    // HTTPC_ERROR_* constants for what each number means.
     http.end();
     return out;
   }
@@ -64,6 +75,7 @@ Discovery fetchDiscovery() {
   const DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
   if (err) {
+    Serial.printf("[discovery] JSON parse failed: %s\n", err.c_str());
     return out;
   }
 
