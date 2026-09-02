@@ -1,0 +1,49 @@
+name: Build and publish CAL firmware
+
+# Ship model: push to main, CI builds and publishes - never a manual build,
+# never a manual release. The "latest" release is recreated on every push at
+# the same tag, so its download URLs never change; /admin/services'
+# Cal:FirmwareDownloadUrl on the server only ever needs setting once.
+#
+# Deliberately thin: everything about actually BUILDING the firmware lives in
+# ci/build-firmware.sh, runnable identically on any machine or CI provider.
+# Only two things below are genuinely specific to GitHub - getting
+# arduino-cli onto the runner, and publishing to a GitHub Release - so those
+# are the only two steps a move to a different CI provider would need to
+# replace.
+#
+# Never triggers on pull requests: a fork's CI run must never be able to
+# publish a release using this repo's own token.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Build
+        run: ci/build-firmware.sh
+
+      - name: Publish the "latest" release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build (${{ github.sha }})
+          body_path: build/esp32.esp32.esp32/checksums.txt
+          make_latest: true
+          files: |
+            build/esp32.esp32.esp32/CAL.ino.merged.bin
+            build/esp32.esp32.esp32/CAL.ino.bin
+            build/esp32.esp32.esp32/CAL.ino.bootloader.bin
+            build/esp32.esp32.esp32/CAL.ino.partitions.bin
+            build/esp32.esp32.esp32/checksums.txt
