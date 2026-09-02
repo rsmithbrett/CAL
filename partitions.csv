@@ -21,7 +21,7 @@
 #
 # SIZING, MEASURED RATHER THAN ESTIMATED
 # --------------------------------------
-# CAL compiled to 1,318,843 bytes on 2026-09-01 (esp32 core 3.3.11, LovyanGFX,
+# CAL compiled to 1,318,891 bytes on 2026-09-02 (esp32 core 3.3.11, LovyanGFX,
 # NetworkClientSecure/mbedTLS, LittleFS, WebServer, ArduinoJson). An earlier
 # draft of this table gave factory 0x130000 = 1,245,184 bytes, which CAL exceeded
 # by roughly 72KB. The split below was moved to fit the measured figure with room
