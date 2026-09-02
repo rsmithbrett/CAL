@@ -209,6 +209,16 @@ void setup() {
       haltWithFailure("Update failed",
                       "Restart the device to try again.");
     }
+  } else if (manifest.ok) {
+    // installApplication() clears updateRequested on the path that actually
+    // installs something. This is the other successful path - the server was
+    // reached and confirmed the running version is already current - and it
+    // has to clear the flag too. Without this, an application that asked for
+    // an update and got "nothing to do" would leave updateRequested set
+    // forever, which makes mustContactServer() true on every future boot
+    // even after a plain power cut - exactly the fleet-wide network
+    // dependency this flag exists to avoid outside of a real update.
+    Identity::setUpdateRequested(false);
   }
 
   if (Updater::haveBootableApplication()) {
