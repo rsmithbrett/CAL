@@ -1,17 +1,17 @@
 name: Build and publish CAL firmware
 
 # Ship model: push to main, CI builds and publishes - never a manual build,
-# never a manual release. See VERSIONING.md for the two things this
-# publishes and when: the rolling "latest" release (every push, same tag,
-# same URLs every time) and a permanent v<VERSION> release (only when the
-# VERSION file changes, never overwritten again).
+# never a manual release, never a manually-chosen version number. See
+# VERSIONING.md: every push publishes the rolling "latest" release (same
+# tag, same URLs, every time) and a permanent vYYYY.MM.DD.NNNN release
+# (today's date plus a same-day counter, never reused).
 #
 # Deliberately thin: everything about actually BUILDING the firmware lives in
 # ci/build-firmware.sh, runnable identically on any machine or CI provider.
 # Only three things below are genuinely specific to GitHub - getting
-# arduino-cli onto the runner, checking whether a version tag already
-# exists, and publishing to a GitHub Release - so those are the only steps a
-# move to a different CI provider would need to replace.
+# arduino-cli onto the runner, finding the next same-day release number, and
+# publishing to a GitHub Release - so those are the only steps a move to a
+# different CI provider would need to replace.
 #
 # Never triggers on pull requests: a fork's CI run must never be able to
 # publish a release using this repo's own token.
@@ -52,31 +52,30 @@ jobs:
             build/esp32.esp32.esp32/CAL.ino.partitions.bin
             build/esp32.esp32.esp32/checksums.txt
 
-      - name: Read VERSION
+      - name: Compute the next vYYYY.MM.DD.NNNN
         id: version
-        run: echo "value=$(cat VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
-
-      - name: Check whether this version was already released
-        id: check
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "v${{ steps.version.outputs.value }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          prefix="v$(date -u +%Y.%m.%d)."
+          # QFR starts at 0001 for the first release on this date, and counts
+          # up for each further one - see VERSIONING.md. Existing tags are the
+          # only source of truth for "how many already happened today", since
+          # nothing else records it.
+          last=$(gh api "repos/${{ github.repository }}/tags" --paginate \
+            --jq '.[].name' | grep "^${prefix}" | sed "s/^${prefix}//" | sort -n | tail -1)
+          next=$(printf '%04d' "$((10#${last:-0} + 1))")
+          echo "tag=${prefix}${next}" >> "$GITHUB_OUTPUT"
 
-      - name: Publish the permanent v${{ steps.version.outputs.value }} release
-        # Only when VERSION changed to a value not already tagged. This tag is
-        # never reused - see VERSIONING.md on why "latest" and a numbered
-        # release answer different questions and neither can substitute for
-        # the other.
-        if: steps.check.outputs.exists == 'false'
+      - name: Publish the permanent ${{ steps.version.outputs.tag }} release
+        # Never reused: each of these is a distinct, permanent tag by
+        # construction (the counter above only ever goes up), so there is no
+        # "does this already exist" check needed the way a human-chosen
+        # version number would require.
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.value }}
-          name: v${{ steps.version.outputs.value }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
           body_path: build/esp32.esp32.esp32/checksums.txt
           make_latest: false
           files: |
