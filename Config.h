@@ -31,6 +31,13 @@ static constexpr uint32_t kSntpTimeoutMs = 30000;
 static constexpr uint32_t kWifiJoinTimeoutMs = 20000;
 static constexpr uint8_t kWifiJoinAttempts = 3;
 
+/// How long Provisioning::run() waits for a phone to submit credentials before
+/// giving up. Long enough that finding glasses and typing a passphrase is not
+/// a race, short enough that a household that walked away does not leave the
+/// device holding its access point open indefinitely - every minute spent
+/// broadcasting an open AP is a minute the device is not doing its job.
+static constexpr uint32_t kProvisioningAbandonTimeoutMs = 15UL * 60UL * 1000UL;  // 15 minutes
+
 /// Rejects an implausible clock. SNTP is unauthenticated, so a result before
 /// the build date is treated as a failure rather than as an answer.
 static constexpr time_t kEarliestPlausibleTime = 1767225600;  // 2026-01-01Z

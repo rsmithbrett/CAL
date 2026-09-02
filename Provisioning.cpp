@@ -233,17 +233,25 @@ bool run() {
   const String joinPayload = "WIFI:S:" + name + ";T:WPA;P:" + pass + ";;";
   Display::showQr(joinPayload, "Scan to set up WiFi", name);
 
+  const uint32_t deadline = millis() + Config::kProvisioningAbandonTimeoutMs;
+  bool abandoned = false;
   while (!credentialsAccepted) {
+    if (millis() >= deadline) {
+      abandoned = true;
+      break;
+    }
     dns.processNextRequest();
     server.handleClient();
     delay(2);
   }
 
-  delay(400);  // let the acknowledgement page reach the handset
+  if (!abandoned) {
+    delay(400);  // let the acknowledgement page reach the handset
+  }
   server.stop();
   dns.stop();
   WiFi.softAPdisconnect(true);
-  return true;
+  return !abandoned;
 }
 
 }  // namespace Provisioning
