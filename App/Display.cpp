@@ -31,6 +31,38 @@ void centeredText(const String& text, int y, uint32_t colour, uint8_t size) {
   lcd.drawString(text, kScreenW / 2, y);
 }
 
+// The degree mark is drawn, not rendered as a character: the built-in font is
+// ASCII-only with no extended/Unicode glyphs at all, so a literal degree sign -
+// UTF-8 or otherwise - has nothing to look up and shows as a missing-glyph
+// placeholder box instead (a real device showed exactly this: "66[box]F"). A
+// small drawn ring reads unambiguously as "degrees" and needs no font support.
+void centeredTemperature(int temperature, const String& unit, int y, uint32_t colour, uint8_t size) {
+  lcd.setTextColor(colour, kBg);
+  lcd.setTextSize(size);
+  lcd.setTextDatum(top_left);
+
+  const String numberText = String(temperature);
+  const int numberWidth = lcd.textWidth(numberText);
+  const int unitWidth = lcd.textWidth(unit);
+
+  const int radius = size;
+  const int gap = size;
+  const int totalWidth = numberWidth + radius * 2 + gap * 2 + unitWidth;
+
+  int x = (kScreenW - totalWidth) / 2;
+  lcd.drawString(numberText, x, y);
+  x += numberWidth + gap;
+
+  // Near the top of the glyph's cap-height, like a real superscript degree
+  // mark - not centered on the whole digit.
+  lcd.drawCircle(x + radius, y + radius, radius, colour);
+  x += radius * 2 + gap;
+
+  lcd.drawString(unit, x, y);
+
+  lcd.setTextDatum(top_center);  // restore the datum every other helper here assumes
+}
+
 // Identical to CAL's Display.cpp helper of the same name - see there for why
 // greedy word-wrap measured with real font metrics matters: server-supplied
 // strings (a card's shortForecast, a content-gate refusal message) arrive with
@@ -112,7 +144,7 @@ void showWeatherCard(const String& location, int temperature, const String& unit
     centeredText(location, 20, kMuted, 2);
   }
 
-  centeredText(String(temperature) + "\xC2\xB0" + unit, 55, kInk, 6);
+  centeredTemperature(temperature, unit, 55, kInk, 6);
 
   const int forecastLines = wrappedCenteredText(shortForecast, 145, kAccent, 2, 26, 2);
 

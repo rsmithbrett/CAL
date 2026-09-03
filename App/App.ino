@@ -14,6 +14,7 @@
 #include <WiFi.h>
 
 #include "AppUpdater.h"
+#include "CheckIn.h"
 #include "Config.h"
 #include "Display.h"
 #include "Identity.h"
@@ -66,6 +67,29 @@ void ensureWifiConnected() {
 
 uint32_t lastContentFetchMs = 0;
 uint32_t lastUpdateCheckMs = 0;
+uint32_t lastCheckInMs = 0;
+
+// The server can shorten or lengthen this on every check-in response
+// (CheckInResponse.CheckInIntervalSeconds, resolved from the
+// "checkin_interval_seconds" config key) - a fleet's polling cadence is an
+// operational decision, not a constant this firmware should own. 5 minutes
+// only until the first real check-in response replaces it, matching
+// CheckInGatewayService's own DefaultIntervalSeconds.
+uint32_t checkInIntervalMs = 5UL * 60UL * 1000UL;
+
+/// True for exactly one loop() iteration per physical press - edge-detected
+/// against the previous iteration's reading, not just "is it down right now",
+/// so holding the button doesn't fire this repeatedly. Distinct from
+/// wifiResetRequested()'s 3-second hold: that gesture only runs once, at
+/// boot, before the button is ever read again here - a plain press during
+/// normal operation was otherwise unused and is free to mean something else.
+bool forceUpdateCheckRequested() {
+  static bool wasPressed = false;
+  const bool isPressed = digitalRead(kBootButtonPin) == LOW;
+  const bool justPressed = isPressed && !wasPressed;
+  wasPressed = isPressed;
+  return justPressed;
+}
 
 void refreshWeatherCard() {
   const Weather::Result result = Weather::fetchMine();
@@ -86,6 +110,54 @@ void refreshWeatherCard() {
     Display::showStatus("Weather is not showing yet", result.message);
   } else {
     Display::showFailure("Could not load weather", result.message);
+  }
+}
+
+/// Checks right now instead of waiting for the button-triggered path's only
+/// alternative (AppUpdater's own slow, independent manifest poll), and says
+/// so on screen either way - a press that silently does nothing reads as a
+/// dead button, and "nothing happened" and "already checked, nothing new"
+/// look identical without this. This is the manual, at-the-device path;
+/// performCheckIn() below is the automatic, server-driven one a "Force
+/// update" admin button actually reaches.
+void forceUpdateCheck() {
+  Display::showStatus("Checking for update", "");
+  if (AppUpdater::newerVersionAvailable()) {
+    Display::showStatus("Updating", "A new version is available");
+    Loader::requestUpdate();
+    // Unreachable: the call above never returns.
+  }
+
+  Display::showStatus("Already up to date", "");
+  delay(1500);
+  refreshWeatherCard();
+}
+
+/// The fast path: whatever the server decided on this check-in - an admin's
+/// "Force update" button, or simply a newer build now marked current -
+/// arrives here within one checkInIntervalMs, not AppUpdater's own slower
+/// independent timer. An ordinary failed check-in (no ok, secret not
+/// rejected) changes nothing; the next one is still checkInIntervalMs away,
+/// same as a normal one. A check-in rejected for a stale secret is not
+/// ordinary - see CheckIn.h's own remarks on secretRejected.
+void performCheckIn() {
+  const CheckIn::Result result = CheckIn::perform();
+  if (!result.ok) {
+    if (result.secretRejected) {
+      Loader::returnToLoaderForReprovisioning();
+      // Unreachable: the call above never returns.
+    }
+    return;
+  }
+
+  if (result.intervalMs > 0) {
+    checkInIntervalMs = result.intervalMs;
+  }
+
+  if (result.updateAvailable) {
+    Display::showStatus("Updating", "The server requested an update");
+    Loader::requestUpdate();
+    // Unreachable: the call above never returns.
   }
 }
 
@@ -127,6 +199,12 @@ void setup() {
 void loop() {
   ensureWifiConnected();
 
+  if (forceUpdateCheckRequested()) {
+    forceUpdateCheck();
+    lastContentFetchMs = millis();
+    lastUpdateCheckMs = millis();
+  }
+
   const uint32_t now = millis();
 
   if (now - lastContentFetchMs >= Config::kContentRefreshIntervalMs) {
@@ -134,6 +212,16 @@ void loop() {
     lastContentFetchMs = now;
   }
 
+  if (now - lastCheckInMs >= checkInIntervalMs) {
+    lastCheckInMs = now;
+    performCheckIn();
+  }
+
+  // Belt-and-braces fallback only: performCheckIn() above is the fast path
+  // that actually reaches an admin's "Force update" button or a fresh
+  // version within one checkInIntervalMs. This independent, much slower
+  // timer exists purely so an update is never permanently missed if
+  // check-in itself were ever broken.
   if (now - lastUpdateCheckMs >= Config::kUpdateCheckIntervalMs) {
     lastUpdateCheckMs = now;
     if (AppUpdater::newerVersionAvailable()) {

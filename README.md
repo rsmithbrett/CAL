@@ -181,6 +181,116 @@ by the component that survives the crash, and cleared *after* success by the
 component that only runs if things worked. A counter incremented after a
 successful boot would prove nothing.
 
+## The App firmware
+
+`App/` is the product application the sections above refer to only from CAL's
+side of the fence — the thing "the application" means throughout *Updates:
+reboot to the updater*. It runs from `ota_0`, installed and started by CAL,
+and reuses CAL's own `Identity.h`/`.cpp` and `Tls.h`/`.cpp` verbatim (same NVS
+namespace, same TLS trust setup) plus a trimmed `Config.h`. Unlike CAL, it is
+meant to run indefinitely — failures here retry rather than halt, because a
+display that goes dark until someone finds a USB cable is a worse outcome for
+a household than one that keeps trying.
+
+### Deciding when to reboot to the updater
+
+Three independent things can make the App call `Loader::requestUpdate()` —
+which sets the `updreq` flag and reboots into CAL, as described above:
+
+1. **Check-in (`CheckIn.h`/`.cpp`) — the fast path, and the primary
+   mechanism.** `performCheckIn()` POSTs to `/api/checkin` every
+   `checkInIntervalMs`, sending the device's current UTC timestamp (ISO8601,
+   built with `gmtime_r`/`strftime`), its installed firmware version
+   (`Identity::installedAppVersion()`), and battery/charging fields. This
+   board has no battery — the ELEGOO/CYD is USB-powered — so
+   `batteryPercent`/`charging` go over as fixed placeholders (`100`, `true`)
+   rather than being omitted: `CheckInRequest` has no way to say "not
+   applicable," and a battery-powered sibling board will want the real fields
+   this same call already sends. The response's `checkInIntervalSeconds`
+   becomes the next `checkInIntervalMs` — a fleet's polling cadence is the
+   server's decision, not a constant baked into every device's firmware — and
+   defaults to 5 minutes (matching `CheckInGatewayService`'s own
+   `DefaultIntervalSeconds`) until the first real response replaces it. When
+   the response's `updateAvailable` comes back true, `performCheckIn()` calls
+   `Loader::requestUpdate()` directly. This is the path an admin's "Force
+   update" button on the server actually reaches, and it's what makes a fresh
+   build visible to a device within one check-in interval rather than within
+   the hour.
+
+   A check-in that fails for an ordinary reason (no network, a momentary
+   server outage) changes nothing; the next attempt is still
+   `checkInIntervalMs` away, same as a normal one. A check-in rejected with
+   `401` is different and is not treated as ordinary: it means this device's
+   own secret no longer authenticates, the case an admin's "Allow
+   re-registration" or a secret regeneration produces on a device that is
+   still mid-run rather than freshly booted. The App cannot re-enroll itself
+   (only CAL can), so `CheckIn::Result::secretRejected` carries this specific
+   case back to `performCheckIn()`, which calls
+   `Loader::returnToLoaderForReprovisioning()` immediately rather than
+   retrying the same dead secret forever. Before this existed, a device
+   caught by a server-side re-registration mid-run would sit silently
+   failing every `checkInIntervalMs` with no way back - invisible on its own
+   screen, since a failed check-in draws nothing - until someone noticed and
+   held its BOOT button for 3 seconds by hand.
+2. **`AppUpdater::newerVersionAvailable()` — kept, explicitly as a slower
+   fallback.** This is the same plain yes/no manifest check it always was,
+   still run independently on `Config::kUpdateCheckIntervalMs` (1 hour).
+   `App.ino` comments the call site to say so directly: check-in above is the
+   fast path that actually reaches an admin's "Force update" button or a
+   newly-current build; this hourly timer is belt-and-braces only, kept so an
+   update can never be permanently missed if check-in itself were ever
+   broken.
+3. **A single BOOT-button press**, covered next.
+
+### Two BOOT-button gestures, distinguished only by hold time
+
+The App reads the same pin CAL itself uses (`kBootButtonPin`, GPIO0,
+`INPUT_PULLUP`) for two different gestures — deliberately, so a household
+never needs to know which binary is running to know how to fix a problem:
+
+- **Hold for 3 seconds — reset stored WiFi.** `wifiResetRequested()` checks
+  this once, at boot, before the button is read for anything else, and
+  reboots into CAL via `Loader::returnToLoaderForReprovisioning()` if held.
+  The App has no captive-portal flow of its own (see WifiJoin, below), so
+  this is the only way out of "nothing remembered works."
+- **A plain press during normal operation — check for an update now.**
+  `forceUpdateCheckRequested()` edge-detects against the previous `loop()`
+  iteration's reading (a static `wasPressed`), so it fires exactly once per
+  physical press rather than repeatedly while held; a plain press during
+  normal operation was otherwise unused and is free to mean this.
+  `forceUpdateCheck()` shows "Checking for update," then either reboots into
+  the updater with "Updating" or reports "Already up to date" and falls
+  through to a normal weather refresh. Saying so explicitly on screen either
+  way matters: a press that silently does nothing reads as a dead button, and
+  without an explicit answer, "nothing happened" and "already checked,
+  nothing new" look identical.
+
+### A drawn degree symbol, because the font has none
+
+LovyanGFX's built-in font used here is ASCII-only — no Unicode glyphs, no
+extended-ASCII either — so a degree sign has nothing to look up, whether it's
+attempted as a UTF-8 sequence or a raw `0xB0` byte. A real device showed
+exactly the failure mode this predicts: a missing-glyph box where the degree
+mark should be. `Display.cpp`'s `centeredTemperature(int temperature, const
+String& unit, int y, uint32_t colour, uint8_t size)` works around this by
+composing the temperature display by hand rather than as one string:
+`lcd.drawString` for the number and the unit, and a small ring from
+`lcd.drawCircle()` — sized to the text size and positioned near the
+cap-height, like a real superscript degree mark — standing in for the
+character the font can't render. `showWeatherCard()` calls this instead of
+building `String(temperature) + "°" + unit`; putting a literal degree
+character back into that string reintroduces the missing-glyph box.
+
+### WifiJoin, not Network
+
+`App/WifiJoin.h`/`.cpp` is named that on purpose, not `Network.h`. A
+sketch-local `Network.h` shadows the ESP32 Arduino core's own system header
+of the same name, which `WiFi.h` depends on internally, and takes the build
+down with missing-type errors (`network_event_handle_t`, `NetworkInterface`,
+and similar) that have nothing to do with the file's own contents and nothing
+obviously pointing at the real cause. Don't rename this file back, and don't
+add a new sketch-local `Network.h` anywhere else in this project.
+
 ## Provisioning: how a device gets its secret
 
 The Device Client Specification's §13 lists "the factory provisioning process by
@@ -365,9 +475,6 @@ and to a new, **permanent** `vYYYY.MM.DD.NNNN` release that is never reused.
 - **Nothing has run on hardware.** Every behaviour described in this document
   is designed and written and, as of the build-to-ship pipeline above,
   mechanically reproducible - none of it is proven on a device.
-- **The application's side of the contract does not exist yet.** Setting
-  `updreq` and clearing the boot-attempt counter are CAL's expectations of an
-  application that has not been written to meet them.
 - **The operator-authenticated, secret-injecting flasher is still just
   designed.** See *Provisioning: how a device gets its secret*, above - what
   exists today (the server's public `/cal` page) covers a fresh unit that
