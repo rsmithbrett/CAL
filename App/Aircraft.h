@@ -4,7 +4,12 @@
 
 /// Live aircraft overhead - the second content type this build renders,
 /// sitting beside Weather.h as its own module per Weather.h's own remarks on
-/// why cards get sibling files rather than growing into one another.
+/// why cards get sibling files rather than growing into one another. Like
+/// Weather, the .cpp registers its own card descriptor with the scheduler
+/// (see Cards.h) rather than being named anywhere above it. It registers as
+/// a *list* card - see the block at the bottom of Aircraft.cpp for why that
+/// is the honest description even while the server hands over only the
+/// nearest sighting.
 ///
 /// CYD-Dickey's Aircraft.cpp/Aircraft.h talk to api.adsb.lol directly from
 /// the device and additionally resolve, per callsign, an airline name/logo
@@ -51,6 +56,13 @@ struct Result {
   /// full list CYD-Dickey's touch-driven card carousel does (this board has
   /// no touch input wired up at all - see App.ino).
   Sighting nearest;
+  /// The owner's configured tracking radius, echoed back by the server on
+  /// every response. Kept because "how interesting is this sighting" only
+  /// means anything relative to it - a plane 2 miles out is practically
+  /// overhead when the radius is 10 and unremarkable when it is 30. Same
+  /// reasoning as CYD-Dickey scaling its own overhead threshold off
+  /// aircraftRadiusMiles rather than hardcoding a mile count.
+  double radiusMiles = 10.0;
   /// Set on every non-Ok status, including Empty - what to put on screen.
   String message;
 };

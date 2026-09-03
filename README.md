@@ -91,6 +91,18 @@ As of the last build: **1,318,891 bytes**, comfortably inside the 1,441,792-byte
 grows meaningfully - `factory` cannot be resized for a unit already flashed.
 Nothing here is proven on hardware yet - see Open questions.
 
+**The App's own size, measured the same way.** As of the card-manager build:
+**1,353,683 bytes of program storage and 55,356 bytes of globals** (leaving
+272,324 bytes of the 327,680-byte DRAM for locals). That is **55.8% of the
+2,424,832-byte `ota_0` partition**, with 1,071,149 bytes spare. Note that
+`arduino-cli` reports this build as "68% of 1,966,080 bytes" - that is the
+stock `min_spiffs` table's own app slot, not this project's layout, and it is
+the wrong ceiling to read. `ota_0` above is the real one. The card manager,
+actions, SD and PNG support together cost **+71,136 bytes** over the previous
+build's 1,282,547, and **+1,752 bytes** of globals over its 53,604; nearly all
+of that is the SD library and LovyanGFX's PNG decoder being linked in for the
+first time, which was expected.
+
 ## The boot ladder
 
 `setup()` in `CAL.ino` is the whole of CAL's control flow, and
@@ -190,8 +202,9 @@ and reuses CAL's own `Identity.h`/`.cpp` and `Tls.h`/`.cpp` verbatim (same NVS
 namespace, same TLS trust setup) plus a trimmed `Config.h`. Unlike CAL, it is
 meant to run indefinitely — failures here retry rather than halt, because a
 display that goes dark until someone finds a USB cable is a worse outcome for
-a household than one that keeps trying. It renders two cards, weather and
-aircraft overhead, alternating on the same content-refresh timer (see below).
+a household than one that keeps trying. It renders a rotation of cards —
+weather and aircraft overhead today — scheduled by a policy the server hands
+down on check-in and navigable by touch (see *The card manager*, below).
 
 ### Two cards, styled after CYD-Dickey
 
@@ -257,19 +270,14 @@ screens and `drawNoAircraftScreen()`/`drawNoListingsScreen()`'s white,
 card-styled ones for content problems specifically. The boot-ladder screens
 themselves (Wi-Fi joining, time sync, update-in-progress) are unchanged.
 
-**A known simplification, stated plainly:** CYD-Dickey interleaves weather,
-a splash card, a QR/branding card, and a full list of aircraft or listings on
-independent timers, with touch-driven forward/back navigation and a history
-buffer so rewinding replays exactly what was shown. Most of that still
-doesn't exist here — the server gives CAL only the *nearest* aircraft as a
-single featured value rather than a list to cycle through, so there is
-nothing to page through and no history to rewind. `App.ino`'s
-`refreshCurrentCard()` remains a plain two-way toggle between the weather
-and aircraft cards on the existing content-refresh timer. What changed is
-the *trigger*: a tap now advances it immediately too (see "Touch input"
-below) — the board's touch controller was simply unused before, not
-missing — rather than the toggle only ever firing on the timer or the BOOT
-button's force-update-check path.
+**The two-way toggle these cards used to live on is gone.** An earlier
+version of this document called that out as "a known simplification":
+`App.ino` held an `enum class CardKind { Weather, Aircraft }` and flipped
+between them on the content-refresh timer, while CYD-Dickey's real scheduler
+— independent interleave timers, touch-driven forward/back, a history buffer
+so rewinding replays exactly what was shown — had nothing to attach to.
+That is no longer true. Both cards are now ordinary registered descriptors
+and the scheduler is real; see *The card manager* below.
 
 ### A corner clock and a day/night theme, both driven by check-in
 
@@ -331,21 +339,43 @@ following for its own sake rather than solving a real legibility problem.
 
 This board — 2.8" ILI9341 + XPT2046 resistive touch, the same "Cheap Yellow
 Display" family as `CYD-Dickey` — has always had a touch controller; the App
-simply never used it, wiring card advancement to a plain timer instead (see
-the simplification note above). `App/Touch.h`/`.cpp` is new: a small,
-reusable, card-agnostic module — `Touch::wasTapped()` returns true for
-exactly one `loop()` iteration per physical tap, edge-detected the same way
-`forceUpdateCheckRequested()` already debounces the BOOT button — polled
-once per `loop()` iteration alongside that same button check. The one
-consumer wired up today is card advance: a tap calls the same
-`refreshCurrentCard()` the automatic timer calls, and resets
-`lastContentFetchMs` the same way the BOOT-press force-update path already
-does, so the timer's own next automatic advance is pushed out from the tap
-rather than landing moments later and re-showing the same card. Nothing in
-`Touch.h`'s shape assumes cards are the only thing that will ever consume
-it — the user explicitly wants it reusable for future UX components, and a
-future caller reading raw coordinates for something like drag or a second
-gesture doesn't need this file's shape to change.
+simply never used it, wiring card advancement to a plain timer instead.
+`App/Touch.h`/`.cpp` is a small, reusable, card-agnostic module: one physical
+tap produces exactly one event, edge-detected the same way
+`forceUpdateCheckRequested()` already debounces the BOOT button, polled once
+per `loop()` iteration.
+
+**The coordinate is no longer thrown away.** The first version of this file
+returned a bare `bool` from `wasTapped()` — `Display::readTouchRaw()` was
+already handing back `x` and `y` and they were discarded, so a tap anywhere
+on the glass meant one single thing. `Touch::poll()` now classifies the tap
+into a zone: an action button, the reverse (left edge) strip, the forward
+(right edge) strip, or none. The edge strips are 16px wide and full height,
+the same dimensions CYD-Dickey settled on for the same panel (`x < 16` /
+`x > 304` in its own touch handler).
+
+**Zone priority is fixed, not incidental:** action buttons are tested first,
+edges second. The edge strips have no visible chrome of their own and run the
+full height of the screen, so a button that happens to sit near an edge has to
+win — the same ordering CYD-Dickey uses, where its corner menu buttons are
+checked before its edge zones for exactly that reason. Geometry is decided by
+`Display` (which is the only thing that knows this panel's layout and what
+else is already drawn on it) and handed to `Touch::setActionZones()` after
+every card draw, so the hit test and the drawing can never disagree about
+where a button is, and a zone belonging to the previous card can never still
+be live under the current one. Nothing in `Touch.h`'s shape assumes cards are
+the only thing that will ever consume it: this file knows about rectangles and
+screen edges, not about what advancing means.
+
+`loop()`'s trailing `delay()` came down from 1000ms to 50ms as part of this.
+Everything else in that loop is gated on its own `millis()` comparison and
+does not care how often it is asked, but touch is sampled inside
+`CardManager::poll()`, and sampling once a second misses most of a real tap —
+a finger is on the glass for a fraction of that. That was already true when a
+tap only advanced a card, where a missed tap costs nothing worse than tapping
+again. It is much less acceptable now that a tap can be a button press whose
+whole design is that the person gets no confirmation, and so would never learn
+it had not registered.
 
 The actual hardware read (`lcd.getTouch(&x, &y)`) lives in
 `Display::readTouchRaw()`, not in `Touch.cpp` itself — `Display.cpp` already
@@ -368,6 +398,241 @@ never exercised touch. This firmware has no automated tests at all (see
 possible even in principle here — proving it out needs an actual finger on
 actual glass, which as of this commit nobody has done. Treat the tap-to-
 advance behaviour above as designed and compiled, not as verified.
+
+Zones make that unverified assumption *load-bearing* in a way a bare
+tap-anywhere never was. Before, an inverted or unscaled axis would have gone
+completely unnoticed — every tap did the same thing. Now it would send a
+"forward" tap backwards, or put a button's hit zone somewhere other than
+where the button is drawn. Calibration is LovyanGFX's autodetect's job and
+`CYD-Dickey/TouchKeyboard.cpp` relies on it working on the same hardware
+family, but that is inherited confidence, not measurement.
+
+### The card manager: a registry, not a toggle
+
+`App/Cards.h` and `App/CardManager.h`/`.cpp` replace the two-way toggle
+described above with the real scheduler, ported from CYD-Dickey's
+`Screen::Ready` rotation — its `computeNextCard()`, `advanceCard()`,
+`rewindCard()` and the long design comment above them.
+
+**What a card is, now.** A card used to be smeared across three places: a
+fetch module (`Weather.cpp`, `Aircraft.cpp`), a draw function in
+`Display.cpp`, and the hardcoded `CardKind` toggle in `App.ino` that named
+both of them. Adding a third card meant editing all three. A card is now a
+`Cards::CardSpec` descriptor — an id, a kind, a fetch function, an
+item-count function, a draw function, an optional "is this item notable"
+predicate — that the card module registers itself at static-init time (see
+the block at the bottom of `Weather.cpp` and `Aircraft.cpp`). `App.ino` does
+not name a single card anywhere any more; it brings up the hardware and the
+network, calls `CardManager::begin()`, and pumps `CardManager::poll()` once
+per `loop()` iteration.
+
+**Deliberately not CYD-Dickey's shape, in exactly one place.** That project
+uses a hardcoded `enum class CardSlot { Base, Weather, Splash, Qr }` plus
+three separately-named globals, `cardsSinceWeather` / `cardsSinceSplash` /
+`cardsSinceQr`. A fifth card type there needs a new enum case, a new global,
+a new `if` in `computeNextCard()` and a new `case` in
+`drawDashboardScreen()`. Card types on this project are expected to keep
+growing, so every one of those named globals is a per-descriptor struct field
+here (`CardSpec::cardsSince`) and the enum is a registry index. Adding a card
+type is registering a descriptor plus server-side config; the scheduler does
+not change.
+
+**Interstitials interleave, they do not take a slot.** Two kinds exist.
+A `list` card is a variable-length collection whose items are cycled one at a
+time. An `interstitial` is a singleton that shows *after every N other cards*
+(`interleaveEvery`) rather than occupying one fixed position in a rotation.
+That distinction is carried over deliberately and the reason is recorded
+rather than guessed at: with a fixed slot, a device tracking a dozen list
+items showed its singletons proportionally less often — CYD-Dickey's own note
+says "with a dozen+ data cards, once every couple minutes, easy to miss
+entirely." Every active card's counter ticks on every computed card, the
+first to exceed its own `interleaveEvery` wins, and ties break on `order`,
+lowest first. The counters are fully independent: an earlier CYD-Dickey
+version forced two of its singletons into a fixed pair (QR always following
+splash) and records having corrected that, so nothing here couples one
+interstitial's cadence to another's.
+
+**Forward and reverse share one history, not two code paths.** Every
+genuinely-new card is recorded in a 24-entry ring buffer as it is first shown
+(`CARD_HISTORY_CAP = 24` there, the same here). Rewinding walks the cursor
+back and replays recorded entries exactly — including landing back on an
+interstitial, not just on list items. Advancing after a rewind replays
+*forward* through that same recorded stretch rather than recomputing:
+recomputing could put a different card in a position the user just stepped
+past, which would make "which card is where" depend on which direction you
+happen to be travelling. Only once the cursor reaches the frontier does
+advancing compute something new. The ring collapses to a single entry
+whenever a card refetches, for the reason CYD-Dickey's `resetCardHistory()`
+exists — a recorded item index must never be replayed against a list that no
+longer holds the same items at the same positions — and deliberately leaves
+the interleave counters alone, so a data refresh does not throw off the
+singletons' cadence.
+
+**Navigation never fetches.** `fetch()` and `draw()` are separate functions
+on the descriptor and the scheduler only ever calls `fetch()` from its own
+refresh timer, never from a navigation path. A rewind is a pure redraw of
+state the card is already holding. If it refetched, stepping back could show
+you something you never saw going forward, which defeats the entire point of
+the history buffer. `CardManager::poll()` refreshes at most one due card per
+call, so a refresh sweep never blocks `loop()` on several HTTP round trips
+back to back.
+
+**Manual navigation holds off the timer.** A deliberate tap suppresses
+auto-advance for `manualNavHoldSeconds`, so a card someone picked on purpose
+is not yanked away a second later. CYD-Dickey hardcodes this as
+`MANUAL_NAV_HOLD_MS = 30000`; here 30 seconds is the built-in default and the
+server can change it.
+
+**Empty cards are skipped, blank cards are not shown.** A card reporting zero
+items is passed over entirely. Note what does *not* count as empty: a card
+holding an explanatory status — "no aircraft within 10 mi right now",
+"weather is not showing yet" — reports one item, because that message is
+content and has always been shown. In practice the skip fires for a card that
+has not fetched yet, which is the ordinary state for the first second or two
+after boot. If nothing at all has anything, `Display::showNoContent()` says
+so rather than leaving the panel blank.
+
+**The policy comes from the server, on the check-in that already exists.**
+`CheckInResponse.cardPolicy` carries `defaultDwellSeconds`,
+`manualNavHoldSeconds`, and a `cards` array of `{id, kind, order,
+dwellSeconds, interleaveEvery?, notableDwellSeconds?}`. Three rules keep this
+safe in both directions of the six-month firmware backward-compatibility
+mandate:
+
+- **No policy means keep the one you have.** An omitted or empty `cardPolicy`
+  is explicitly not "show nothing" — a server that cannot resolve a policy
+  must never blank a screen that was working. A device that has never
+  received one uses the built-in defaults compiled into each descriptor.
+- **An unknown card id is ignored, not an error.** That is what lets the
+  server add a card type before firmware supports it.
+- **A policy that matches *nothing* leaves every card active.** The mirror
+  image of the rule above: a newer server whose whole policy names card types
+  an older device does not have would otherwise switch every card off and
+  leave a dark screen. A card the policy *does* omit while naming others is
+  taken out of the rotation, which is how the server turns a card off — the
+  fallback only fires when nothing matched at all.
+
+`notableDwellSeconds` is the generalised form of CYD-Dickey's
+`aircraftOverheadSeconds = 20`: a longer hold for an item the card itself
+considers more interesting. The aircraft card's `isNotable` uses their rule
+too — 20% of the configured tracking radius with a 1-mile floor, so
+"practically overhead" still means something whether the owner tracks 3 miles
+or 30, rather than a hardcoded mile count.
+
+### Card buttons and the pending-action queue
+
+`App/Actions.h`/`.cpp` adds buttons a card can draw and a queue of presses
+waiting to be delivered. Two halves that only touch each other at the moment
+of a press: the **definitions** (`CheckInResponse.cardActions`, held in RAM
+because the server re-sends them every time, so persisting them would just be
+another thing to fall out of sync) and the **pending queue** (NVS-backed,
+because a press a power cycle eats is a press the household believes they
+made).
+
+**The device reports intent, never meaning.** `actionId` is opaque here. This
+firmware knows `"im-ok"` was pressed; it does not know an email goes out, or
+to whom. That binding is a database row in the server's `Commands` domain, so
+changing who gets notified is a config change rather than a firmware release
+across a fleet. `label` is drawn verbatim and never interpreted.
+
+**Passive push, no confirmation, no new endpoint.** A press is recorded
+locally, rides the next ordinary `/api/checkin` as `pendingActions`, and the
+device's job ends there. There is no round trip and no "sent" state for the
+user to wait on. Worst-case latency is one check-in interval — which the
+server already controls, so tightening it is a config change, not a new
+route. A single press fires the action; there is no confirm tap.
+
+**`instanceId` exists for dedup and for nothing else.** It is
+`"<device>:<monotonic counter>"`, the counter persisted in NVS and
+incremented *before* the press is stored, so a power loss mid-write costs an
+unused id rather than two presses sharing one. Its whole purpose is that if a
+check-in succeeds but its response is lost, the device re-sends the same press
+and the recipient is not notified twice. It is not user-visible
+confirmation and nothing in the UI is built on it. The prefix is the device's
+MAC address rather than its server-side device id, because nothing has ever
+told a device its own id — `CheckInRequest` deliberately carries no
+`DeviceId` at all — and the server, which already knows who is calling, only
+needs the prefix to be stable and device-local.
+
+**One-shot consume, running the other way.** The device keeps carrying a press
+until `acceptedActionIds` in a response names its `instanceId`; only then does
+it drop it from NVS. This is the same handshake shape as
+`FirmwareUpdateForced`, in the opposite direction. The queue holds eight
+presses; a press arriving at a full queue is dropped and logged rather than
+evicting one already recorded, because a queue that deep means check-ins have
+been failing for a long stretch and the *earliest* presses are the ones that
+still describe what happened.
+
+**The one thing drawn that the contract does not describe:** a pressed button
+flashes and comes straight back (`Display::flashActionButton`). That
+acknowledges the *press*, not the delivery — a button that does not visibly
+react to a finger reads as a dead button, which is its own separate failure —
+and it claims nothing about what the server did with it. Pressing also
+triggers the same manual-nav hold a navigation tap does, so a card someone
+just pressed a button on is not swapped out from under them.
+
+Geometry is entirely the device's: a row of up to three buttons along the
+bottom, from x=24 to x=296 and ending at y=220, which clears the 16px
+reverse/forward edge strips on both sides and the corner clock's
+bottom-right patch. The server says what a button is called and what it
+means; only the device knows its own panel.
+
+### Assets and the SD card
+
+`App/Sd.h`/`.cpp` mounts the card (CS pin 5, the same one `CYD-Dickey`'s
+`SdCard.cpp` uses on this board family — unlike the panel, a card slot's CS
+line is just a wiring fact, not something autodetect can find). `App/Assets.h`
+/`.cpp` is a cache of images on top of it, addressed by server-side asset id:
+**SD hit → draw. SD miss → fetch → store → draw. Fetch failed → draw
+nothing.** A miss must never block a card; a household staring at a frozen
+screen while a PNG times out is a far worse outcome than a card with no
+picture on it. Same storage approach as CYD-Dickey, which keeps its PNGs on SD
+and addresses them by path (`splashImage = "/LRBH.PNG"`); the difference is
+that the path is derived from a server id rather than typed in by a person, so
+the server's catalog is the source of truth and a device populates its own
+cache on demand.
+
+Downloads stream straight to the card rather than through a `String` — an
+asset is tens of kilobytes and this device has roughly 274KB of free heap, so
+buffering the whole body first is exactly the allocation that would turn a
+slightly-too-large image from slow into fatal. They are written to a `.part`
+name and renamed on success, so an interrupted download cannot leave a
+truncated file that every later lookup then treats as a cache hit.
+
+**The device never validates image size.** The server normalises every image
+at upload time — resized to a per-asset-type target, re-encoded, metadata
+stripped — so what arrives here is already device-appropriate. A device with
+274KB of heap must never be the thing that discovers an image was too big;
+that discovery belongs at upload, where a person can see it.
+
+Two small mechanical details are inherited from CYD-Dickey and both matter.
+`SD.h` must be included *before* `LovyanGFX.hpp` in `Display.cpp`: LovyanGFX
+detects SD image support by checking whether the SD library's own include
+guard is already defined, and including it afterwards fails to compile with
+`abstract type DataWrapperT<fs::SDFS>`. And `lcd.releasePngMemory()` is called
+unconditionally after every PNG draw, including a failed one — LovyanGFX keeps
+the decoder's buffers allocated on purpose for cheap repeat-draws, and
+CYD-Dickey found that starving the memory its Bluetooth init needed
+immediately afterwards.
+
+**Storage is treated as effectively unlimited but measured.** The card is
+user-upgradeable, and a cache that has to reason about eviction is a great
+deal of machinery for a problem a larger card solves. "Unlimited" is only a
+defensible position while somebody can see how full it is, so `Telemetry` now
+reports `sdTotalBytes`, `sdUsedBytes` and `assetCount` alongside free heap —
+same mechanism, same cadence, so storage pressure shows up fleet-wide on
+`/diag/telemetry` before it shows up as a device that quietly stopped caching.
+All three read zero on a device with no card in the slot, which is an ordinary
+state and not a fault: nothing mounts, nothing caches, and weather and
+aircraft carry on untouched.
+
+**Currently drawn by exactly one caller.** `Assets::showBootSplash()` puts a
+cached `splash` asset up at boot if there is one, the way CYD-Dickey's
+`showSplashScreen()` does, and silently does nothing otherwise. No registered
+card consumes an asset yet — neither weather nor aircraft has an image to
+show, and the server's `Assets` catalog and its device-authenticated fetch
+endpoint are still a stub, so `/api/assets/{id}` is this firmware's
+expectation of that route rather than something that has ever answered.
 
 ### Deciding when to reboot to the updater
 
@@ -791,7 +1056,34 @@ and to a new, **permanent** `vYYYY.MM.DD.NNNN` release that is never reused.
   piece of firmware in this repository with literally zero possible
   automated coverage even in principle - a clean compile proves the code
   builds against LovyanGFX's touch API, nothing more. See "Touch input: the
-  XPT2046 controller, used for the first time" above.
+  XPT2046 controller, used for the first time" above. Now that taps are
+  classified into zones rather than meaning one single thing, a miscalibrated
+  or inverted axis would send a "forward" tap backwards instead of going
+  unnoticed - the unverified assumption became load-bearing.
+- **The SD card slot has never had a card in it.** `App/Sd.h`/`.cpp` mounts
+  on CS pin 5 because `CYD-Dickey` does on the same board family; nothing has
+  confirmed this particular ELEGOO unit's slot enumerates a card, that a PNG
+  decodes off it, or that `sdTotalBytes`/`sdUsedBytes` report anything real.
+  A device with no card is a supported, ordinary state, so the untested path
+  is specifically "a card is present".
+- **The asset fetch endpoint does not exist yet.** `App/Assets.cpp` expects
+  `GET /api/assets/{id}` with the usual `X-Device-Secret`, matching the shape
+  of every other device route, but the server's `Assets` domain is still a
+  stub. Nothing has ever answered that request, and no registered card
+  consumes an asset yet - the only caller is the boot splash.
+- **Card buttons and the pending-action queue are compiled, not exercised.**
+  Nothing has pressed a button, written a press to NVS, carried one on a
+  check-in, or watched `acceptedActionIds` clear one. The server-side
+  `DeviceSimulator` (`/diag/devicesimulator`) is the only repeatable way to
+  exercise the wire half of this without hardware; the firmware half has no
+  equivalent and cannot get one.
+- **The scheduler has no test, and the nearest substitute lives on the
+  server.** `App/CardManager.cpp`'s interleaving, history ring and dwell
+  logic are verified by a clean compile and by reading them against the
+  CYD-Dickey code they were ported from. The closest thing to a test for the
+  intended *behaviour* is the `DeviceSimulator`'s rendered preview of a
+  policy's resulting rotation, which at least lets a policy change be
+  sanity-checked before a device sees it.
 - **The operator-authenticated, secret-injecting flasher is still just
   designed.** See *Provisioning: how a device gets its secret*, above - what
   exists today (the server's public `/cal` page) covers a fresh unit that

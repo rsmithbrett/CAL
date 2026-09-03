@@ -4,7 +4,9 @@
 #include <HTTPClient.h>
 #include <NetworkClientSecure.h>
 
+#include "Cards.h"
 #include "Config.h"
+#include "Display.h"
 #include "Identity.h"
 #include "Log.h"
 #include "Tls.h"
@@ -107,12 +109,13 @@ Result fetchMine() {
     return result;
   }
 
+  result.radiusMiles = doc["radiusMiles"] | 10.0;
+
   JsonArrayConst aircraft = doc["aircraft"].as<JsonArrayConst>();
   if (aircraft.isNull() || aircraft.size() == 0) {
     result.status = Status::Empty;
-    const double radiusMiles = doc["radiusMiles"] | 10.0;
     char buffer[48];
-    snprintf(buffer, sizeof(buffer), "No aircraft within %.0f mi right now.", radiusMiles);
+    snprintf(buffer, sizeof(buffer), "No aircraft within %.0f mi right now.", result.radiusMiles);
     result.message = String(buffer);
     return result;
   }
@@ -126,5 +129,90 @@ Result fetchMine() {
   result.nearest.distanceMiles = nearest["distanceMiles"] | 0.0;
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// The card descriptor. See the equivalent block at the bottom of Weather.cpp
+// for why registration happens here rather than in App.ino.
+//
+// Registered as a *list* card even though the server currently gives us
+// exactly one sighting - the nearest. That is the honest description of the
+// card's shape: MyAircraftService returns a distance-sorted list and this
+// module takes element 0 only because nothing had a use for the rest. A
+// later server change that hands over the whole list needs cardItemCount()
+// and cardDraw() to start reading an index, and nothing in the scheduler to
+// change at all. Registering it as an interstitial today would have to be
+// undone then.
+// ---------------------------------------------------------------------------
+namespace {
+
+Result gLast;
+bool gEverFetched = false;
+
+void cardFetch() {
+  gLast = fetchMine();
+  gEverFetched = true;
+  if (gLast.status == Status::Ok) {
+    Log::printf("[aircraft] card updated: %s alt=%dft speed=%.0fkts heading=%.0f dist=%.1fmi",
+                gLast.nearest.callsign.c_str(), gLast.nearest.altitudeFeet,
+                gLast.nearest.speedKnots, gLast.nearest.headingDegrees,
+                gLast.nearest.distanceMiles);
+  }
+}
+
+/// Same reasoning as Weather's: one item once anything has been fetched.
+/// Empty ("nothing overhead right now") counts as an item rather than zero -
+/// it is a real, informative message this card has always shown, and the
+/// scheduler's empty-card skipping is for cards with nothing at all to say.
+uint16_t cardItemCount() { return gEverFetched ? 1 : 0; }
+
+/// A plane nearly directly overhead earns the longer dwell. Threshold scales
+/// with the configured radius rather than being a fixed mile count, so it
+/// still means "practically overhead" whether the owner tracks 3 miles or
+/// 30 - the same 20%-of-radius rule CYD-Dickey uses, with the same 1-mile
+/// floor so a very small radius does not make every sighting notable.
+bool cardIsNotable(uint16_t) {
+  if (gLast.status != Status::Ok) {
+    return false;
+  }
+  const double threshold = max(1.0, gLast.radiusMiles * 0.2);
+  return gLast.nearest.distanceMiles <= threshold;
+}
+
+void cardDraw(uint16_t) {
+  if (gLast.status == Status::Ok) {
+    Display::showAircraftCard(gLast.nearest.callsign, gLast.nearest.altitudeFeet,
+                              gLast.nearest.speedKnots, gLast.nearest.headingDegrees,
+                              gLast.nearest.distanceMiles, "Updated just now");
+    return;
+  }
+
+  // Empty (fetch worked, nothing in range right now) and the two resting
+  // states read as ordinary/muted; auth and network trouble read amber -
+  // same isProblem split Weather's card makes, just with a third muted case
+  // this card has and weather doesn't.
+  const bool isRestingState = gLast.status == Status::NotActivated ||
+                              gLast.status == Status::ProviderDisabled ||
+                              gLast.status == Status::Empty;
+  const String headline = gLast.status == Status::Empty ? "Nothing overhead right now"
+                          : isRestingState              ? "Aircraft overhead is not showing yet"
+                                                        : "Could not load aircraft data";
+  Display::showAircraftStatus(headline, gLast.message, /*isProblem=*/!isRestingState);
+}
+
+[[maybe_unused]] const bool kRegistered = [] {
+  Cards::CardSpec spec;
+  spec.id = "aircraft";
+  spec.kind = Cards::Kind::List;
+  spec.fetch = cardFetch;
+  spec.itemCount = cardItemCount;
+  spec.draw = cardDraw;
+  spec.isNotable = cardIsNotable;
+  spec.order = 2;
+  spec.dwellSeconds = 8;
+  spec.notableDwellSeconds = 20;
+  return Cards::registerCard(spec);
+}();
+
+}  // namespace
 
 }  // namespace Aircraft

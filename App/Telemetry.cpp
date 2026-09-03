@@ -5,9 +5,11 @@
 #include <NetworkClientSecure.h>
 #include <WiFi.h>
 
+#include "Assets.h"
 #include "Config.h"
 #include "Identity.h"
 #include "Log.h"
+#include "SdStorage.h"
 #include "Tls.h"
 
 namespace Telemetry {
@@ -56,12 +58,26 @@ void report(const char* lastCheckInOutcome) {
   // anti-brick threshold falls back to the factory partition instead.
   const uint8_t bootCount = Identity::bootAttempts();
 
+  // Storage, reported for the same reason free heap already is: so pressure
+  // shows up fleet-wide on /diag/telemetry before it shows up as a device
+  // that quietly stopped caching assets. The card is treated as effectively
+  // unlimited - it is user-upgradeable - but "unlimited" is only a defensible
+  // position while somebody can actually see how full it is. All three read
+  // as zero on a device with no card in the slot, which is an ordinary state
+  // rather than a fault (see SdStorage.h).
+  const uint64_t sdTotalBytes = Sd::totalBytes();
+  const uint64_t sdUsedBytes = Sd::usedBytes();
+  const uint16_t assetCount = Assets::cachedCount();
+
   JsonDocument requestDoc;
   requestDoc["uptimeSeconds"] = uptimeSeconds;
   requestDoc["wifiRssiDbm"] = rssi;
   requestDoc["freeHeapBytes"] = freeHeap;
   requestDoc["bootCount"] = bootCount;
   requestDoc["lastCheckInOutcome"] = lastCheckInOutcome;
+  requestDoc["sdTotalBytes"] = sdTotalBytes;
+  requestDoc["sdUsedBytes"] = sdUsedBytes;
+  requestDoc["assetCount"] = assetCount;
 
   String body;
   serializeJson(requestDoc, body);
@@ -77,9 +93,13 @@ void report(const char* lastCheckInOutcome) {
     return;
   }
 
-  Log::printf("[telemetry] ok (uptimeSeconds=%lu rssi=%d freeHeap=%lu bootCount=%u outcome=%s)",
-              static_cast<unsigned long>(uptimeSeconds), rssi,
-              static_cast<unsigned long>(freeHeap), bootCount, lastCheckInOutcome);
+  Log::printf(
+      "[telemetry] ok (uptimeSeconds=%lu rssi=%d freeHeap=%lu bootCount=%u outcome=%s "
+      "sdUsedMB=%lu sdTotalMB=%lu assets=%u)",
+      static_cast<unsigned long>(uptimeSeconds), rssi, static_cast<unsigned long>(freeHeap),
+      bootCount, lastCheckInOutcome,
+      static_cast<unsigned long>(sdUsedBytes / (1024ULL * 1024ULL)),
+      static_cast<unsigned long>(sdTotalBytes / (1024ULL * 1024ULL)), assetCount);
 }
 
 }  // namespace Telemetry

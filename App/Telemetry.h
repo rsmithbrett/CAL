@@ -12,9 +12,18 @@
 /// stale mid-run and it silently failed every check-in for hours with zero
 /// server-side visibility, discovered only by hand-reading raw audit
 /// records. Telemetry is the fix - a small, roughly-periodic heartbeat
-/// (uptime, WiFi signal, free heap, CAL's own boot-attempt counter, and this
-/// device's own last check-in outcome) an admin's fleet page can watch for
-/// staleness. It is device health/diagnostics, not product-usage analytics.
+/// (uptime, WiFi signal, free heap, CAL's own boot-attempt counter, SD
+/// capacity/usage and cached-asset count, and this device's own last check-in
+/// outcome) an admin's fleet page can watch for staleness. It is device
+/// health/diagnostics, not product-usage analytics.
+///
+/// The three storage fields are here for the same reason free heap already
+/// is. SD storage is treated as effectively unlimited - the card is
+/// user-upgradeable - but that is only a defensible position while somebody
+/// can see how full it is, so storage pressure shows up fleet-wide before it
+/// shows up as a device that quietly stopped caching assets. All three read
+/// zero on a device with no card in the slot, which is an ordinary supported
+/// state rather than a fault (see SdStorage.h).
 ///
 /// Deliberately has no timer of its own. It piggybacks on CheckIn's existing
 /// cadence instead - see performCheckIn() in App.ino, which calls report()

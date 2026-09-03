@@ -4,7 +4,9 @@
 #include <HTTPClient.h>
 #include <NetworkClientSecure.h>
 
+#include "Cards.h"
 #include "Config.h"
+#include "Display.h"
 #include "Identity.h"
 #include "Log.h"
 #include "Tls.h"
@@ -134,5 +136,88 @@ Result fetchMine() {
   result.forecast.shortForecast = String(current["shortForecast"] | "");
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// The card descriptor.
+//
+// Weather used to be a card only in the sense that App.ino held a
+// `CardKind::Weather` enum case, a refreshWeatherCard() that both fetched and
+// drew in one breath, and a two-way toggle deciding when to call it. All
+// three of those are gone: this module now describes itself to the scheduler
+// and the scheduler does not know the word "weather" anywhere.
+//
+// Note the split between cardFetch() and cardDraw(). The Result lives in
+// gLast between them, so drawing is a pure redraw of retained state - which
+// is what makes stepping backwards through the card history show the card
+// that was actually there rather than whatever a fresh fetch would return
+// now.
+// ---------------------------------------------------------------------------
+namespace {
+
+Result gLast;
+bool gEverFetched = false;
+
+void cardFetch() {
+  gLast = fetchMine();
+  gEverFetched = true;
+  if (gLast.status == Status::Ok) {
+    Log::printf("[weather] card updated: %s, %d%s, %s", gLast.forecast.location.c_str(),
+                gLast.forecast.temperature, gLast.forecast.unit.c_str(),
+                gLast.forecast.shortForecast.c_str());
+  }
+}
+
+/// One item once anything has been fetched, zero before that. A non-Ok
+/// status still counts as one item, not zero: "weather is not showing yet"
+/// or "could not load weather" is a message worth putting on screen, and the
+/// scheduler's empty-card skipping is meant for cards with genuinely nothing
+/// to say - not for cards with bad news.
+uint16_t cardItemCount() { return gEverFetched ? 1 : 0; }
+
+void cardDraw(uint16_t) {
+  if (gLast.status == Status::Ok) {
+    Display::showWeatherCard(gLast.forecast.location, gLast.forecast.temperature,
+                             gLast.forecast.unit, gLast.forecast.shortForecast,
+                             "Updated just now");
+    return;
+  }
+
+  // NotActivated and ProviderDisabled are resting states an owner or their
+  // agent can change server-side at any time - shown muted, not amber, since
+  // there is nothing wrong with the device itself. Routed through
+  // showWeatherStatus() rather than the black boot-ladder showStatus()/
+  // showFailure() - see Display.h's remarks on why content-card problems
+  // stay in the white/bannered card family instead.
+  const bool isRestingState =
+      gLast.status == Status::NotActivated || gLast.status == Status::ProviderDisabled;
+  Display::showWeatherStatus(
+      isRestingState ? "Weather is not showing yet" : "Could not load weather", gLast.message,
+      /*isProblem=*/!isRestingState);
+}
+
+/// Registers this card at static-init time, so App.ino never names it. The
+/// registry it writes into is constant-initialised (see the top of
+/// CardManager.cpp), so this cannot run before the registry exists.
+///
+/// The values below are built-in defaults only - they hold until the first
+/// cardPolicy arrives on a check-in and replaces them, and they match the
+/// example policy in the contract this was built against. Weather is an
+/// interstitial: it interleaves after every N other cards rather than taking
+/// a fixed rotation slot, so a device tracking a long list does not see its
+/// weather proportionally less often.
+[[maybe_unused]] const bool kRegistered = [] {
+  Cards::CardSpec spec;
+  spec.id = "weather";
+  spec.kind = Cards::Kind::Interstitial;
+  spec.fetch = cardFetch;
+  spec.itemCount = cardItemCount;
+  spec.draw = cardDraw;
+  spec.order = 1;
+  spec.dwellSeconds = 15;
+  spec.interleaveEvery = 5;
+  return Cards::registerCard(spec);
+}();
+
+}  // namespace
 
 }  // namespace Weather

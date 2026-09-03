@@ -3,10 +3,17 @@
 // Runs from ota_0, installed and started by CAL (see ../CAL.ino,
 // ../Updater.cpp). Everything CAL already established - WiFi credentials, the
 // device secret, TLS trust - lives in NVS and is simply read here, not
-// re-derived. This build renders two cards, weather and aircraft overhead,
-// alternating on the same content-refresh timer (see refreshCurrentCard());
-// see Weather.h/Aircraft.h for why each card is its own sibling file rather
-// than growing one another.
+// re-derived.
+//
+// **This file does not know what a weather card is.** It brings up the
+// hardware and the network, hands control of the screen to CardManager, and
+// pumps it once per loop() iteration. Which cards exist, what order they
+// appear in and how long each stays up are all decided elsewhere: each card
+// module registers its own descriptor at static-init time (see the bottom of
+// Weather.cpp and Aircraft.cpp), and the server's cardPolicy schedules them.
+// This file used to hold an `enum class CardKind { Weather, Aircraft }` and a
+// two-way toggle, which is exactly the thing that made adding a third card
+// mean editing three unrelated places.
 //
 // Unlike CAL, this is meant to run indefinitely: failures here retry instead
 // of halting, because a display that goes dark until someone finds a USB
@@ -14,19 +21,20 @@
 
 #include <WiFi.h>
 
-#include "Aircraft.h"
+#include "Actions.h"
+#include "AppService.h"
 #include "AppUpdater.h"
+#include "Assets.h"
+#include "CardManager.h"
 #include "CheckIn.h"
 #include "Config.h"
 #include "Display.h"
 #include "Identity.h"
 #include "Loader.h"
 #include "Log.h"
-#include "WifiJoin.h"
-#include "AppService.h"
+#include "SdStorage.h"
 #include "Telemetry.h"
-#include "Touch.h"
-#include "Weather.h"
+#include "WifiJoin.h"
 
 namespace {
 
@@ -106,7 +114,6 @@ void ensureWifiConnected() {
   }
 }
 
-uint32_t lastContentFetchMs = 0;
 uint32_t lastUpdateCheckMs = 0;
 uint32_t lastCheckInMs = 0;
 
@@ -146,86 +153,6 @@ bool forceUpdateCheckRequested() {
   return justPressed;
 }
 
-void refreshWeatherCard() {
-  const Weather::Result result = Weather::fetchMine();
-
-  if (result.status == Weather::Status::Ok) {
-    Log::printf("[weather] card updated: %s, %d%s, %s", result.forecast.location.c_str(),
-                result.forecast.temperature, result.forecast.unit.c_str(),
-                result.forecast.shortForecast.c_str());
-    Display::showWeatherCard(result.forecast.location, result.forecast.temperature,
-                             result.forecast.unit, result.forecast.shortForecast,
-                             "Updated just now");
-    return;
-  }
-
-  // NotActivated and ProviderDisabled are resting states an owner or their
-  // agent can change server-side at any time - shown muted, not amber, since
-  // there is nothing wrong with the device itself. Routed through
-  // showWeatherStatus() rather than the black boot-ladder showStatus()/
-  // showFailure() - see Display.h's remarks on why content-card problems
-  // stay in the white/bannered card family instead.
-  const bool isRestingState = result.status == Weather::Status::NotActivated ||
-                              result.status == Weather::Status::ProviderDisabled;
-  Display::showWeatherStatus(isRestingState ? "Weather is not showing yet" : "Could not load weather",
-                             result.message, /*isProblem=*/!isRestingState);
-}
-
-void refreshAircraftCard() {
-  const Aircraft::Result result = Aircraft::fetchMine();
-
-  if (result.status == Aircraft::Status::Ok) {
-    Log::printf("[aircraft] card updated: %s alt=%dft speed=%.0fkts heading=%.0f dist=%.1fmi",
-                result.nearest.callsign.c_str(), result.nearest.altitudeFeet,
-                result.nearest.speedKnots, result.nearest.headingDegrees,
-                result.nearest.distanceMiles);
-    Display::showAircraftCard(result.nearest.callsign, result.nearest.altitudeFeet,
-                              result.nearest.speedKnots, result.nearest.headingDegrees,
-                              result.nearest.distanceMiles, "Updated just now");
-    return;
-  }
-
-  // Empty (fetch worked, nothing in range right now) and the two resting
-  // states read as ordinary/muted; auth and network trouble read amber -
-  // same isProblem split refreshWeatherCard() makes, just with a third
-  // muted case this card has and weather doesn't (weather's "no forecast
-  // yet"/"no address set" cases are folded into NetworkError instead - see
-  // Weather.cpp).
-  const bool isRestingState = result.status == Aircraft::Status::NotActivated ||
-                              result.status == Aircraft::Status::ProviderDisabled ||
-                              result.status == Aircraft::Status::Empty;
-  const String headline = result.status == Aircraft::Status::Empty ? "Nothing overhead right now"
-                          : isRestingState                          ? "Aircraft overhead is not showing yet"
-                                                                     : "Could not load aircraft data";
-  Display::showAircraftStatus(headline, result.message, /*isProblem=*/!isRestingState);
-}
-
-// Weather and aircraft overhead alternate on the same content-refresh timer
-// rather than each getting a card-cycling scheduler of its own the way
-// CYD-Dickey's drawDashboardScreen()/advanceCard() interleave weather,
-// splash, QR and a whole list of aircraft/listings on independent
-// intervals with touch-driven rewind. Most of that machinery still has
-// nothing to attach to here: the server gives CAL only the *nearest*
-// aircraft as a single featured value, not a list to cycle through, so
-// there remains exactly one of each card. A tap (see Touch.h/.cpp, wired up
-// in loop()) now advances between them immediately instead of only ever
-// waiting for the timer - the board's touch controller was simply unused
-// before this, not absent - but "the next card" is still unambiguous
-// either way, so this stays a plain two-way toggle rather than a real
-// cycling scheduler with history/rewind.
-enum class CardKind { Weather, Aircraft };
-CardKind nextCard = CardKind::Weather;
-
-void refreshCurrentCard() {
-  if (nextCard == CardKind::Weather) {
-    refreshWeatherCard();
-    nextCard = CardKind::Aircraft;
-  } else {
-    refreshAircraftCard();
-    nextCard = CardKind::Weather;
-  }
-}
-
 /// Checks right now instead of waiting for the button-triggered path's only
 /// alternative (AppUpdater's own slow, independent manifest poll), and says
 /// so on screen either way - a press that silently does nothing reads as a
@@ -246,7 +173,10 @@ void forceUpdateCheck() {
   Log::line("[update] manual check: already up to date");
   Display::showStatus("Already up to date", "");
   delay(1500);
-  refreshCurrentCard();
+  // Puts the card that was showing back, rather than advancing to the next
+  // one - a check that found nothing should leave the screen exactly as it
+  // was, and this is a redraw of retained state, not a refetch.
+  CardManager::redraw();
 }
 
 /// The fast path: whatever the server decided on this check-in - an admin's
@@ -278,6 +208,27 @@ void performCheckIn() {
   lastUtcOffsetMinutes = result.utcOffsetMinutes;
   lastIsDaytime = result.isDaytime;
   Display::setEnvironment(lastUtcOffsetMinutes, lastIsDaytime);
+
+  // The three card fields, in the order they have to happen in.
+  //
+  // acceptedActionIds is consumed first: it acknowledges presses this very
+  // request carried, and clearing them before anything else can go wrong is
+  // the point of the handshake. It is the one-shot-consume shape
+  // FirmwareUpdateForced already uses, running the other way - the device
+  // keeps carrying a press until the server says it has it, so a lost
+  // response costs a duplicate send (which server-side dedup absorbs on
+  // instanceId) rather than a lost press.
+  Actions::clearAccepted(result.acceptedActionIds, result.acceptedActionCount);
+
+  // Then the button set, before the policy, so the redraw the policy may
+  // trigger already has the right buttons to draw. Not one-shot: the server
+  // re-sends the full set every time, and an empty set is a legitimate
+  // instruction meaning "no card draws any buttons".
+  Actions::applyDefinitions(result.cardActions, result.cardActionCount);
+
+  // Then the rotation itself. A response with no cardPolicy leaves whatever
+  // is already in force alone - see CardManager::applyPolicy().
+  CardManager::applyPolicy(result.cardPolicy);
 
   // Not one-shot, unlike updateAvailable below: this reflects the server's
   // current wish on every successful check-in, so remote debug streaming
@@ -333,9 +284,18 @@ void setup() {
     delay(10000);
   }
 
-  Display::showStatus("Loading weather", "");
-  refreshCurrentCard();
-  lastContentFetchMs = millis();
+  // Storage is optional. A device with nothing in the card slot mounts
+  // nothing, caches nothing, reports zeroes in telemetry and otherwise
+  // behaves identically - see SdStorage.h. Brought up after the clock so a
+  // just-cached asset gets a plausible modification time.
+  Sd::begin();
+  Assets::begin();
+  Assets::showBootSplash();
+
+  // Hands the screen over. Every card registered itself before setup() was
+  // ever called; this is where the rotation starts running.
+  Display::showStatus("Loading", "");
+  CardManager::begin();
 }
 
 void loop() {
@@ -343,28 +303,17 @@ void loop() {
 
   if (forceUpdateCheckRequested()) {
     forceUpdateCheck();
-    lastContentFetchMs = millis();
     lastUpdateCheckMs = millis();
   }
 
-  // Touch-driven card advance - the App's first use of the touch panel (see
-  // Touch.h/.cpp). Resets lastContentFetchMs the same way the BOOT-press
-  // path above does, so the automatic content-refresh timer's next fire is
-  // pushed out from right now instead of landing moments later and
-  // re-showing the very card this tap just requested (or worse, showing the
-  // same card twice in a row instead of advancing to the other one).
-  if (Touch::wasTapped()) {
-    Log::line("[touch] tap detected - advancing to the next card");
-    refreshCurrentCard();
-    lastContentFetchMs = millis();
-  }
+  // Everything about what is on the screen - the dwell timer, the
+  // interstitial interleaving, touch-driven forward/reverse and its
+  // manual-nav hold, and refreshing at most one due card per pass - happens
+  // in here. There is no content-refresh timer in this file any more; the
+  // scheduler owns its own, per card.
+  CardManager::poll();
 
   const uint32_t now = millis();
-
-  if (now - lastContentFetchMs >= Config::kContentRefreshIntervalMs) {
-    refreshCurrentCard();
-    lastContentFetchMs = now;
-  }
 
   if (now - lastCheckInMs >= checkInIntervalMs) {
     lastCheckInMs = now;
@@ -393,5 +342,15 @@ void loop() {
   // periodic thing in this loop.
   Log::poll();
 
-  delay(1000);
+  // 50ms, not the 1000ms this loop used to sleep for. Everything else in
+  // here is gated on its own millis() comparison and does not care how often
+  // it is asked, but touch is sampled inside CardManager::poll() and a
+  // once-per-second sample misses most of a real tap - a finger is on the
+  // glass for a fraction of that. That was already true when a tap only
+  // advanced a card, where a missed tap costs nothing worse than tapping
+  // again; it is much less acceptable now that a tap can be a button press
+  // whose whole point is that the person gets no confirmation and would
+  // therefore never know it had not registered. CYD-Dickey's own loop() has
+  // no delay in it at all for the same reason.
+  delay(50);
 }

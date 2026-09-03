@@ -81,6 +81,58 @@ void showAircraftCard(const String& callsign, int altitudeFeet, double speedKnot
 /// showWeatherStatus()'s split from the boot-ladder screens.
 void showAircraftStatus(const String& headline, const String& detail, bool isProblem);
 
+/// Shown when no registered card has anything to draw at all - which is the
+/// ordinary state for the first second or two after boot, before the first
+/// fetch lands. Same white/bannered card family as the two status screens
+/// above rather than the black boot ladder: nothing is wrong with the
+/// device, it simply has no content yet.
+void showNoContent(const String& headline, const String& detail);
+
+// --- Card chrome: the controls drawn on top of whatever card is showing.
+//
+// Both of these are drawn by CardManager after a card's own draw function
+// has finished, so they land on a completed card rather than being painted
+// over by it. Their geometry is decided here, not by the server: only this
+// file knows this panel's size and what else is already on it. The corner
+// clock owns the bottom-right (see drawClock in Display.cpp) and the
+// left/right edge strips belong to the reverse/forward touch zones (see
+// Touch.h), so the button row sits clear of all three.
+
+/// Up to Actions::kMaxButtonsPerCard buttons in a row along the bottom of the
+/// card. Labels are drawn verbatim, truncated to fit - the server chose the
+/// wording and this file does not second-guess it.
+void drawActionButtons(const String* labels, uint8_t count);
+
+/// The hit rectangle for button `index` of `count`, in the same layout
+/// drawActionButtons() uses. Handed to Touch::setActionZones() so the hit
+/// test and the drawing can never disagree about where a button is.
+void actionButtonZone(uint8_t index, uint8_t count, int16_t& x, int16_t& y, int16_t& w,
+                      int16_t& h);
+
+/// Briefly redraws one button in its pressed colour and puts it straight
+/// back. This acknowledges the *press* only. It deliberately says nothing
+/// about delivery: a press is a passive push that rides the next ordinary
+/// check-in, with no confirmation and nothing for the user to wait for (see
+/// Actions.h). A button that does not visibly react to a finger reads as a
+/// dead button, which is its own, separate failure.
+void flashActionButton(uint8_t index, uint8_t count, const String& label);
+
+/// Small chevrons at the left and right edges marking the reverse/forward
+/// touch zones. CYD-Dickey leaves its equivalent zones completely invisible;
+/// these are drawn because an invisible control on a household appliance is
+/// only discoverable by accident. `canReverse` dims the left one when there
+/// is no history to step back into, so the affordance never promises
+/// something that will do nothing.
+void drawNavAffordances(bool canReverse);
+
+/// Draws a PNG from the SD card, scaled to fit and centred on the whole
+/// panel. Clears to the theme background first, so a failed decode leaves a
+/// clean screen rather than a half-painted one; returns false in that case so
+/// the caller can put its own content back. Assets.cpp is the only caller -
+/// the SD read lives behind this function because this file owns the one
+/// LGFX instance for this panel, the same reason readTouchRaw() is here.
+bool drawPngFromSd(const String& path);
+
 }  // namespace Display
 
 // A note on the day/night theme this file implements (see setEnvironment()

@@ -2,11 +2,20 @@
 
 #include <Arduino.h>
 
-/// The one content type this first build of the App renders. Additional cards
-/// (Listings.h/.cpp, Aircraft.h/.cpp, ...) are meant to sit beside this file as
-/// their own modules mirroring the server's per-provider project split - see
-/// MyWeatherEndpoints.cs / MyListingsEndpoints.cs / MyAircraftEndpoints.cs - not
-/// to be folded into it.
+/// The weather content type. Additional cards (Listings.h/.cpp,
+/// Aircraft.h/.cpp, ...) are meant to sit beside this file as their own
+/// modules mirroring the server's per-provider project split - see
+/// MyWeatherEndpoints.cs / MyListingsEndpoints.cs / MyAircraftEndpoints.cs -
+/// not to be folded into it.
+///
+/// The .cpp also registers this module's card descriptor with the scheduler
+/// (see Cards.h, and the block at the bottom of Weather.cpp). That
+/// registration happens at static-init time from inside this translation
+/// unit, so nothing above it - App.ino included - has to name "weather"
+/// anywhere. fetchMine() below is the fetch half of that descriptor; the
+/// draw half lives in Weather.cpp too, and the two are deliberately
+/// separate, because reverse navigation is a redraw of retained state and
+/// must never trigger a network call.
 namespace Weather {
 
 enum class Status {

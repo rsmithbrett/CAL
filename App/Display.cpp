@@ -1,9 +1,18 @@
+// SD.h MUST come before LovyanGFX.hpp, not after. LovyanGFX auto-detects
+// SD-card image support by checking whether the SD library's own include
+// guard is already defined (see its esp32/common.hpp); include it afterwards
+// and drawPngFile(SD, ...) fails to compile with "abstract type
+// DataWrapperT<fs::SDFS>". CYD-Dickey hit exactly this and records the same
+// note at the top of its .ino.
+#include <SD.h>
+
 #define LGFX_AUTODETECT
 #include <LovyanGFX.hpp>
 #include <LGFX_AUTODETECT.hpp>
 #include <time.h>
 
 #include "Display.h"
+#include "Log.h"
 
 namespace Display {
 namespace {
@@ -58,6 +67,36 @@ constexpr uint32_t kWeatherBanner = 0x0D2B52u;
 constexpr uint32_t kAircraftBanner = 0x1F6FEBu;
 constexpr int kBannerHeight = 22;
 constexpr int kCardMargin = 10;
+
+// Card chrome geometry - see Display.h's own remarks on why all of it is
+// decided here rather than described by the server.
+//
+// The button row has to stay clear of three things at once: the 16px
+// left/right edge strips Touch.h uses for reverse/forward, and the corner
+// clock, which drawClock() sets bottom-right at (314, 236) in the small
+// bitmap font (so roughly y 228-236, x 290-314). A row from x=24 to x=296
+// ending at y=220 clears all of them with room to spare in both axes.
+constexpr int kButtonRowY = 190;
+constexpr int kButtonHeight = 30;
+constexpr int kButtonRowLeft = 24;
+constexpr int kButtonRowRight = 296;
+constexpr int kButtonGap = 8;
+constexpr int kButtonRadius = 6;
+
+// The same bright, high-contrast blue CYD-Dickey settled on for its own
+// buttons (its BUTTON_COLOR = 0x2E9FFF), chosen there because the default
+// dark navy was hard to read on this panel. Deliberately outside the
+// day/night swap for the same reason the banner colours are: it reads
+// against either background, and white-on-blue stays legible either way.
+constexpr uint32_t kButtonFill = 0x2E9FFFu;
+constexpr uint32_t kButtonPressedFill = 0x0B5FB0u;
+constexpr uint32_t kButtonInk = 0xFFFFFFu;
+
+// Edge chevrons. Small, low-contrast, vertically centred - they mark the
+// touch zones without competing with the card for attention.
+constexpr int kChevronHalfHeight = 12;
+constexpr int kChevronWidth = 7;
+constexpr int kChevronCentreY = kScreenH / 2;
 
 void clear() {
   lcd.fillScreen(bg());
@@ -462,6 +501,123 @@ void showAircraftStatus(const String& headline, const String& detail, bool isPro
 
   drawClock();
   restoreDefaultFont();
+}
+
+void showNoContent(const String& headline, const String& detail) {
+  lcd.fillScreen(bg());
+
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setTextSize(1);
+  const int headlineLines =
+      wrappedLeftText(headline, kCardMargin, 60, muted(), 22, 3, kScreenW - kCardMargin * 2);
+  if (detail.length() > 0) {
+    wrappedLeftText(detail, kCardMargin, 60 + headlineLines * 22 + 12, muted(), 18, 3,
+                    kScreenW - kCardMargin * 2);
+  }
+
+  drawClock();
+  restoreDefaultFont();
+}
+
+void actionButtonZone(uint8_t index, uint8_t count, int16_t& x, int16_t& y, int16_t& w,
+                      int16_t& h) {
+  x = 0;
+  y = 0;
+  w = 0;
+  h = 0;
+  if (count == 0 || index >= count) {
+    return;
+  }
+  const int available = kButtonRowRight - kButtonRowLeft;
+  const int width = (available - kButtonGap * (count - 1)) / count;
+  x = static_cast<int16_t>(kButtonRowLeft + index * (width + kButtonGap));
+  y = static_cast<int16_t>(kButtonRowY);
+  w = static_cast<int16_t>(width);
+  h = static_cast<int16_t>(kButtonHeight);
+}
+
+namespace {
+
+// Shared by drawActionButtons() and flashActionButton() so a pressed button
+// can never come back a different size or in a different font than the one
+// it replaced.
+void drawOneButton(uint8_t index, uint8_t count, const String& label, uint32_t fill) {
+  int16_t x, y, w, h;
+  actionButtonZone(index, count, x, y, w, h);
+  if (w <= 0) {
+    return;
+  }
+
+  lcd.fillRoundRect(x, y, w, h, kButtonRadius, fill);
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setTextSize(1);
+  lcd.setTextColor(kButtonInk, fill);
+
+  // Truncated one character at a time to fit, the same technique
+  // drawRightJustified() uses - the label is the server's wording drawn
+  // verbatim, and it has no idea how wide this panel is.
+  String text = label;
+  const int maxTextWidth = w - 10;
+  while (text.length() > 1 && lcd.textWidth(text) > maxTextWidth) {
+    text = text.substring(0, text.length() - 1);
+  }
+  lcd.setTextDatum(middle_center);
+  lcd.drawString(text, x + w / 2, y + h / 2);
+  lcd.setTextDatum(top_left);
+}
+
+}  // namespace
+
+void drawActionButtons(const String* labels, uint8_t count) {
+  if (labels == nullptr || count == 0) {
+    return;
+  }
+  for (uint8_t i = 0; i < count; ++i) {
+    drawOneButton(i, count, labels[i], kButtonFill);
+  }
+  restoreDefaultFont();
+}
+
+void flashActionButton(uint8_t index, uint8_t count, const String& label) {
+  drawOneButton(index, count, label, kButtonPressedFill);
+  delay(180);
+  drawOneButton(index, count, label, kButtonFill);
+  restoreDefaultFont();
+}
+
+void drawNavAffordances(bool canReverse) {
+  // Drawn as three lines rather than a filled triangle: at this size a filled
+  // arrow reads as a solid blob, and the point of these is to be noticed
+  // without being loud.
+  const uint32_t reverseColour = canReverse ? muted() : bg();
+  const int leftTipX = 5;
+  lcd.drawLine(leftTipX + kChevronWidth, kChevronCentreY - kChevronHalfHeight, leftTipX,
+               kChevronCentreY, reverseColour);
+  lcd.drawLine(leftTipX, kChevronCentreY, leftTipX + kChevronWidth,
+               kChevronCentreY + kChevronHalfHeight, reverseColour);
+
+  const int rightTipX = kScreenW - 6;
+  lcd.drawLine(rightTipX - kChevronWidth, kChevronCentreY - kChevronHalfHeight, rightTipX,
+               kChevronCentreY, muted());
+  lcd.drawLine(rightTipX, kChevronCentreY, rightTipX - kChevronWidth,
+               kChevronCentreY + kChevronHalfHeight, muted());
+}
+
+bool drawPngFromSd(const String& path) {
+  lcd.fillScreen(bg());
+  const bool ok =
+      lcd.drawPngFile(SD, path.c_str(), 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
+  // LovyanGFX keeps the PNG decoder's internal buffers allocated after a draw
+  // (intentional, for cheap repeat-draws). Released unconditionally, because
+  // a *failed* decode leaves them allocated too - CYD-Dickey found this
+  // starving the memory its Bluetooth init needed immediately afterwards, and
+  // this device has roughly 274KB of free heap to lose it out of.
+  lcd.releasePngMemory();
+  if (!ok) {
+    Log::printf("[display] failed to draw %s", path.c_str());
+  }
+  restoreDefaultFont();
+  return ok;
 }
 
 }  // namespace Display

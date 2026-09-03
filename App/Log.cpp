@@ -39,14 +39,16 @@ constexpr size_t kMaxBatchLines = 40;
 constexpr size_t kMaxBatchBytes = 4096;
 
 // How often poll() actually sends, measured against millis() the same way
-// every other timer in this codebase already works (checkInIntervalMs,
-// lastContentFetchMs, ...). App's loop() already runs on roughly a 1-second
-// cadence of its own (see App.ino's closing delay(1000)) with no hardware
-// timer or second task driving anything faster - so 1000ms is the finest
-// granularity poll() actually gets called at regardless of what this
-// constant says; picking something shorter would only be aspirational. The
-// line/byte caps above are what actually catch a sudden burst faster than
-// this timer would, between one loop() iteration and the next.
+// every other timer in this codebase already works (checkInIntervalMs, the
+// card manager's own per-card refresh timer, ...). This stays at 1000ms even
+// though App's loop() now spins roughly twenty times faster than that: the
+// closing delay() came down from 1000ms to 50ms so touch is sampled often
+// enough to catch a real tap (see App.ino), which means poll() is now called
+// far more often than it needs to send. The timer below is what keeps that
+// from turning into twenty POSTs a second; it is no longer merely
+// aspirational, as it was while loop() itself was the coarser limit. The
+// line/byte caps above still catch a sudden burst faster than this timer
+// would.
 constexpr uint32_t kBatchIntervalMs = 1000;
 
 bool streaming = false;

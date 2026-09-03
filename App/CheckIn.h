@@ -2,6 +2,9 @@
 
 #include <Arduino.h>
 
+#include "Actions.h"
+#include "Cards.h"
+
 /// The device's regular heartbeat - what CheckInGatewayEndpoints/CheckInGatewayService
 /// actually answer, distinct from both Weather's content fetch and AppUpdater's own
 /// slower, independent manifest poll. This is the FAST path an admin's "Force update"
@@ -45,6 +48,28 @@ struct Result {
   /// own fallback for an unresolved location (DeviceLocalTimeResult.Fallback
   /// in the DiscoverAroundMe repo).
   bool isDaytime = true;
+
+  /// How this device should rotate its cards. `present == false` means the
+  /// server sent no policy this time, which means "keep whatever policy you
+  /// already had" - explicitly not "show nothing". See
+  /// CardManager::applyPolicy().
+  Cards::Policy cardPolicy;
+
+  /// The buttons this device's cards should draw, resolved server-side from
+  /// the account's action bindings. An empty set is completely normal and
+  /// means no card draws any buttons. Re-sent on every check-in, so this is
+  /// not one-shot: the device simply matches its button set to whatever the
+  /// latest response said, the same "always current" contract
+  /// debugStreamRequested has.
+  Actions::Definition cardActions[Actions::kMaxDefinitions];
+  uint8_t cardActionCount = 0;
+
+  /// Which of the pendingActions this request carried the server has now
+  /// recorded, and which the device may therefore stop carrying. Pure dedup
+  /// bookkeeping - NOT confirmation for whoever pressed the button, who by
+  /// design gets none and waits for nothing. See Actions.h.
+  String acceptedActionIds[Actions::kMaxPending];
+  uint8_t acceptedActionCount = 0;
 };
 
 /// This board has no battery (ELEGOO/CYD is USB-powered) - batteryPercent/charging are
