@@ -1,10 +1,17 @@
-name: Build and publish CAL firmware
+name: Build and publish CAL and App firmware
 
 # Ship model: push to main, CI builds and publishes - never a manual build,
 # never a manual release, never a manually-chosen version number. See
 # VERSIONING.md: every push publishes the rolling "latest" release (same
 # tag, same URLs, every time) and a permanent vYYYY.MM.DD.NNNN release
 # (today's date plus a same-day counter, never reused).
+#
+# Both CAL (the permanent factory bootloader) and App (the OTA-delivered
+# product application) build here and land in the same release under the
+# same tag - one release timeline for the whole repo, not two to keep in
+# sync. DiscoverAroundMe's /diag/firmware page reads App's release assets
+# from here to populate its own Firmware build catalog; CAL's own /cal
+# setup wizard reads CAL's own assets from here the same way it always has.
 #
 # Deliberately thin: everything about actually BUILDING the firmware lives in
 # ci/build-firmware.sh, runnable identically on any machine or CI provider.
@@ -43,7 +50,7 @@ jobs:
         with:
           tag_name: latest
           name: Latest build (${{ github.sha }})
-          body_path: build/esp32.esp32.esp32/checksums.txt
+          body_path: combined-checksums.txt
           make_latest: true
           files: |
             build/esp32.esp32.esp32/CAL.ino.merged.bin
@@ -51,6 +58,12 @@ jobs:
             build/esp32.esp32.esp32/CAL.ino.bootloader.bin
             build/esp32.esp32.esp32/CAL.ino.partitions.bin
             build/esp32.esp32.esp32/checksums.txt
+            App/build/esp32.esp32.esp32/App.ino.merged.bin
+            App/build/esp32.esp32.esp32/App.ino.bin
+            App/build/esp32.esp32.esp32/App.ino.bootloader.bin
+            App/build/esp32.esp32.esp32/App.ino.partitions.bin
+            App/build/esp32.esp32.esp32/checksums.txt
+            combined-checksums.txt
 
       - name: Compute the next vYYYY.MM.DD.NNNN
         id: version
@@ -71,12 +84,15 @@ jobs:
         # Never reused: each of these is a distinct, permanent tag by
         # construction (the counter above only ever goes up), so there is no
         # "does this already exist" check needed the way a human-chosen
-        # version number would require.
+        # version number would require. App shares this exact tag/version
+        # rather than keeping its own scheme - see VERSIONING.md and the
+        # Firmware build catalog section of the DiscoverAroundMe README for
+        # why: one release timeline to browse, not two to reconcile.
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.tag }}
-          body_path: build/esp32.esp32.esp32/checksums.txt
+          body_path: combined-checksums.txt
           make_latest: false
           files: |
             build/esp32.esp32.esp32/CAL.ino.merged.bin
@@ -84,3 +100,9 @@ jobs:
             build/esp32.esp32.esp32/CAL.ino.bootloader.bin
             build/esp32.esp32.esp32/CAL.ino.partitions.bin
             build/esp32.esp32.esp32/checksums.txt
+            App/build/esp32.esp32.esp32/App.ino.merged.bin
+            App/build/esp32.esp32.esp32/App.ino.bin
+            App/build/esp32.esp32.esp32/App.ino.bootloader.bin
+            App/build/esp32.esp32.esp32/App.ino.partitions.bin
+            App/build/esp32.esp32.esp32/checksums.txt
+            combined-checksums.txt

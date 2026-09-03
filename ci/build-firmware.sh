@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# Builds CAL and leaves flashable artifacts + checksums in
-# build/esp32.esp32.esp32/. This is the entire build procedure, deliberately
-# kept out of any CI provider's own config file: a GitHub Actions YAML, a
-# GitLab pipeline, a Jenkinsfile, or a person's own terminal should all be
-# able to call this one script and get the identical result. Only "how to
-# get arduino-cli onto this machine" and "what to do with the artifacts
-# afterward" (upload to a release, copy somewhere, etc.) are the CI
-# provider's own business - everything about actually building the firmware
-# lives here so switching CI providers never means re-deriving these steps.
+# Builds CAL and App and leaves flashable artifacts + checksums in
+# build/esp32.esp32.esp32/ and App/build/esp32.esp32.esp32/ respectively.
+# This is the entire build procedure, deliberately kept out of any CI
+# provider's own config file: a GitHub Actions YAML, a GitLab pipeline, a
+# Jenkinsfile, or a person's own terminal should all be able to call this
+# one script and get the identical result. Only "how to get arduino-cli
+# onto this machine" and "what to do with the artifacts afterward" (upload
+# to a release, copy somewhere, etc.) are the CI provider's own business -
+# everything about actually building the firmware lives here so switching
+# CI providers never means re-deriving these steps.
+#
+# Both sketches share one toolchain install (same ESP32 core, same
+# ArduinoJson/LovyanGFX versions - App has no library dependency CAL
+# doesn't already have, confirmed by reading every #include across App/),
+# so there is exactly one install pass below feeding two compile passes.
 #
 # Requires: arduino-cli already on PATH. Everything else it installs itself.
 set -euo pipefail
@@ -42,13 +48,28 @@ arduino-cli lib install "LovyanGFX@${LOVYANGFX_VERSION}" "ArduinoJson@${ARDUINOJ
 # binary's own partition table (magic 0xAA50 entries) rather than trusted
 # from the CLI's summary line, which reports against the FQBN's static
 # memory map and not against the table actually baked into the binary.
-echo "==> Compiling"
+echo "==> Compiling CAL"
 arduino-cli compile --fqbn "$FQBN" --export-binaries .
+
+echo "==> Compiling App"
+(
+  cd App
+  arduino-cli compile --fqbn "$FQBN" --export-binaries .
+)
 
 echo "==> Computing checksums"
 (
   cd "$BUILD_DIR"
-  sha256sum CAL.ino.merged.bin CAL.ino.bin CAL.ino.bootloader.bin CAL.ino.partitions.bin | tee checksums.txt
+  sha256sum CAL.ino.merged.bin CAL.ino.bin CAL.ino.bootloader.bin CAL.ino.partitions.bin > checksums.txt
 )
+(
+  cd "App/$BUILD_DIR"
+  sha256sum App.ino.merged.bin App.ino.bin App.ino.bootloader.bin App.ino.partitions.bin > checksums.txt
+)
+# One combined file is what actually goes in a release's notes/body and is
+# published as its own downloadable asset - a release with two separate
+# checksums.txt files floating among its other assets would just mean
+# guessing which one covers which binary.
+cat "$BUILD_DIR/checksums.txt" "App/$BUILD_DIR/checksums.txt" | tee combined-checksums.txt
 
-echo "==> Done. Artifacts in ${BUILD_DIR}/"
+echo "==> Done. CAL artifacts in ${BUILD_DIR}/, App artifacts in App/${BUILD_DIR}/"
