@@ -1,6 +1,7 @@
 #define LGFX_AUTODETECT
 #include <LovyanGFX.hpp>
 #include <LGFX_AUTODETECT.hpp>
+#include <time.h>
 
 #include "Display.h"
 
@@ -14,23 +15,40 @@ LGFX lcd;
 constexpr int kScreenW = 320;
 constexpr int kScreenH = 240;
 
-constexpr uint32_t kBg = 0x000000u;
-constexpr uint32_t kInk = 0xFFFFFFu;
-constexpr uint32_t kMuted = 0x9A9A9Au;
+// Day/night theme (see Display.h's own remarks on setEnvironment() and the
+// note at the bottom of that file): every screen this file draws - the
+// boot-ladder screens below and the content-card family further down alike
+// - picks one of these two pairs via bg()/ink()/muted(), rather than each
+// screen family owning its own fixed palette the way this restyle's first
+// pass left them. "Day" is exactly CYD-Dickey's white-card look this file
+// already had; "night" is exactly the black boot-ladder look this file
+// already had - this is a wholesale swap between two looks that both
+// already existed here, not a new invention either way.
+constexpr uint32_t kBgDay = 0xFFFFFFu;
+constexpr uint32_t kInkDay = 0x000000u;
+constexpr uint32_t kMutedDay = 0x707070u;
+constexpr uint32_t kBgNight = 0x000000u;
+constexpr uint32_t kInkNight = 0xFFFFFFu;
+constexpr uint32_t kMutedNight = 0x9A9A9Au;
+// Deliberately outside the day/night swap - see the note at the bottom of
+// Display.h for why: amber already reads against either background, and a
+// fixed white banner label needs to stay white regardless of theme since
+// the banner rects below (kWeatherBanner/kAircraftBanner) are their own
+// fixed dark colour blocks, not part of the swap either.
 constexpr uint32_t kWarn = 0xEDA100u;
+constexpr uint32_t kBannerLabelInk = 0xFFFFFFu;
 
-// The content-card palette, kept separate from kBg/kInk above: those two
-// stay black-on-white for the boot-ladder screens (showStatus/showFailure),
-// which WifiJoin and CAL's own Provisioning module both assume look a
-// particular way (see Display.h's remarks) and which this restyle
-// deliberately leaves alone. Cards themselves switch to CYD-Dickey's actual
-// look - every one of its cards (Weather, aircraft, listings, QR, branding)
-// is a white background with a small colour-banded label in the corner,
-// black body text and a muted grey for secondary lines - rather than CAL's
-// original black weather card.
-constexpr uint32_t kCardBg = 0xFFFFFFu;
-constexpr uint32_t kCardInk = 0x000000u;
-constexpr uint32_t kCardMuted = 0x707070u;
+// Set by setEnvironment(), read by bg()/ink()/muted()/drawClock() below.
+// Defaults match App.ino's own pre-first-check-in defaults (0 minutes,
+// daytime) so the very first boot screens - drawn before any check-in has
+// ever completed - still render sensibly.
+int gUtcOffsetMinutes = 0;
+bool gIsDaytime = true;
+
+uint32_t bg() { return gIsDaytime ? kBgDay : kBgNight; }
+uint32_t ink() { return gIsDaytime ? kInkDay : kInkNight; }
+uint32_t muted() { return gIsDaytime ? kMutedDay : kMutedNight; }
+
 // CYD-Dickey's WEATHER banner is navy (fillRect + TFT_NAVY); aircraft has no
 // banner of its own there (its card spends that space on an airline logo
 // CAL has no equivalent data for - see Aircraft.h), so this colour is new,
@@ -42,7 +60,38 @@ constexpr int kBannerHeight = 22;
 constexpr int kCardMargin = 10;
 
 void clear() {
-  lcd.fillScreen(kBg);
+  lcd.fillScreen(bg());
+}
+
+// Bottom-right corner clock, drawn by every card-rendering function further
+// down (see Display.h's remarks on setEnvironment()) regardless of that
+// card's Ok/error state - a clock is chrome, not content, and shouldn't
+// disappear just because a card is showing a problem. Local time is UTC
+// (already synchronised over SNTP - see AppService::synchroniseTime()) plus
+// the check-in-supplied offset; DST is already folded into that offset
+// server-side (see CheckIn.h's own remarks), so no DST math happens here.
+// Uses the same time_t -> tm idiom as CheckIn.cpp's nowAsIso8601Utc()
+// (gmtime_r on a shifted time_t, rather than reaching for localtime() and a
+// TZ this firmware never sets).
+//
+// Redrawn only when the card underneath it redraws (content refresh, a
+// forced update check, or now a touch tap - see Touch.h) rather than on an
+// independent per-second ticker: none of this file's draw functions are
+// called more often than that today, and adding a ticking redraw path for a
+// corner clock that already updates on every card refresh was judged not
+// worth the added complexity - see README.
+void drawClock() {
+  const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
+  struct tm localTm;
+  gmtime_r(&localNow, &localTm);
+  char buffer[6];
+  snprintf(buffer, sizeof(buffer), "%02d:%02d", localTm.tm_hour, localTm.tm_min);
+
+  lcd.setFont(&fonts::Font0);
+  lcd.setTextSize(1);
+  lcd.setTextColor(muted(), bg());
+  lcd.setTextDatum(bottom_right);
+  lcd.drawString(buffer, kScreenW - 6, kScreenH - 4);
 }
 
 // The boot-ladder screens' (showStatus/showFailure) own word-wrap - greedy,
@@ -52,7 +101,7 @@ void clear() {
 // counterpart this restyle adds alongside it.
 int wrappedCenteredText(const String& text, int y, uint32_t colour, uint8_t size,
                         int lineHeight, int maxLines) {
-  lcd.setTextColor(colour, kBg);
+  lcd.setTextColor(colour, bg());
   lcd.setTextSize(size);
   lcd.setTextDatum(top_center);
 
@@ -107,7 +156,7 @@ int wrappedCenteredText(const String& text, int y, uint32_t colour, uint8_t size
 // this restyle doesn't touch that.
 int wrappedLeftText(const String& text, int x, int y, uint32_t colour, int lineHeight,
                     int maxLines, int maxWidth) {
-  lcd.setTextColor(colour, kCardBg);
+  lcd.setTextColor(colour, bg());
   lcd.setTextDatum(top_left);
 
   const int textLen = static_cast<int>(text.length());
@@ -157,7 +206,7 @@ void drawCardBanner(const String& label, uint32_t bannerColour, int width) {
   lcd.fillRect(0, 0, width, kBannerHeight, bannerColour);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);  // GFX fonts are sized at their own point size - see drawCardBanner's callers
-  lcd.setTextColor(kInk, bannerColour);
+  lcd.setTextColor(kBannerLabelInk, bannerColour);
   lcd.setTextDatum(top_left);
   lcd.drawString(label, 8, 4);
 }
@@ -198,7 +247,7 @@ void drawRightJustified(String text, int rightX, int y, int maxWidthPx) {
 // describes - the missing-glyph problem, and the reason for drawing this
 // ring instead of a literal degree character, applies here unchanged.
 void drawTemperature(int temperature, const String& unit, int x, int y, uint32_t colour) {
-  lcd.setTextColor(colour, kCardBg);
+  lcd.setTextColor(colour, bg());
   lcd.setTextDatum(top_left);
 
   const String numberText = String(temperature);
@@ -241,23 +290,32 @@ void begin() {
   clear();
 }
 
+void setEnvironment(int utcOffsetMinutes, bool isDaytime) {
+  gUtcOffsetMinutes = utcOffsetMinutes;
+  gIsDaytime = isDaytime;
+}
+
+bool readTouchRaw(int32_t& x, int32_t& y) {
+  return lcd.getTouch(&x, &y);
+}
+
 void showStatus(const String& headline, const String& detail) {
   clear();
-  const int headlineLines = wrappedCenteredText(headline, 85, kInk, 2, 22, 3);
+  const int headlineLines = wrappedCenteredText(headline, 85, ink(), 2, 22, 3);
   if (detail.length() > 0) {
-    wrappedCenteredText(detail, 85 + headlineLines * 22 + 12, kMuted, 1, 14, 3);
+    wrappedCenteredText(detail, 85 + headlineLines * 22 + 12, muted(), 1, 14, 3);
   }
 }
 
 void showFailure(const String& headline, const String& whatToDo) {
   clear();
   const int headlineLines = wrappedCenteredText(headline, 75, kWarn, 2, 22, 3);
-  wrappedCenteredText(whatToDo, 75 + headlineLines * 22 + 12, kMuted, 1, 14, 3);
+  wrappedCenteredText(whatToDo, 75 + headlineLines * 22 + 12, muted(), 1, 14, 3);
 }
 
 void showWeatherCard(const String& location, int temperature, const String& unit,
                      const String& shortForecast, const String& updatedAt) {
-  lcd.fillScreen(kCardBg);
+  lcd.fillScreen(bg());
   drawCardBanner("WEATHER", kWeatherBanner, 110);
 
   // Location, right-justified against the card's right margin on the same
@@ -268,17 +326,23 @@ void showWeatherCard(const String& location, int temperature, const String& unit
   if (location.length() > 0) {
     lcd.setFont(&fonts::Font0);
     lcd.setTextSize(1);
-    lcd.setTextColor(kCardMuted, kCardBg);
+    lcd.setTextColor(muted(), bg());
     drawRightJustified(location, kScreenW - 8, 7, kScreenW - 120);
   }
 
   // Big left-aligned temperature in a bold sans font - CYD-Dickey's
   // `lcd.setFont(&fonts::FreeSansBold12pt7b); ...; lcd.printf("%.0fF\n")` at
   // (10, 32), minus their plain "F" (see drawTemperature's own remarks on
-  // why the hand-drawn ring stays).
+  // why the hand-drawn ring stays). Tinted with the weather banner's own
+  // navy by day - it reads fine against the white day background, and
+  // echoes the banner colour the way CYD-Dickey's own card doesn't bother
+  // to. That same navy would be nearly invisible against the night
+  // background (dark-on-black), so night falls back to the plain theme ink
+  // colour instead - the banner rect above still carries the navy accent
+  // either way, so nothing brand-identifying is actually lost at night.
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
-  drawTemperature(temperature, unit, kCardMargin, 32, kWeatherBanner);
+  drawTemperature(temperature, unit, kCardMargin, 32, gIsDaytime ? kWeatherBanner : ink());
 
   // Short forecast, bold sans, left-margined and word-wrapped underneath -
   // same position CYD-Dickey uses for its weatherCodeDescription() line
@@ -287,39 +351,41 @@ void showWeatherCard(const String& location, int temperature, const String& unit
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
   const int forecastLines =
-      wrappedLeftText(shortForecast, kCardMargin, 78, kCardInk, 22, 4, kScreenW - kCardMargin * 2);
+      wrappedLeftText(shortForecast, kCardMargin, 78, ink(), 22, 4, kScreenW - kCardMargin * 2);
 
   if (updatedAt.length() > 0) {
     lcd.setFont(&fonts::Font0);
     lcd.setTextSize(1);
-    lcd.setTextColor(kCardMuted, kCardBg);
+    lcd.setTextColor(muted(), bg());
     lcd.setTextDatum(top_left);
     lcd.drawString(updatedAt, kCardMargin, 78 + forecastLines * 22 + 10);
   }
 
+  drawClock();
   restoreDefaultFont();
 }
 
 void showWeatherStatus(const String& headline, const String& detail, bool isProblem) {
-  lcd.fillScreen(kCardBg);
+  lcd.fillScreen(bg());
   drawCardBanner("WEATHER", kWeatherBanner, 110);
 
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
-  const uint32_t headlineColour = isProblem ? kWarn : kCardMuted;
+  const uint32_t headlineColour = isProblem ? kWarn : muted();
   const int headlineLines =
       wrappedLeftText(headline, kCardMargin, 40, headlineColour, 22, 3, kScreenW - kCardMargin * 2);
   if (detail.length() > 0) {
-    wrappedLeftText(detail, kCardMargin, 40 + headlineLines * 22 + 12, kCardInk, 18, 3,
+    wrappedLeftText(detail, kCardMargin, 40 + headlineLines * 22 + 12, ink(), 18, 3,
                     kScreenW - kCardMargin * 2);
   }
 
+  drawClock();
   restoreDefaultFont();
 }
 
 void showAircraftCard(const String& callsign, int altitudeFeet, double speedKnots,
                       double headingDegrees, double distanceMiles, const String& updatedAt) {
-  lcd.fillScreen(kCardBg);
+  lcd.fillScreen(bg());
   drawCardBanner("OVERHEAD", kAircraftBanner, 130);
 
   // Callsign as the card's headline, in the spot CYD-Dickey's
@@ -330,14 +396,14 @@ void showAircraftCard(const String& callsign, int altitudeFeet, double speedKnot
   // server doesn't provide).
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
-  lcd.setTextColor(kCardInk, kCardBg);
+  lcd.setTextColor(ink(), bg());
   lcd.setTextDatum(top_left);
   lcd.drawString(callsign, kCardMargin, 32);
 
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   char distanceBuf[24];
   snprintf(distanceBuf, sizeof(distanceBuf), "%.1f mi away", distanceMiles);
-  lcd.setTextColor(kCardMuted, kCardBg);
+  lcd.setTextColor(muted(), bg());
   lcd.drawString(distanceBuf, kCardMargin, 64);
 
   // Stat rows: a muted label on the left, the value right-justified against
@@ -350,49 +416,51 @@ void showAircraftCard(const String& callsign, int altitudeFeet, double speedKnot
   int rowY = 100;
   constexpr int kRowHeight = 30;
 
-  lcd.setTextColor(kCardMuted, kCardBg);
+  lcd.setTextColor(muted(), bg());
   lcd.drawString("Altitude", kCardMargin, rowY);
-  lcd.setTextColor(kCardInk, kCardBg);
+  lcd.setTextColor(ink(), bg());
   drawRightJustified(String(altitudeFeet) + " ft", rightX, rowY, rowValueWidth);
   rowY += kRowHeight;
 
-  lcd.setTextColor(kCardMuted, kCardBg);
+  lcd.setTextColor(muted(), bg());
   lcd.drawString("Speed", kCardMargin, rowY);
-  lcd.setTextColor(kCardInk, kCardBg);
+  lcd.setTextColor(ink(), bg());
   drawRightJustified(String(static_cast<int>(speedKnots + 0.5)) + " kts", rightX, rowY, rowValueWidth);
   rowY += kRowHeight;
 
-  lcd.setTextColor(kCardMuted, kCardBg);
+  lcd.setTextColor(muted(), bg());
   lcd.drawString("Heading", kCardMargin, rowY);
-  lcd.setTextColor(kCardInk, kCardBg);
+  lcd.setTextColor(ink(), bg());
   drawRightJustified(compassDirection(headingDegrees), rightX, rowY, rowValueWidth);
   rowY += kRowHeight;
 
   if (updatedAt.length() > 0) {
     lcd.setFont(&fonts::Font0);
     lcd.setTextSize(1);
-    lcd.setTextColor(kCardMuted, kCardBg);
+    lcd.setTextColor(muted(), bg());
     lcd.setTextDatum(top_left);
     lcd.drawString(updatedAt, kCardMargin, rowY + 8);
   }
 
+  drawClock();
   restoreDefaultFont();
 }
 
 void showAircraftStatus(const String& headline, const String& detail, bool isProblem) {
-  lcd.fillScreen(kCardBg);
+  lcd.fillScreen(bg());
   drawCardBanner("OVERHEAD", kAircraftBanner, 130);
 
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
-  const uint32_t headlineColour = isProblem ? kWarn : kCardMuted;
+  const uint32_t headlineColour = isProblem ? kWarn : muted();
   const int headlineLines =
       wrappedLeftText(headline, kCardMargin, 40, headlineColour, 22, 3, kScreenW - kCardMargin * 2);
   if (detail.length() > 0) {
-    wrappedLeftText(detail, kCardMargin, 40 + headlineLines * 22 + 12, kCardInk, 18, 3,
+    wrappedLeftText(detail, kCardMargin, 40 + headlineLines * 22 + 12, ink(), 18, 3,
                     kScreenW - kCardMargin * 2);
   }
 
+  drawClock();
   restoreDefaultFont();
 }
 

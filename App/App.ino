@@ -25,6 +25,7 @@
 #include "WifiJoin.h"
 #include "AppService.h"
 #include "Telemetry.h"
+#include "Touch.h"
 #include "Weather.h"
 
 namespace {
@@ -55,9 +56,23 @@ bool wifiResetRequested() {
 
 /// Blocks until WiFi is up, retrying indefinitely rather than giving up - the
 /// App has no captive-portal fallback of its own (see WifiJoin.h), so the only
-/// way out of "nothing remembered works" is the BOOT-hold gesture above,
-/// which only takes effect at boot. A network that comes back on its own
-/// (router reboot, brief outage) must not need that.
+/// way out of "nothing remembered works" is the BOOT-hold gesture above -
+/// which, unlike the one-shot check in setup(), stays live for the whole
+/// time this function is stuck retrying (see below). A network that comes
+/// back on its own (router reboot, brief outage) must not need that.
+///
+/// Bug fixed 2026-09-03: this loop used to `delay(30000)` between join
+/// attempts without ever looking at the BOOT button, so a household holding
+/// BOOT for 3 seconds - exactly what the "Could not join WiFi" screen below
+/// tells them to do - while already stuck here did nothing at all. The
+/// gesture only worked at the single instant setup() happened to call
+/// wifiResetRequested() once, before this loop ever started; a device that
+/// passed that check and only lost WiFi afterwards had no working recovery
+/// gesture short of a precisely-timed power-cycle-and-immediately-hold. This
+/// was found live on a physical device. Reusing wifiResetRequested() itself
+/// - rather than writing a second, slightly different 3-second-hold
+/// implementation here - means both call sites share one definition of "was
+/// the gesture actually completed."
 void ensureWifiConnected() {
   if (WiFi.status() == WL_CONNECTED) {
     return;
@@ -67,7 +82,27 @@ void ensureWifiConnected() {
     Display::showFailure("Could not join WiFi",
                          "Hold BOOT for 3 seconds to set up WiFi again.");
     Log::line("[wifi] still not connected, retrying in 30s");
-    delay(30000);
+
+    // Same ~30s pace as the old delay(30000), but polled in short
+    // increments so a hold started at any point during the wait - not just
+    // at boot - actually reaches wifiResetRequested().
+    const uint32_t waitDeadline = millis() + 30000;
+    while (millis() < waitDeadline) {
+      if (digitalRead(kBootButtonPin) == LOW) {
+        if (wifiResetRequested()) {
+          Loader::returnToLoaderForReprovisioning();
+          // Unreachable: the call above never returns.
+        }
+        // Held briefly, then released before the 3-second confirm
+        // completed - wifiResetRequested() left its own "keep holding"
+        // prompt on screen; put the real status back before continuing to
+        // wait, so the screen never claims a hold is still in progress
+        // when it isn't.
+        Display::showFailure("Could not join WiFi",
+                             "Hold BOOT for 3 seconds to set up WiFi again.");
+      }
+      delay(100);
+    }
   }
 }
 
@@ -82,6 +117,20 @@ uint32_t lastCheckInMs = 0;
 // only until the first real check-in response replaces it, matching
 // CheckInGatewayService's own DefaultIntervalSeconds.
 uint32_t checkInIntervalMs = 5UL * 60UL * 1000UL;
+
+// The corner clock's offset and the day/night theme, both check-in-driven
+// (CheckIn::Result::utcOffsetMinutes/isDaytime) and both persisted here the
+// same way checkInIntervalMs above already is - a value the server hands
+// back on one successful check-in needs to keep being true in between check-
+// ins, not just for the one loop() iteration it arrived on. Defaults (UTC,
+// daytime) hold until the first successful check-in ever completes, matching
+// the server's own fallback for an unresolved location. Display.cpp keeps
+// its own copy of both (see Display::setEnvironment()) since it's the thing
+// that actually draws with them; App.ino's copies exist so a later check-in
+// has something to compare against and so this state lives in exactly one
+// kind of place in this file, alongside every other check-in-derived value.
+int lastUtcOffsetMinutes = 0;
+bool lastIsDaytime = true;
 
 /// True for exactly one loop() iteration per physical press - edge-detected
 /// against the previous iteration's reading, not just "is it down right now",
@@ -155,11 +204,15 @@ void refreshAircraftCard() {
 // rather than each getting a card-cycling scheduler of its own the way
 // CYD-Dickey's drawDashboardScreen()/advanceCard() interleave weather,
 // splash, QR and a whole list of aircraft/listings on independent
-// intervals with touch-driven rewind. None of that machinery has anything
-// to attach to here: this board has no touchscreen wired up in the App at
-// all (see kBootButtonPin below - the only input is a single button), and
-// there is exactly one of each card, not a list to cycle through. A plain
-// toggle is the smallest thing that shows both cards at all.
+// intervals with touch-driven rewind. Most of that machinery still has
+// nothing to attach to here: the server gives CAL only the *nearest*
+// aircraft as a single featured value, not a list to cycle through, so
+// there remains exactly one of each card. A tap (see Touch.h/.cpp, wired up
+// in loop()) now advances between them immediately instead of only ever
+// waiting for the timer - the board's touch controller was simply unused
+// before this, not absent - but "the next card" is still unambiguous
+// either way, so this stays a plain two-way toggle rather than a real
+// cycling scheduler with history/rewind.
 enum class CardKind { Weather, Aircraft };
 CardKind nextCard = CardKind::Weather;
 
@@ -217,6 +270,14 @@ void performCheckIn() {
   if (result.intervalMs > 0) {
     checkInIntervalMs = result.intervalMs;
   }
+
+  // Not one-shot either, same reasoning as debugStreamRequested below: the
+  // offset and daytime/nighttime state are both current-as-of-this-check-in
+  // facts, not one-time settings, so every successful check-in refreshes
+  // them rather than only the first one ever seen.
+  lastUtcOffsetMinutes = result.utcOffsetMinutes;
+  lastIsDaytime = result.isDaytime;
+  Display::setEnvironment(lastUtcOffsetMinutes, lastIsDaytime);
 
   // Not one-shot, unlike updateAvailable below: this reflects the server's
   // current wish on every successful check-in, so remote debug streaming
@@ -284,6 +345,18 @@ void loop() {
     forceUpdateCheck();
     lastContentFetchMs = millis();
     lastUpdateCheckMs = millis();
+  }
+
+  // Touch-driven card advance - the App's first use of the touch panel (see
+  // Touch.h/.cpp). Resets lastContentFetchMs the same way the BOOT-press
+  // path above does, so the automatic content-refresh timer's next fire is
+  // pushed out from right now instead of landing moments later and
+  // re-showing the very card this tap just requested (or worse, showing the
+  // same card twice in a row instead of advancing to the other one).
+  if (Touch::wasTapped()) {
+    Log::line("[touch] tap detected - advancing to the next card");
+    refreshCurrentCard();
+    lastContentFetchMs = millis();
   }
 
   const uint32_t now = millis();

@@ -13,6 +13,25 @@ namespace Display {
 
 void begin();
 
+/// Updates the day/night theme and the corner-clock's UTC offset that every
+/// screen below reads when it next draws - not retroactive to whatever is
+/// already on screen. Called once from App.ino's performCheckIn() whenever
+/// a check-in succeeds (see CheckIn::Result::utcOffsetMinutes/isDaytime),
+/// so this file has exactly one place tracking "what does the App currently
+/// believe about local time and daylight" rather than every draw call
+/// taking both as parameters. Defaults (0 minutes, daytime) match App.ino's
+/// own pre-first-check-in defaults, so the very first boot screens render
+/// sensibly before any check-in has ever completed.
+void setEnvironment(int utcOffsetMinutes, bool isDaytime);
+
+/// The raw touch read beneath Touch.h/.cpp's debounced, event-style API.
+/// Lives here, not in Touch.cpp, because this file already owns the one
+/// LGFX instance for this panel (see `lcd` and begin() below) - a second
+/// LGFX_AUTODETECT instance addressing the same physical SPI bus would risk
+/// re-initialising hardware this file already brought up. Returns false
+/// (x/y untouched) when nothing is currently touching the panel.
+bool readTouchRaw(int32_t& x, int32_t& y);
+
 /// A single line of status with an optional detail line beneath it.
 void showStatus(const String& headline, const String& detail = "");
 
@@ -63,3 +82,15 @@ void showAircraftCard(const String& callsign, int altitudeFeet, double speedKnot
 void showAircraftStatus(const String& headline, const String& detail, bool isProblem);
 
 }  // namespace Display
+
+// A note on the day/night theme this file implements (see setEnvironment()
+// above): "day" is exactly the white-background/black-ink/grey-muted look
+// the card family already had (see kBgDay/kInkDay/kMutedDay in Display.cpp);
+// "night" is the black-background/white-ink/lighter-grey look the
+// boot-ladder screens (showStatus/showFailure) already had before this -
+// applied uniformly, so the whole App matches what a household would see
+// out their own window, not just the two content cards. The colour-banded
+// banners (WEATHER navy, OVERHEAD blue) and the amber warning colour are
+// deliberately NOT part of the swap - both already read fine against either
+// background, and inventing night variants of them would be theme-following
+// for its own sake rather than a real legibility need.

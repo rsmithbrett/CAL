@@ -80,11 +80,15 @@ Result perform() {
   result.acknowledged = responseDoc["acknowledged"] | false;
   result.updateAvailable = responseDoc["updateAvailable"] | false;
   result.debugStreamRequested = responseDoc["debugStreamRequested"] | false;
+  result.utcOffsetMinutes = responseDoc["utcOffsetMinutes"] | 0;
+  result.isDaytime = responseDoc["isDaytime"] | true;
   const int intervalSeconds = responseDoc["checkInIntervalSeconds"] | 300;
   result.intervalMs = static_cast<uint32_t>(intervalSeconds) * 1000UL;
-  Log::printf("[checkin] ok (acknowledged=%d updateAvailable=%d debugStream=%d intervalSeconds=%d)",
-              result.acknowledged, result.updateAvailable, result.debugStreamRequested,
-              intervalSeconds);
+  Log::printf(
+      "[checkin] ok (acknowledged=%d updateAvailable=%d debugStream=%d intervalSeconds=%d "
+      "utcOffsetMinutes=%d isDaytime=%d)",
+      result.acknowledged, result.updateAvailable, result.debugStreamRequested, intervalSeconds,
+      result.utcOffsetMinutes, result.isDaytime);
   return result;
 }
 

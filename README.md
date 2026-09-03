@@ -260,14 +260,114 @@ themselves (Wi-Fi joining, time sync, update-in-progress) are unchanged.
 **A known simplification, stated plainly:** CYD-Dickey interleaves weather,
 a splash card, a QR/branding card, and a full list of aircraft or listings on
 independent timers, with touch-driven forward/back navigation and a history
-buffer so rewinding replays exactly what was shown. None of that exists here
-— this board's App has no touchscreen wired up at all, only the single BOOT
-button (already spoken for by the Wi-Fi-reset and force-update-check
-gestures below), and the server gives CAL only the *nearest* aircraft as a
-single featured value rather than a list to cycle through. `App.ino`'s
-`refreshCurrentCard()` is a plain two-way toggle between the weather and
-aircraft cards on the existing content-refresh timer — the smallest change
-that shows both cards at all, not a port of CYD-Dickey's scheduler.
+buffer so rewinding replays exactly what was shown. Most of that still
+doesn't exist here — the server gives CAL only the *nearest* aircraft as a
+single featured value rather than a list to cycle through, so there is
+nothing to page through and no history to rewind. `App.ino`'s
+`refreshCurrentCard()` remains a plain two-way toggle between the weather
+and aircraft cards on the existing content-refresh timer. What changed is
+the *trigger*: a tap now advances it immediately too (see "Touch input"
+below) — the board's touch controller was simply unused before, not
+missing — rather than the toggle only ever firing on the timer or the BOOT
+button's force-update-check path.
+
+### A corner clock and a day/night theme, both driven by check-in
+
+`/api/checkin`'s response carries two more fields alongside
+`checkInIntervalSeconds`/`updateAvailable`/`debugStreamRequested`:
+`utcOffsetMinutes` (signed minutes to add to UTC for this device's correct
+local time, DST already applied) and `isDaytime` (whether the Sun is up
+right now at the device's location) — both recomputed by the server fresh
+on every check-in from the device's own location, not looked up once and
+cached or guessed at from a fixed schedule. `CheckIn::Result` parses both
+the same way as every other check-in field, and `performCheckIn()` in
+`App.ino` persists them into two more file-local statics
+(`lastUtcOffsetMinutes`/`lastIsDaytime`, alongside the existing
+`checkInIntervalMs`) on every *successful* check-in — not one-shot, so both
+track the server's current answer rather than latching whatever the first
+check-in ever said. Before the first check-in ever completes, both default
+sensibly: `0` (UTC) and `true` (daytime), the latter matching the server's
+own fallback for a location it can't yet resolve
+(`DeviceLocalTimeResult.Fallback` in the DiscoverAroundMe repo).
+
+**The clock** (`Display.cpp`'s `drawClock()`) is `time(nullptr) +
+utcOffsetMinutes * 60`, turned into wall-clock fields with `gmtime_r` and
+formatted `HH:MM` — the same time_t-to-tm idiom `CheckIn.cpp`'s
+`nowAsIso8601Utc()` already uses, just shifted by the offset instead of left
+at UTC, and with no DST logic of its own since the server already folded
+that into the offset. It's drawn bottom-right, small and muted, by every one
+of the four card-family functions (`showWeatherCard`/`showAircraftCard` and
+their `*Status` variants) — deliberately including the error states, since a
+clock is chrome, not content, and shouldn't disappear just because a card
+is showing a problem. It is **not** on its own per-second ticker: it
+redraws only when the card underneath it redraws (a content refresh, a
+forced update check, or now a touch tap), which was judged the right amount
+of engineering for a small corner clock rather than building a partial-
+redraw path that ticks independently of everything else on screen — stated
+here plainly as a real trade-off, not an oversight.
+
+**The theme** (`Display.cpp`'s `bg()`/`ink()`/`muted()`) is a wholesale
+swap between two palettes that both already existed in this file before
+this change, applied uniformly: "day" is exactly the white-background/
+black-ink/grey-muted look the content-card family already had, and "night"
+is exactly the black-background/white-ink look the boot-ladder screens
+(`showStatus`/`showFailure`) already had. Rather than leaving that a fixed
+split — cards always white, boot screens always black — every screen this
+file draws now picks whichever pair `isDaytime` currently says, so the
+*whole* App matches what a household would see out their own window at
+that moment, not just the two content cards. The one deliberate exception
+is the weather card's big temperature number, which is tinted with the
+weather banner's own navy by day (it reads fine against white, and echoes
+the banner colour) but falls back to the plain theme ink colour at night,
+since that same navy would be nearly invisible against a black background
+— the banner rect above it still carries the navy accent either way, so
+nothing brand-identifying is actually lost. The colour-banded banners
+themselves (`WEATHER` navy, `OVERHEAD` blue) and the amber warning colour
+are deliberately **not** part of the swap — both already read fine against
+either background, and giving them night variants too would be theme-
+following for its own sake rather than solving a real legibility problem.
+
+### Touch input: the XPT2046 controller, used for the first time
+
+This board — 2.8" ILI9341 + XPT2046 resistive touch, the same "Cheap Yellow
+Display" family as `CYD-Dickey` — has always had a touch controller; the App
+simply never used it, wiring card advancement to a plain timer instead (see
+the simplification note above). `App/Touch.h`/`.cpp` is new: a small,
+reusable, card-agnostic module — `Touch::wasTapped()` returns true for
+exactly one `loop()` iteration per physical tap, edge-detected the same way
+`forceUpdateCheckRequested()` already debounces the BOOT button — polled
+once per `loop()` iteration alongside that same button check. The one
+consumer wired up today is card advance: a tap calls the same
+`refreshCurrentCard()` the automatic timer calls, and resets
+`lastContentFetchMs` the same way the BOOT-press force-update path already
+does, so the timer's own next automatic advance is pushed out from the tap
+rather than landing moments later and re-showing the same card. Nothing in
+`Touch.h`'s shape assumes cards are the only thing that will ever consume
+it — the user explicitly wants it reusable for future UX components, and a
+future caller reading raw coordinates for something like drag or a second
+gesture doesn't need this file's shape to change.
+
+The actual hardware read (`lcd.getTouch(&x, &y)`) lives in
+`Display::readTouchRaw()`, not in `Touch.cpp` itself — `Display.cpp` already
+owns the one `LGFX` instance for this panel (via `LGFX_AUTODETECT`, the same
+autodetection CAL's own `Display.cpp` uses for the screen), and giving
+`Touch.cpp` a second `LGFX_AUTODETECT` instance addressing the same physical
+SPI bus/controller would risk re-initialising hardware `Display::begin()`
+already brought up. `Touch.cpp` calls that accessor and adds only the
+debounced event shape on top — no hand-rolled SPI or XPT2046 register
+access anywhere in this codebase; LovyanGFX's autodetect wires up
+calibration and reading for this board the same way it wires up the panel,
+confirmed by `CYD-Dickey/TouchKeyboard.cpp` (`lcd.getTouch(&x, &y)`) already
+working this way on the same hardware family.
+
+**Stated plainly, because a compile can't prove this one:** nobody has
+confirmed touch actually works on this exact ELEGOO board. The display
+itself was separately confirmed compatible earlier — that confirmation
+never exercised touch. This firmware has no automated tests at all (see
+*Open questions*), and touch specifically has zero automated coverage
+possible even in principle here — proving it out needs an actual finger on
+actual glass, which as of this commit nobody has done. Treat the tap-to-
+advance behaviour above as designed and compiled, not as verified.
 
 ### Deciding when to reboot to the updater
 
@@ -341,6 +441,37 @@ never needs to know which binary is running to know how to fix a problem:
   way matters: a press that silently does nothing reads as a dead button, and
   without an explicit answer, "nothing happened" and "already checked,
   nothing new" look identical.
+
+### Bug fix: the WiFi-reset hold only worked at boot, not when actually stuck
+
+Found live on a physical device. `wifiResetRequested()`'s 3-second BOOT hold
+was, before this fix, checked exactly once — in `setup()`, before
+`ensureWifiConnected()` is ever called. A device that passed that one check
+(WiFi looked fine, or the hold window was simply missed) and only lost its
+ability to join WiFi *afterwards* — bad credentials, a router swap, whatever
+— fell into `ensureWifiConnected()`'s retry loop, which showed "Could not
+join WiFi… Hold BOOT for 3 seconds to set up WiFi again" and then called a
+blind `delay(30000)` between attempts. That `delay()` never read the button
+at all. A household holding BOOT for 3 seconds *while already stuck on that
+exact screen* — precisely what it told them to do — did nothing, because the
+gesture's only working instant had already passed back in `setup()`. The
+only actual way out was a precisely-timed power-cycle-then-immediately-hold,
+which the on-screen text never described and which is not something a
+household member would discover on their own.
+
+The fix keeps the same ~30-second pace between join attempts but polls for
+the gesture throughout the wait instead of blocking blind: every 100ms it
+checks the BOOT pin, and a press hands off to `wifiResetRequested()` itself
+— reused as-is rather than reimplemented, so there is exactly one definition
+of "was the 3-second hold actually completed" for both call sites to share,
+not two subtly different ones drifting apart over time. A confirmed hold
+calls `Loader::returnToLoaderForReprovisioning()` immediately, from inside
+the retry loop, rather than waiting for the next `joinStoredNetwork()`
+attempt to fail first. A press released early (before the 3 seconds
+complete) leaves `wifiResetRequested()`'s own "Keep holding…" prompt on
+screen, which `ensureWifiConnected()` explicitly redraws back to "Could not
+join WiFi" afterward — so the screen never keeps telling someone to
+"release now to cancel" a hold that already ended.
 
 ### A drawn degree symbol, because the font has none
 
@@ -653,6 +784,14 @@ and to a new, **permanent** `vYYYY.MM.DD.NNNN` release that is never reused.
 - **Nothing has run on hardware.** Every behaviour described in this document
   is designed and written and, as of the build-to-ship pipeline above,
   mechanically reproducible - none of it is proven on a device.
+- **Touch input (`App/Touch.h`/`.cpp`) is compiled but unverified.** The
+  panel/screen on this exact ELEGOO board was separately confirmed working
+  earlier, but that confirmation never exercised the XPT2046 touch
+  controller, and nobody has put a finger on this glass yet. This is the one
+  piece of firmware in this repository with literally zero possible
+  automated coverage even in principle - a clean compile proves the code
+  builds against LovyanGFX's touch API, nothing more. See "Touch input: the
+  XPT2046 controller, used for the first time" above.
 - **The operator-authenticated, secret-injecting flasher is still just
   designed.** See *Provisioning: how a device gets its secret*, above - what
   exists today (the server's public `/cal` page) covers a fresh unit that

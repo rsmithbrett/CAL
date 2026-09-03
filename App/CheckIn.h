@@ -31,6 +31,20 @@ struct Result {
   /// naturally picks the right state back up after a reboot within one check-in
   /// interval, with no flag of its own to persist or fall out of sync.
   bool debugStreamRequested = false;
+  /// Minutes to add to UTC to get this device's local time right now - DST
+  /// already applied, recomputed by the server fresh on every check-in from
+  /// the device's own location rather than looked up once and cached. Local
+  /// time is just `time(nullptr) + utcOffsetMinutes * 60` (see Display.cpp's
+  /// drawClock()). Defaults to 0 (UTC) until the first successful check-in -
+  /// see App.ino's own lastUtcOffsetMinutes, which persists this across the
+  /// gaps between check-ins the same way checkInIntervalMs already does.
+  int utcOffsetMinutes = 0;
+  /// Whether the Sun is up right now at the device's location, recomputed
+  /// fresh from real sunrise/sunset on every check-in - not a fixed
+  /// day/night schedule. Defaults to true (daytime), matching the server's
+  /// own fallback for an unresolved location (DeviceLocalTimeResult.Fallback
+  /// in the DiscoverAroundMe repo).
+  bool isDaytime = true;
 };
 
 /// This board has no battery (ELEGOO/CYD is USB-powered) - batteryPercent/charging are
