@@ -73,9 +73,13 @@ constexpr int kCardMargin = 10;
 //
 // The button row has to stay clear of three things at once: the 16px
 // left/right edge strips Touch.h uses for reverse/forward, and the corner
-// clock, which drawClock() sets bottom-right at (314, 236) in the small
-// bitmap font (so roughly y 228-236, x 290-314). A row from x=24 to x=296
-// ending at y=220 clears all of them with room to spare in both axes.
+// clock, which drawClock() sets bottom-right at (314, 236). The clock was
+// enlarged to FreeSans9pt after it proved invisible on real hardware at its
+// original 6x8 bitmap size, so it now occupies roughly y 222-236, x 265-314.
+// A row from x=24 to x=296 ending at y=220 still clears it, but the vertical
+// gap is now 2px rather than 8 - so growing the clock again, or moving the
+// button row down, needs both numbers reconsidered together rather than one
+// of them nudged in isolation.
 constexpr int kButtonRowY = 190;
 constexpr int kButtonHeight = 30;
 constexpr int kButtonRowLeft = 24;
@@ -126,9 +130,27 @@ void drawClock() {
   char buffer[6];
   snprintf(buffer, sizeof(buffer), "%02d:%02d", localTm.tm_hour, localTm.tm_min);
 
-  lcd.setFont(&fonts::Font0);
+  // Sized for a person across a room, not for a screenshot. The first version of
+  // this used Font0 at size 1 in muted grey - 6x8 pixels per character, roughly
+  // 3mm tall on this 2.8" panel, grey on white - and the first person to see it on
+  // real hardware reported there was no clock at all. It was drawing correctly the
+  // whole time; it simply could not be seen, which for a display whose entire job
+  // is being read from a distance is the same thing as not working.
+  //
+  // FreeSansBold at size 1 is about 13px tall here, and ink() rather than
+  // muted() keeps it legible in both themes. Still corner chrome - it must not
+  // compete with the card - but chrome you can actually read.
+  //
+  // 9pt rather than the 12pt the temperature uses is a hard constraint, not a
+  // preference: the button row above ends at y=220 and the clock's baseline sits
+  // at y=236, so there are 16 pixels to work in. 12pt bold needs about 17 and
+  // would collide. Going bigger means moving the button row up, and the row
+  // cannot move up without reflowing the card body above it - a four-line
+  // forecast plus its "updated" line already reaches roughly y=186. So a bigger
+  // clock is a card-layout change, not a font change.
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
-  lcd.setTextColor(muted(), bg());
+  lcd.setTextColor(ink(), bg());
   lcd.setTextDatum(bottom_right);
   lcd.drawString(buffer, kScreenW - 6, kScreenH - 4);
 }
