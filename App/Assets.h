@@ -31,6 +31,13 @@
 /// answered. PNG decode, SD writes and this fetch have all never run.
 namespace Assets {
 
+/// The longest id this module will accept. Ids come from the server, so this
+/// is a sanity bound rather than a schema - see isSafeId() in Assets.cpp for
+/// what it is guarding against. Cards::kMaxAssetIdLength must agree with it
+/// (Graphic.cpp static_asserts that it does), since that is the buffer a
+/// policy-supplied id is carried in.
+static constexpr size_t kMaxIdLength = 48;
+
 void begin();
 
 /// True when the asset is on the card afterwards - either it already was, or
@@ -38,10 +45,26 @@ void begin();
 /// draw nothing rather than waiting.
 bool ensureCached(const String& id);
 
+/// True when the asset is already on the card, with no network access of any
+/// kind. This is the question a card's draw() may ask - fetching from a draw
+/// path would make stepping backwards through the rotation a network
+/// operation (see Cards.h on why fetch and draw are separate).
+bool isCached(const String& id);
+
 /// Draws the asset scaled to fit and centred on the whole panel. Returns
 /// false when the asset is not available or the decode failed, having drawn
 /// nothing.
+///
+/// **Fetches on a miss**, so this belongs on a fetch path and not in a
+/// card's draw(); drawCached() below is the draw-path version.
 bool drawFullScreen(const String& id);
+
+/// Draws an asset that is already cached, and never fetches. False means
+/// either "not on the card" (nothing was drawn) or "the decode failed", in
+/// which case Display::drawPngFromSd() has already cleared the panel to the
+/// theme background and the caller is expected to put its own no-content
+/// state there. This is what a card's draw() calls.
+bool drawCached(const String& id);
 
 /// How many assets are currently cached - reported by Telemetry so the
 /// fleet's storage view can show cache growth alongside sdUsedBytes.

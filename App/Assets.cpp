@@ -39,7 +39,7 @@ constexpr const char* kExtension = ".png";
 /// the failure mode otherwise is writing over something else on a card a
 /// person also uses.
 bool isSafeId(const String& id) {
-  if (id.length() == 0 || id.length() > 48) {
+  if (id.length() == 0 || id.length() > kMaxIdLength) {
     return false;
   }
   for (size_t i = 0; i < id.length(); ++i) {
@@ -137,8 +137,19 @@ bool ensureCached(const String& id) {
   return fetchToCard(id);
 }
 
+bool isCached(const String& id) {
+  return Sd::isReady() && isSafeId(id) && SD.exists(pathFor(id));
+}
+
 bool drawFullScreen(const String& id) {
   if (!ensureCached(id)) {
+    return false;
+  }
+  return Display::drawPngFromSd(pathFor(id));
+}
+
+bool drawCached(const String& id) {
+  if (!isCached(id)) {
     return false;
   }
   return Display::drawPngFromSd(pathFor(id));

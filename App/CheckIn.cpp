@@ -83,6 +83,10 @@ void parseCardPolicy(JsonVariantConst source, Cards::Policy& policy) {
     entry.dwellSeconds = card["dwellSeconds"] | 0;
     entry.interleaveEvery = card["interleaveEvery"] | 0;
     entry.notableDwellSeconds = card["notableDwellSeconds"] | 0;
+    // Optional, and absent from every card that draws no picture. Empty is
+    // the ordinary case, not a fault: the card it names simply reports
+    // itself as having nothing to show and the scheduler passes over it.
+    entry.assetId = String(card["assetId"] | "");
   }
 }
 

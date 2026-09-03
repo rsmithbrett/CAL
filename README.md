@@ -203,10 +203,11 @@ namespace, same TLS trust setup) plus a trimmed `Config.h`. Unlike CAL, it is
 meant to run indefinitely — failures here retry rather than halt, because a
 display that goes dark until someone finds a USB cable is a worse outcome for
 a household than one that keeps trying. It renders a rotation of cards —
-weather and aircraft overhead today — scheduled by a policy the server hands
-down on check-in and navigable by touch (see *The card manager*, below).
+weather, aircraft overhead, and a picture the server picks — scheduled by a
+policy the server hands down on check-in and navigable by touch (see *The card
+manager*, below).
 
-### Two cards, styled after CYD-Dickey
+### The weather and aircraft cards, styled after CYD-Dickey
 
 A separate, more mature project on similar hardware — `CYD-Dickey`, a
 Discover Around Me build for the same ESP32/ILI9341 panel — already has a
@@ -495,9 +496,9 @@ so rather than leaving the panel blank.
 **The policy comes from the server, on the check-in that already exists.**
 `CheckInResponse.cardPolicy` carries `defaultDwellSeconds`,
 `manualNavHoldSeconds`, and a `cards` array of `{id, kind, order,
-dwellSeconds, interleaveEvery?, notableDwellSeconds?}`. Three rules keep this
-safe in both directions of the six-month firmware backward-compatibility
-mandate:
+dwellSeconds, interleaveEvery?, notableDwellSeconds?, assetId?}`. Three rules
+keep this safe in both directions of the six-month firmware
+backward-compatibility mandate:
 
 - **No policy means keep the one you have.** An omitted or empty `cardPolicy`
   is explicitly not "show nothing" — a server that cannot resolve a policy
@@ -518,6 +519,14 @@ considers more interesting. The aircraft card's `isNotable` uses their rule
 too — 20% of the configured tracking radius with a 1-mile floor, so
 "practically overhead" still means something whether the owner tracks 3 miles
 or 30, rather than a hardcoded mile count.
+
+`assetId` is the newest of these and the only one that is *content* rather
+than scheduling: it names the picture a card should draw, and it exists so
+that changing which picture a household sees is a config edit rather than a
+firmware release. It is optional, absent from every card that draws no
+picture, and empty is an ordinary state and not a fault — see *A picture as a
+card*, below. The server side of it is being built in parallel with this
+firmware, so nothing has ever sent one.
 
 ### Card buttons and the pending-action queue
 
@@ -579,7 +588,7 @@ means; only the device knows its own panel.
 
 ### Assets and the SD card
 
-`App/Sd.h`/`.cpp` mounts the card (CS pin 5, the same one `CYD-Dickey`'s
+`App/SdStorage.h`/`.cpp` mounts the card (CS pin 5, the same one `CYD-Dickey`'s
 `SdCard.cpp` uses on this board family — unlike the panel, a card slot's CS
 line is just a wiring fact, not something autodetect can find). `App/Assets.h`
 /`.cpp` is a cache of images on top of it, addressed by server-side asset id:
@@ -623,16 +632,102 @@ reports `sdTotalBytes`, `sdUsedBytes` and `assetCount` alongside free heap —
 same mechanism, same cadence, so storage pressure shows up fleet-wide on
 `/diag/telemetry` before it shows up as a device that quietly stopped caching.
 All three read zero on a device with no card in the slot, which is an ordinary
-state and not a fault: nothing mounts, nothing caches, and weather and
-aircraft carry on untouched.
+state and not a fault: nothing mounts, nothing caches, weather and aircraft
+carry on untouched, and the graphic card below simply never appears.
 
-**Currently drawn by exactly one caller.** `Assets::showBootSplash()` puts a
-cached `splash` asset up at boot if there is one, the way CYD-Dickey's
-`showSplashScreen()` does, and silently does nothing otherwise. No registered
-card consumes an asset yet — neither weather nor aircraft has an image to
-show, and the server's `Assets` catalog and its device-authenticated fetch
-endpoint are still a stub, so `/api/assets/{id}` is this firmware's
-expectation of that route rather than something that has ever answered.
+**Two callers, and they ask different questions.**
+`Assets::showBootSplash()` puts a cached `splash` asset up at boot if there is
+one, the way CYD-Dickey's `showSplashScreen()` does, and silently does nothing
+otherwise — deliberately without fetching, since boot is the one moment where
+waiting on the network to draw a decoration is least defensible. The graphic
+card (below) is the other, and it needs the fetch and the draw to be separate
+calls, so `Assets` exposes both halves: `ensureCached()` / `drawFullScreen()`
+may hit the network and belong on a fetch path, while `isCached()` /
+`drawCached()` never touch it and are what a card's `draw()` is allowed to
+call.
+
+None of this has ever run. The server's `Assets` catalog and its
+device-authenticated fetch endpoint are being built in parallel with the
+firmware, so `/api/assets/{id}` is this firmware's expectation of that route
+rather than something that has ever answered — which also means the boot
+splash has never had an asset to fetch, no PNG has been decoded on a device,
+and no SD write has happened. A clean compile is the only verification any of
+it has.
+
+### A picture as a card, chosen by the server
+
+`App/Graphic.h`/`.cpp` puts an image into the rotation as a card of its own.
+It registers a `CardSpec` with id `graphic` exactly the way `Weather.cpp` and
+`Aircraft.cpp` register theirs, and adding it required **no change to the
+scheduler at all** — which is the property the registry was built to have, and
+the first time anything has exercised that claim.
+
+**The card has no content of its own.** Weather and aircraft each own a server
+route, a response shape and a status vocabulary. This one owns none of that:
+what it draws is whatever asset its own policy entry names.
+`CardPolicyEntry.assetId` (optional, string) is carried through
+`Cards::PolicyEntry` and `CardManager::applyPolicy()` onto the descriptor as
+`Cards::CardSpec::assetId`, and the card resolves it through the `Assets`
+cache described above. That indirection is the whole point: **changing which
+picture a household sees is a config edit, not a firmware release.**
+CYD-Dickey's nearest equivalents are its splash and QR cards, which are this
+card with the image hardcoded (`splashImage = "/LRBH.PNG"`) and therefore need
+a reflash to change.
+
+`assetId` is a fixed 48-character buffer on the descriptor rather than a
+`String`, and that is not an arbitrary choice. The registry is
+constant-initialised precisely so it exists before any card module's
+static initialiser runs; a `String` member would make it dynamically
+initialised instead, and initialisation order across translation units is
+undefined — the card that registered first would be writing into an array that
+had not been constructed yet. An id longer than the buffer is **dropped, not
+truncated**: a truncated id is a perfectly well-formed id for some *other*
+asset, and showing the wrong picture is worse than showing none.
+
+**Interstitial, not list.** It is one picture, not a feed, and
+`interleaveEvery`'s "show after every N other cards" is the honest description
+of how a picture should appear — on a cadence of its own, no matter how many
+aircraft happen to be overhead. A list card would take one fixed slot in the
+list sequence and be seen proportionally less often as that sequence grows,
+which is the specific mistake recorded above as having been corrected on a
+running CYD-Dickey device.
+
+**Missing is the ordinary state, and it is silent.** With no `assetId` in the
+policy — which is every device until somebody sets one — the card reports zero
+items and the scheduler's existing empty-card skipping passes over it
+entirely. Same for an asset that will not fetch and for one that will not
+decode. This is deliberately the opposite of what weather and aircraft do,
+whose "not activated" and "nothing overhead right now" states report one item
+because those messages are real content worth a screen. There is nothing
+informative to say about a picture that isn't there, and a card reading "no
+image configured" in a household's living room is a worse outcome than a card
+that simply never appears.
+
+A decode failure is the one case the card cannot see coming, since it is only
+discovered inside `draw()`. It clears its ready flag, so the card is out of
+the rotation by the next computed card and a corrupt asset costs one dwell
+rather than reappearing every cycle. The cached file is deliberately **not**
+deleted: a PNG that will not decode will not decode next time either, and
+deleting it would turn a permanent failure into an HTTP fetch on every
+refresh, forever — loud on the network and no better on screen.
+
+**Fetch and draw stay strictly separate**, like every other card.
+`fetch()` calls `Assets::ensureCached()` (an SD stat on a hit, one HTTP fetch
+on a miss) and is called only by the scheduler's refresh timer; `draw()` calls
+`Assets::drawCached()`, which never reaches for the network, so stepping
+backwards through the rotation is a pure redraw. Both re-read the configured
+`assetId` off the descriptor rather than caching it, which is what makes a
+policy change take effect immediately: the moment the server names a different
+asset, the one the card is holding stops counting as content and stays
+uncounted until the next refresh has actually fetched the new one. Without
+that, a device told to change its picture would keep showing the old one for
+up to a full refresh interval.
+
+The theme and the centring come for free — `Display::drawPngFromSd()` already
+clears to the day/night background before decoding and centres the image on it
+— and the corner clock and action buttons are drawn by `CardManager` after
+every card's `draw()` returns, so there is nothing card-specific to do for
+either.
 
 ### Deciding when to reboot to the updater
 

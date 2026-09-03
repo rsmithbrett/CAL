@@ -64,6 +64,12 @@ using DrawFn = void (*)(uint16_t itemIndex);
 /// the edge of the radius.
 using NotableFn = bool (*)(uint16_t itemIndex);
 
+/// The longest asset id a policy entry can carry. Matches Assets::kMaxIdLength,
+/// which is what actually validates one - Graphic.cpp static_asserts that the
+/// two agree, so a divergence is a compile error rather than a silently
+/// truncated id that quietly fetches nothing.
+static constexpr uint8_t kMaxAssetIdLength = 48;
+
 struct CardSpec {
   /// Matches the `id` the server uses in cardPolicy/cardActions. An id the
   /// server sends that no descriptor here claims is ignored, not an error -
@@ -95,6 +101,19 @@ struct CardSpec {
   /// way of turning a card off. True until the first policy ever arrives, so
   /// a device that has never checked in still shows something.
   bool active = true;
+
+  /// Which asset this card draws, for the cards that draw one - empty for
+  /// every card that does not, which is most of them. It lives on the
+  /// descriptor rather than inside one card's module because it arrives on
+  /// the same policy entry as `order` and `dwellSeconds`: **changing which
+  /// picture a household sees is a config edit, not a firmware release.**
+  ///
+  /// A fixed buffer rather than a String, deliberately. The registry these
+  /// descriptors live in is constant-initialised so that it exists before any
+  /// card module's static initialiser runs (see the top of CardManager.cpp);
+  /// a String member would make it dynamically initialised instead, and the
+  /// registration order across translation units is undefined.
+  char assetId[kMaxAssetIdLength + 1] = "";
 
   // ---- Per-card scheduling state. Each of these is a struct field
   // precisely because CYD-Dickey's equivalents are named globals, one set
@@ -141,6 +160,12 @@ struct PolicyEntry {
   int interleaveEvery = 0;
   /// List cards only; 0 when the server omitted it.
   int notableDwellSeconds = 0;
+  /// Optional on the wire, and empty for the cards that draw no picture. One
+  /// longer than kMaxAssetIdLength is dropped rather than truncated when it
+  /// reaches the descriptor - a truncated id is a perfectly well-formed id
+  /// for some *other* asset, so the card shows nothing instead of showing
+  /// the wrong thing. See CardManager::applyPolicy().
+  String assetId;
 };
 
 struct Policy {

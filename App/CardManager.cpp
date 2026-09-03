@@ -568,6 +568,20 @@ void applyPolicy(const Cards::Policy& policy) {
         static_cast<uint16_t>(entry.interleaveEvery > 0 ? entry.interleaveEvery : 0);
     card.notableDwellSeconds =
         static_cast<uint16_t>(entry.notableDwellSeconds > 0 ? entry.notableDwellSeconds : 0);
+
+    // The picture this card draws, for the cards that draw one. Rewritten on
+    // every policy - including back to empty, which is how the server takes a
+    // picture away again. An over-long id is dropped rather than truncated:
+    // a truncated id is a well-formed id for some *other* asset, and showing
+    // the wrong picture is worse than showing none (see Cards.h).
+    card.assetId[0] = '\0';
+    if (entry.assetId.length() > Cards::kMaxAssetIdLength) {
+      Log::printf("[cards] policy assetId for '%s' is too long (%u chars) - ignored",
+                  entry.id.c_str(), static_cast<unsigned>(entry.assetId.length()));
+    } else if (entry.assetId.length() > 0) {
+      strncpy(card.assetId, entry.assetId.c_str(), Cards::kMaxAssetIdLength);
+      card.assetId[Cards::kMaxAssetIdLength] = '\0';
+    }
   }
 
   if (matched == 0) {
