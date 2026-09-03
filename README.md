@@ -449,6 +449,26 @@ one, is a separate piece of work — not a natural extension of this one, since
 CAL's constraints (never updated over the air, must stay minimal) argue
 against giving it any new remote-facing surface lightly.
 
+### Telemetry: a heartbeat riding check-in's own clock
+
+`App/Telemetry.h`/`.cpp` reports device health — uptime, WiFi RSSI, free
+heap, CAL's own boot-attempt counter, and this device's own last check-in
+outcome — to the server's `POST /api/telemetry` (see the DiscoverAroundMe
+repo's README, "Telemetry: device health/diagnostics," for the canonical
+wire contract this firmware implements; this section only covers the
+device's own side of it). `Telemetry::report()` is called once per
+successful check-in, from `performCheckIn()` in `App.ino`, right before the
+`updateAvailable` reboot branch — a device about to reboot for an update
+still leaves a fresh snapshot behind first. Deliberately has no timer of
+its own: the server's own `/diag/telemetry` page flags a report stale past
+three times the check-in gateway's default interval, a threshold that only
+stays meaningful if a healthy device's telemetry refreshes close to every
+check-in rather than on some slower, independent schedule that would trip
+that alarm on its own. Best-effort and fire-and-forget — a failed report is
+logged and dropped, not retried before the next check-in comes around; this
+is diagnostics, not a control channel, and nothing downstream depends on it
+succeeding.
+
 ## Provisioning: how a device gets its secret
 
 The Device Client Specification's §13 lists "the factory provisioning process by

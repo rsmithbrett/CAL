@@ -24,6 +24,7 @@
 #include "Log.h"
 #include "WifiJoin.h"
 #include "AppService.h"
+#include "Telemetry.h"
 #include "Weather.h"
 
 namespace {
@@ -223,6 +224,14 @@ void performCheckIn() {
   // after a reboot within one check-in interval - see CheckIn.h's and Log.h's
   // own remarks.
   Log::setStreamingEnabled(result.debugStreamRequested);
+
+  // Piggybacks on check-in's own cadence rather than owning a timer of its
+  // own - see Telemetry.h for why riding this exact cadence (instead of a
+  // slower, independent one) is what keeps the server's own staleness
+  // threshold on /diag/telemetry meaningful. Sent here, before the
+  // updateAvailable branch below, so a device about to reboot for an update
+  // still leaves a fresh snapshot behind.
+  Telemetry::report(result.updateAvailable ? "updateAvailable" : "ok");
 
   if (result.updateAvailable) {
     Log::line("[checkin] server requested an update - rebooting into CAL");
