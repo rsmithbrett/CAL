@@ -190,7 +190,84 @@ and reuses CAL's own `Identity.h`/`.cpp` and `Tls.h`/`.cpp` verbatim (same NVS
 namespace, same TLS trust setup) plus a trimmed `Config.h`. Unlike CAL, it is
 meant to run indefinitely — failures here retry rather than halt, because a
 display that goes dark until someone finds a USB cable is a worse outcome for
-a household than one that keeps trying.
+a household than one that keeps trying. It renders two cards, weather and
+aircraft overhead, alternating on the same content-refresh timer (see below).
+
+### Two cards, styled after CYD-Dickey
+
+A separate, more mature project on similar hardware — `CYD-Dickey`, a
+Discover Around Me build for the same ESP32/ILI9341 panel — already has a
+working weather card and an aircraft-overhead card. `App/`'s own weather card
+was restyled to match its actual look, and its aircraft card is new; CAL had
+no aircraft rendering of any kind before this.
+
+**The weather card** (`Display::showWeatherCard`) moved from a screen-centered
+black card to CYD-Dickey's actual layout: a white background, a small
+colour-banded "WEATHER" label in the top-left corner (`Display.cpp`'s
+`drawCardBanner`, mirroring their `lcd.fillRect(0, 0, 110, 22, TFT_NAVY)` +
+bold-white-label pattern from `drawWeatherCard()`), the temperature set large
+and **left-aligned** in a bold sans GFX font (`fonts::FreeSansBold12pt7b`,
+matching their `lcd.setFont(&fonts::FreeSansBold12pt7b)` at the same `(10,
+32)` position) rather than centered bitmap text, and the short-forecast text
+below it left-margined instead of centered. The hand-drawn degree ring from
+before (`drawTemperature`, formerly `centeredTemperature`) stayed — CYD-Dickey
+sidesteps the missing-glyph problem by never printing a degree sign at all
+(`"%.0fF\n"`), but CAL already had the better fix, and regressing to their
+plain "72F" would be a downgrade dressed up as alignment. `location` (Home or
+Target's city/state, which CYD-Dickey's card has no equivalent field for) is
+kept, right-justified on the banner row instead of centered above the
+temperature.
+
+**The aircraft card** (`Display::showAircraftCard`, `App/Aircraft.h`/`.cpp`)
+is new. It fetches `/api/myaircraft/mine` with the device's own secret — the
+same authentication, refusal-body shape (`reason`/`message`), and
+`NetworkClientSecure`/`HTTPClient`/`Tls::configure` idiom as `Weather.h`/`.cpp`
+and `CheckIn.cpp` already use — and shows the nearest aircraft the server
+reports (the response is already sorted by distance and pre-filtered to
+airborne traffic within the owner's radius). Visually it borrows CYD-Dickey's
+`drawFeaturedAircraft()` layout: a bold headline at top-left, then stat rows
+below with a muted label on the left and the value right-justified against
+the card's right margin, using the same truncate-and-right-justify technique
+as their `drawTruncatedRight()` (`Display.cpp`'s `drawRightJustified`) so a
+short value and a long one both end flush at the same edge. The 8-point
+compass-direction lookup for `headingDegrees` is also a direct port of theirs.
+
+**What CYD-Dickey's aircraft card assumes that this server doesn't provide:**
+their card devotes its left column to an airline logo or bold airline name
+(`Airlines.h`, a user-managed LittleFS directory keyed by ICAO callsign
+prefix) and a smaller line underneath showing the flight's departure/arrival
+airports (`Route.h`, via a free third-party route database, hexdb.io).
+DiscoverAroundMe's server-side aircraft pipeline
+(`MyAircraftService`/`AdsbLolClient`, `AircraftSighting`) has neither: it
+exposes exactly `callsign`, `altitudeFeet`, `speedKnots`, `headingDegrees`,
+and `distanceMiles` per aircraft, with no airline-name resolution or route
+lookup anywhere in it. Rather than inventing a fake airline/route field or
+silently dropping the idea, `App/`'s aircraft card uses the callsign itself as
+its headline (in the visual slot CYD-Dickey's logo/name occupies) and simply
+has no route line. Giving CAL's aircraft card real airline names or routes
+would require adding that lookup to the server first — out of scope here.
+
+Both cards also gained a "content status" treatment for their non-Ok states
+(not yet activated, disabled for this owner, nothing currently in range, auth
+or network trouble) — `Display::showWeatherStatus`/`showAircraftStatus` keep
+these in the same white/bannered card family rather than routing them through
+the black boot-ladder `showStatus()`/`showFailure()` screens, matching
+CYD-Dickey's own split between `drawStatusMessage()`'s black Wi-Fi/menu
+screens and `drawNoAircraftScreen()`/`drawNoListingsScreen()`'s white,
+card-styled ones for content problems specifically. The boot-ladder screens
+themselves (Wi-Fi joining, time sync, update-in-progress) are unchanged.
+
+**A known simplification, stated plainly:** CYD-Dickey interleaves weather,
+a splash card, a QR/branding card, and a full list of aircraft or listings on
+independent timers, with touch-driven forward/back navigation and a history
+buffer so rewinding replays exactly what was shown. None of that exists here
+— this board's App has no touchscreen wired up at all, only the single BOOT
+button (already spoken for by the Wi-Fi-reset and force-update-check
+gestures below), and the server gives CAL only the *nearest* aircraft as a
+single featured value rather than a list to cycle through. `App.ino`'s
+`refreshCurrentCard()` is a plain two-way toggle between the weather and
+aircraft cards on the existing content-refresh timer — the smallest change
+that shows both cards at all, not a port of CYD-Dickey's scheduler.
 
 ### Deciding when to reboot to the updater
 
@@ -290,6 +367,87 @@ down with missing-type errors (`network_event_handle_t`, `NetworkInterface`,
 and similar) that have nothing to do with the file's own contents and nothing
 obviously pointing at the real cause. Don't rename this file back, and don't
 add a new sketch-local `Network.h` anywhere else in this project.
+
+### Watching a device live: `Log.h`/`.cpp` and remote debug streaming
+
+Forcing an update onto a device and then wanting to *watch it land* — without
+finding the unit and plugging in a USB cable — is what `App/Log.h`/`.cpp`
+exists for. Every module in `App/` (`App.ino`, `CheckIn.cpp`, `Weather.cpp`,
+`Aircraft.cpp`, `WifiJoin.cpp`, `AppUpdater.cpp`, `AppService.cpp`,
+`Loader.cpp`) calls `Log::line()`/`Log::printf()` instead of `Serial` directly,
+so the same narrative — WiFi joining, check-in results, card refreshes, update
+decisions — is available two ways at once rather than two logging paths
+silently drifting apart. This is scoped to `App/` only; CAL's own root-level
+logging (`CAL.ino` and its modules) is untouched by this pass; a
+bootloader-side counterpart, if ever wanted, is a separate piece of work.
+
+**Serial first, always.** Every `Log::line()`/`Log::printf()` call writes to
+USB `Serial` unconditionally, before anything else happens. If the remote
+stream is ever broken, disabled, or the server unreachable, someone with a
+cable in hand still sees exactly what they would have seen before this module
+existed — that is the fallback of last resort this was built not to regress,
+not a nice-to-have.
+
+**Discovery is check-in-driven, and deliberately not one-shot.** `/api/checkin`'s
+response now carries `debugStreamRequested` alongside `acknowledged` /
+`updateAvailable` / `checkInIntervalSeconds`, parsed into a new
+`CheckIn::Result::debugStreamRequested` field the same way as the others.
+Unlike the forced-update flag, `performCheckIn()` calls
+`Log::setStreamingEnabled(result.debugStreamRequested)` on *every* successful
+check-in, not just once — so streaming tracks an admin's toggle live, turning
+on or off within one `checkInIntervalMs`, and there is no flag of its own
+persisted to NVS. After a reboot, streaming is simply off until the next
+check-in tells it otherwise (up to one interval away) — recovering the right
+state automatically rather than needing to survive the reboot itself.
+
+**Transport reuses the proven pattern, on a timer.** While streaming is on,
+`Log::line()` also appends the same formatted line to an in-RAM buffer;
+`Log::poll()`, called once per `loop()` iteration, batches it into a
+`POST /api/debuglog` body (`{"lines": ["...", "..."]}`) using the identical
+`NetworkClientSecure` / `HTTPClient` / `Tls::configure()` /
+`X-Device-Secret` pattern `CheckIn.cpp` already established — no new HTTP
+client, no WebSocket. `Log::flushNow()` forces an immediate, synchronous send
+bypassing the timer; `Loader.cpp`'s `bootFactoryAndRestart()` — the single
+choke point every reboot path (`requestUpdate()`,
+`returnToLoaderForReprovisioning()`) already goes through — calls it right
+before `esp_restart()`, so the line explaining *why* the device is about to go
+dark actually reaches the server instead of being lost with the rest of RAM.
+
+**The concrete numbers, and why:**
+
+| Constant | Value | Reasoning |
+|---|---|---|
+| `kBatchIntervalMs` | 1000 ms | `loop()` already runs on roughly a 1-second cadence of its own (its closing `delay(1000)`), with no hardware timer or second task driving anything faster. A shorter timer would only be aspirational — `poll()` cannot be called any more often than `loop()` actually calls it. |
+| `kMaxBatchLines` / `kMaxBatchBytes` | 40 lines / 4 KB | Caps a single `POST` body so one flush can't spike request latency or hold up `loop()` for longer than necessary; whatever doesn't fit waits for the next `poll()`. |
+| `kMaxBufferedLines` / `kMaxBufferedBytes` | 200 lines / 16 KB | The buffer's actual memory ceiling, independent of and larger than the per-batch cap — this is what protects against unbounded growth if the network is down for a while. Generous for several minutes of this firmware's real log volume (roughly one line every few seconds, brief bursts during WiFi join/check-in/update) while staying a small, fixed slice of the ESP32's ~320 KB SRAM, and only ever paid while an admin has actually turned streaming on. |
+
+Once either buffer cap is hit, the oldest line is dropped to make room for the
+newest — oldest-first, never growing unbounded and never crashing — and the
+next successful flush is prefixed with a `[N lines dropped]` marker line
+summarizing exactly how many were lost. A failed `POST` leaves the buffer
+untouched for a retry on the next `poll()`; only what the server actually
+accepted (`HTTP 200`) is removed.
+
+**Formatting.** `Log::printf()` renders into a fixed 256-byte stack scratch
+buffer — deterministic, and consistent with this module running from
+stack-tight retry loops throughout `App/` — rather than growing a heap buffer
+on every call; output that would overflow it is kept and marked
+`...(truncated)` rather than silently cut off mid-word.
+
+### CAL-side (bootloader) logging is explicitly out of scope here
+
+This pass touches `App/` only. CAL's own root-level modules (`CAL.ino`,
+`Provisioning.cpp`, `Updater.cpp`, and the rest) keep their existing `Serial`
+calls untouched, and there is no `debugStreamRequested` handling, streaming
+buffer, or `/api/debuglog` POST anywhere in CAL's own code. This is a
+deliberate scoping decision, not an oversight: the motivating use case —
+watching an *App* OTA update land and run — lives entirely in `App/`, and CAL
+itself already has no equivalent "watch it happen" need of its own (it either
+gets a device onto the network and hands over, or fails loudly on-screen at
+the point of failure). A bootloader-side counterpart, should CAL ever want
+one, is a separate piece of work — not a natural extension of this one, since
+CAL's constraints (never updated over the air, must stay minimal) argue
+against giving it any new remote-facing surface lightly.
 
 ## Provisioning: how a device gets its secret
 

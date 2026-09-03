@@ -5,6 +5,7 @@
 #include "Config.h"
 #include "Display.h"
 #include "Identity.h"
+#include "Log.h"
 
 // Join logic mirrors CAL's Provisioning::joinStoredNetwork() - scan, rank
 // remembered networks by in-range signal, retry each a few times - because a
@@ -30,10 +31,14 @@ bool attemptJoin(const Identity::Network& net) {
     const uint32_t deadline = millis() + Config::kWifiJoinTimeoutMs;
     while (millis() < deadline) {
       if (WiFi.status() == WL_CONNECTED) {
+        Log::printf("[wifi] joined SSID=%s IP=%s RSSI=%d dBm channel=%d", net.ssid.c_str(),
+                    WiFi.localIP().toString().c_str(), WiFi.RSSI(), WiFi.channel());
         return true;
       }
       delay(250);
     }
+    Log::printf("[wifi] attempt %d/%d for SSID=%s timed out", attempt, Config::kWifiJoinAttempts,
+                net.ssid.c_str());
     WiFi.disconnect();
   }
   return false;
@@ -44,6 +49,7 @@ bool attemptJoin(const Identity::Network& net) {
 bool joinStoredNetwork() {
   const uint8_t known = Identity::networkCount();
   if (known == 0) {
+    Log::line("[wifi] no networks remembered, cannot join");
     return false;
   }
 
@@ -74,6 +80,7 @@ bool joinStoredNetwork() {
     }
   }
   WiFi.scanDelete();
+  Log::printf("[wifi] scan found %d networks, %d match a remembered SSID in range", found, count);
 
   for (uint8_t i = 1; i < count; ++i) {
     const Candidate key = candidates[i];
@@ -94,6 +101,7 @@ bool joinStoredNetwork() {
   }
 
   if (count == 0) {
+    Log::line("[wifi] none of the remembered networks turned up in the scan, trying them blind");
     for (uint8_t i = 0; i < known; ++i) {
       const Identity::Network net = Identity::network(i);
       if (net.ssid.length() > 0 && attemptJoin(net)) {
@@ -103,6 +111,7 @@ bool joinStoredNetwork() {
     }
   }
 
+  Log::line("[wifi] exhausted all remembered networks, none reachable");
   return false;
 }
 

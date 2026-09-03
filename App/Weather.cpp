@@ -6,6 +6,7 @@
 
 #include "Config.h"
 #include "Identity.h"
+#include "Log.h"
 #include "Tls.h"
 
 namespace Weather {
@@ -53,6 +54,7 @@ Result parseRefusal(int statusCode, const String& body) {
   } else if (strcmp(reason, "content_provider_disabled") == 0) {
     result.status = Status::ProviderDisabled;
   }
+  Log::printf("[weather] refused (%s): %s", reason, result.message.c_str());
   return result;
 }
 
@@ -64,6 +66,7 @@ Result fetchMine() {
   NetworkClientSecure client;
   if (!Tls::configure(client)) {
     result.message = "Cannot verify the service's identity.";
+    Log::line("[weather] TLS setup failed");
     return result;
   }
 
@@ -71,6 +74,7 @@ Result fetchMine() {
   const String url = String("https://") + Config::kServiceHost + kPath;
   if (!http.begin(client, url)) {
     result.message = "Cannot reach the weather service.";
+    Log::line("[weather] could not begin request");
     return result;
   }
   http.setTimeout(Config::kHttpTimeoutMs);
@@ -82,6 +86,7 @@ Result fetchMine() {
     http.end();
     result.status = Status::AuthError;
     result.message = "Cannot verify this device. Contact support.";
+    Log::line("[weather] auth rejected (401)");
     return result;
   }
 
@@ -94,6 +99,7 @@ Result fetchMine() {
   if (status != 200) {
     http.end();
     result.message = "Cannot reach the weather service.";
+    Log::printf("[weather] unexpected http status=%d", status);
     return result;
   }
 
@@ -102,18 +108,21 @@ Result fetchMine() {
   http.end();
   if (err) {
     result.message = "The weather service sent something unreadable.";
+    Log::line("[weather] response was not valid JSON");
     return result;
   }
 
   JsonVariantConst weatherResult = preferredForecast(doc.as<JsonVariantConst>());
   if (weatherResult.isNull()) {
     result.message = "No home address is set for this device's owner yet.";
+    Log::line("[weather] no home/target address on file");
     return result;
   }
 
   JsonArrayConst periods = weatherResult["periods"].as<JsonArrayConst>();
   if (periods.isNull() || periods.size() == 0) {
     result.message = "No forecast is available yet.";
+    Log::line("[weather] no forecast periods in response");
     return result;
   }
 

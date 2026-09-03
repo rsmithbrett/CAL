@@ -3,9 +3,10 @@
 // Runs from ota_0, installed and started by CAL (see ../CAL.ino,
 // ../Updater.cpp). Everything CAL already established - WiFi credentials, the
 // device secret, TLS trust - lives in NVS and is simply read here, not
-// re-derived. This build renders one card, weather; see Weather.h for why
-// additional cards are meant to become sibling files rather than growing this
-// one.
+// re-derived. This build renders two cards, weather and aircraft overhead,
+// alternating on the same content-refresh timer (see refreshCurrentCard());
+// see Weather.h/Aircraft.h for why each card is its own sibling file rather
+// than growing one another.
 //
 // Unlike CAL, this is meant to run indefinitely: failures here retry instead
 // of halting, because a display that goes dark until someone finds a USB
@@ -13,12 +14,14 @@
 
 #include <WiFi.h>
 
+#include "Aircraft.h"
 #include "AppUpdater.h"
 #include "CheckIn.h"
 #include "Config.h"
 #include "Display.h"
 #include "Identity.h"
 #include "Loader.h"
+#include "Log.h"
 #include "WifiJoin.h"
 #include "AppService.h"
 #include "Weather.h"
@@ -45,6 +48,7 @@ bool wifiResetRequested() {
     }
     delay(50);
   }
+  Log::line("[boot] WiFi reset gesture confirmed");
   return true;
 }
 
@@ -61,6 +65,7 @@ void ensureWifiConnected() {
   while (!WifiJoin::joinStoredNetwork()) {
     Display::showFailure("Could not join WiFi",
                          "Hold BOOT for 3 seconds to set up WiFi again.");
+    Log::line("[wifi] still not connected, retrying in 30s");
     delay(30000);
   }
 }
@@ -95,6 +100,9 @@ void refreshWeatherCard() {
   const Weather::Result result = Weather::fetchMine();
 
   if (result.status == Weather::Status::Ok) {
+    Log::printf("[weather] card updated: %s, %d%s, %s", result.forecast.location.c_str(),
+                result.forecast.temperature, result.forecast.unit.c_str(),
+                result.forecast.shortForecast.c_str());
     Display::showWeatherCard(result.forecast.location, result.forecast.temperature,
                              result.forecast.unit, result.forecast.shortForecast,
                              "Updated just now");
@@ -102,14 +110,65 @@ void refreshWeatherCard() {
   }
 
   // NotActivated and ProviderDisabled are resting states an owner or their
-  // agent can change server-side at any time - shown as status, not failure,
-  // since there is nothing wrong with the device itself.
+  // agent can change server-side at any time - shown muted, not amber, since
+  // there is nothing wrong with the device itself. Routed through
+  // showWeatherStatus() rather than the black boot-ladder showStatus()/
+  // showFailure() - see Display.h's remarks on why content-card problems
+  // stay in the white/bannered card family instead.
   const bool isRestingState = result.status == Weather::Status::NotActivated ||
                               result.status == Weather::Status::ProviderDisabled;
-  if (isRestingState) {
-    Display::showStatus("Weather is not showing yet", result.message);
+  Display::showWeatherStatus(isRestingState ? "Weather is not showing yet" : "Could not load weather",
+                             result.message, /*isProblem=*/!isRestingState);
+}
+
+void refreshAircraftCard() {
+  const Aircraft::Result result = Aircraft::fetchMine();
+
+  if (result.status == Aircraft::Status::Ok) {
+    Log::printf("[aircraft] card updated: %s alt=%dft speed=%.0fkts heading=%.0f dist=%.1fmi",
+                result.nearest.callsign.c_str(), result.nearest.altitudeFeet,
+                result.nearest.speedKnots, result.nearest.headingDegrees,
+                result.nearest.distanceMiles);
+    Display::showAircraftCard(result.nearest.callsign, result.nearest.altitudeFeet,
+                              result.nearest.speedKnots, result.nearest.headingDegrees,
+                              result.nearest.distanceMiles, "Updated just now");
+    return;
+  }
+
+  // Empty (fetch worked, nothing in range right now) and the two resting
+  // states read as ordinary/muted; auth and network trouble read amber -
+  // same isProblem split refreshWeatherCard() makes, just with a third
+  // muted case this card has and weather doesn't (weather's "no forecast
+  // yet"/"no address set" cases are folded into NetworkError instead - see
+  // Weather.cpp).
+  const bool isRestingState = result.status == Aircraft::Status::NotActivated ||
+                              result.status == Aircraft::Status::ProviderDisabled ||
+                              result.status == Aircraft::Status::Empty;
+  const String headline = result.status == Aircraft::Status::Empty ? "Nothing overhead right now"
+                          : isRestingState                          ? "Aircraft overhead is not showing yet"
+                                                                     : "Could not load aircraft data";
+  Display::showAircraftStatus(headline, result.message, /*isProblem=*/!isRestingState);
+}
+
+// Weather and aircraft overhead alternate on the same content-refresh timer
+// rather than each getting a card-cycling scheduler of its own the way
+// CYD-Dickey's drawDashboardScreen()/advanceCard() interleave weather,
+// splash, QR and a whole list of aircraft/listings on independent
+// intervals with touch-driven rewind. None of that machinery has anything
+// to attach to here: this board has no touchscreen wired up in the App at
+// all (see kBootButtonPin below - the only input is a single button), and
+// there is exactly one of each card, not a list to cycle through. A plain
+// toggle is the smallest thing that shows both cards at all.
+enum class CardKind { Weather, Aircraft };
+CardKind nextCard = CardKind::Weather;
+
+void refreshCurrentCard() {
+  if (nextCard == CardKind::Weather) {
+    refreshWeatherCard();
+    nextCard = CardKind::Aircraft;
   } else {
-    Display::showFailure("Could not load weather", result.message);
+    refreshAircraftCard();
+    nextCard = CardKind::Weather;
   }
 }
 
@@ -121,16 +180,19 @@ void refreshWeatherCard() {
 /// performCheckIn() below is the automatic, server-driven one a "Force
 /// update" admin button actually reaches.
 void forceUpdateCheck() {
+  Log::line("[update] manual check requested (BOOT press)");
   Display::showStatus("Checking for update", "");
   if (AppUpdater::newerVersionAvailable()) {
+    Log::line("[update] manual check found a newer version");
     Display::showStatus("Updating", "A new version is available");
     Loader::requestUpdate();
     // Unreachable: the call above never returns.
   }
 
+  Log::line("[update] manual check: already up to date");
   Display::showStatus("Already up to date", "");
   delay(1500);
-  refreshWeatherCard();
+  refreshCurrentCard();
 }
 
 /// The fast path: whatever the server decided on this check-in - an admin's
@@ -144,6 +206,7 @@ void performCheckIn() {
   const CheckIn::Result result = CheckIn::perform();
   if (!result.ok) {
     if (result.secretRejected) {
+      Log::line("[checkin] secret rejected - device needs reprovisioning");
       Loader::returnToLoaderForReprovisioning();
       // Unreachable: the call above never returns.
     }
@@ -154,7 +217,15 @@ void performCheckIn() {
     checkInIntervalMs = result.intervalMs;
   }
 
+  // Not one-shot, unlike updateAvailable below: this reflects the server's
+  // current wish on every successful check-in, so remote debug streaming
+  // turns on or off in step with an admin's toggle and recovers on its own
+  // after a reboot within one check-in interval - see CheckIn.h's and Log.h's
+  // own remarks.
+  Log::setStreamingEnabled(result.debugStreamRequested);
+
   if (result.updateAvailable) {
+    Log::line("[checkin] server requested an update - rebooting into CAL");
     Display::showStatus("Updating", "The server requested an update");
     Loader::requestUpdate();
     // Unreachable: the call above never returns.
@@ -170,6 +241,7 @@ void setup() {
   Display::showStatus("Starting", "");
 
   Identity::begin();
+  Log::printf("[boot] App starting, installed version=%s", Identity::installedAppVersion().c_str());
 
   if (wifiResetRequested()) {
     Loader::returnToLoaderForReprovisioning();
@@ -192,7 +264,7 @@ void setup() {
   }
 
   Display::showStatus("Loading weather", "");
-  refreshWeatherCard();
+  refreshCurrentCard();
   lastContentFetchMs = millis();
 }
 
@@ -208,7 +280,7 @@ void loop() {
   const uint32_t now = millis();
 
   if (now - lastContentFetchMs >= Config::kContentRefreshIntervalMs) {
-    refreshWeatherCard();
+    refreshCurrentCard();
     lastContentFetchMs = now;
   }
 
@@ -225,11 +297,19 @@ void loop() {
   if (now - lastUpdateCheckMs >= Config::kUpdateCheckIntervalMs) {
     lastUpdateCheckMs = now;
     if (AppUpdater::newerVersionAvailable()) {
+      Log::line("[update] fallback timer found a newer version - rebooting into CAL");
       Display::showStatus("Updating", "A new version is available");
       Loader::requestUpdate();
       // Unreachable: the call above never returns.
     }
   }
+
+  // Sends whatever debug-log lines have piled up since the last pass, when
+  // remote streaming is currently on (see Log::setStreamingEnabled(), driven
+  // by performCheckIn() above) - a no-op the rest of the time. Called once
+  // per loop() iteration rather than on its own timer, same as every other
+  // periodic thing in this loop.
+  Log::poll();
 
   delay(1000);
 }

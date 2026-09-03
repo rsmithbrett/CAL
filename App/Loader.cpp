@@ -4,10 +4,17 @@
 #include <esp_partition.h>
 
 #include "Identity.h"
+#include "Log.h"
 
 namespace Loader {
 namespace {
 
+// Every path back to CAL passes through here, which makes this the one place
+// that needs to flush the remote debug stream (see Log::flushNow()) before
+// rebooting - not each caller individually. esp_restart() below discards
+// everything in RAM; without this, whatever explained the reboot (a
+// requested update, a rejected secret) would never make it to a server
+// someone is watching the stream on.
 [[noreturn]] void bootFactoryAndRestart() {
   const esp_partition_t* factory = esp_partition_find_first(
       ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, nullptr);
@@ -17,7 +24,10 @@ namespace {
   // (whatever it currently is) another chance rather than hanging here.
   if (factory != nullptr) {
     esp_ota_set_boot_partition(factory);
+  } else {
+    Log::line("[loader] factory partition not found - restarting anyway");
   }
+  Log::flushNow();
   esp_restart();
 }
 
@@ -25,6 +35,7 @@ namespace {
 
 void requestUpdate() {
   Identity::setUpdateRequested(true);
+  Log::line("[loader] update requested - rebooting into CAL");
   bootFactoryAndRestart();
 }
 
@@ -37,6 +48,7 @@ void returnToLoaderForReprovisioning() {
   // mustContactServer()).
   Identity::clearNetworks();
   Identity::setUpdateRequested(true);
+  Log::line("[loader] returning to CAL for reprovisioning");
   bootFactoryAndRestart();
 }
 

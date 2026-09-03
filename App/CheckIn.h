@@ -24,6 +24,13 @@ struct Result {
   /// Server-dictated cadence for the NEXT check-in - a household's fleet size is the
   /// server's decision to make, not a constant baked into every device's firmware.
   uint32_t intervalMs = 0;
+  /// The server's current wish for remote debug-log streaming (see Log.h), reread
+  /// on every check-in - unlike updateAvailable, this is NOT one-shot. It reflects
+  /// whatever an admin's toggle says right now, so streaming turns on or off in
+  /// step with the server rather than latching the first answer it ever saw, and
+  /// naturally picks the right state back up after a reboot within one check-in
+  /// interval, with no flag of its own to persist or fall out of sync.
+  bool debugStreamRequested = false;
 };
 
 /// This board has no battery (ELEGOO/CYD is USB-powered) - batteryPercent/charging are
