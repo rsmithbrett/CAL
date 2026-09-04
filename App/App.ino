@@ -130,16 +130,23 @@ uint32_t lastCheckInMs = 0;
 uint32_t checkInIntervalMs = 5UL * 60UL * 1000UL;
 
 // The corner clock's offset and the day/night theme, both check-in-driven
-// (CheckIn::Result::utcOffsetMinutes/isDaytime) and both persisted here the
+// (CheckIn::Result::utcOffsetMinutes/isDaytime) and both kept live here the
 // same way checkInIntervalMs above already is - a value the server hands
 // back on one successful check-in needs to keep being true in between check-
-// ins, not just for the one loop() iteration it arrived on. Defaults (UTC,
-// daytime) hold until the first successful check-in ever completes, matching
-// the server's own fallback for an unresolved location. Display.cpp keeps
+// ins, not just for the one loop() iteration it arrived on. Display.cpp keeps
 // its own copy of both (see Display::setEnvironment()) since it's the thing
 // that actually draws with them; App.ino's copies exist so a later check-in
 // has something to compare against and so this state lives in exactly one
 // kind of place in this file, alongside every other check-in-derived value.
+//
+// The offset alone is additionally mirrored to NVS (Identity::
+// lastUtcOffsetMinutes()/setLastUtcOffsetMinutes()) - unlike checkInIntervalMs
+// and lastIsDaytime, which only need to survive between check-ins, this one
+// also needs to survive a *reboot* that happens before the first check-in of
+// the new run has completed (WiFi still joining, a power cycle, etc.). Both
+// variables start at the in-RAM defaults below (UTC, daytime); setup()
+// overwrites the offset with whatever NVS remembers, if anything, before the
+// first card ever draws - see its own call to Identity::lastUtcOffsetMinutes().
 int lastUtcOffsetMinutes = 0;
 bool lastIsDaytime = true;
 
@@ -212,6 +219,11 @@ void performCheckIn() {
   lastUtcOffsetMinutes = result.utcOffsetMinutes;
   lastIsDaytime = result.isDaytime;
   Display::setEnvironment(lastUtcOffsetMinutes, lastIsDaytime);
+  // Persisted so the value survives a reboot - see Identity::lastUtcOffsetMinutes()'s
+  // own remarks. Written on every successful check-in, not just the first, same as
+  // the RAM copy above: NVS wear from one small write per checkInIntervalMs (minutes
+  // apart, not milliseconds) is not a concern this firmware needs to manage.
+  Identity::setLastUtcOffsetMinutes(lastUtcOffsetMinutes);
 
   // Same "current as of this check-in" contract as the two above, and pushed for
   // the same reason: the check-in path is the only thing that knows these, and
@@ -271,6 +283,16 @@ void setup() {
   Display::showStatus("Starting", "");
 
   Identity::begin();
+
+  // Seeded from NVS before WiFi, time sync, or the first check-in - all of
+  // which can take a while, or fail and retry, on a device that just powered
+  // on. Without this the corner clock would draw raw UTC (the in-RAM default
+  // above) for that whole stretch instead of the last offset this device
+  // ever actually confirmed. A never-checked-in unit reads 0 back (NVS empty),
+  // which is the same UTC default it already drew before this existed - not a
+  // new failure mode, just not a worse one either.
+  lastUtcOffsetMinutes = Identity::lastUtcOffsetMinutes();
+  Display::setEnvironment(lastUtcOffsetMinutes, lastIsDaytime);
 
   // Once per start, before anything below can reboot or hand back to CAL, so
   // every boot is counted exactly once - including the ones that never get far

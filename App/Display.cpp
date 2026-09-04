@@ -74,20 +74,36 @@ constexpr int kCardMargin = 10;
 // Card chrome geometry - see Display.h's own remarks on why all of it is
 // decided here rather than described by the server.
 //
-// The button row has to stay clear of three things at once: the 16px
-// left/right edge strips Touch.h uses for reverse/forward, and the corner
-// clock, which drawClock() sets bottom-right at (314, 236). The clock was
-// enlarged to FreeSans9pt after it proved invisible on real hardware at its
-// original 6x8 bitmap size, so it now occupies roughly y 222-236, x 265-314.
-// A row from x=24 to x=296 ending at y=220 still clears it, but the vertical
-// gap is now 2px rather than 8 - so growing the clock again, or moving the
-// button row down, needs both numbers reconsidered together rather than one
-// of them nudged in isolation.
+// The button row has to stay clear of two things vertically: the card
+// content above it (a four-line forecast plus its "updated" line already
+// reaches roughly y=186 - see drawClock()'s own remarks on why the clock
+// itself is stuck at 9pt) and the corner clock below, which drawClock() sets
+// bottom-right at (314, 236). The clock was enlarged to FreeSans9pt after it
+// proved invisible on real hardware at its original 6x8 bitmap size, so it
+// now occupies roughly y 222-236, x 265-314. kButtonRowY/kButtonHeight are
+// therefore left exactly as they were: a row ending at y=220 clears the
+// clock by 2px, and starting at y=190 clears the card content above by a
+// similar margin, and neither number moves without the other three
+// (content layout, clock size, clock position) being reconsidered together.
+//
+// Width is a different story. The touch controller checks action-button
+// zones before the reverse/forward edge strips (see Touch.cpp's poll() and
+// its own remarks on why that ordering is fixed) - a tap landing inside a
+// button rect is always a button press, regardless of how close that rect
+// sits to the physical edge. So unlike the 16px edge strips themselves,
+// which have to stay clear of card content in the middle of the screen, a
+// button row has nothing logical to stay clear of horizontally, and can run
+// almost the full 320px width. Real fingers found the old 24px-to-296px row
+// (272px total, narrowing to 85px for a three-button card) too narrow to hit
+// reliably; it now runs 8px to 312px (304px total, 97px for three buttons -
+// roughly +14% per button), with a small residual margin from the true
+// bezel edge kept only because a resistive panel's accuracy is known to
+// degrade right at the glass edge, not because anything would misfire.
 constexpr int kButtonRowY = 190;
 constexpr int kButtonHeight = 30;
-constexpr int kButtonRowLeft = 24;
-constexpr int kButtonRowRight = 296;
-constexpr int kButtonGap = 8;
+constexpr int kButtonRowLeft = 8;
+constexpr int kButtonRowRight = 312;
+constexpr int kButtonGap = 6;
 constexpr int kButtonRadius = 6;
 
 // The same bright, high-contrast blue CYD-Dickey settled on for its own

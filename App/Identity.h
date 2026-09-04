@@ -92,6 +92,26 @@ static constexpr uint8_t kMaxBootAttempts = 3;
 uint32_t totalBoots();
 void recordBoot();
 
+/// The most recent `CheckIn::Result::utcOffsetMinutes` a successful check-in
+/// ever handed back, persisted so a device that hasn't completed one yet this
+/// boot - just powered on, WiFi still joining, first check-in still seconds
+/// away - has a real (if possibly a day stale) offset for the corner clock
+/// and day/night logic instead of drawing raw UTC until it does. Updated on
+/// every successful check-in, not just the first, the same "always current"
+/// treatment App.ino's own lastUtcOffsetMinutes already gives it in RAM - this
+/// is that same value's copy that survives a reboot.
+///
+/// 0 (UTC) on a device that has never completed a check-in, matching
+/// CheckIn::Result's own default - a freshly flashed unit gets exactly the
+/// behaviour it already had before this existed, not a new failure mode.
+///
+/// App-only key: CAL never reads or writes it, so - unlike every other member
+/// of this file - it does not need mirroring in CAL's own copy of
+/// Identity.h/.cpp despite the "kept byte-identical" note at the top. It's a
+/// new key, not a change to one CAL also uses.
+int lastUtcOffsetMinutes();
+void setLastUtcOffsetMinutes(int minutes);
+
 void begin();
 
 }  // namespace Identity

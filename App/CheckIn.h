@@ -38,9 +38,12 @@ struct Result {
   /// already applied, recomputed by the server fresh on every check-in from
   /// the device's own location rather than looked up once and cached. Local
   /// time is just `time(nullptr) + utcOffsetMinutes * 60` (see Display.cpp's
-  /// drawClock()). Defaults to 0 (UTC) until the first successful check-in -
+  /// drawClock()). Defaults to 0 (UTC) on a struct nothing has populated yet -
   /// see App.ino's own lastUtcOffsetMinutes, which persists this across the
-  /// gaps between check-ins the same way checkInIntervalMs already does.
+  /// gaps between check-ins the same way checkInIntervalMs already does, and
+  /// Identity::lastUtcOffsetMinutes(), which mirrors it to NVS so it also
+  /// survives a reboot that happens before this run's first check-in ever
+  /// completes.
   int utcOffsetMinutes = 0;
   /// Whether the Sun is up right now at the device's location, recomputed
   /// fresh from real sunrise/sunset on every check-in - not a fixed

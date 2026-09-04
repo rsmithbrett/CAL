@@ -18,6 +18,7 @@ constexpr const char* kKeyAppVer = "appver";
 constexpr const char* kKeyUpdReq = "updreq";
 constexpr const char* kKeyBootAtt = "bootatt";
 constexpr const char* kKeyTotBoots = "totboots";
+constexpr const char* kKeyUtcOffset = "utcoffmin";
 
 // Per-slot keys are built at runtime: "ssid0".."ssid2", "pass0".."pass2".
 // NVS keys are capped at 15 characters, so these stay deliberately short.
@@ -143,5 +144,9 @@ void recordBoot() {
   }
   prefs.putUInt(kKeyTotBoots, current + 1);
 }
+
+int lastUtcOffsetMinutes() { return prefs.getInt(kKeyUtcOffset, 0); }
+
+void setLastUtcOffsetMinutes(int minutes) { prefs.putInt(kKeyUtcOffset, minutes); }
 
 }  // namespace Identity

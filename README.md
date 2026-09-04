@@ -431,10 +431,28 @@ the same way as every other check-in field, and `performCheckIn()` in
 (`lastUtcOffsetMinutes`/`lastIsDaytime`, alongside the existing
 `checkInIntervalMs`) on every *successful* check-in — not one-shot, so both
 track the server's current answer rather than latching whatever the first
-check-in ever said. Before the first check-in ever completes, both default
-sensibly: `0` (UTC) and `true` (daytime), the latter matching the server's
-own fallback for a location it can't yet resolve
-(`DeviceLocalTimeResult.Fallback` in the DiscoverAroundMe repo).
+check-in ever said. `isDaytime` defaults to `true` before this run's first
+check-in ever completes, matching the server's own fallback for a location
+it can't yet resolve (`DeviceLocalTimeResult.Fallback` in the DiscoverAroundMe
+repo) — there is nothing to persist across a reboot for a value the server
+itself only guesses at until it knows better.
+
+**`utcOffsetMinutes` gets one more copy than `isDaytime` does, because its gap
+is worse.** A device that has just powered on — WiFi still joining, or SNTP
+still failing and retrying every 10s in `synchroniseTime()` — can go through
+several minutes of drawing cards before its first check-in of this boot ever
+lands, and until this existed every one of those frames drew raw UTC as if it
+were local time. `Identity::setLastUtcOffsetMinutes()` mirrors the offset to
+NVS (key `utcoffmin`, same `"cal"` namespace as everything else in
+`Identity.h`) on every successful check-in, right alongside the existing
+in-RAM copy, and `setup()` reads it back with `Identity::
+lastUtcOffsetMinutes()` before WiFi, time sync, or anything else in that
+function has run. A device that has completed even one check-in in its life
+therefore draws with that offset — stale by at most a day, never by more,
+since check-ins keep refreshing it — from its very first frame, instead of
+raw UTC while it waits. A device that has never completed a check-in — the
+factory-fresh case, NVS empty — reads back `0` and behaves exactly as it did
+before this existed: not a new failure mode, just a narrower one than before.
 
 **The clock** (`Display.cpp`'s `drawClock()`) is `time(nullptr) +
 utcOffsetMinutes * 60`, turned into wall-clock fields with `gmtime_r` and
@@ -718,10 +736,14 @@ triggers the same manual-nav hold a navigation tap does, so a card someone
 just pressed a button on is not swapped out from under them.
 
 Geometry is entirely the device's: a row of up to three buttons along the
-bottom, from x=24 to x=296 and ending at y=220, which clears the 16px
-reverse/forward edge strips on both sides and the corner clock's
-bottom-right patch. The server says what a button is called and what it
-means; only the device knows its own panel.
+bottom, from x=8 to x=312 and ending at y=220, clearing the corner clock's
+bottom-right patch above it. It does *not* need to clear the 16px
+reverse/forward edge strips on either side the way it looks like it should —
+`Touch.cpp`'s `poll()` checks action-button zones before the edge strips, so
+a tap landing inside a button rect is always a button press regardless of how
+close it sits to the physical edge; real fingers found the original,
+edge-clearing width too narrow to hit reliably. The server says what a
+button is called and what it means; only the device knows its own panel.
 
 ### Assets and the SD card
 
