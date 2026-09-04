@@ -49,6 +49,20 @@ struct Result {
   /// in the DiscoverAroundMe repo).
   bool isDaytime = true;
 
+  /// Today's sunrise and sunset as minutes after UTC midnight (0-1439), or -1
+  /// where the server reported none. Minutes rather than timestamps because
+  /// `utcOffsetMinutes` above is already in the same unit, so local wall-clock
+  /// is `(value + utcOffsetMinutes + 1440) % 1440` with no date arithmetic and
+  /// no 64-bit epoch handling.
+  ///
+  /// -1 rather than 0 for "absent": 0 is a real time (UTC midnight). The server
+  /// sends JSON null in three cases that are all genuinely "there is no answer"
+  /// rather than an error - polar day, polar night, and a device whose position
+  /// has never resolved. A card is expected to say the Sun does not rise or set
+  /// rather than render a placeholder.
+  int sunriseMinutesUtc = -1;
+  int sunsetMinutesUtc = -1;
+
   /// How this device should rotate its cards. `present == false` means the
   /// server sent no policy this time, which means "keep whatever policy you
   /// already had" - explicitly not "show nothing". See

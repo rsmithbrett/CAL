@@ -81,6 +81,16 @@ void showAircraftCard(const String& callsign, int altitudeFeet, double speedKnot
 /// showWeatherStatus()'s split from the boot-ladder screens.
 void showAircraftStatus(const String& headline, const String& detail, bool isProblem);
 
+/// The sunrise/sunset card. Both time strings are already-formatted local
+/// wall-clock ("06:32") - this draws, it does not compute, so the
+/// minutes-to-local arithmetic lives in exactly one place (SunMoon.cpp)
+/// rather than half of it here. Same white/bannered card family as weather
+/// and aircraft.
+///
+/// `detail` is the single line under the two times: day length on an ordinary
+/// day, and on a polar day or night the reason there is no time to show.
+void showSunMoonCard(const String& sunriseText, const String& sunsetText, const String& detail);
+
 /// Shown when no registered card has anything to draw at all - which is the
 /// ordinary state for the first second or two after boot, before the first
 /// fetch lands. Same white/bannered card family as the two status screens

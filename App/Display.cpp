@@ -65,6 +65,9 @@ uint32_t muted() { return gIsDaytime ? kMutedDay : kMutedNight; }
 // device.
 constexpr uint32_t kWeatherBanner = 0x0D2B52u;
 constexpr uint32_t kAircraftBanner = 0x1F6FEBu;
+// Amber, distinct from the two blues above so the three cards are told apart at
+// a glance from across a room rather than by reading the banner text.
+constexpr uint32_t kSunMoonBanner = 0xB45309u;
 constexpr int kBannerHeight = 22;
 constexpr int kCardMargin = 10;
 
@@ -519,6 +522,40 @@ void showAircraftStatus(const String& headline, const String& detail, bool isPro
   if (detail.length() > 0) {
     wrappedLeftText(detail, kCardMargin, 40 + headlineLines * 22 + 12, ink(), 18, 3,
                     kScreenW - kCardMargin * 2);
+  }
+
+  drawClock();
+  restoreDefaultFont();
+}
+
+void showSunMoonCard(const String& sunriseText, const String& sunsetText, const String& detail) {
+  lcd.fillScreen(bg());
+  drawCardBanner("SUN", kSunMoonBanner, 70);
+
+  // Two rows, label left and time right-justified, reusing showAircraftCard's
+  // stat-row layout rather than inventing a second one - this card is the same
+  // shape of information (a short label against a short value).
+  const int rightX = kScreenW - kCardMargin;
+  const int rowValueWidth = 150;
+
+  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setTextSize(1);
+
+  lcd.setTextColor(muted(), bg());
+  lcd.setTextDatum(top_left);
+  lcd.drawString("Sunrise", kCardMargin, 44);
+  lcd.setTextColor(ink(), bg());
+  drawRightJustified(sunriseText, rightX, 44, rowValueWidth);
+
+  lcd.setTextColor(muted(), bg());
+  lcd.drawString("Sunset", kCardMargin, 90);
+  lcd.setTextColor(ink(), bg());
+  drawRightJustified(sunsetText, rightX, 90, rowValueWidth);
+
+  if (detail.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setTextColor(muted(), bg());
+    wrappedLeftText(detail, kCardMargin, 140, muted(), 20, 2, kScreenW - kCardMargin * 2);
   }
 
   drawClock();

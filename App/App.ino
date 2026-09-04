@@ -33,6 +33,10 @@
 #include "Loader.h"
 #include "Log.h"
 #include "SdStorage.h"
+// Included for setTimes() only, not to register the card - cards still register
+// themselves at static-init time and App.ino names none of them. This one needs a
+// push because its content rides the check-in response rather than a fetch of its own.
+#include "SunMoon.h"
 #include "Telemetry.h"
 #include "WifiJoin.h"
 
@@ -208,6 +212,11 @@ void performCheckIn() {
   lastUtcOffsetMinutes = result.utcOffsetMinutes;
   lastIsDaytime = result.isDaytime;
   Display::setEnvironment(lastUtcOffsetMinutes, lastIsDaytime);
+
+  // Same "current as of this check-in" contract as the two above, and pushed for
+  // the same reason: the check-in path is the only thing that knows these, and
+  // the sun card has no fetch of its own to pull them with.
+  SunMoon::setTimes(result.sunriseMinutesUtc, result.sunsetMinutesUtc, result.utcOffsetMinutes);
 
   // The three card fields, in the order they have to happen in.
   //

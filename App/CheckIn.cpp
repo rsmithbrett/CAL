@@ -182,6 +182,11 @@ Result perform() {
   result.debugStreamRequested = responseDoc["debugStreamRequested"] | false;
   result.utcOffsetMinutes = responseDoc["utcOffsetMinutes"] | 0;
   result.isDaytime = responseDoc["isDaytime"] | true;
+  // `| -1` covers a JSON null and a field an older server never sends at all. Both
+  // mean the same thing to this client - no sunrise or sunset to show - so neither
+  // needs distinguishing here.
+  result.sunriseMinutesUtc = responseDoc["sunriseMinutesUtc"] | -1;
+  result.sunsetMinutesUtc = responseDoc["sunsetMinutesUtc"] | -1;
   const int intervalSeconds = responseDoc["checkInIntervalSeconds"] | 300;
   result.intervalMs = static_cast<uint32_t>(intervalSeconds) * 1000UL;
 
