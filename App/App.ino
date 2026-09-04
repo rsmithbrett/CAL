@@ -262,7 +262,15 @@ void setup() {
   Display::showStatus("Starting", "");
 
   Identity::begin();
-  Log::printf("[boot] App starting, installed version=%s", Identity::installedAppVersion().c_str());
+
+  // Once per start, before anything below can reboot or hand back to CAL, so
+  // every boot is counted exactly once - including the ones that never get far
+  // enough to report telemetry. Must stay in setup() and out of loop().
+  Identity::recordBoot();
+
+  Log::printf("[boot] App starting, installed version=%s totalBoots=%lu",
+              Identity::installedAppVersion().c_str(),
+              static_cast<unsigned long>(Identity::totalBoots()));
 
   if (wifiResetRequested()) {
     Loader::returnToLoaderForReprovisioning();

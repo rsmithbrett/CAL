@@ -17,6 +17,7 @@ constexpr const char* kKeyNetCount = "netcount";
 constexpr const char* kKeyAppVer = "appver";
 constexpr const char* kKeyUpdReq = "updreq";
 constexpr const char* kKeyBootAtt = "bootatt";
+constexpr const char* kKeyTotBoots = "totboots";
 
 // Per-slot keys are built at runtime: "ssid0".."ssid2", "pass0".."pass2".
 // NVS keys are capped at 15 characters, so these stay deliberately short.
@@ -129,5 +130,18 @@ void recordBootAttempt() {
 }
 
 void clearBootAttempts() { prefs.putUChar(kKeyBootAtt, 0); }
+
+uint32_t totalBoots() { return prefs.getUInt(kKeyTotBoots, 0); }
+
+void recordBoot() {
+  const uint32_t current = totalBoots();
+  // Saturate instead of wrapping - see Identity.h. A rolled-over 0 would look
+  // like a device that had never booted, which is the one reading this counter
+  // must never produce.
+  if (current == UINT32_MAX) {
+    return;
+  }
+  prefs.putUInt(kKeyTotBoots, current + 1);
+}
 
 }  // namespace Identity

@@ -58,6 +58,18 @@ void report(const char* lastCheckInOutcome) {
   // anti-brick threshold falls back to the factory partition instead.
   const uint8_t bootCount = Identity::bootAttempts();
 
+  // The counter that answers the question bootCount above cannot: incremented
+  // once per start in setup() and never cleared, so a device rebooting when it
+  // shouldn't be is visible from one report rather than from watching
+  // uptimeSeconds fail to climb across several.
+  const uint32_t totalBoots = Identity::totalBoots();
+
+  // Sent so the server can say which build a device is actually on. Without it
+  // that is only inferable from whether a check-in came back "ok" - which says
+  // "matches the current manifest" and never which version, and says nothing at
+  // all about a device that has not checked in since a build went live.
+  const String firmwareVersion = Identity::installedAppVersion();
+
   // Storage, reported for the same reason free heap already is: so pressure
   // shows up fleet-wide on /diag/telemetry before it shows up as a device
   // that quietly stopped caching assets. The card is treated as effectively
@@ -78,6 +90,13 @@ void report(const char* lastCheckInOutcome) {
   requestDoc["sdTotalBytes"] = sdTotalBytes;
   requestDoc["sdUsedBytes"] = sdUsedBytes;
   requestDoc["assetCount"] = assetCount;
+  requestDoc["totalBoots"] = totalBoots;
+  // Omitted rather than sent empty when nothing is installed yet: the server
+  // treats a missing field as "this firmware does not report it", and an empty
+  // string would be stored as a real answer that happens to say nothing.
+  if (firmwareVersion.length() > 0) {
+    requestDoc["firmwareVersion"] = firmwareVersion;
+  }
 
   String body;
   serializeJson(requestDoc, body);
@@ -94,10 +113,11 @@ void report(const char* lastCheckInOutcome) {
   }
 
   Log::printf(
-      "[telemetry] ok (uptimeSeconds=%lu rssi=%d freeHeap=%lu bootCount=%u outcome=%s "
-      "sdUsedMB=%lu sdTotalMB=%lu assets=%u)",
+      "[telemetry] ok (uptimeSeconds=%lu rssi=%d freeHeap=%lu bootCount=%u totalBoots=%lu "
+      "version=%s outcome=%s sdUsedMB=%lu sdTotalMB=%lu assets=%u)",
       static_cast<unsigned long>(uptimeSeconds), rssi, static_cast<unsigned long>(freeHeap),
-      bootCount, lastCheckInOutcome,
+      bootCount, static_cast<unsigned long>(totalBoots),
+      firmwareVersion.length() > 0 ? firmwareVersion.c_str() : "(none)", lastCheckInOutcome,
       static_cast<unsigned long>(sdUsedBytes / (1024ULL * 1024ULL)),
       static_cast<unsigned long>(sdTotalBytes / (1024ULL * 1024ULL)), assetCount);
 }

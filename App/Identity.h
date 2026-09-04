@@ -79,6 +79,19 @@ void recordBootAttempt();
 void clearBootAttempts();
 static constexpr uint8_t kMaxBootAttempts = 3;
 
+/// How many times this App has started, ever. Deliberately NOT bootAttempts():
+/// that counter is cleared the moment the App reaches a network, which happens
+/// before the first telemetry report is sent, so it always reads 0 by the time
+/// anything reports it and is dead as a fleet health signal. This one is never
+/// cleared, so "is this device rebooting when it shouldn't be" is answerable
+/// from a single report instead of by watching uptime across several.
+///
+/// Saturates rather than wrapping: a counter that rolled over to 0 would read
+/// as a freshly provisioned device. At one boot a minute that is millennia
+/// away, so this is about being explicit rather than an expected case.
+uint32_t totalBoots();
+void recordBoot();
+
 void begin();
 
 }  // namespace Identity
