@@ -1319,6 +1319,21 @@ Every push publishes to the rolling **`latest`** release (same tag, same
 download URLs, every time - this is what a device-setup page should link to)
 and to a new, **permanent** `vYYYY.MM.DD.NNNN` release that is never reused.
 
+**That second half silently did not happen at least once.** The two publish
+steps run in sequence, and a failed step aborts the rest of the job by
+default. `latest` replaces every asset on a tag that never changes name, and
+that replace-in-place dance occasionally races against GitHub's own API - a
+"delete this asset" call returning 404 for one already gone, observed live -
+which failed the `latest` step and silently skipped the permanent, dated
+release after it. The push still showed green-adjacent in the sense that
+every binary really did build and upload to `latest` correctly; what never
+happened was the numbered release nothing else can recreate after the fact,
+and the server's own "Load from GitHub" picker only lists numbered releases,
+not `latest` - so the fix for that exact push was reachable only by loading
+`latest` by name, not by picking the newest number in the list. The `latest`
+publish step now has `continue-on-error: true`, so a cosmetic race on the
+disposable tag can no longer cost the permanent one.
+
 ## Open questions
 
 - **`Provisioning::run()`'s abandonment timeout is untested on hardware.** The

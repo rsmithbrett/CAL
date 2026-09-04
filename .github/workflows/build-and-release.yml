@@ -46,6 +46,18 @@ jobs:
         run: bash ci/build-firmware.sh
 
       - name: Publish the "latest" release
+        # continue-on-error, deliberately: this step replaces every asset on a
+        # tag that never changes name, and that replace-in-place dance
+        # occasionally races against GitHub's own API - "delete this asset"
+        # returning 404 for one that's already gone is a real failure mode,
+        # observed live, not a hypothetical. Steps run sequentially and a
+        # failed step aborts the rest of the job by default, which meant one
+        # cosmetic race here was silently skipping the permanent, dated
+        # release below - the one that matters, and the one nothing else
+        # can recreate after the fact. "latest" always gets a fresh full set
+        # of files uploaded regardless of whether the delete step stumbled
+        # first, so failing it forward here costs nothing real.
+        continue-on-error: true
         uses: softprops/action-gh-release@v3
         with:
           tag_name: latest
