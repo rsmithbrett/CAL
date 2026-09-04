@@ -783,13 +783,22 @@ may hit the network and belong on a fetch path, while `isCached()` /
 `drawCached()` never touch it and are what a card's `draw()` is allowed to
 call.
 
-None of this has ever run. The server's `Assets` catalog and its
-device-authenticated fetch endpoint are being built in parallel with the
-firmware, so `/api/assets/{id}` is this firmware's expectation of that route
-rather than something that has ever answered — which also means the boot
-splash has never had an asset to fetch, no PNG has been decoded on a device,
-and no SD write has happened. A clean compile is the only verification any of
-it has.
+**Partially run now, on real hardware — and it found a real bug.** The fetch
+path written above, `/api/assets/{id}`, was this firmware's guess at a route
+that did not exist yet when it was written, and nobody went back to check it
+once the server side actually shipped with a different shape:
+`GET /api/assets/{id}/content` (see `AssetsEndpoints.cs`). A real device
+reached the real server correctly — TLS, `X-Device-Secret`, the request
+itself all worked — and got back a real, honest 404, because the path was
+simply wrong. Caught from the device's own remote debug log
+(`[assets] fetch of '...' failed, http status=404`), which is exactly the
+diagnostic this domain exists to provide. Fixed to the real path.
+
+What is still genuinely unverified is everything past a 200: no device has
+decoded a real PNG or written one to its own SD card, because no fetch has
+yet succeeded far enough to try. A clean compile plus one confirmed-real
+404-to-be-fixed is the current state of verification, which is more than a
+clean compile alone but well short of "this works."
 
 ### A picture as a card, chosen by the server
 
@@ -1337,12 +1346,13 @@ and to a new, **permanent** `vYYYY.MM.DD.NNNN` release that is never reused.
   classified into zones rather than meaning one single thing, a miscalibrated
   or inverted axis would send a "forward" tap backwards instead of going
   unnoticed - the unverified assumption became load-bearing.
-- **The SD card slot has never had a card in it.** `App/Sd.h`/`.cpp` mounts
-  on CS pin 5 because `CYD-Dickey` does on the same board family; nothing has
-  confirmed this particular ELEGOO unit's slot enumerates a card, that a PNG
-  decodes off it, or that `sdTotalBytes`/`sdUsedBytes` report anything real.
-  A device with no card is a supported, ordinary state, so the untested path
-  is specifically "a card is present".
+- **The SD card slot does have a card in it, confirmed from a real device's
+  own telemetry** (`sdTotalMB=7450`, a real capacity, not the zero a missing
+  card reports) — narrower than previously written here. What is still
+  unconfirmed: whether a PNG actually decodes off it, since no asset fetch
+  has yet reached that stage (see "Partially run now, on real hardware"
+  above) - the card mounts and reports real numbers, but nothing has been
+  written to it or read back as an image yet.
 - **The asset fetch endpoint does not exist yet.** `App/Assets.cpp` expects
   `GET /api/assets/{id}` with the usual `X-Device-Secret`, matching the shape
   of every other device route, but the server's `Assets` domain is still a

@@ -24,11 +24,15 @@
 /// discovers an image was too big; that discovery belongs at upload, where a
 /// person can see it.
 ///
-/// **UNVERIFIED ON HARDWARE, and additionally unverified end-to-end:** the
-/// server's asset catalog and its device-authenticated fetch endpoint are
-/// still a stub at the time of writing, so `kFetchPath` below is this
-/// firmware's expectation of that route rather than a route anything has
-/// answered. PNG decode, SD writes and this fetch have all never run.
+/// **Partially verified on hardware, the rest still is not.** A real device
+/// reached the real server: TLS, `X-Device-Secret` auth, and the request
+/// itself all worked, and came back with a real HTTP response - just the
+/// wrong one, a 404, because the fetch path was never checked against the
+/// endpoint actually built (`AssetsEndpoints.cs`'s `.../{id}/content`) and
+/// silently diverged from it. That is now fixed. What is still genuinely
+/// unverified is everything past a 200: no device has yet decoded a real
+/// PNG or written one to its own SD card, because no fetch has ever
+/// succeeded far enough to try.
 namespace Assets {
 
 /// The longest id this module will accept. Ids come from the server, so this

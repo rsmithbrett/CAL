@@ -14,13 +14,18 @@
 namespace Assets {
 namespace {
 
-/// The device-authenticated fetch route. The server's Assets domain is still
-/// a stub, so this path is this firmware's expectation of it rather than
-/// something that has ever answered - see Assets.h. Shaped like every other
-/// device route the App calls: no id of the device anywhere in the request,
-/// only the X-Device-Secret header (see MyWeatherEndpoints' "mine" route for
-/// the fuller reasoning behind that convention).
-constexpr const char* kFetchPath = "/api/assets/";
+/// The device-authenticated fetch route. Corrected against the real,
+/// registered endpoint (`AssetsEndpoints.cs`: `MapGet("/api/assets/{id:guid}/content", ...)`)
+/// after it produced a live 404 on real hardware: this constant used to read
+/// "/api/assets/" with no trailing segment, an id concatenated directly onto
+/// it, and no `/content` - written before the server side existed, as this
+/// firmware's guess at what the route would look like, and never checked
+/// against what was actually built. Shaped like every other device route the
+/// App calls: no id of the device anywhere in the request, only the
+/// X-Device-Secret header (see MyWeatherEndpoints' "mine" route for the
+/// fuller reasoning behind that convention).
+constexpr const char* kFetchPathPrefix = "/api/assets/";
+constexpr const char* kFetchPathSuffix = "/content";
 
 /// One directory, so cachedCount() below is a single readdir and a person
 /// with the card in a reader can see exactly what a device has pulled down.
@@ -67,7 +72,7 @@ bool fetchToCard(const String& id) {
   }
 
   HTTPClient http;
-  const String url = String("https://") + Config::kServiceHost + kFetchPath + id;
+  const String url = String("https://") + Config::kServiceHost + kFetchPathPrefix + id + kFetchPathSuffix;
   if (!http.begin(client, url)) {
     Log::printf("[assets] could not begin request for '%s'", id.c_str());
     return false;
