@@ -64,17 +64,26 @@ jobs:
           name: Latest build (${{ github.sha }})
           body_path: combined-checksums.txt
           make_latest: true
+          # CAL's and App's own per-binary checksums.txt are deliberately not
+          # listed here: both build directories produce a file with that
+          # exact same basename, GitHub release assets are addressed by
+          # basename only, and uploading both under one release turns the
+          # second upload into an "update" of the first - which raced
+          # GitHub's API and 404'd, observed live, aborting this step (see
+          # its continue-on-error above) before it ever reached the
+          # permanent release. combined-checksums.txt already carries both
+          # (see ci/build-firmware.sh) and is the one meant for a release's
+          # own assets; the per-binary files are a local build-time
+          # convenience only.
           files: |
             build/esp32.esp32.esp32/CAL.ino.merged.bin
             build/esp32.esp32.esp32/CAL.ino.bin
             build/esp32.esp32.esp32/CAL.ino.bootloader.bin
             build/esp32.esp32.esp32/CAL.ino.partitions.bin
-            build/esp32.esp32.esp32/checksums.txt
             App/build/esp32.esp32.esp32/App.ino.merged.bin
             App/build/esp32.esp32.esp32/App.ino.bin
             App/build/esp32.esp32.esp32/App.ino.bootloader.bin
             App/build/esp32.esp32.esp32/App.ino.partitions.bin
-            App/build/esp32.esp32.esp32/checksums.txt
             combined-checksums.txt
 
       - name: Compute the next vYYYY.MM.DD.NNNN
@@ -106,15 +115,16 @@ jobs:
           name: ${{ steps.version.outputs.tag }}
           body_path: combined-checksums.txt
           make_latest: false
+          # See the "latest" step above: CAL's and App's per-binary
+          # checksums.txt collide on basename and are deliberately left out;
+          # combined-checksums.txt already carries both.
           files: |
             build/esp32.esp32.esp32/CAL.ino.merged.bin
             build/esp32.esp32.esp32/CAL.ino.bin
             build/esp32.esp32.esp32/CAL.ino.bootloader.bin
             build/esp32.esp32.esp32/CAL.ino.partitions.bin
-            build/esp32.esp32.esp32/checksums.txt
             App/build/esp32.esp32.esp32/App.ino.merged.bin
             App/build/esp32.esp32.esp32/App.ino.bin
             App/build/esp32.esp32.esp32/App.ino.bootloader.bin
             App/build/esp32.esp32.esp32/App.ino.partitions.bin
-            App/build/esp32.esp32.esp32/checksums.txt
             combined-checksums.txt
