@@ -43,14 +43,23 @@ void showFailure(const String& headline, const String& whatToDo);
 /// whichever the caller resolved; updatedAt is a short human string ("Updated
 /// 2 min ago") the caller computes, not a raw timestamp Display has to format.
 ///
-/// Styled after CYD-Dickey's drawWeatherCard(): a white card with a small
-/// colour-banded label in the top-left corner (theirs says "WEATHER" on
-/// navy), the headline number set left-aligned in a bold sans font rather
-/// than centered bitmap text, and body copy left-margined below it instead
-/// of centered. The degree mark stays hand-drawn (see drawTemperature in
-/// Display.cpp) - CYD-Dickey sidesteps the glyph entirely by never printing
-/// one ("72F"), but CAL already solved this the better way and regressing to
-/// their workaround would be a downgrade, not alignment.
+/// Styled after CYD-Dickey's drawWeatherCard() - colour-banded label in the
+/// top-left corner, headline number set left-aligned in a bold sans face,
+/// body copy left-margined below it - but deliberately NOT at their type
+/// sizes. Their card fills the panel with six live readings and a five-day
+/// strip; this one has three fields, because that is all the server sends.
+/// Matching their sizes on a third of their content produced a card that was
+/// both small and empty, so the hierarchy here is stretched to fit what is
+/// actually available: the temperature is a 24pt hero rather than 12pt, and
+/// the supporting lines are set in readable 9pt bold rather than the 6x8
+/// bitmap grey they were. See showWeatherCard()'s own layout note in
+/// Display.cpp, and the README on what the server would have to send for the
+/// missing half of their card to be possible at all.
+///
+/// The degree mark stays hand-drawn (see drawTemperature in Display.cpp) -
+/// CYD-Dickey sidesteps the glyph entirely by never printing one ("72F"), but
+/// CAL already solved this the better way and regressing to their workaround
+/// would be a downgrade, not alignment.
 void showWeatherCard(const String& location, int temperature, const String& unit,
                      const String& shortForecast, const String& updatedAt);
 

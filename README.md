@@ -219,18 +219,117 @@ no aircraft rendering of any kind before this.
 black card to CYD-Dickey's actual layout: a white background, a small
 colour-banded "WEATHER" label in the top-left corner (`Display.cpp`'s
 `drawCardBanner`, mirroring their `lcd.fillRect(0, 0, 110, 22, TFT_NAVY)` +
-bold-white-label pattern from `drawWeatherCard()`), the temperature set large
-and **left-aligned** in a bold sans GFX font (`fonts::FreeSansBold12pt7b`,
-matching their `lcd.setFont(&fonts::FreeSansBold12pt7b)` at the same `(10,
-32)` position) rather than centered bitmap text, and the short-forecast text
-below it left-margined instead of centered. The hand-drawn degree ring from
-before (`drawTemperature`, formerly `centeredTemperature`) stayed — CYD-Dickey
-sidesteps the missing-glyph problem by never printing a degree sign at all
-(`"%.0fF\n"`), but CAL already had the better fix, and regressing to their
-plain "72F" would be a downgrade dressed up as alignment. `location` (Home or
-Target's city/state, which CYD-Dickey's card has no equivalent field for) is
-kept, right-justified on the banner row instead of centered above the
-temperature.
+bold-white-label pattern from `drawWeatherCard()`), the temperature set
+**left-aligned** in a bold sans GFX font rather than centered bitmap text, and
+the short-forecast text below it left-margined instead of centered. The
+hand-drawn degree ring from before (`drawTemperature`, formerly
+`centeredTemperature`) stayed — CYD-Dickey sidesteps the missing-glyph problem
+by never printing a degree sign at all (`"%.0fF\n"`), but CAL already had the
+better fix, and regressing to their plain "72F" would be a downgrade dressed
+up as alignment. `location` (Home or Target's city/state, which CYD-Dickey's
+card has no equivalent field for) is kept.
+
+#### Why the weather card was restyled a second time
+
+That first pass copied CYD-Dickey's *elements* faithfully and was still
+reported as worse than the original once it was seen on hardware. Reading the
+two implementations side by side explains why, and it is not a detail either
+version got wrong.
+
+CYD-Dickey's card carries **five live readings and a five-day strip**:
+temperature, condition, feels-like, humidity and wind, then a bottom band of
+`M/D` plus high/low for five days (`drawWeatherCard()`, `WeatherInfo`,
+`DailyForecast`). It fills the panel top to bottom, and its modest 12pt
+temperature is the right size *because* four other readings and a forecast
+band are competing with it for the same 320×240.
+
+CAL's card has **three fields** — temperature, condition, location — because
+that is all `/api/myweather/mine` sends. Copying a dense layout's type sizes
+onto a third of its content produced the worst of both: roughly 70 vertical
+pixels of content on a 240-pixel panel, everything below y≈120 blank, and
+nothing set large enough to read from across a room. It was *small* and
+*empty* at the same time.
+
+So the second pass stopped imitating their density and spent the space
+instead — fewer facts, set larger:
+
+- **The temperature is now a hero number** at `FreeSansBold24pt7b` (35px
+  digits) rather than sharing 12pt with everything else, with the hand-drawn
+  degree ring scaled to match. `drawTemperature` takes the ring radius as a
+  parameter now, because a fixed 5px ring that read as a degree mark beside a
+  12pt numeral reads as a stray speck beside a 24pt one; at large radii it
+  draws two concentric circles so the ring has a stroke weight in the same
+  family as the bold digits beside it.
+- **The two supporting lines are legible.** `location` and the "updated" line
+  were both `Font0` — the 6×8 bitmap font — in muted grey. That is the exact
+  combination this file already records as having *failed on real hardware*
+  for the corner clock: about 3mm tall on a 2.8" panel, low contrast, and
+  reported by the first person who saw it as simply not being there. The clock
+  was fixed at the time; these two lines on the same card had the identical
+  defect for the identical reason and were not. Both are now set in that same
+  bold 9pt face, and `location` moved to its own line under the banner.
+- **The condition phrase picks a size that fits rather than clipping.** NWS's
+  `shortForecast` is a whole phrase ("Chance Showers And Thunderstorms then
+  Partly Sunny"), not CYD-Dickey's one-or-two-word `weatherCodeDescription()`.
+  It renders at 12pt while it lands in two lines or fewer and drops to 9pt and
+  three lines when it does not (`wrappedLeftText` gained a `measureOnly` mode
+  so the same wrap that draws is the one that measures). Truncating mid-phrase
+  can invert the meaning of exactly the sentences worth reading — "…then
+  Clearing".
+- **The "updated" line is now true.** It was the hardcoded string `"Updated
+  just now"` passed on *every* draw, including redraws of a forecast fetched
+  twenty minutes earlier and including reverse navigation into card history,
+  where it was false by construction. `Weather.cpp` now records `millis()` at
+  each successful fetch and the card says "Updated 7 min ago". A freshness
+  label that is always the same string is worse than none, because it reads as
+  a live measurement and is not one. It is pinned to a fixed baseline rather
+  than flowing under the condition block, so it does not jump around the card
+  when the forecast wording changes length.
+
+**What was deliberately not done:** the empty space was not padded with
+invented content. There is no placeholder humidity, no fake wind reading and
+no forecast strip drawn from data the device does not have.
+
+#### What CYD-Dickey's weather card shows that this server does not send
+
+This is the real reason the two cards cannot be made to match, and it is
+**server-side, not firmware-side**.
+
+*Not modelled server-side.* Feels-like, humidity and wind come from
+Open-Meteo's `current` block in CYD-Dickey (`apparent_temperature`,
+`relative_humidity_2m`, `wind_speed_10m`). DiscoverAroundMe's weather pipeline
+is built on the US National Weather Service instead, and `WeatherPeriod` — the
+server's own model — carries none of the three. The cost of adding them is not
+uniform, and it is worth being exact rather than lumping them together:
+
+- **Wind** is the cheap one. NWS's `/forecast` periods *do* carry `windSpeed`
+  and `windDirection`; `NwsForecastClient.ForecastPeriod` simply does not map
+  them. That is a field on an existing DTO, not a new integration.
+- **Humidity and feels-like** are not in what this endpoint's periods provide.
+  Getting them means a different NWS endpoint or a second provider — a data
+  source change, not a display field.
+
+None of this is done here, and none of it is faked on the card.
+
+*Available on the server, deliberately withheld from the device.* The five-day
+strip is the bigger loss and the more fixable one. `WeatherResult.Periods` is
+a full NWS forecast — roughly a fortnight of periods, each with `Name`
+("Tuesday", "Tuesday Night"), `IsDaytime`, `Temperature`, `ShortForecast` and
+`StartTimeUtc`. `MyWeatherEndpoints.ForDeviceLocation` **trims that to
+`Periods[0]`** before it goes over the wire, for a documented and entirely
+sound reason: the untrimmed response measured 9,194 bytes for a real account,
+and a real device failed to parse it, because ArduinoJson's DOM parser needs
+roughly its own input size again in heap on a chip that has already spent most
+of it on WiFi and TLS.
+
+So the data exists and the device is not allowed to see it. Closing this gap
+is a small, bounded server change — send the first *N* periods carrying only
+`name`, `temperature` and `shortForecast`, which is a few hundred bytes rather
+than nine thousand, nowhere near the ceiling that forced the trim — and then a
+firmware change to render the strip. **Neither is done here**, and the card is
+designed around the three fields that genuinely arrive rather than around a
+strip that would have to be faked to appear. This is the same standard applied
+to the aircraft card's missing airline and route data, below.
 
 **The aircraft card** (`Display::showAircraftCard`, `App/Aircraft.h`/`.cpp`)
 is new. It fetches `/api/myaircraft/mine` with the device's own secret — the
@@ -839,15 +938,24 @@ LovyanGFX's built-in font used here is ASCII-only — no Unicode glyphs, no
 extended-ASCII either — so a degree sign has nothing to look up, whether it's
 attempted as a UTF-8 sequence or a raw `0xB0` byte. A real device showed
 exactly the failure mode this predicts: a missing-glyph box where the degree
-mark should be. `Display.cpp`'s `centeredTemperature(int temperature, const
-String& unit, int y, uint32_t colour, uint8_t size)` works around this by
-composing the temperature display by hand rather than as one string:
-`lcd.drawString` for the number and the unit, and a small ring from
-`lcd.drawCircle()` — sized to the text size and positioned near the
+mark should be. `Display.cpp`'s `drawTemperature()` (formerly
+`centeredTemperature`) works around this by composing the temperature display
+by hand rather than as one string: `lcd.drawString` for the number and the
+unit, and a small ring from `lcd.drawCircle()` — positioned near the
 cap-height, like a real superscript degree mark — standing in for the
 character the font can't render. `showWeatherCard()` calls this instead of
 building `String(temperature) + "°" + unit`; putting a literal degree
 character back into that string reintroduces the missing-glyph box.
+
+The ring's radius is a **parameter**, not a constant, because it has to track
+whatever font the caller selected: the fixed 5px ring that read as a degree
+mark beside a 12pt numeral reads as a stray speck beside the 24pt one the
+weather card now uses. At radii of 7 and above it draws two concentric
+circles, so the ring carries a stroke weight in the same family as the bold
+digits standing next to it — a one-pixel ring beside a 24pt bold numeral reads
+as a rendering artefact, which is the one thing a hand-drawn glyph substitute
+must never look like. The doubling is skipped at small radii, where a 2px
+stroke would close the ring into a dot.
 
 ### WifiJoin, not Network
 
@@ -924,6 +1032,42 @@ buffer — deterministic, and consistent with this module running from
 stack-tight retry loops throughout `App/` — rather than growing a heap buffer
 on every call; output that would overflow it is kept and marked
 `...(truncated)` rather than silently cut off mid-word.
+
+**Log on change, not on every pass.** The 200-line buffer above is the reason
+this is a rule rather than a preference: anything logged unconditionally from
+a timer or a draw path emits the same line forever and pushes out exactly the
+context someone opened the stream to find. `Graphic.cpp`'s `noteState()` and
+`SunMoon.cpp`'s `gLastLoggedSunrise`/`gLastLoggedSunset` established the
+pattern — say something the first time a condition becomes true and the first
+time it stops, and nothing in between.
+
+`Weather.cpp` now follows it throughout, and the cases it covers are worth
+listing because every one of them used to be a **silent** degradation on a
+device in someone's kitchen, with no on-screen tell and nothing in the stream:
+
+- **A missing `temperature` field** defaulted to `0` and drew as a real
+  reading of zero degrees — indistinguishable from a genuine freezing morning.
+  It still draws that way (inventing a substitute reading would be worse), but
+  it now says so, in those words.
+- **A missing `shortForecast`** drew as an empty gap; **an unresolvable
+  city/state/postal code** drew as no location line at all. Both are now
+  reported when they start and when they recover.
+- **Which address the reading is for.** `preferredForecast()` picks the
+  owner's Target over their Home when one is set, and both render as an
+  ordinary city name — so a device showing the "wrong" city has no visible
+  tell whatsoever. The log line is the only place that distinction is ever
+  recoverable from a deployed device.
+- **A failed refresh discards a good forecast.** `cardFetch()` replaces the
+  reading that was on the card with an error message, so one network blip
+  turns a working weather card into "Could not load weather" until the next
+  refresh ten minutes later. That is deliberate existing behaviour, not a bug
+  fixed here — but it now logs the *age of what it threw away*, which is the
+  kind of thing that is impossible to reconstruct after the fact.
+- **What the card actually drew**, gated so it fires only when the content
+  changed. Deliberately *excluding* the "Updated N min ago" string from the
+  change comparison even though it is on screen: freshness ticks over on its
+  own every minute, so folding it in would make every summary differ from the
+  last and turn a change-gated line straight back into a per-draw one.
 
 ### CAL-side (bootloader) logging is explicitly out of scope here
 

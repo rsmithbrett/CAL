@@ -218,8 +218,17 @@ int wrappedCenteredText(const String& text, int y, uint32_t colour, uint8_t size
 // showStatus()/showFailure() above are the shared boot-ladder surface
 // WifiJoin and CAL's own Provisioning module assume renders centered, and
 // this restyle doesn't touch that.
+//
+// measureOnly runs the identical wrap and returns the identical line count
+// without putting anything on screen, so a caller can ask "how tall would
+// this be at the font I currently have selected?" and choose a size before
+// committing to it - see showWeatherCard(), which uses it to keep a long
+// forecast phrase whole at a smaller size rather than clipping it at a
+// larger one. Deliberately the same function rather than a parallel
+// measuring one, because a measurement that can drift from the drawing it
+// predicts is worse than no measurement at all.
 int wrappedLeftText(const String& text, int x, int y, uint32_t colour, int lineHeight,
-                    int maxLines, int maxWidth) {
+                    int maxLines, int maxWidth, bool measureOnly = false) {
   lcd.setTextColor(colour, bg());
   lcd.setTextDatum(top_left);
 
@@ -242,14 +251,18 @@ int wrappedLeftText(const String& text, int x, int y, uint32_t colour, int lineH
     const String candidate = text.substring(lineStart, i);
     if (lcd.textWidth(candidate) <= maxWidth) {
       if (atEnd) {
-        lcd.drawString(candidate, x, cursorY);
+        if (!measureOnly) {
+          lcd.drawString(candidate, x, cursorY);
+        }
         linesDrawn++;
       }
       continue;
     }
 
     const int breakAt = (lastSpace > lineStart) ? lastSpace : i;
-    lcd.drawString(text.substring(lineStart, breakAt), x, cursorY);
+    if (!measureOnly) {
+      lcd.drawString(text.substring(lineStart, breakAt), x, cursorY);
+    }
     cursorY += lineHeight;
     linesDrawn++;
     lineStart = (lastSpace > lineStart) ? lastSpace + 1 : breakAt;
@@ -302,15 +315,35 @@ void drawRightJustified(String text, int rightX, int y, int maxWidthPx) {
   lcd.setTextDatum(top_left);
 }
 
+// Left-margined counterpart to drawRightJustified above: same
+// truncate-one-character-at-a-time technique, anchored at the left instead.
+// Used for the weather card's location and freshness lines, both of which are
+// short in practice but come from data this file does not control (a city
+// name the owner typed, say), and neither of which may be allowed to run off
+// the right edge of the panel.
+void drawTruncatedLeft(String text, int x, int y, int maxWidthPx) {
+  while (text.length() > 1 && lcd.textWidth(text) > maxWidthPx) {
+    text = text.substring(0, text.length() - 1);
+  }
+  lcd.setTextDatum(top_left);
+  lcd.drawString(text, x, y);
+}
+
 // The hand-drawn-degree-ring technique from the original centeredTemperature
 // above, adapted to a left-aligned origin instead of screen-centered - this
 // restyle's cards lay out left-margined (see wrappedLeftText's remarks), so
 // the temperature moves to match rather than staying centered on its own.
-// The bold GFX font used here (fonts::FreeSansBold12pt7b, set by the
-// caller) is exactly as ASCII-only as the bitmap font the original comment
-// describes - the missing-glyph problem, and the reason for drawing this
-// ring instead of a literal degree character, applies here unchanged.
-void drawTemperature(int temperature, const String& unit, int x, int y, uint32_t colour) {
+// The bold GFX font used by the caller is exactly as ASCII-only as the bitmap
+// font the original comment describes - the missing-glyph problem, and the
+// reason for drawing this ring instead of a literal degree character, applies
+// here unchanged.
+//
+// ringRadius is a parameter rather than a constant because the ring has to
+// scale with whatever font the caller selected: a fixed 5px ring that looked
+// like a degree mark beside a 12pt numeral looks like a stray speck beside a
+// 24pt one. The gap either side scales with it for the same reason.
+void drawTemperature(int temperature, const String& unit, int x, int y, uint32_t colour,
+                     int ringRadius) {
   lcd.setTextColor(colour, bg());
   lcd.setTextDatum(top_left);
 
@@ -319,14 +352,23 @@ void drawTemperature(int temperature, const String& unit, int x, int y, uint32_t
   lcd.drawString(numberText, cursorX, y);
   cursorX += lcd.textWidth(numberText);
 
-  constexpr int kRadius = 5;
-  constexpr int kGap = 5;
-  cursorX += kGap;
+  const int gap = ringRadius;
+  cursorX += gap;
   // Near the top of the glyph's cap-height, like a real superscript degree
   // mark - same placement rationale as the original, just against this
   // font's taller cap-height.
-  lcd.drawCircle(cursorX + kRadius, y + kRadius, kRadius, colour);
-  cursorX += kRadius * 2 + kGap;
+  const int ringCentreX = cursorX + ringRadius;
+  const int ringCentreY = y + ringRadius;
+  lcd.drawCircle(ringCentreX, ringCentreY, ringRadius, colour);
+  if (ringRadius >= 7) {
+    // A one-pixel ring reads as a hairline next to a 24pt *bold* numeral,
+    // which is the one place it must not look like an artefact. A second
+    // concentric circle gives it a stroke weight in the same family as the
+    // digits it is standing beside. Skipped at small radii, where a 2px
+    // stroke would close the ring into a dot.
+    lcd.drawCircle(ringCentreX, ringCentreY, ringRadius - 1, colour);
+  }
+  cursorX += ringRadius * 2 + gap;
 
   lcd.drawString(unit, cursorX, y);
 }
@@ -377,52 +419,112 @@ void showFailure(const String& headline, const String& whatToDo) {
   wrappedCenteredText(whatToDo, 75 + headlineLines * 22 + 12, muted(), 1, 14, 3);
 }
 
+// Layout note, because this card was restyled twice and the second pass is
+// the one that matters.
+//
+// The first pass matched CYD-Dickey's *elements* - navy banner, bold
+// left-aligned temperature, left-margined body - and was still reported as
+// worse than the original on real hardware. Reading the two side by side
+// explains why, and it is not a detail either version got wrong: their card
+// carries five live readings plus a five-day strip (temperature, condition,
+// feels-like, humidity, wind, then M/D + high/low for five days) and fills
+// the panel top to bottom with them. This card has three fields to show,
+// because that is all /api/myweather/mine sends (see Weather.h). Copying a
+// dense layout's type sizes onto a third of its content produced a card that
+// was small AND empty - roughly 70 vertical pixels of content on a 240px
+// panel, with everything below y=120 blank.
+//
+// So this pass stops imitating their density and spends the space instead.
+// Fewer facts, set larger: the temperature becomes a genuine hero number at
+// 24pt rather than sharing 12pt with everything else, and the two lines that
+// were 6x8 bitmap grey are set in the same readable bold 9pt the clock
+// settled on. What is deliberately NOT done here is padding the empty space
+// with invented content - no fake humidity, no placeholder forecast strip.
+// The gap is real and it is server-side; see README.
 void showWeatherCard(const String& location, int temperature, const String& unit,
                      const String& shortForecast, const String& updatedAt) {
   lcd.fillScreen(bg());
   drawCardBanner("WEATHER", kWeatherBanner, 110);
 
-  // Location, right-justified against the card's right margin on the same
-  // row as the banner - CYD-Dickey's own weather card has no location line
-  // (it assumes local weather), but CAL's server data carries one
-  // (Home/Target city, state) and dropping it would lose real information
-  // the original centered card showed.
+  // Location on its own line directly under the banner, on the same left
+  // column as everything else on the card. CYD-Dickey's weather card has no
+  // location field at all (it assumes local weather); CAL's data carries one
+  // (Home or Target's city/state), so it stays - it is the difference between
+  // "72 degrees" and "72 degrees *where*", which matters precisely because
+  // this device may be sitting somewhere other than the address it reports.
+  //
+  // It previously sat right-justified on the banner row in Font0 - the 6x8
+  // bitmap font, in muted grey. That is the exact combination drawClock()
+  // above records as having failed on real hardware: roughly 3mm tall on this
+  // 2.8" panel, low contrast, read from across a room, and reported by the
+  // first person who saw it as simply not being there. The clock was fixed
+  // at the time; these two micro-text lines on the same card had the identical
+  // defect for the identical reason and were not. Both are now set in that
+  // same bold 9pt face.
   if (location.length() > 0) {
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
     lcd.setTextColor(muted(), bg());
-    drawRightJustified(location, kScreenW - 8, 7, kScreenW - 120);
+    drawTruncatedLeft(location, kCardMargin, 28, kScreenW - kCardMargin * 2);
   }
 
-  // Big left-aligned temperature in a bold sans font - CYD-Dickey's
-  // `lcd.setFont(&fonts::FreeSansBold12pt7b); ...; lcd.printf("%.0fF\n")` at
-  // (10, 32), minus their plain "F" (see drawTemperature's own remarks on
-  // why the hand-drawn ring stays). Tinted with the weather banner's own
-  // navy by day - it reads fine against the white day background, and
-  // echoes the banner colour the way CYD-Dickey's own card doesn't bother
-  // to. That same navy would be nearly invisible against the night
-  // background (dark-on-black), so night falls back to the plain theme ink
-  // colour instead - the banner rect above still carries the navy accent
-  // either way, so nothing brand-identifying is actually lost at night.
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  // The hero number. CYD-Dickey sets its temperature at 12pt because it is
+  // one of six things competing for the same panel; here it is one of three,
+  // so it gets the weight that buys. Tinted with the weather banner's own
+  // navy by day - it reads fine against the white day background, and echoes
+  // the banner colour the way CYD-Dickey's own card doesn't bother to. That
+  // same navy would be nearly invisible against the night background
+  // (dark-on-black), so night falls back to the plain theme ink colour
+  // instead - the banner rect above still carries the navy accent either way,
+  // so nothing brand-identifying is lost at night.
+  //
+  // 24pt digits are 35px tall, so this block occupies y 50-85 and the ring
+  // scales to match (see drawTemperature). Widest realistic string, a
+  // three-digit temperature, ends around x=150 - nowhere near the right edge.
+  lcd.setFont(&fonts::FreeSansBold24pt7b);
   lcd.setTextSize(1);
-  drawTemperature(temperature, unit, kCardMargin, 32, gIsDaytime ? kWeatherBanner : ink());
+  drawTemperature(temperature, unit, kCardMargin, 50, gIsDaytime ? kWeatherBanner : ink(),
+                  /*ringRadius=*/8);
 
-  // Short forecast, bold sans, left-margined and word-wrapped underneath -
-  // same position CYD-Dickey uses for its weatherCodeDescription() line
-  // relative to the temperature above it, just wrapped instead of a single
-  // println() since shortForecast can run considerably longer than "Overcast".
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
-  lcd.setTextSize(1);
-  const int forecastLines =
-      wrappedLeftText(shortForecast, kCardMargin, 78, ink(), 22, 4, kScreenW - kCardMargin * 2);
+  // The condition phrase. CYD-Dickey never wraps here because its
+  // weatherCodeDescription() is always a word or two ("Overcast"); NWS's
+  // shortForecast is a whole phrase ("Chance Showers And Thunderstorms then
+  // Partly Sunny"), so this picks the largest size the phrase actually fits
+  // in rather than clipping it: 12pt while it lands in two lines or fewer,
+  // dropping to 9pt and three lines when it does not. A forecast the
+  // household can read in full at a smaller size beats half a forecast at a
+  // larger one, and truncating mid-phrase can invert the meaning of exactly
+  // the sentences worth reading ("...then Clearing").
+  const int bodyWidth = kScreenW - kCardMargin * 2;
+  if (shortForecast.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    lcd.setTextSize(1);
+    const int linesAtLargeSize = wrappedLeftText(shortForecast, kCardMargin, 100, ink(), 24, 3,
+                                                 bodyWidth, /*measureOnly=*/true);
+    if (linesAtLargeSize <= 2) {
+      wrappedLeftText(shortForecast, kCardMargin, 100, ink(), 24, 2, bodyWidth);
+    } else {
+      lcd.setFont(&fonts::FreeSansBold9pt7b);
+      wrappedLeftText(shortForecast, kCardMargin, 100, ink(), 18, 3, bodyWidth);
+    }
+  }
 
+  // Freshness, pinned to a fixed baseline rather than flowing under whatever
+  // the condition block happened to need. Both branches above bottom out
+  // above this line (12pt x 2 = y148, 9pt x 3 = y154), and a fixed position
+  // means this line does not jump around the card every time the forecast
+  // wording changes length - the card is looked at from across a room, where
+  // a moving element is read as a change in the data.
+  //
+  // The caller computes the wording. It is worth saying plainly that this
+  // used to be the hardcoded string "Updated just now" on every draw,
+  // including redraws of a card fetched twenty minutes earlier - see
+  // Weather.cpp, which now measures it.
   if (updatedAt.length() > 0) {
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
     lcd.setTextColor(muted(), bg());
-    lcd.setTextDatum(top_left);
-    lcd.drawString(updatedAt, kCardMargin, 78 + forecastLines * 22 + 10);
+    drawTruncatedLeft(updatedAt, kCardMargin, 162, bodyWidth);
   }
 
   drawClock();
