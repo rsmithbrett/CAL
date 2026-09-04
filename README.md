@@ -328,8 +328,10 @@ is a small, bounded server change — send the first *N* periods carrying only
 than nine thousand, nowhere near the ceiling that forced the trim — and then a
 firmware change to render the strip. **Neither is done here**, and the card is
 designed around the three fields that genuinely arrive rather than around a
-strip that would have to be faked to appear. This is the same standard applied
-to the aircraft card's missing airline and route data, below.
+strip that would have to be faked to appear. The aircraft card below applied
+this same standard to its own missing airline/route data for a while, until
+that gap was closed server-side — see "Airline name, logo, and route" below
+for what changed once it was.
 
 **The aircraft card** (`Display::showAircraftCard`, `App/Aircraft.h`/`.cpp`)
 is new. It fetches `/api/myaircraft/mine` with the device's own secret — the
@@ -345,20 +347,56 @@ as their `drawTruncatedRight()` (`Display.cpp`'s `drawRightJustified`) so a
 short value and a long one both end flush at the same edge. The 8-point
 compass-direction lookup for `headingDegrees` is also a direct port of theirs.
 
-**What CYD-Dickey's aircraft card assumes that this server doesn't provide:**
-their card devotes its left column to an airline logo or bold airline name
-(`Airlines.h`, a user-managed LittleFS directory keyed by ICAO callsign
-prefix) and a smaller line underneath showing the flight's departure/arrival
-airports (`Route.h`, via a free third-party route database, hexdb.io).
-DiscoverAroundMe's server-side aircraft pipeline
-(`MyAircraftService`/`AdsbLolClient`, `AircraftSighting`) has neither: it
-exposes exactly `callsign`, `altitudeFeet`, `speedKnots`, `headingDegrees`,
-and `distanceMiles` per aircraft, with no airline-name resolution or route
-lookup anywhere in it. Rather than inventing a fake airline/route field or
-silently dropping the idea, `App/`'s aircraft card uses the callsign itself as
-its headline (in the visual slot CYD-Dickey's logo/name occupies) and simply
-has no route line. Giving CAL's aircraft card real airline names or routes
-would require adding that lookup to the server first — out of scope here.
+**Airline name, logo, and route — added after the gap above was closed
+server-side.** `AircraftSighting` now carries seven more fields, all optional:
+`airlineCode`, `airlineName`, `airlineLogoAssetId`, `originCode`,
+`destinationCode` (plus `originName`/`destinationName`, which this card reads
+the wire contract for but does not parse — see below). The server resolves
+these the same way CYD-Dickey's own `Airlines.h`/`Route.h` did, just fleet-wide
+in one cache instead of twelve entries of per-device RAM lost on every reboot.
+
+`airlineName` takes over the headline slot CYD-Dickey gives its logo/name and
+this card previously gave the bare callsign; callsign drops to the secondary
+line alongside distance instead of disappearing (`"UAL123 - 4.2 mi away"`).
+Empty `airlineName` — a server old enough to predate the field entirely, the
+6-month backward-compatibility case — falls straight back to callsign as the
+headline, this card's entire original behaviour with nothing new to detect or
+branch on.
+
+A route line appears between the distance line and the stat rows when
+`originCode` is present: `"KRDU -> KLGA"`, or `"from KRDU"` alone when no
+destination was on file. Neither present draws no line at all, the same
+"nothing configured, nothing shown" rule Graphic.cpp already follows for a
+missing picture — this card does not fabricate a dash or a placeholder where
+there is no data. **Codes only, never the full names the server also sends**:
+two airport names plus everything else already on this card (headline,
+distance, three stat rows, freshness) does not fit readably on a 320x240
+panel, the identical "small and empty vs. too dense" tradeoff the missing
+weather forecast strip above already documents. `originName`/`destinationName`
+are consequently never parsed by `Aircraft.cpp` at all — a field the filter
+does not whitelist is simply never seen, not wastefully decoded and discarded.
+
+**The logo** is the first image this build draws that is *not* the whole
+card. Every existing PNG draw here (`Assets::drawCached`/`drawFullScreen`,
+`Graphic.cpp`'s picture card) fills the entire 320x240 panel; a small airline
+logo alongside text needed a new primitive, `Display::drawPngFromSdInRect()`
+and `Assets::drawCachedInRect()`, bounded to a caller-given rectangle rather
+than clearing and filling the whole screen. The rectangle itself —
+`Display::aircraftLogoZone()`, top-right of the content area — is decided in
+`Display.cpp` for the same reason all of this build's card chrome geometry
+lives there, even though `Display.cpp` never touches `Assets.h` itself:
+`Aircraft.cpp` owns the asset id and calls `Assets::drawCachedInRect()`
+directly from its own `cardDraw()`, the identical module boundary
+`Graphic.cpp` already keeps. The logo is fetched (`Assets::ensureCached()`)
+from `cardFetch()`, never from `cardDraw()` — the same fetch/draw split every
+other card in this build follows, so stepping backwards through the rotation
+is never a network operation.
+
+This bounded-rectangle draw is **unverified on hardware more pointedly than
+most of this codebase**. Every other PNG draw here fills the whole panel; this
+is the first one that doesn't, and the auto-fit-within-a-box behaviour is read
+from LovyanGFX's own `drawPngFile` parameters, not confirmed against an actual
+decode of an actual logo on an actual panel.
 
 Both cards also gained a "content status" treatment for their non-Ok states
 (not yet activated, disabled for this owner, nothing currently in range, auth

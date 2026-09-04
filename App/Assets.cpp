@@ -148,6 +148,13 @@ bool drawFullScreen(const String& id) {
   return Display::drawPngFromSd(pathFor(id));
 }
 
+bool drawCachedInRect(const String& id, int32_t x, int32_t y, int32_t w, int32_t h) {
+  if (!isCached(id)) {
+    return false;
+  }
+  return Display::drawPngFromSdInRect(pathFor(id), x, y, w, h);
+}
+
 bool drawCached(const String& id) {
   if (!isCached(id)) {
     return false;

@@ -14,17 +14,20 @@
 /// CYD-Dickey's Aircraft.cpp/Aircraft.h talk to api.adsb.lol directly from
 /// the device and additionally resolve, per callsign, an airline name/logo
 /// (Airlines.h, user-managed on LittleFS) and a departure/arrival route
-/// (Route.h, via hexdb.io). None of that richer data exists on this path:
-/// DiscoverAroundMe's server-side MyAircraftService/AdsbLolClient (see
-/// MyAircraftEndpoints.cs's "/mine" route) exposes exactly five fields per
-/// aircraft - callsign, altitude, speed, heading, distance - already
-/// filtered to airborne traffic within the owner's configured radius, with
-/// no airline or route lookup anywhere in that pipeline. CYD-Dickey's
-/// aircraft card's airline-name/logo panel and route line therefore have no
-/// equivalent here; this module and Display::showAircraftCard() work with
-/// only the five fields the server actually provides. Enriching the server
-/// side with an airline/route lookup would be a separate, larger project,
-/// not something this firmware can paper over on its own.
+/// (Route.h, via hexdb.io). That used to have no equivalent here; the server
+/// now does the same resolution fleet-wide instead of per-device (see
+/// DiscoverAroundMe's "Give the aircraft card its airline, logo and route
+/// back" - the airline directory, hexdb.io route/airport cache, and seven new
+/// AircraftSighting fields), so this module and Display::showAircraftCard()
+/// consume them the same way this card already consumed the original five.
+///
+/// All seven new fields are optional on the wire and are read that way here -
+/// see Sighting's own remarks below for what an absent value of each one
+/// means and what this card does about it. None of them are ever required
+/// for the original five-field card to keep working exactly as it always
+/// has: a server old enough to predate this enrichment simply never sends
+/// them, ArduinoJson's `| ""` idiom reads that as empty, and every draw path
+/// below already treats empty as "fall back to the old behaviour".
 namespace Aircraft {
 
 enum class Status {
@@ -44,6 +47,39 @@ struct Sighting {
   double speedKnots = 0;
   double headingDegrees = 0;
   double distanceMiles = 0;
+
+  /// The matched directory row's code - a real ICAO prefix, or the
+  /// server's two non-ICAO catch-alls "PVT" (general aviation, a tail
+  /// number rather than an airline prefix) and "OTH" (a real airline
+  /// prefix the directory doesn't have a row for). Not drawn directly by
+  /// this card; airlineName below is what appears on screen; this exists so
+  /// firmware logic could branch on it later without needing to add a wire
+  /// field for that. Empty only against firmware old enough to predate this
+  /// field entirely - a server that has it always sends one of the three.
+  String airlineCode;
+  /// The directory row's display name, already chosen to be card-width by
+  /// whoever maintains the directory server-side - drawn verbatim, never
+  /// wrapped or re-derived here. Empty means exactly one thing: this
+  /// firmware is talking to a server old enough to not send it. It does NOT
+  /// mean "general aviation" - PVT and OTH are ordinary directory rows with
+  /// their own editable names, so a real server always sends something here
+  /// once it has the field at all.
+  String airlineName;
+  /// An Assets catalog id, fetched the same way Graphic.cpp fetches its own
+  /// configured picture - see Aircraft.cpp's cardFetch(). Empty means no
+  /// logo is on file for this row, which is the ordinary case for any
+  /// airline nobody has uploaded one for yet, not a fetch failure.
+  String airlineLogoAssetId;
+  /// ICAO airport codes ("KRDU"), not full names. The server also sends
+  /// originName/destinationName; this card draws codes only and does not
+  /// parse them - see Display::showAircraftCard()'s own remarks on why.
+  /// Either code can be empty independently: originCode set with
+  /// destinationCode empty is a filed departure with no filed arrival
+  /// (common for general aviation and some regional traffic); both empty is
+  /// "hexdb has nothing on file for this callsign", itself the common case
+  /// for GA and short-hop regional flights, not a lookup failure.
+  String originCode;
+  String destinationCode;
 };
 
 struct Result {

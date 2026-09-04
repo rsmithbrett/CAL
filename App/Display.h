@@ -74,15 +74,47 @@ void showWeatherCard(const String& location, int temperature, const String& unit
 /// (auth/network trouble) reads the same amber as showFailure()'s headline.
 void showWeatherStatus(const String& headline, const String& detail, bool isProblem);
 
-/// The aircraft-overhead card - new; CAL's App had no equivalent before this.
-/// Modeled on CYD-Dickey's drawFeaturedAircraft(), minus the parts that
-/// assume data DiscoverAroundMe's server doesn't provide (airline name/logo,
-/// route/airport lookups - see Aircraft.h's own remarks): callsign stands in
-/// as the card's headline where CYD-Dickey puts the airline logo or name,
-/// and the stat rows below (altitude/speed/heading) reuse their
-/// truncate-and-right-justify layout for the values.
-void showAircraftCard(const String& callsign, int altitudeFeet, double speedKnots,
-                      double headingDegrees, double distanceMiles, const String& updatedAt);
+/// The aircraft-overhead card. Originally modeled on CYD-Dickey's
+/// drawFeaturedAircraft() minus the parts that assumed data the server didn't
+/// provide; the server now does (airline name, logo, route - see Aircraft.h's
+/// updated remarks), so this draws them, with callsign staying on screen as a
+/// secondary line rather than being displaced entirely.
+///
+/// airlineName empty means the server has no name for this callsign (older
+/// firmware talking to a newer server never happens the other way, but the
+/// reverse - this firmware against a server old enough to send nothing - is
+/// exactly the 6-month compatibility case) - callsign is promoted back to the
+/// headline in that case, which is this card's entire original behaviour.
+///
+/// originCode/destinationCode: empty destinationCode with a non-empty
+/// originCode draws a one-sided "from X" line (a filed departure with no
+/// filed arrival, or a route lookup partial); both empty draws no route line
+/// at all rather than an empty one - the honest rendering of "no route data",
+/// same reasoning as the card drawing nothing when there is no picture
+/// configured (see Graphic.h). Full names are not drawn here at all: two
+/// airport names plus everything else already on this card does not fit
+/// readably on a 320x240 panel - see the README on why codes were chosen
+/// over names for this card specifically, unlike the sunrise card's plain
+/// text.
+///
+/// This function draws no logo. The image lives in the Assets cache under a
+/// server-given id this file has no reason to know about (see aircraftLogoZone()
+/// below and Aircraft.cpp's cardDraw()) - the same module boundary Graphic.cpp
+/// already keeps: whoever owns the asset id draws the picture, Display.cpp
+/// only ever decides where things go.
+void showAircraftCard(const String& callsign, const String& airlineName, int altitudeFeet,
+                      double speedKnots, double headingDegrees, double distanceMiles,
+                      const String& originCode, const String& destinationCode,
+                      const String& updatedAt);
+
+/// The rectangle a small airline logo may be drawn into, alongside
+/// showAircraftCard()'s own text - geometry decided here for the same reason
+/// every other piece of card chrome is (see this file's own remarks on why),
+/// even though this file never draws into it itself. Positioned top-right of
+/// the content area: clear of the banner above it, clear of the headline
+/// text's left-aligned start, and above the distance/route line so a wide
+/// logo cannot run into either.
+void aircraftLogoZone(int16_t& x, int16_t& y, int16_t& w, int16_t& h);
 
 /// The aircraft card's non-Ok states, including "fetch succeeded, nothing is
 /// currently overhead" (not an error - see Aircraft::Status::Empty) - same
@@ -151,6 +183,20 @@ void drawNavAffordances(bool canReverse);
 /// the SD read lives behind this function because this file owns the one
 /// LGFX instance for this panel, the same reason readTouchRaw() is here.
 bool drawPngFromSd(const String& path);
+
+/// Same decode, bounded to a caller-given rectangle instead of the whole
+/// panel - for a small logo layered onto a card another draw call has
+/// already composed, rather than the picture being the whole card. Does NOT
+/// clear the screen first, unlike drawPngFromSd(): clearing here would erase
+/// the content it is being layered onto. Scaled to fit within (w, h) and
+/// centred there.
+///
+/// UNVERIFIED ON HARDWARE more pointedly than most of this file: every other
+/// PNG draw here fills the whole panel, and this is the first one that
+/// doesn't. The bounded-rect behaviour is read from LovyanGFX's own
+/// drawPngFile parameters (maxWidth/maxHeight plus a centred datum), not
+/// confirmed against an actual decode of an actual logo on this actual panel.
+bool drawPngFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, int32_t h);
 
 }  // namespace Display
 

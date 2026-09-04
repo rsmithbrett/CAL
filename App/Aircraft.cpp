@@ -4,6 +4,7 @@
 #include <HTTPClient.h>
 #include <NetworkClientSecure.h>
 
+#include "Assets.h"
 #include "Cards.h"
 #include "Config.h"
 #include "Display.h"
@@ -87,10 +88,14 @@ Result fetchMine() {
     return result;
   }
 
-  // Only the fields Display::showAircraftCard() reads are worth keeping in
-  // the filter - same rationale as CYD-Dickey's Aircraft.cpp filtering
-  // adsb.lol's couple-dozen raw fields down to five, just applied to this
-  // server's already-trimmed AircraftResult/AircraftSighting shape instead.
+  // Only the fields this card actually draws are worth keeping in the filter
+  // - same rationale as CYD-Dickey's Aircraft.cpp filtering adsb.lol's
+  // couple-dozen raw fields down to five, just applied to this server's own
+  // AircraftSighting shape. originName/destinationName are deliberately
+  // absent: the server sends them, this card draws codes only (see
+  // Display::showAircraftCard()'s remarks), and a field this filter does not
+  // whitelist is simply never seen rather than wastefully parsed and
+  // discarded.
   JsonDocument filter;
   filter["radiusMiles"] = true;
   filter["aircraft"][0]["callsign"] = true;
@@ -98,6 +103,11 @@ Result fetchMine() {
   filter["aircraft"][0]["speedKnots"] = true;
   filter["aircraft"][0]["headingDegrees"] = true;
   filter["aircraft"][0]["distanceMiles"] = true;
+  filter["aircraft"][0]["airlineCode"] = true;
+  filter["aircraft"][0]["airlineName"] = true;
+  filter["aircraft"][0]["airlineLogoAssetId"] = true;
+  filter["aircraft"][0]["originCode"] = true;
+  filter["aircraft"][0]["destinationCode"] = true;
 
   JsonDocument doc;
   const DeserializationError err =
@@ -127,6 +137,15 @@ Result fetchMine() {
   result.nearest.speedKnots = nearest["speedKnots"] | 0.0;
   result.nearest.headingDegrees = nearest["headingDegrees"] | 0.0;
   result.nearest.distanceMiles = nearest["distanceMiles"] | 0.0;
+  // `| ""` reads a JSON null exactly the same as a field an older server
+  // never sends at all - both mean "nothing here" to this client, and the
+  // contract deliberately writes null rather than omitting the key, so both
+  // shapes have to land on the same empty String regardless.
+  result.nearest.airlineCode = String((const char*)(nearest["airlineCode"] | ""));
+  result.nearest.airlineName = String((const char*)(nearest["airlineName"] | ""));
+  result.nearest.airlineLogoAssetId = String((const char*)(nearest["airlineLogoAssetId"] | ""));
+  result.nearest.originCode = String((const char*)(nearest["originCode"] | ""));
+  result.nearest.destinationCode = String((const char*)(nearest["destinationCode"] | ""));
   return result;
 }
 
@@ -148,14 +167,58 @@ namespace {
 Result gLast;
 bool gEverFetched = false;
 
+/// millis() when gLast last became an Ok result - same field, same reasoning,
+/// same fix as Weather.cpp's gLastOkMs: "Updated just now" was previously
+/// hardcoded on every draw, including a redraw of a sighting fetched minutes
+/// earlier and reverse navigation into card history, where it was false by
+/// construction.
+unsigned long gLastOkMs = 0;
+
+/// Unsigned subtraction, correct across the millis() rollover at ~49 days -
+/// identical to Weather.cpp's describeFreshness(), duplicated rather than
+/// shared because the two cards' Result types are unrelated and a shared
+/// helper would need a third file just to hold one function used twice.
+String describeFreshness(unsigned long fetchedAtMs) {
+  const unsigned long ageMinutes = (millis() - fetchedAtMs) / 60000UL;
+  if (ageMinutes == 0) {
+    return "Updated just now";
+  }
+  if (ageMinutes == 1) {
+    return "Updated 1 min ago";
+  }
+  return String("Updated ") + ageMinutes + " min ago";
+}
+
 void cardFetch() {
   gLast = fetchMine();
   gEverFetched = true;
   if (gLast.status == Status::Ok) {
-    Log::printf("[aircraft] card updated: %s alt=%dft speed=%.0fkts heading=%.0f dist=%.1fmi",
-                gLast.nearest.callsign.c_str(), gLast.nearest.altitudeFeet,
-                gLast.nearest.speedKnots, gLast.nearest.headingDegrees,
-                gLast.nearest.distanceMiles);
+    gLastOkMs = millis();
+
+    // Belongs on the fetch path, not draw: ensureCached() fetches on a miss,
+    // and Cards.h's whole fetch/draw split exists so stepping backwards
+    // through the rotation is never a network operation - see Graphic.cpp's
+    // own remarks on the same split. A blank airlineLogoAssetId is the
+    // ordinary case (no logo on file for this row yet) and skips the call
+    // entirely rather than asking Assets to cache an empty id.
+    if (gLast.nearest.airlineLogoAssetId.length() > 0) {
+      const bool logoReady = Assets::ensureCached(gLast.nearest.airlineLogoAssetId);
+      Log::printf("[aircraft] logo %s for '%s': %s", logoReady ? "cached" : "unavailable",
+                  gLast.nearest.airlineCode.c_str(), gLast.nearest.airlineLogoAssetId.c_str());
+    }
+
+    String routeSummary = "none on file";
+    if (gLast.nearest.originCode.length() > 0) {
+      routeSummary = gLast.nearest.destinationCode.length() > 0
+          ? (gLast.nearest.originCode + "->" + gLast.nearest.destinationCode)
+          : ("from " + gLast.nearest.originCode + " only");
+    }
+    Log::printf(
+        "[aircraft] card updated: %s (%s) alt=%dft speed=%.0fkts heading=%.0f dist=%.1fmi route=%s",
+        gLast.nearest.callsign.c_str(),
+        gLast.nearest.airlineName.length() > 0 ? gLast.nearest.airlineName.c_str() : "no airline match",
+        gLast.nearest.altitudeFeet, gLast.nearest.speedKnots, gLast.nearest.headingDegrees,
+        gLast.nearest.distanceMiles, routeSummary.c_str());
   }
 }
 
@@ -180,9 +243,23 @@ bool cardIsNotable(uint16_t) {
 
 void cardDraw(uint16_t) {
   if (gLast.status == Status::Ok) {
-    Display::showAircraftCard(gLast.nearest.callsign, gLast.nearest.altitudeFeet,
-                              gLast.nearest.speedKnots, gLast.nearest.headingDegrees,
-                              gLast.nearest.distanceMiles, "Updated just now");
+    Display::showAircraftCard(gLast.nearest.callsign, gLast.nearest.airlineName,
+                              gLast.nearest.altitudeFeet, gLast.nearest.speedKnots,
+                              gLast.nearest.headingDegrees, gLast.nearest.distanceMiles,
+                              gLast.nearest.originCode, gLast.nearest.destinationCode,
+                              describeFreshness(gLastOkMs));
+
+    // Drawn after showAircraftCard(), not by it - same module boundary
+    // Graphic.cpp already keeps with Display.cpp: whoever holds the asset id
+    // draws the picture, Display.cpp only ever decides where things go (see
+    // aircraftLogoZone()). Never fetches - this is the draw path, and a
+    // logo that hasn't finished caching this cycle simply doesn't appear
+    // this cycle rather than blocking the card on the network.
+    if (gLast.nearest.airlineLogoAssetId.length() > 0) {
+      int16_t x, y, w, h;
+      Display::aircraftLogoZone(x, y, w, h);
+      Assets::drawCachedInRect(gLast.nearest.airlineLogoAssetId, x, y, w, h);
+    }
     return;
   }
 

@@ -549,34 +549,79 @@ void showWeatherStatus(const String& headline, const String& detail, bool isProb
   restoreDefaultFont();
 }
 
-void showAircraftCard(const String& callsign, int altitudeFeet, double speedKnots,
-                      double headingDegrees, double distanceMiles, const String& updatedAt) {
+void aircraftLogoZone(int16_t& x, int16_t& y, int16_t& w, int16_t& h) {
+  // Top-right of the content area: clear of the banner (ends y22), clear of
+  // the headline's left-aligned start (truncated to stop at x210, see
+  // below), and above the distance/route line at y64 so a wide logo cannot
+  // run into it either.
+  x = 220;
+  y = 26;
+  w = 90;
+  h = 34;
+}
+
+void showAircraftCard(const String& callsign, const String& airlineName, int altitudeFeet,
+                      double speedKnots, double headingDegrees, double distanceMiles,
+                      const String& originCode, const String& destinationCode,
+                      const String& updatedAt) {
   lcd.fillScreen(bg());
   drawCardBanner("OVERHEAD", kAircraftBanner, 130);
 
-  // Callsign as the card's headline, in the spot CYD-Dickey's
-  // drawFeaturedAircraft() gives the airline logo or bold airline name - the
-  // most identifying single piece of data available from what
-  // DiscoverAroundMe's adsb.lol integration actually returns (see
-  // Aircraft.h's own remarks on what CYD-Dickey's version assumes that this
-  // server doesn't provide).
+  // Airline name is the headline when the server has one, in the spot
+  // CYD-Dickey's drawFeaturedAircraft() gives the airline logo or bold
+  // airline name - callsign was the fallback for this position for as long
+  // as this server sent nothing richer (see Aircraft.h's updated remarks),
+  // and stays the fallback now for a server too old to send a name at all.
+  // Truncated left at 200px, not the full card width: aircraftLogoZone()
+  // starts at x220, and a name long enough to reach it would run under the
+  // logo rather than stopping short of it.
+  const bool hasAirlineName = airlineName.length() > 0;
+  const String headline = hasAirlineName ? airlineName : callsign;
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
   lcd.setTextColor(ink(), bg());
-  lcd.setTextDatum(top_left);
-  lcd.drawString(callsign, kCardMargin, 32);
+  drawTruncatedLeft(headline, kCardMargin, 32, 200);
 
+  // Callsign drops to this secondary line, alongside distance, only when the
+  // airline name took the headline slot above it - otherwise callsign is
+  // already the headline and repeating it here would be the same fact twice.
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  char distanceBuf[24];
-  snprintf(distanceBuf, sizeof(distanceBuf), "%.1f mi away", distanceMiles);
+  // Plain ASCII separator, not a middle-dot or any other non-ASCII glyph -
+  // this font has no Unicode coverage (see drawTemperature's hand-drawn
+  // degree ring for the same constraint hit and worked around elsewhere in
+  // this file).
+  char distanceBuf[32];
+  if (hasAirlineName) {
+    snprintf(distanceBuf, sizeof(distanceBuf), "%s - %.1f mi away", callsign.c_str(), distanceMiles);
+  } else {
+    snprintf(distanceBuf, sizeof(distanceBuf), "%.1f mi away", distanceMiles);
+  }
   lcd.setTextColor(muted(), bg());
   lcd.drawString(distanceBuf, kCardMargin, 64);
+
+  // Route, in the gap between the distance line and the stat rows. Codes
+  // only, not names: two airport names plus everything else on this card
+  // does not fit readably on a 320x240 panel (see Display.h's own remarks).
+  // Neither code present draws no line at all - the honest rendering of "no
+  // route data", the same reasoning Graphic.cpp draws nothing rather than an
+  // empty frame when it has no picture configured.
+  if (originCode.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setTextColor(muted(), bg());
+    // "->" rather than a real arrow glyph, for the same reason as the
+    // separator above - plain ASCII only.
+    const String routeLine = destinationCode.length() > 0
+        ? (originCode + " -> " + destinationCode)
+        : ("from " + originCode);
+    lcd.drawString(routeLine, kCardMargin, 82);
+  }
 
   // Stat rows: a muted label on the left, the value right-justified against
   // the card's right margin - the same truncate-and-right-justify technique
   // as CYD-Dickey's drawFeaturedAircraft()/drawTruncatedRight (see
   // drawRightJustified above), applied per-row here instead of to a whole
-  // second column of airline-specific fields CAL doesn't have data for.
+  // second column of airline-specific fields CAL didn't used to have data
+  // for.
   const int rightX = kScreenW - kCardMargin;
   const int rowValueWidth = 150;
   int rowY = 100;
@@ -600,12 +645,16 @@ void showAircraftCard(const String& callsign, int altitudeFeet, double speedKnot
   drawRightJustified(compassDirection(headingDegrees), rightX, rowY, rowValueWidth);
   rowY += kRowHeight;
 
+  // Same defect Weather.cpp's restyle found and fixed on its own card: this
+  // line was set in Font0, the 6x8 bitmap face drawClock()'s own remarks
+  // record as having failed on real hardware ("simply not there"). Same
+  // fix, same face.
   if (updatedAt.length() > 0) {
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
     lcd.setTextColor(muted(), bg());
     lcd.setTextDatum(top_left);
-    lcd.drawString(updatedAt, kCardMargin, rowY + 8);
+    lcd.drawString(updatedAt, kCardMargin, rowY + 4);
   }
 
   drawClock();
@@ -762,6 +811,20 @@ void drawNavAffordances(bool canReverse) {
                kChevronCentreY, muted());
   lcd.drawLine(rightTipX, kChevronCentreY, rightTipX - kChevronWidth,
                kChevronCentreY + kChevronHalfHeight, muted());
+}
+
+bool drawPngFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, int32_t h) {
+  // No fillScreen() here, deliberately - see this function's own header
+  // comment. Same decode call as drawPngFromSd() below, just bounded to
+  // (w, h) at (x, y) instead of the whole panel; scaleX/scaleY left at 0
+  // is what makes LovyanGFX auto-fit the image within that box rather than
+  // drawing it at native size.
+  const bool ok = lcd.drawPngFile(SD, path.c_str(), x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
+  lcd.releasePngMemory();
+  if (!ok) {
+    Log::printf("[display] failed to draw %s in %dx%d rect at (%d,%d)", path.c_str(), (int)w, (int)h, (int)x, (int)y);
+  }
+  return ok;
 }
 
 bool drawPngFromSd(const String& path) {

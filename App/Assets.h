@@ -66,6 +66,13 @@ bool drawFullScreen(const String& id);
 /// state there. This is what a card's draw() calls.
 bool drawCached(const String& id);
 
+/// Same as drawCached(), bounded to a rectangle rather than the whole panel -
+/// for a small logo layered onto a card another draw call already composed
+/// (see Display::aircraftLogoZone()), rather than the picture being the
+/// whole card the way Graphic.cpp's is. Never fetches, same reasoning as
+/// drawCached().
+bool drawCachedInRect(const String& id, int32_t x, int32_t y, int32_t w, int32_t h);
+
 /// How many assets are currently cached - reported by Telemetry so the
 /// fleet's storage view can show cache growth alongside sdUsedBytes.
 uint16_t cachedCount();
