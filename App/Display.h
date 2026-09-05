@@ -224,6 +224,19 @@ void flashActionButton(uint8_t index, uint8_t count, const String& label);
 /// something that will do nothing.
 void drawNavAffordances(bool canReverse);
 
+/// Briefly fills the tapped reverse/forward edge strip in its pressed colour
+/// and puts it straight back - the edge-zone equivalent of
+/// flashActionButton() above, for exactly the same reason: Touch's edge
+/// zones have no visible chrome of their own (see drawNavAffordances()'s
+/// chevrons, which are a discoverability hint, not a press indicator), so a
+/// tap there previously produced rewind()/advance() with nothing on the
+/// glass to say the touch was registered. `isForward` picks which edge lit
+/// up; `canReverse` is forwarded to the drawNavAffordances() redraw that
+/// restores the strip afterwards, so a flash on the (disabled) left edge
+/// still comes back dim rather than snapping to an enabled look it doesn't
+/// have.
+void flashNavEdge(bool isForward, bool canReverse);
+
 /// Draws a PNG from the SD card, scaled to fit and centred on the whole
 /// panel. Clears to the theme background first, so a failed decode leaves a
 /// clean screen rather than a half-painted one; returns false in that case so

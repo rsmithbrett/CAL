@@ -131,6 +131,17 @@ constexpr int kChevronHalfHeight = 12;
 constexpr int kChevronWidth = 7;
 constexpr int kChevronCentreY = kScreenH / 2;
 
+// Mirrors Touch.cpp's own kEdgeZoneWidth exactly (see that file's remarks on
+// why 16). Duplicated rather than shared for the same reason kScreenW here
+// and kScreenWidth there are already duplicated instead of one file
+// including the other's constant: Touch stays ignorant of Display and
+// Display stays ignorant of Touch's hit-testing internals. flashNavEdge()
+// below needs this to fill exactly the rect Touch::poll() reads taps from,
+// so if one of these two numbers ever changes without the other, a flash
+// would light up a strip narrower or wider than the zone that actually
+// responds to a finger.
+constexpr int kEdgeZoneWidth = 16;
+
 void clear() {
   lcd.fillScreen(bg());
 }
@@ -1013,6 +1024,25 @@ void drawNavAffordances(bool canReverse) {
                kChevronCentreY, muted());
   lcd.drawLine(rightTipX, kChevronCentreY, rightTipX - kChevronWidth,
                kChevronCentreY + kChevronHalfHeight, muted());
+}
+
+void flashNavEdge(bool isForward, bool canReverse) {
+  // The same 16px-wide, full-height strip Touch::poll() classifies as
+  // Hit::Reverse/Hit::Forward - see kEdgeZoneWidth's own remarks above.
+  const int x = isForward ? kScreenW - kEdgeZoneWidth : 0;
+  // kButtonPressedFill, not a new colour: reusing flashActionButton()'s own
+  // "pressed" shade makes every touch on this panel answer back the same
+  // way, rather than teaching the user two different flash colours for two
+  // different kinds of button. It reads against either day/night background
+  // for the same reason it was chosen for the action row in the first place.
+  lcd.fillRect(x, 0, kEdgeZoneWidth, kScreenH, kButtonPressedFill);
+  delay(180);
+  // Undo the flash before redrawing the chevron on top of it - the resting
+  // state here isn't a filled rect the way a button's is, so simply drawing
+  // the chevron again over the pressed fill would leave a stray blue bar
+  // behind it.
+  lcd.fillRect(x, 0, kEdgeZoneWidth, kScreenH, bg());
+  drawNavAffordances(canReverse);
 }
 
 bool drawPngFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, int32_t h) {
