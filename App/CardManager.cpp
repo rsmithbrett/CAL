@@ -582,6 +582,23 @@ void applyPolicy(const Cards::Policy& policy) {
       strncpy(card.assetId, entry.assetId.c_str(), Cards::kMaxAssetIdLength);
       card.assetId[Cards::kMaxAssetIdLength] = '\0';
     }
+
+    // The words this card draws, for the announcement card - rewritten on
+    // every policy exactly like assetId above, including back to empty,
+    // which is how an admin takes an announcement down again. Dropped rather
+    // than truncated when over-long, for the same reason: a notice chopped
+    // off mid-sentence on a household's screen is worse than one that simply
+    // does not appear, and the editor already refuses to save anything past
+    // this length (CardPolicyEditing.MaxTextLength), so this should only ever
+    // fire against a hand-crafted or future-server value.
+    card.text[0] = '\0';
+    if (entry.text.length() > Cards::kMaxTextLength) {
+      Log::printf("[cards] policy text for '%s' is too long (%u chars) - ignored",
+                  entry.id.c_str(), static_cast<unsigned>(entry.text.length()));
+    } else if (entry.text.length() > 0) {
+      strncpy(card.text, entry.text.c_str(), Cards::kMaxTextLength);
+      card.text[Cards::kMaxTextLength] = '\0';
+    }
   }
 
   if (matched == 0) {

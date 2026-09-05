@@ -155,6 +155,18 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
 /// label, and the space a banner would take is better spent on the numbers.
 void showClockDate(const String& timeText, const String& dateText);
 
+/// The announcement card: an admin-typed notice, drawn as plain wrapped
+/// prose rather than the label/value layout weather, aircraft and sunmoon
+/// each use - this card has exactly one field, so a stat-row layout would
+/// have nothing to lay out beside it. Sized to the whole text at the largest
+/// of two tiers it actually fits at, the same technique showWeatherCard()
+/// uses for its own free-text forecast phrase - see that function's remarks.
+/// Same white/bannered card family as every other content card. Drawing
+/// nothing (an empty `text`) is the caller's job to avoid - see
+/// Announcement.cpp's cardItemCount(), which is what keeps the scheduler from
+/// calling this at all when there is nothing configured.
+void showAnnouncementCard(const String& text);
+
 /// Shown when no registered card has anything to draw at all - which is the
 /// ordinary state for the first second or two after boot, before the first
 /// fetch lands. Same white/bannered card family as the two status screens
