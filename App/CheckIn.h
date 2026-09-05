@@ -66,6 +66,21 @@ struct Result {
   int sunriseMinutesUtc = -1;
   int sunsetMinutesUtc = -1;
 
+  /// The Moon's elongation from the Sun as a fraction of the cycle (0 new,
+  /// 0.25 first quarter, 0.5 full, 0.75 last quarter) and the fraction of
+  /// its visible disc lit (0-1), or -1 for either where the server has no
+  /// answer. Unlike sunrise/sunset there is no polar-style "does not happen
+  /// today" case for these - the phase is a fact of the date, not of the
+  /// observer's horizon - so -1 means only one thing: a device whose
+  /// position has never resolved (see DeviceLocalTimeResult in the
+  /// DiscoverAroundMe repo). moonPhaseName is empty under the same
+  /// condition - a human label for moonPhase ("Waxing Gibbous"), carried
+  /// alongside the two numbers as a fallback caption for the card that
+  /// draws them as a picture.
+  double moonPhase = -1.0;
+  double moonIlluminatedFraction = -1.0;
+  String moonPhaseName;
+
   /// How this device should rotate its cards. `present == false` means the
   /// server sent no policy this time, which means "keep whatever policy you
   /// already had" - explicitly not "show nothing". See

@@ -147,7 +147,13 @@ struct CardSpec {
   bool everFetched = false;
 };
 
-static constexpr uint8_t kMaxCards = 8;
+// 9 registrations exist today (weather, aircraft, graphic x3, sunmoon,
+// announcement, clockdate, moonphase) against a cap of 8 until this bump -
+// registerCard() only logs and drops a card past the cap rather than
+// crashing, which is a silent-until-noticed failure on firmware with no
+// automated tests. Sized with one spare slot rather than exactly 9 so the
+// next card type is a registration, not also a bump here.
+static constexpr uint8_t kMaxCards = 10;
 
 /// Called from each card module's own translation unit at static-init time
 /// (see the `kRegistered` idiom at the bottom of Weather.cpp/Aircraft.cpp),

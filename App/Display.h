@@ -144,6 +144,19 @@ void showAircraftStatus(const String& headline, const String& detail, bool isPro
 /// day, and on a polar day or night the reason there is no time to show.
 void showSunMoonCard(const String& sunriseText, const String& sunsetText, const String& detail);
 
+/// The Moon-phase card - the first of a new "graphical style" card family:
+/// an actual drawn disc rather than a text description, labeled with
+/// phaseName underneath. phase (0-1 elongation fraction) and
+/// illuminatedFraction (0-1) drive the drawing itself; phaseName is text,
+/// shown as a caption rather than being the point of the card. Negative
+/// phase/illuminatedFraction are not expected here - MoonPhase.cpp's
+/// cardItemCount() keeps the scheduler from calling this at all when the
+/// device has no answer to draw, the same tolerance showAnnouncementCard()
+/// gets from Announcement.cpp's own cardItemCount(). See this function's
+/// body in Display.cpp for the rendering technique and the Northern-
+/// Hemisphere waxing/waning convention it uses.
+void showMoonPhaseCard(const String& phaseName, double phase, double illuminatedFraction);
+
 /// The clock/date card: a large, room-readable HH:MM and today's date filling
 /// most of the panel - "a moment where the display is just a big clock",
 /// distinct from the small corner clock every card (this one included)

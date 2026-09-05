@@ -68,6 +68,11 @@ constexpr uint32_t kAircraftBanner = 0x1F6FEBu;
 // Amber, distinct from the two blues above so the three cards are told apart at
 // a glance from across a room rather than by reading the banner text.
 constexpr uint32_t kSunMoonBanner = 0xB45309u;
+// A deep indigo, distinct from every banner above it - this is the first
+// "graphical style" card (an illustration rather than a data reading or
+// prose), so it earns a colour family of its own rather than reusing sun's
+// amber just because the two share an astronomy source.
+constexpr uint32_t kMoonPhaseBanner = 0x4B2E83u;
 // A muted green, distinct from every banner above it - this card is the only
 // one whose entire content is server-chosen prose rather than a data reading,
 // so it gets a colour that reads as neither "weather" nor "aircraft" nor
@@ -731,6 +736,101 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
     lcd.setTextColor(muted(), bg());
     wrappedLeftText(detail, kCardMargin, 140, muted(), 20, 2, kScreenW - kCardMargin * 2);
   }
+
+  drawClock();
+  restoreDefaultFont();
+}
+
+// The Moon-phase card - the first "graphical style" card: an actual drawn
+// disc rather than a text description, captioned with phaseName underneath.
+//
+// **Rendering technique - "half-disc plus terminator ellipse"**, a well-known
+// way to fake a lunar-phase disc with nothing but circle/ellipse primitives:
+//
+//   1. Fill the whole disc muted() - a starting assumption that none of it is
+//      lit.
+//   2. Fill exactly the half of it currently facing the Sun in ink(), as a
+//      half-disc wedge (fillArc from radius 0 to radius, sweeping 180
+//      degrees) rather than a fillRect: a rectangle's bounding box has
+//      corners outside the circle that a wedge does not, which would
+//      otherwise poke square corners past the round limb into the card
+//      background.
+//   3. Overlay an ellipse - same centre, same vertical radius as the disc,
+//      horizontal radius `disc radius * |1 - 2 * illuminatedFraction|` - to
+//      grow or shrink the lit area away from the exact-half case step 2
+//      drew:
+//        - illuminatedFraction < 0.5 (crescent): the ellipse is filled
+//          muted(), eating back into the lit half. At illuminatedFraction 0
+//          the ellipse's horizontal radius equals the disc's own, so it
+//          coincides with the outer circle and the whole disc reads dark -
+//          new moon.
+//        - illuminatedFraction > 0.5 (gibbous): the ellipse is filled ink(),
+//          growing into the still-dark half. At illuminatedFraction 1 it
+//          likewise coincides with the outer circle and the whole disc
+//          reads lit - full moon.
+//        - At exactly 0.5 the ellipse has zero width, so it is skipped
+//          rather than drawn as a no-op; step 2's half-disc is already the
+//          right answer (first or last quarter).
+//
+// **Waxing/waning convention.** `phase` < 0.5 is waxing (growing toward
+// full) and lights the right half in step 2; `phase` > 0.5 is waning
+// (shrinking toward new) and lights the left half. This is the Northern
+// Hemisphere convention - a waxing crescent's illuminated limb is on the
+// right as seen looking up from the northern half of the planet. A Southern
+// Hemisphere household sees its own sky mirrored left-right from what this
+// draws. That is a deliberate, documented simplification (see the README),
+// not an oversight: there is no per-device hemisphere signal today to draw
+// the correct picture from, and the alternative - drawing neither
+// convention correctly for anyone - is worse than picking one and saying
+// so.
+//
+// UNVERIFIED ON HARDWARE, same as every other card in this file - checked
+// by a clean compile and by reading, not by a real decode on a real panel.
+void showMoonPhaseCard(const String& phaseName, double phase, double illuminatedFraction) {
+  lcd.fillScreen(bg());
+  drawCardBanner("MOON", kMoonPhaseBanner, 80);
+
+  const int cx = kScreenW / 2;
+  const int cy = 90;
+  const int radius = 50;
+
+  // Defensive clamp only - MoonPhase.cpp's cardItemCount() already keeps this
+  // function from being called at all with the "no data" sentinel (-1), so
+  // this never actually sees an out-of-range value in practice.
+  double k = illuminatedFraction;
+  if (k < 0.0) k = 0.0;
+  if (k > 1.0) k = 1.0;
+  const bool waxingRight = phase < 0.5;
+
+  lcd.fillCircle(cx, cy, radius, muted());
+  if (waxingRight) {
+    lcd.fillArc(cx, cy, 0, radius, 270, 90, ink());
+  } else {
+    lcd.fillArc(cx, cy, 0, radius, 90, 270, ink());
+  }
+
+  double halfWidthFraction = 2.0 * k - 1.0;
+  if (halfWidthFraction < 0.0) halfWidthFraction = -halfWidthFraction;
+  const int terminatorRx = static_cast<int>(radius * halfWidthFraction + 0.5);
+  if (terminatorRx > 0) {
+    const uint32_t terminatorColour = (k <= 0.5) ? muted() : ink();
+    lcd.fillEllipse(cx, cy, terminatorRx, radius, terminatorColour);
+  }
+
+  // A crisp outline regardless of theme: muted() against bg() is legible
+  // elsewhere in this file as body text, but a ring makes the disc's edge
+  // unambiguous even where the two are close in tone.
+  lcd.drawCircle(cx, cy, radius, ink());
+
+  if (phaseName.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    wrappedCenteredText(phaseName, 150, ink(), 1, 22, 1);
+  }
+
+  char pctBuffer[24];
+  snprintf(pctBuffer, sizeof(pctBuffer), "%d%% illuminated", static_cast<int>(k * 100.0 + 0.5));
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  wrappedCenteredText(String(pctBuffer), 176, muted(), 1, 18, 1);
 
   drawClock();
   restoreDefaultFont();
