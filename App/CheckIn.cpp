@@ -87,6 +87,11 @@ void parseCardPolicy(JsonVariantConst source, Cards::Policy& policy) {
     // the ordinary case, not a fault: the card it names simply reports
     // itself as having nothing to show and the scheduler passes over it.
     entry.assetId = String(card["assetId"] | "");
+    // Same optionality as assetId immediately above, for the announcement
+    // card's text instead of a picture. Absent (or blank) is the ordinary
+    // case for every card that is not an announcement, and for an
+    // announcement card nobody has typed anything into yet.
+    entry.text = String(card["text"] | "");
   }
 }
 

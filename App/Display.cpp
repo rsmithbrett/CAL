@@ -68,6 +68,11 @@ constexpr uint32_t kAircraftBanner = 0x1F6FEBu;
 // Amber, distinct from the two blues above so the three cards are told apart at
 // a glance from across a room rather than by reading the banner text.
 constexpr uint32_t kSunMoonBanner = 0xB45309u;
+// A muted green, distinct from every banner above it - this card is the only
+// one whose entire content is server-chosen prose rather than a data reading,
+// so it gets a colour that reads as neither "weather" nor "aircraft" nor
+// "sunrise" at a glance.
+constexpr uint32_t kAnnouncementBanner = 0x2E7D32u;
 constexpr int kBannerHeight = 22;
 constexpr int kCardMargin = 10;
 
@@ -723,6 +728,43 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextColor(muted(), bg());
     wrappedLeftText(detail, kCardMargin, 140, muted(), 20, 2, kScreenW - kCardMargin * 2);
+  }
+
+  drawClock();
+  restoreDefaultFont();
+}
+
+// The announcement card: an admin's free text, filling most of the panel.
+// Styled after showWeatherCard()'s own two-tier sizing for its shortForecast
+// phrase (see that function's remarks) rather than a fixed size, for the same
+// reason - this text comes from a server with no length this file controls
+// beyond CardPolicyEditing.MaxTextLength (280 characters, enforced there, not
+// here), and truncating an admin's sentence can change what it says ("no
+// school tomorrow" clipped to "no school" is a materially different notice).
+// The larger size is tried first and used whenever the whole text actually
+// fits in it; only text that would overflow it drops to the smaller, denser
+// size, so a short reminder is never shown smaller than it needs to be.
+void showAnnouncementCard(const String& text) {
+  lcd.fillScreen(bg());
+  drawCardBanner("NOTICE", kAnnouncementBanner, 90);
+
+  const int bodyWidth = kScreenW - kCardMargin * 2;
+  if (text.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    lcd.setTextSize(1);
+    // 5 lines at 24px is y 40-160, clear of the button row that starts at
+    // y=190 (see this file's own remarks on kButtonRowY further up).
+    const int linesAtLargeSize =
+        wrappedLeftText(text, kCardMargin, 40, ink(), 24, 5, bodyWidth, /*measureOnly=*/true);
+    if (linesAtLargeSize <= 5) {
+      wrappedLeftText(text, kCardMargin, 40, ink(), 24, 5, bodyWidth);
+    } else {
+      // 7 lines at 18px is y 40-166, same clearance at the smaller size - and
+      // 7 lines of roughly 38 characters each comfortably covers the full
+      // 280-character limit without a further fallback tier.
+      lcd.setFont(&fonts::FreeSansBold9pt7b);
+      wrappedLeftText(text, kCardMargin, 40, ink(), 18, 7, bodyWidth);
+    }
   }
 
   drawClock();

@@ -897,6 +897,66 @@ clears to the day/night background before decoding and centres the image on it
 every card's `draw()` returns, so there is nothing card-specific to do for
 either.
 
+### An announcement card: admin-typed text, chosen by the server
+
+`App/Announcement.h`/`.cpp` is the text equivalent of the picture card just
+above: the server picks an image for `graphic`, and picks *words* for
+`announcement`. It registers a `CardSpec` with id `announcement` the same way
+every other card module does, and needed no scheduler change either.
+
+**No fetch at all, unlike every other card in this build.** A picture is an
+id that has to be resolved through the `Assets` cache — an SD stat, maybe an
+HTTP round trip, maybe a PNG decode. Text is not: `CardPolicyEntry.Text`
+arrives already complete, inside the policy itself, on every check-in, so
+there is nothing to cache and nothing that can fail to fetch or decode.
+`Announcement.cpp` registers no `fetch` function at all (`spec.fetch` is left
+`nullptr`), which `CardManager.cpp`'s scheduler already tolerates — it guards
+every call site with `card.fetch == nullptr` for exactly this reason. The
+"fetch" for this card, such as it is, is `CardManager::applyPolicy()` writing
+straight onto the descriptor.
+
+`Text` is carried through `Cards::PolicyEntry::text` and
+`CardManager::applyPolicy()` onto `Cards::CardSpec::text` — a fixed
+281-character buffer (`Cards::kMaxTextLength + 1`) for the same
+constant-initialisation reason `assetId`'s buffer is fixed rather than a
+`String` (see the picture-card section above): the registry exists before any
+card module's static initialiser runs, and a `String` member would make it
+dynamically initialised instead, racing that guarantee. An over-long value is
+**dropped, not truncated**, mirroring `assetId`'s own rule: a notice cut off
+mid-sentence on a household's screen is a worse outcome than one that simply
+does not appear, and in practice this should never fire at all — the server's
+policy editor already refuses to save anything past its own limit.
+
+**`Cards::kMaxTextLength` (280) must equal
+`DiscoverAroundMe.AdminUI.CardPolicyEditing.MaxTextLength` on the server.**
+The two live in separate repositories with no shared build, so
+`Announcement.cpp` carries a `static_assert` pinning this firmware's own
+constant to the number both sides' comments agree on — it cannot catch the
+server's number changing out from under it, but it does catch this side
+drifting from what both comments say it must be. Change one number, you must
+notice and change the other; that is the same discipline
+`Cards::kMaxAssetIdLength`/`Assets::kMaxIdLength` already keep for the picture
+card, just without a same-repository `static_assert` to enforce the
+cross-repository half of it.
+
+**Interstitial, not list**, for the same reason the picture card is: one
+notice is not a feed. **Missing text is the ordinary state, and it is
+silent** — with no `text` in the policy, which is every device until an admin
+types one, the card reports zero items and is passed over entirely, the same
+"no image configured" tolerance the picture card already has for words
+instead of a picture.
+
+Drawing is `Display::showAnnouncementCard()`, a new function alongside
+`showWeatherCard()`/`showAircraftCard()`/`showSunMoonCard()` in the same
+white/bannered card family. It reuses `wrappedLeftText()`'s existing
+greedy word-wrap rather than inventing new text-layout code, and picks between
+two size tiers the same way `showWeatherCard()` already does for its own
+free-text `shortForecast` phrase: 12pt/5 lines if the whole notice fits there,
+9pt/7 lines if it does not. Either tier clears the button row that starts at
+y=190. A banner reading "NOTICE" in a new muted green
+(`kAnnouncementBanner`) keeps it visually distinct from weather's navy,
+aircraft's blue and sunrise/sunset's amber.
+
 ### Deciding when to reboot to the updater
 
 Three independent things can make the App call `Loader::requestUpdate()` —

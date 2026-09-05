@@ -70,6 +70,15 @@ using NotableFn = bool (*)(uint16_t itemIndex);
 /// truncated id that quietly fetches nothing.
 static constexpr uint8_t kMaxAssetIdLength = 48;
 
+/// The longest announcement text a policy entry can carry, in characters.
+/// Matches DiscoverAroundMe.AdminUI.CardPolicyEditing.MaxTextLength (280) on
+/// the server, which is what actually enforces the bound - Announcement.cpp
+/// static_asserts that the two agree, the same cross-check Graphic.cpp already
+/// does for kMaxAssetIdLength against Assets::kMaxIdLength, so a future change
+/// to either number is a compile error here rather than text that quietly
+/// arrives truncated to whatever this buffer happened to hold.
+static constexpr uint16_t kMaxTextLength = 280;
+
 struct CardSpec {
   /// Matches the `id` the server uses in cardPolicy/cardActions. An id the
   /// server sends that no descriptor here claims is ignored, not an error -
@@ -114,6 +123,16 @@ struct CardSpec {
   /// a String member would make it dynamically initialised instead, and the
   /// registration order across translation units is undefined.
   char assetId[kMaxAssetIdLength + 1] = "";
+
+  /// The announcement text this card draws, for the one card that draws text
+  /// instead of a picture - empty for every other card, which is most of
+  /// them. Same fixed-buffer reasoning as `assetId` immediately above: this
+  /// struct must stay constant-initialisable, and a String field would make
+  /// it dynamically initialised instead, racing every card module's own
+  /// static-init registration. See CardManager::applyPolicy() for how this is
+  /// populated from a policy's `text` field, and Announcement.cpp for the
+  /// card that reads it.
+  char text[kMaxTextLength + 1] = "";
 
   // ---- Per-card scheduling state. Each of these is a struct field
   // precisely because CYD-Dickey's equivalents are named globals, one set
@@ -166,6 +185,14 @@ struct PolicyEntry {
   /// for some *other* asset, so the card shows nothing instead of showing
   /// the wrong thing. See CardManager::applyPolicy().
   String assetId;
+  /// Optional on the wire, and empty for every card that draws no text - which
+  /// is every card except the announcement one. Unlike assetId, an over-long
+  /// value here has no "well-formed but wrong" failure mode to avoid (there is
+  /// no catalog to look up a truncated id in), but it is still dropped rather
+  /// than truncated for the same reason CardManager::applyPolicy() gives for
+  /// assetId: silence is a more honest failure than a sentence chopped off
+  /// mid-word on a household's screen.
+  String text;
 };
 
 struct Policy {
