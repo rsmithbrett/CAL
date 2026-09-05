@@ -622,6 +622,21 @@ void applyPolicy(const Cards::Policy& policy) {
       strncpy(card.qrData, entry.qrData.c_str(), Cards::kMaxQrDataLength);
       card.qrData[Cards::kMaxQrDataLength] = '\0';
     }
+
+    // Which of the owner's addresses to show, for the forecast card -
+    // rewritten on every policy exactly like assetId/text/qrData above,
+    // including back to empty (which reads as Home - see
+    // Cards::CardSpec::location). Dropped rather than truncated when
+    // over-long, the same rule those three already follow, though in
+    // practice "home"/"target" never come close to this bound.
+    card.location[0] = '\0';
+    if (entry.location.length() > Cards::kMaxLocationLength) {
+      Log::printf("[cards] policy location for '%s' is too long (%u chars) - ignored",
+                  entry.id.c_str(), static_cast<unsigned>(entry.location.length()));
+    } else if (entry.location.length() > 0) {
+      strncpy(card.location, entry.location.c_str(), Cards::kMaxLocationLength);
+      card.location[Cards::kMaxLocationLength] = '\0';
+    }
   }
 
   if (matched == 0) {

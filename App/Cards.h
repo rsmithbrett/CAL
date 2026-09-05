@@ -89,6 +89,16 @@ static constexpr uint16_t kMaxTextLength = 280;
 /// arrives, it does not re-derive the bound.
 static constexpr uint16_t kMaxQrDataLength = 100;
 
+/// The longest location choice a policy entry can carry, in characters.
+/// CardPolicyEntry.Location on the server only ever sends "home", "target",
+/// or omits the field entirely (see that property's own remarks), so this
+/// only needs to be a few characters longer than "target" itself - sized with
+/// headroom rather than exactly 6 for the same "tolerate rather than reject"
+/// reasoning wantsTarget() in Forecast.cpp applies to the value once it
+/// arrives: an unrecognised value here is treated as Home, not truncated into
+/// a different unrecognised value.
+static constexpr uint8_t kMaxLocationLength = 16;
+
 struct CardSpec {
   /// Matches the `id` the server uses in cardPolicy/cardActions. An id the
   /// server sends that no descriptor here claims is ignored, not an error -
@@ -156,6 +166,20 @@ struct CardSpec {
   /// required content.
   char qrData[kMaxQrDataLength + 1] = "";
 
+  /// Which of the owner's addresses this card should show - "home" or
+  /// "target" - for the one card that draws a single-location result and
+  /// needs to be told which. Empty for every other card, which is most of
+  /// them: this arrives on the same policy entry as
+  /// `order`/`dwellSeconds` for the same reason `assetId`/`text`/`qrData` do
+  /// (see CardPolicyEntry.Location on the server), and a card that does not
+  /// consult it must ignore it exactly the way an unrelated card ignores a
+  /// stray assetId. Same fixed-buffer reasoning as assetId/text/qrData above:
+  /// this struct must stay constant-initialisable. Raw and unvalidated -
+  /// Forecast.cpp's wantsTarget() is what actually interprets it, treating
+  /// anything other than exactly "target" (case-insensitive) as Home, the
+  /// same tolerant default GET /api/myweather/forecast itself applies.
+  char location[kMaxLocationLength + 1] = "";
+
   // ---- Per-card scheduling state. Each of these is a struct field
   // precisely because CYD-Dickey's equivalents are named globals, one set
   // per card type.
@@ -169,16 +193,23 @@ struct CardSpec {
   bool everFetched = false;
 };
 
-// 12 registrations exist today (weather, aircraft, graphic x3, sunmoon,
-// announcement, clockdate, moonphase, qrtext, listings) - qrtext and listings
-// were each built on their own branch against a base of 10, each bumping this
-// constant to 11 independently; merging both together makes the true count
-// 12, so the cap moves to 13 rather than either branch's own 11.
+// 11 registrations exist as of this branch's own base (weather, aircraft,
+// graphic x3, sunmoon, announcement, clockdate, moonphase, qrtext, listings) -
+// qrtext and listings were each built on their own earlier branch against a
+// base of 10, each bumping this constant to 11 independently; merging both
+// together made the true count 11 with the cap already carrying one spare at
+// 13 (see git history for that earlier merge's own arithmetic).
+//
+// This branch adds a 12th (forecast), and bumps the cap to 14 to keep that
+// same one-spare-slot convention - exactly the qrtext/listings pattern
+// repeating: another card-adding branch (tides, running concurrently) is
+// independently bumping this same constant for its own 13th registration,
+// so a merge conflict here is expected and gets resolved the same way that
+// earlier one was, not by either branch trying to guess the other's count.
 // registerCard() only logs and drops a card past the cap rather than
 // crashing, which is a silent-until-noticed failure on firmware with no
-// automated tests. Sized with one spare slot rather than exactly 12 so the
-// next card type is a registration, not also a bump here.
-static constexpr uint8_t kMaxCards = 13;
+// automated tests.
+static constexpr uint8_t kMaxCards = 14;
 
 /// Called from each card module's own translation unit at static-init time
 /// (see the `kRegistered` idiom at the bottom of Weather.cpp/Aircraft.cpp),
@@ -230,6 +261,15 @@ struct PolicyEntry {
   /// not a shorter version of the same code, it is a different (and likely useless) one, so
   /// showing nothing is more honest than showing the wrong code.
   String qrData;
+  /// Optional on the wire, and empty for every card that draws no single
+  /// location's data - which is every card except the forecast one. "home",
+  /// "target", or absent/anything else, meaning Home - see
+  /// Cards::CardSpec::location and CardPolicyEntry.Location on the server for
+  /// the full tolerance rule. Dropped rather than truncated when over-long,
+  /// the same rule text/qrData already follow above, though in practice this
+  /// value is always short enough that the bound never fires against a real
+  /// server.
+  String location;
 };
 
 struct Policy {
