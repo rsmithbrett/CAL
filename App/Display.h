@@ -180,6 +180,22 @@ void showClockDate(const String& timeText, const String& dateText);
 /// calling this at all when there is nothing configured.
 void showAnnouncementCard(const String& text);
 
+/// The QR card: a scannable code with an optional caption. Ported from CAL's own
+/// bootloader-side showQr() (root Display.cpp) - same vendored CalQr.h/.c, same fixed
+/// version-6/ECC-LOW static buffer sizing, same qrcode_initText()/qrcode_getModule() render
+/// loop - adapted only to fit within the App's card layout (banner, corner clock, button
+/// row) rather than the whole panel, and to treat `caption` as optional supplementary text
+/// rather than CAL's own always-present caption/subCaption pair.
+///
+/// `qrData` is the payload actually encoded - never empty when this is called (see
+/// QrText.cpp's cardItemCount(), the same tolerance showAnnouncementCard() gets from
+/// Announcement.cpp). `caption` may be empty; when it is, only the code and its raw-data
+/// fallback line are drawn. The raw `qrData` is always shown as a small line beneath the
+/// code regardless of whether a caption is present, mirroring CAL's own showQr() - "the
+/// address in characters as well as in the code, because cameras fail" applies exactly as
+/// much on this panel as on CAL's.
+void showQrTextCard(const String& qrData, const String& caption);
+
 /// Shown when no registered card has anything to draw at all - which is the
 /// ordinary state for the first second or two after boot, before the first
 /// fetch lands. Same white/bannered card family as the two status screens
