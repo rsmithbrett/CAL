@@ -417,6 +417,8 @@ void setEnvironment(int utcOffsetMinutes, bool isDaytime) {
   gIsDaytime = isDaytime;
 }
 
+int utcOffsetMinutes() { return gUtcOffsetMinutes; }
+
 bool readTouchRaw(int32_t& x, int32_t& y) {
   return lcd.getTouch(&x, &y);
 }
@@ -724,6 +726,48 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
     lcd.setTextColor(muted(), bg());
     wrappedLeftText(detail, kCardMargin, 140, muted(), 20, 2, kScreenW - kCardMargin * 2);
   }
+
+  drawClock();
+  restoreDefaultFont();
+}
+
+// The hero number and only the hero number - see Display.h's own remarks on
+// why there is no banner here. Sized by doubling FreeSansBold24pt7b with
+// setTextSize(2) rather than reaching for a bigger font file: the weather
+// card already proved this exact face legible on this panel at size 1, and
+// LovyanGFX's setTextSize scales a GFX font's rendered glyphs cleanly, so
+// this gets a genuinely room-filling clock face without adding a second
+// 24pt-class font to the binary for a five-character string.
+//
+// Width is measured rather than assumed before committing to size 2: "HH:MM"
+// is short, but this file has already been burned once by an assumption
+// about a font's real on-panel size turning out wrong (see drawClock()'s own
+// remarks on the corner clock's original, invisible 6x8 bitmap attempt). A
+// clock that would run off both edges of a 320px panel falls back to size 1
+// instead - still exactly the weather hero's own proven size - rather than
+// clipping.
+void showClockDate(const String& timeText, const String& dateText) {
+  lcd.fillScreen(bg());
+
+  lcd.setFont(&fonts::FreeSansBold24pt7b);
+  lcd.setTextColor(ink(), bg());
+  lcd.setTextDatum(middle_center);
+
+  lcd.setTextSize(2);
+  const int maxTimeWidth = kScreenW - kCardMargin * 2;
+  if (lcd.textWidth(timeText) > maxTimeWidth) {
+    lcd.setTextSize(1);
+  }
+  lcd.drawString(timeText, kScreenW / 2, 100);
+
+  // The date, secondary to the time both in size and in colour (muted(),
+  // same as every other card's supporting line) - the same bold 9pt/12pt
+  // family the rest of this file uses rather than a plain bitmap face, and
+  // reusing wrappedCenteredText's own word-wrap/measure logic (see
+  // showStatus() above) rather than assuming a spelled-out weekday and month
+  // always fits on one line at this width.
+  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  wrappedCenteredText(dateText, 145, muted(), 1, 20, 2);
 
   drawClock();
   restoreDefaultFont();
