@@ -236,6 +236,34 @@ void showListingsCard(const String& address, const String& propertyType, int pri
 /// muted-vs-amber split.
 void showListingsStatus(const String& headline, const String& detail, bool isProblem);
 
+/// The multi-day forecast card: one outlook period per screen, cycling
+/// through however many the device fetched (up to Forecast::kMaxPeriods) -
+/// same list-card shape as showListingsCard() above, weather periods instead
+/// of listings. `location` is the city/state (or bare postal code)
+/// GET /api/myweather/forecast resolved the card's own Home/Target choice to.
+/// `periodName` is the server's own period label ("Tonight", "Monday");
+/// `isDaytime` is drawn as a small Day/Night tag beside it rather than folded
+/// into the headline text - NWS period names usually already say so
+/// ("Monday Night") but this card cannot assume every period name does, and
+/// a card handed an explicit day/night flag that never shows it would be
+/// silently dropping a field the server bothered to send.
+/// temperature/unit/shortForecast reuse showWeatherCard()'s own hero-number-
+/// plus-condition-phrase layout and drawTemperature() technique - the same
+/// shape of information (one reading, one phrase), just for a specific day
+/// instead of "right now". `index`/`total` draw the same "2 of 5" caption
+/// showListingsCard() does, for the same reason: more than one period is the
+/// ordinary case here, unlike every list card before Listings.
+void showForecastCard(const String& location, const String& periodName, bool isDaytime,
+                      int temperature, const String& unit, const String& shortForecast,
+                      uint16_t index, uint16_t total, const String& updatedAt);
+
+/// The forecast card's non-Ok states: not activated, provider disabled, a
+/// fetch that succeeded but the requested location resolved to nothing or
+/// sent no periods (see Forecast::Status::Empty), and genuine auth/network
+/// trouble. Same white/bannered card family as every other content card,
+/// mirroring showListingsStatus()'s muted-vs-amber split.
+void showForecastStatus(const String& headline, const String& detail, bool isProblem);
+
 /// Shown when no registered card has anything to draw at all - which is the
 /// ordinary state for the first second or two after boot, before the first
 /// fetch lands. Same white/bannered card family as the two status screens

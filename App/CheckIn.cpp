@@ -96,6 +96,12 @@ void parseCardPolicy(JsonVariantConst source, Cards::Policy& policy) {
     // the ordinary case for every card that does not draw a QR code, and for
     // a QR card nobody has entered data into yet.
     entry.qrData = String(card["qrData"] | "");
+    // Same optionality again, for the one card that shows a single owner
+    // location and needs to be told which - "home" or "target", absent
+    // meaning Home. Every other card must ignore this field entirely, the
+    // same tolerance already given to a stray assetId/text/qrData landing on
+    // a card that draws none of those.
+    entry.location = String(card["location"] | "");
   }
 }
 

@@ -101,6 +101,12 @@ constexpr uint32_t kListingsBanner = 0xA13D2Du;
 // just a darker, greener shade than either of the two colours already in use
 // so the three are still told apart at a glance.
 constexpr uint32_t kTidesBanner = 0x0F6B5Cu;
+// A plum/violet, distinct from every banner above it - closest in family to
+// moon's indigo, but far enough apart (magenta-leaning vs. blue-leaning) that
+// the two are told apart at a glance from across a room, matching how
+// weather's navy and aircraft's bright blue already coexist as the two
+// closest-related pair on this device.
+constexpr uint32_t kForecastBanner = 0x6A1B9Au;
 constexpr int kBannerHeight = 22;
 constexpr int kCardMargin = 10;
 
@@ -1213,6 +1219,124 @@ void showListingsCard(const String& address, const String& propertyType, int pri
 void showListingsStatus(const String& headline, const String& detail, bool isProblem) {
   lcd.fillScreen(bg());
   drawCardBanner("LISTINGS", kListingsBanner, 130);
+
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setTextSize(1);
+  const uint32_t headlineColour = isProblem ? kWarn : muted();
+  const int headlineLines =
+      wrappedLeftText(headline, kCardMargin, 40, headlineColour, 22, 3, kScreenW - kCardMargin * 2);
+  if (detail.length() > 0) {
+    wrappedLeftText(detail, kCardMargin, 40 + headlineLines * 22 + 12, ink(), 18, 3,
+                    kScreenW - kCardMargin * 2);
+  }
+
+  drawClock();
+  restoreDefaultFont();
+}
+
+// Styled after showWeatherCard()'s hero-number-plus-condition-phrase layout
+// (see that function's own remarks on the sizing choices this reuses) with
+// showListingsCard()'s "N of M" paging caption layered on top - this is the
+// first card to combine "one data reading" with "more than one item to page
+// through", so it borrows one technique from each rather than inventing a
+// third.
+void showForecastCard(const String& location, const String& periodName, bool isDaytime,
+                      int temperature, const String& unit, const String& shortForecast,
+                      uint16_t index, uint16_t total, const String& updatedAt) {
+  lcd.fillScreen(bg());
+  drawCardBanner("FORECAST", kForecastBanner, 130);
+
+  // "2 of 5" - identical technique and reasoning to showListingsCard()'s own
+  // paging caption: drawn only once there is more than one period to page
+  // through, in the banner row but outside the coloured rect so it costs the
+  // period-name headline below no space.
+  if (total > 1) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setTextSize(1);
+    lcd.setTextColor(muted(), bg());
+    char caption[16];
+    snprintf(caption, sizeof(caption), "%u of %u", static_cast<unsigned>(index) + 1,
+             static_cast<unsigned>(total));
+    lcd.setTextDatum(top_right);
+    lcd.drawString(caption, kScreenW - kCardMargin, 4);
+    lcd.setTextDatum(top_left);
+  }
+
+  // Location on its own line directly under the banner, same placement and
+  // sizing as showWeatherCard()'s own location line - this card answers the
+  // identical "72 degrees *where*" question that one does, just for a
+  // specific day picked from the household's Home or Target address rather
+  // than "right now".
+  if (location.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setTextSize(1);
+    lcd.setTextColor(muted(), bg());
+    drawTruncatedLeft(location, kCardMargin, 28, kScreenW - kCardMargin * 2);
+  }
+
+  // The period name is this card's headline - "Tonight", "Monday" - the one
+  // fact that actually identifies *this* period from the last one shown,
+  // same role showListingsCard()'s address headline plays for a listing.
+  const int bodyWidth = kScreenW - kCardMargin * 2;
+  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setTextSize(1);
+  lcd.setTextColor(ink(), bg());
+  drawTruncatedLeft(periodName.length() > 0 ? periodName : String("Forecast"), kCardMargin, 48,
+                    bodyWidth - 60);
+
+  // Day/Night, drawn explicitly rather than assumed from the period name -
+  // see showForecastCard()'s own doc comment in Display.h for why this
+  // cannot be folded into the headline text above. Right-justified against
+  // the same margin the "N of M" caption uses above it, so both chrome-like
+  // labels line up on the same right edge.
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setTextColor(muted(), bg());
+  drawRightJustified(isDaytime ? "Day" : "Night", kScreenW - kCardMargin, 51, 70);
+
+  // The hero number - identical drawTemperature() technique and vertical
+  // rhythm to showWeatherCard()'s own (24pt digits, ring scaled to match),
+  // just shifted down 20px to make room for the period-name headline this
+  // card has and showWeatherCard() doesn't.
+  lcd.setFont(&fonts::FreeSansBold24pt7b);
+  lcd.setTextSize(1);
+  drawTemperature(temperature, unit, kCardMargin, 70, ink(), /*ringRadius=*/8);
+
+  // The condition phrase - identical two-tier sizing technique to
+  // showWeatherCard()'s own shortForecast block (see that function's remarks
+  // on why a phrase that fits whole at a smaller size beats a clipped one at
+  // a larger size), shifted down the same 20px as the hero number above it.
+  if (shortForecast.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    lcd.setTextSize(1);
+    const int linesAtLargeSize = wrappedLeftText(shortForecast, kCardMargin, 120, ink(), 24, 3,
+                                                 bodyWidth, /*measureOnly=*/true);
+    if (linesAtLargeSize <= 2) {
+      wrappedLeftText(shortForecast, kCardMargin, 120, ink(), 24, 2, bodyWidth);
+    } else {
+      lcd.setFont(&fonts::FreeSansBold9pt7b);
+      wrappedLeftText(shortForecast, kCardMargin, 120, ink(), 18, 3, bodyWidth);
+    }
+  }
+
+  // Freshness, pinned to a fixed baseline for the same reason
+  // showWeatherCard()'s own freshness line is: both branches above bottom
+  // out above this line (12pt x 2 = y168, 9pt x 3 = y174), and a fixed
+  // position means this line does not jump around the card as the forecast
+  // wording's length changes from one period to the next.
+  if (updatedAt.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setTextSize(1);
+    lcd.setTextColor(muted(), bg());
+    drawTruncatedLeft(updatedAt, kCardMargin, 180, bodyWidth);
+  }
+
+  drawClock();
+  restoreDefaultFont();
+}
+
+void showForecastStatus(const String& headline, const String& detail, bool isProblem) {
+  lcd.fillScreen(bg());
+  drawCardBanner("FORECAST", kForecastBanner, 130);
 
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
