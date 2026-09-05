@@ -169,13 +169,16 @@ struct CardSpec {
   bool everFetched = false;
 };
 
-// 10 registrations exist today (weather, aircraft, graphic x3, sunmoon,
-// announcement, clockdate, moonphase, qrtext) against a cap of 10 before this
-// bump - registerCard() only logs and drops a card past the cap rather than
+// 12 registrations exist today (weather, aircraft, graphic x3, sunmoon,
+// announcement, clockdate, moonphase, qrtext, listings) - qrtext and listings
+// were each built on their own branch against a base of 10, each bumping this
+// constant to 11 independently; merging both together makes the true count
+// 12, so the cap moves to 13 rather than either branch's own 11.
+// registerCard() only logs and drops a card past the cap rather than
 // crashing, which is a silent-until-noticed failure on firmware with no
-// automated tests. Sized with one spare slot rather than exactly 10 so the
+// automated tests. Sized with one spare slot rather than exactly 12 so the
 // next card type is a registration, not also a bump here.
-static constexpr uint8_t kMaxCards = 11;
+static constexpr uint8_t kMaxCards = 13;
 
 /// Called from each card module's own translation unit at static-init time
 /// (see the `kRegistered` idiom at the bottom of Weather.cpp/Aircraft.cpp),
