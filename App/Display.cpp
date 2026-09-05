@@ -1027,21 +1027,31 @@ void drawNavAffordances(bool canReverse) {
 }
 
 void flashNavEdge(bool isForward, bool canReverse) {
-  // The same 16px-wide, full-height strip Touch::poll() classifies as
-  // Hit::Reverse/Hit::Forward - see kEdgeZoneWidth's own remarks above.
+  // The same kEdgeZoneWidth-wide strip Touch::poll() classifies as
+  // Hit::Reverse/Hit::Forward - see that constant's own remarks above - but
+  // only up to kButtonRowY, not the full kScreenH. Touch::poll() checks
+  // action-button zones before edge zones, so within the button row's own
+  // y-range a tap only ever reaches Hit::Reverse/Hit::Forward where no
+  // button rect covers it; a taller flash here would still paint over
+  // whatever button *does* live in that row at that x, and unlike
+  // flashActionButton() (always followed by drawCurrent() redrawing
+  // everything, since a nav tap changes what's on screen) there is one path
+  // - rewind() at gHistoryCursor == 0, i.e. canReverse == false - that
+  // returns without redrawing at all, which would leave a bite taken out of
+  // a real button until some unrelated later redraw happened to fix it.
   const int x = isForward ? kScreenW - kEdgeZoneWidth : 0;
   // kButtonPressedFill, not a new colour: reusing flashActionButton()'s own
   // "pressed" shade makes every touch on this panel answer back the same
   // way, rather than teaching the user two different flash colours for two
   // different kinds of button. It reads against either day/night background
   // for the same reason it was chosen for the action row in the first place.
-  lcd.fillRect(x, 0, kEdgeZoneWidth, kScreenH, kButtonPressedFill);
+  lcd.fillRect(x, 0, kEdgeZoneWidth, kButtonRowY, kButtonPressedFill);
   delay(180);
   // Undo the flash before redrawing the chevron on top of it - the resting
   // state here isn't a filled rect the way a button's is, so simply drawing
   // the chevron again over the pressed fill would leave a stray blue bar
   // behind it.
-  lcd.fillRect(x, 0, kEdgeZoneWidth, kScreenH, bg());
+  lcd.fillRect(x, 0, kEdgeZoneWidth, kButtonRowY, bg());
   drawNavAffordances(canReverse);
 }
 

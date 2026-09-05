@@ -746,6 +746,21 @@ close it sits to the physical edge; real fingers found the original,
 edge-clearing width too narrow to hit reliably. The server says what a
 button is called and what it means; only the device knows its own panel.
 
+**Reverse/forward taps flash too, the same way** (`Display::flashNavEdge`),
+for the identical reason: an edge strip with no visible chrome of its own
+gave a tap there no acknowledgment at all before rewind()/advance() ran.
+The flash only fills up to `kButtonRowY`, not the panel's full height,
+specifically because the edge strip's x-range overlaps the button row's —
+Touch::poll()'s button-first priority means a tap actually lands on
+Hit::Reverse/Hit::Forward there only where no button covers it, but a
+flash filling the whole column would still paint over a button that *is*
+drawn at that x within the button row, and painting over a button is only
+harmless because the very next thing to happen is `drawCurrent()` redrawing
+everything — except on the one path that skips that redraw entirely
+(`rewind()` when there is no history to step back into), where the button
+would otherwise stay visibly bitten into until some unrelated redraw fixed
+it.
+
 ### Assets and the SD card
 
 `App/SdStorage.h`/`.cpp` mounts the card (CS pin 5, the same one `CYD-Dickey`'s
