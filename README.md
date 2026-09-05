@@ -822,22 +822,40 @@ yet succeeded far enough to try. A clean compile plus one confirmed-real
 404-to-be-fixed is the current state of verification, which is more than a
 clean compile alone but well short of "this works."
 
-### A picture as a card, chosen by the server
+### A picture as a card, chosen by the server - three of them
 
-`App/Graphic.h`/`.cpp` puts an image into the rotation as a card of its own.
-It registers a `CardSpec` with id `graphic` exactly the way `Weather.cpp` and
-`Aircraft.cpp` register theirs, and adding it required **no change to the
-scheduler at all** — which is the property the registry was built to have, and
-the first time anything has exercised that claim.
+`App/Graphic.h`/`.cpp` puts an image into the rotation as a card of its own,
+and provides **three independently-configured instances**: ids `graphic`,
+`graphic2` and `graphic3`. Each registers its own `CardSpec` exactly the way
+`Weather.cpp` and `Aircraft.cpp` register theirs, and adding all three
+required **no change to the scheduler at all** — which is the property the
+registry was built to have, and the first time anything has exercised that
+claim for more than one descriptor from the same module. A household can
+therefore rotate through up to three separately-chosen pictures - a seasonal
+notice, a house rule, a QR code - rather than being limited to one.
 
-**The card has no content of its own.** Weather and aircraft each own a server
-route, a response shape and a status vocabulary. This one owns none of that:
-what it draws is whatever asset its own policy entry names.
+The three instances share one implementation, not three copies of it:
+`Graphic.cpp` factors the fetch/itemCount/draw logic into a single
+`template <int N> struct Instance`, explicitly instantiated for `N = 1, 2, 3`
+(the one piece that cannot be written generically - each instance's id - is
+the only explicitly-specialized member). Each instantiation gets its own set
+of static globals from the compiler, which is what gives `graphic`, `graphic2`
+and `graphic3` fully independent state - one instance's cached asset going
+stale has no effect on the other two - without hand-duplicating the module.
+This was the only workable option given `Cards::CardSpec::fetch/itemCount/draw`
+are raw function pointers with no per-instance context parameter (see
+Cards.h): a single runtime class holding an id data member would have nowhere
+to stash `this` for the scheduler to pass back in.
+
+**None of the three has content of its own.** Weather and aircraft each own a
+server route, a response shape and a status vocabulary. These own none of
+that: what each one draws is whatever asset its own policy entry names.
 `CardPolicyEntry.assetId` (optional, string) is carried through
-`Cards::PolicyEntry` and `CardManager::applyPolicy()` onto the descriptor as
-`Cards::CardSpec::assetId`, and the card resolves it through the `Assets`
-cache described above. That indirection is the whole point: **changing which
-picture a household sees is a config edit, not a firmware release.**
+`Cards::PolicyEntry` and `CardManager::applyPolicy()` onto that instance's own
+descriptor as `Cards::CardSpec::assetId`, and each instance resolves it
+independently through the `Assets` cache described above. That indirection is
+the whole point: **changing which picture a household sees is a config edit,
+not a firmware release.**
 CYD-Dickey's nearest equivalents are its splash and QR cards, which are this
 card with the image hardcoded (`splashImage = "/LRBH.PNG"`) and therefore need
 a reflash to change.
@@ -852,44 +870,52 @@ had not been constructed yet. An id longer than the buffer is **dropped, not
 truncated**: a truncated id is a perfectly well-formed id for some *other*
 asset, and showing the wrong picture is worse than showing none.
 
-**Interstitial, not list.** It is one picture, not a feed, and
-`interleaveEvery`'s "show after every N other cards" is the honest description
-of how a picture should appear — on a cadence of its own, no matter how many
-aircraft happen to be overhead. A list card would take one fixed slot in the
-list sequence and be seen proportionally less often as that sequence grows,
-which is the specific mistake recorded above as having been corrected on a
-running CYD-Dickey device.
+**Interstitial, not list - all three.** Each instance is one picture, not a
+feed, and `interleaveEvery`'s "show after every N other cards" is the honest
+description of how a picture should appear — on a cadence of its own, no
+matter how many aircraft happen to be overhead. A list card would take one
+fixed slot in the list sequence and be seen proportionally less often as that
+sequence grows, which is the specific mistake recorded above as having been
+corrected on a running CYD-Dickey device. All three share the same `order`
+and `interleaveEvery` defaults: they are peers of the same kind of card, not a
+priority chain, so there is no meaningful ranking to invent between three
+pictures a household picks independently.
 
-**Missing is the ordinary state, and it is silent.** With no `assetId` in the
-policy — which is every device until somebody sets one — the card reports zero
-items and the scheduler's existing empty-card skipping passes over it
-entirely. Same for an asset that will not fetch and for one that will not
-decode. This is deliberately the opposite of what weather and aircraft do,
-whose "not activated" and "nothing overhead right now" states report one item
-because those messages are real content worth a screen. There is nothing
-informative to say about a picture that isn't there, and a card reading "no
-image configured" in a household's living room is a worse outcome than a card
-that simply never appears.
+**Missing is the ordinary state, and it is silent, per instance.** With no
+`assetId` in a given instance's policy entry — which is every instance on
+every device until somebody sets one — that instance reports zero items and
+the scheduler's existing empty-card skipping passes over it entirely. Same for
+an asset that will not fetch and for one that will not decode. This is
+deliberately the opposite of what weather and aircraft do, whose "not
+activated" and "nothing overhead right now" states report one item because
+those messages are real content worth a screen. There is nothing informative
+to say about a picture that isn't there, and a card reading "no image
+configured" in a household's living room is a worse outcome than a card that
+simply never appears. A household that wants only one picture configures only
+`graphic`; `graphic2` and `graphic3` then sit silent, exactly as `graphic`
+alone used to for a device with no policy at all.
 
-A decode failure is the one case the card cannot see coming, since it is only
-discovered inside `draw()`. It clears its ready flag, so the card is out of
-the rotation by the next computed card and a corrupt asset costs one dwell
-rather than reappearing every cycle. The cached file is deliberately **not**
-deleted: a PNG that will not decode will not decode next time either, and
-deleting it would turn a permanent failure into an HTTP fetch on every
+A decode failure is the one case an instance cannot see coming, since it is
+only discovered inside `draw()`. It clears that instance's own ready flag, so
+the card is out of the rotation by the next computed card and a corrupt asset
+costs one dwell rather than reappearing every cycle - and only that one
+instance is affected, not the other two. The cached file is deliberately
+**not** deleted: a PNG that will not decode will not decode next time either,
+and deleting it would turn a permanent failure into an HTTP fetch on every
 refresh, forever — loud on the network and no better on screen.
 
-**Fetch and draw stay strictly separate**, like every other card.
-`fetch()` calls `Assets::ensureCached()` (an SD stat on a hit, one HTTP fetch
-on a miss) and is called only by the scheduler's refresh timer; `draw()` calls
-`Assets::drawCached()`, which never reaches for the network, so stepping
-backwards through the rotation is a pure redraw. Both re-read the configured
-`assetId` off the descriptor rather than caching it, which is what makes a
-policy change take effect immediately: the moment the server names a different
-asset, the one the card is holding stops counting as content and stays
-uncounted until the next refresh has actually fetched the new one. Without
-that, a device told to change its picture would keep showing the old one for
-up to a full refresh interval.
+**Fetch and draw stay strictly separate**, like every other card, for each
+instance independently. `fetch()` calls `Assets::ensureCached()` (an SD stat
+on a hit, one HTTP fetch on a miss) and is called only by the scheduler's
+refresh timer; `draw()` calls `Assets::drawCached()`, which never reaches for
+the network, so stepping backwards through the rotation is a pure redraw.
+Both re-read the configured `assetId` off that instance's own descriptor
+rather than caching it, which is what makes a policy change take effect
+immediately: the moment the server names a different asset for a given
+instance, the one that instance is holding stops counting as content and
+stays uncounted until the next refresh has actually fetched the new one.
+Without that, a device told to change a picture would keep showing the old
+one for up to a full refresh interval.
 
 The theme and the centring come for free — `Display::drawPngFromSd()` already
 clears to the day/night background before decoding and centres the image on it
