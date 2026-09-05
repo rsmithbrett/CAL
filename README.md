@@ -984,6 +984,84 @@ y=190. A banner reading "NOTICE" in a new muted green
 (`kAnnouncementBanner`) keeps it visually distinct from weather's navy,
 aircraft's blue and sunrise/sunset's amber.
 
+### A moon-phase card: the first illustrated card, not just text/data
+
+`App/MoonPhase.h`/`.cpp` is structurally the sunrise/sunset card's twin —
+same "fetches nothing, pushed in from the check-in path" shape as
+`SunMoon.cpp` — but it is the first of a new family the product owner wants:
+**graphical style cards**, illustrated rather than text/data. Every card
+before this one draws numbers, prose, or a server-chosen picture; this one
+draws something computed, as an actual picture.
+
+**No fetch, same as `SunMoon.cpp`, for the same reason.** `moonPhase`,
+`moonIlluminatedFraction` and `moonPhaseName` arrive on the check-in response
+the device already makes (see the DiscoverAroundMe README's "The moon phase
+card"), so `App.ino` pushes them into `MoonPhase::setPhase()` right alongside
+`SunMoon::setTimes()` — one more call in the same spot, no new timer, no new
+failure mode.
+
+**A simpler absent case than `SunMoon.cpp`'s.** Sunrise and sunset can be
+absent for three different reasons and `SunMoon.cpp` still shows a card
+explaining which in words. The Moon's phase has only one absent case — a
+device whose position has never resolved — and nothing useful to say about
+it in words that "no card" doesn't already say, so `MoonPhase.cpp`'s
+`cardItemCount()` reports zero items rather than inventing a message, the
+same tolerance a picture card with no `assetId` chosen already gets.
+
+**Drawing an actual disc from three primitives, not an image asset.**
+`Display::showMoonPhaseCard()` (see that function's own long comment in
+`Display.cpp` for the full derivation) uses a well-known technique for
+faking a lunar-phase disc with nothing but `fillCircle`/`fillArc`/
+`fillEllipse`:
+
+1. Fill the whole disc `muted()` — start dark.
+2. Fill the hemisphere currently facing the Sun `ink()`, as a half-disc
+   wedge (`fillArc` from radius 0 to the disc's radius, sweeping 180
+   degrees) rather than a `fillRect` — a rectangle's bounding-box corners
+   poke past the round limb; a wedge's do not.
+3. Overlay an ellipse, same centre and vertical radius as the disc,
+   horizontal radius `radius * |1 - 2 * illuminatedFraction|`, to grow or
+   shrink the lit area away from the exact-half case step 2 drew — filled
+   `muted()` below 0.5 illuminated (eating back toward new moon) or `ink()`
+   above it (growing toward full), skipped entirely at exactly 0.5 where it
+   would have zero width.
+
+**Waxing lights the right, waning lights the left — a stated
+simplification, not a guess.** `phase < 0.5` (waxing, growing toward full)
+picks the right half in step 2; `phase > 0.5` (waning) picks the left. This
+is the Northern Hemisphere convention: a Southern Hemisphere household sees
+its own sky mirrored left-right from what this draws. There is no
+per-device hemisphere signal today to draw the correct picture for both, and
+`Display.cpp`'s own comment says so rather than leaving it to be discovered
+on a real device.
+
+`phaseName` is captioned underneath the disc in bold, with an "N%
+illuminated" line below that in muted grey — the picture is the point, but
+the card is not purely an unlabeled image.
+
+**Registered at `order` 4, interleaving every 7 cards** — grouped with
+`sunmoon` and `announcement`, the other once-a-day-fact singletons, between
+`sunmoon`'s 6 (sunrise/sunset earns a slightly shorter gap; it is worth
+seeing about that often) and `announcement`'s 8 (a household notice, seen
+more rarely). A fresh, illustrated card the product owner wants seen
+regularly does not belong buried as rarely as a notice, but the Moon's phase
+changes more slowly than sunrise/sunset does, so it does not need sunmoon's
+own cadence either.
+
+**`Cards::kMaxCards` moved from 8 to 10.** Eight registrations already
+existed (`weather`, `aircraft`, `graphic` × 3, `sunmoon`, `announcement`,
+`clockdate`) — exactly at the cap — so `moonphase` as a ninth would have hit
+`registerCard()`'s silent-log-and-drop overflow path on firmware with no
+automated tests to catch it. Sized to 10, one spare slot, rather than
+exactly 9, so the next card type is a registration, not also a bump here.
+
+**`kBannerHeight`/`kCardMargin`/font choices are unchanged** — this card
+reuses the same white/bannered card family and layout primitives as every
+card before it, in a new banner colour (`kMoonPhaseBanner`, deep indigo)
+distinct from weather's navy, aircraft's blue, sunrise/sunset's amber and
+announcement's green, since it is visually a new kind of card, not a
+variation on an existing one.
+
 ### Deciding when to reboot to the updater
 
 Three independent things can make the App call `Loader::requestUpdate()` —

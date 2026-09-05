@@ -33,9 +33,11 @@
 #include "Loader.h"
 #include "Log.h"
 #include "SdStorage.h"
-// Included for setTimes() only, not to register the card - cards still register
-// themselves at static-init time and App.ino names none of them. This one needs a
-// push because its content rides the check-in response rather than a fetch of its own.
+// Included for setPhase()/setTimes() only, not to register either card - cards
+// still register themselves at static-init time and App.ino names none of them.
+// Both need a push because their content rides the check-in response rather than
+// a fetch of their own.
+#include "MoonPhase.h"
 #include "SunMoon.h"
 #include "Telemetry.h"
 #include "WifiJoin.h"
@@ -229,6 +231,9 @@ void performCheckIn() {
   // the same reason: the check-in path is the only thing that knows these, and
   // the sun card has no fetch of its own to pull them with.
   SunMoon::setTimes(result.sunriseMinutesUtc, result.sunsetMinutesUtc, result.utcOffsetMinutes);
+  // Same reasoning, same push, one card over: the Moon-phase card has no fetch of
+  // its own either, and its content rides this exact response.
+  MoonPhase::setPhase(result.moonPhase, result.moonIlluminatedFraction, result.moonPhaseName);
 
   // The three card fields, in the order they have to happen in.
   //

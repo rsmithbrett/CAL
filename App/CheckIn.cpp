@@ -192,6 +192,13 @@ Result perform() {
   // needs distinguishing here.
   result.sunriseMinutesUtc = responseDoc["sunriseMinutesUtc"] | -1;
   result.sunsetMinutesUtc = responseDoc["sunsetMinutesUtc"] | -1;
+  // `| -1.0` covers a JSON null and a field an older server never sends at all, the
+  // same reasoning as sunriseMinutesUtc/sunsetMinutesUtc above - both mean "nothing
+  // to show" here, since unlike sunrise/sunset there is no separate polar-style
+  // absent case to distinguish for the Moon's phase.
+  result.moonPhase = responseDoc["moonPhase"] | -1.0;
+  result.moonIlluminatedFraction = responseDoc["moonIlluminatedFraction"] | -1.0;
+  result.moonPhaseName = String(responseDoc["moonPhaseName"] | "");
   const int intervalSeconds = responseDoc["checkInIntervalSeconds"] | 300;
   result.intervalMs = static_cast<uint32_t>(intervalSeconds) * 1000UL;
 
