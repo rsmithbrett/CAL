@@ -180,6 +180,36 @@ void showClockDate(const String& timeText, const String& dateText);
 /// calling this at all when there is nothing configured.
 void showAnnouncementCard(const String& text);
 
+/// The real-estate listings card: one nearest-market listing per screen, with
+/// the scheduler cycling through however many the device fetched (up to
+/// Listings::kMaxListings) - see Listings.h's own remarks on why this is a
+/// *list* card in the literal sense, unlike showAircraftCard()'s single
+/// featured reading. `index`/`total` draw a small "2 of 5" caption so a
+/// household mid-cycle knows there is more to see rather than wondering
+/// whether the rotation is stuck - the first card on this build to actually
+/// need one, since every other list card today shows exactly one item
+/// (Aircraft.h's own remarks explain why). Stat-row layout, reusing
+/// showAircraftCard()'s label-left/value-right technique: this is the same
+/// shape of information (a handful of short facts about one thing), just a
+/// house instead of a plane. propertyType/price form the sub-headline under
+/// the address; bedrooms/bathrooms print without a trailing ".0" for a whole
+/// number and with one decimal otherwise (a bare double reading "3.0 bd"
+/// looks like a fetch error, not a design choice, to someone glancing at a
+/// kitchen counter).
+void showListingsCard(const String& address, const String& propertyType, int price,
+                      double bedrooms, double bathrooms, int squareFootage,
+                      int daysOnMarket, double distanceMiles, uint16_t index,
+                      uint16_t total, const String& updatedAt);
+
+/// The listings card's non-Ok states: not activated, provider disabled, the
+/// account's RentCast key not configured yet (a first-class resting state
+/// mirrored from the server's own ListingsResult.IsConfigured, not inferred
+/// from an error string), a fetch that succeeded with nothing currently
+/// listed nearby, and genuine auth/network trouble. Same white/bannered card
+/// family as every other content card, mirroring showAircraftStatus()'s
+/// muted-vs-amber split.
+void showListingsStatus(const String& headline, const String& detail, bool isProblem);
+
 /// Shown when no registered card has anything to draw at all - which is the
 /// ordinary state for the first second or two after boot, before the first
 /// fetch lands. Same white/bannered card family as the two status screens

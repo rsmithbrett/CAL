@@ -78,6 +78,10 @@ constexpr uint32_t kMoonPhaseBanner = 0x4B2E83u;
 // so it gets a colour that reads as neither "weather" nor "aircraft" nor
 // "sunrise" at a glance.
 constexpr uint32_t kAnnouncementBanner = 0x2E7D32u;
+// A brick/terracotta red, distinct from every banner above it - real-estate
+// signage colour rather than anything borrowed from the weather/aircraft/
+// astronomy families this card has nothing to do with.
+constexpr uint32_t kListingsBanner = 0xA13D2Du;
 constexpr int kBannerHeight = 22;
 constexpr int kCardMargin = 10;
 
@@ -411,6 +415,55 @@ const char* compassDirection(double degrees) {
   int index = (static_cast<int>((degrees + 22.5) / 45.0)) % 8;
   if (index < 0) index += 8;
   return dirs[index];
+}
+
+// Comma-grouped whole-dollar price ("$450,000") - manual grouping since
+// ESP32 libc locale support is not to be relied on, the same "do not trust a
+// platform feature that might not be there" reasoning this file's hand-drawn
+// degree ring already applies to a font's missing degree glyph.
+String formatPrice(int price) {
+  const String digits = String(price);
+  String grouped;
+  int sinceComma = 0;
+  for (int i = digits.length() - 1; i >= 0; --i) {
+    grouped = digits[i] + grouped;
+    sinceComma++;
+    if (sinceComma % 3 == 0 && i > 0) {
+      grouped = "," + grouped;
+    }
+  }
+  return "$" + grouped;
+}
+
+// Drops a whole number's trailing ".0" ("3" not "3.0") and keeps one decimal
+// otherwise ("3.5") - RentCast reports bedrooms/bathrooms as fractional (a
+// half-bath is a real, common listing detail), and printing every value at a
+// fixed one decimal place would render "3.0 bd" for the ordinary whole-number
+// case, which reads as a fetch glitch rather than a deliberate number to
+// someone glancing at this from across a room.
+String formatCount(double value) {
+  const int whole = static_cast<int>(value + 0.5);
+  double diff = value - whole;
+  if (diff < 0) diff = -diff;
+  if (diff < 0.05) {
+    return String(whole);
+  }
+  char buffer[16];
+  snprintf(buffer, sizeof(buffer), "%.1f", value);
+  return String(buffer);
+}
+
+// "New today"/"1 day"/"N days" - same singular/plural care
+// describeFreshness() already gives "Updated 1 min ago" elsewhere in this
+// file, applied to RentCast's daysOnMarket instead of a fetch age.
+String formatDaysOnMarket(int days) {
+  if (days <= 0) {
+    return "New today";
+  }
+  if (days == 1) {
+    return "1 day";
+  }
+  return String(days) + " days";
 }
 
 }  // namespace
@@ -909,6 +962,119 @@ void showAnnouncementCard(const String& text) {
       lcd.setFont(&fonts::FreeSansBold9pt7b);
       wrappedLeftText(text, kCardMargin, 40, ink(), 18, 7, bodyWidth);
     }
+  }
+
+  drawClock();
+  restoreDefaultFont();
+}
+
+void showListingsCard(const String& address, const String& propertyType, int price,
+                      double bedrooms, double bathrooms, int squareFootage,
+                      int daysOnMarket, double distanceMiles, uint16_t index,
+                      uint16_t total, const String& updatedAt) {
+  lcd.fillScreen(bg());
+  drawCardBanner("LISTINGS", kListingsBanner, 130);
+
+  // "2 of 5" - drawn in the banner row but outside the coloured rect (which
+  // ends at x=130), so it costs no space the address/price block below needs
+  // and reads as ordinary chrome rather than competing with the card's own
+  // content. Only drawn once there is more than one listing to page through -
+  // every other list card on this build shows exactly one item today (see
+  // Aircraft.h's own remarks on why), so this is the first card that has ever
+  // needed to tell a household "there is more" at all.
+  if (total > 1) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setTextSize(1);
+    lcd.setTextColor(muted(), bg());
+    char caption[16];
+    snprintf(caption, sizeof(caption), "%u of %u", static_cast<unsigned>(index) + 1,
+             static_cast<unsigned>(total));
+    lcd.setTextDatum(top_right);
+    lcd.drawString(caption, kScreenW - kCardMargin, 4);
+    lcd.setTextDatum(top_left);
+  }
+
+  // Headline: the address itself, the one fact that actually identifies
+  // *this* listing from the last one shown.
+  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setTextSize(1);
+  lcd.setTextColor(ink(), bg());
+  drawTruncatedLeft(address, kCardMargin, 32, kScreenW - kCardMargin * 2);
+
+  // Price and property type share the sub-headline - the same "two related
+  // facts, one line" pairing showAircraftCard() gives callsign+distance.
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setTextColor(muted(), bg());
+  String subline = formatPrice(price);
+  if (propertyType.length() > 0) {
+    subline += " - " + propertyType;
+  }
+  drawTruncatedLeft(subline, kCardMargin, 64, kScreenW - kCardMargin * 2);
+
+  // Stat rows: identical label-left/value-right technique to
+  // showAircraftCard()'s Altitude/Speed/Heading block - the same shape of
+  // information, a house instead of a plane.
+  const int rightX = kScreenW - kCardMargin;
+  const int rowValueWidth = 150;
+  int rowY = 88;
+  constexpr int kRowHeight = 26;
+
+  lcd.setTextColor(muted(), bg());
+  lcd.drawString("Beds", kCardMargin, rowY);
+  lcd.setTextColor(ink(), bg());
+  drawRightJustified(formatCount(bedrooms), rightX, rowY, rowValueWidth);
+  rowY += kRowHeight;
+
+  lcd.setTextColor(muted(), bg());
+  lcd.drawString("Baths", kCardMargin, rowY);
+  lcd.setTextColor(ink(), bg());
+  drawRightJustified(formatCount(bathrooms), rightX, rowY, rowValueWidth);
+  rowY += kRowHeight;
+
+  lcd.setTextColor(muted(), bg());
+  lcd.drawString("Sq Ft", kCardMargin, rowY);
+  lcd.setTextColor(ink(), bg());
+  drawRightJustified(squareFootage > 0 ? String(squareFootage) : String("-"), rightX, rowY,
+                     rowValueWidth);
+  rowY += kRowHeight;
+
+  lcd.setTextColor(muted(), bg());
+  lcd.drawString("Listed", kCardMargin, rowY);
+  lcd.setTextColor(ink(), bg());
+  drawRightJustified(formatDaysOnMarket(daysOnMarket), rightX, rowY, rowValueWidth);
+  rowY += kRowHeight;
+
+  // Footer: distance and freshness together, both pinned to a fixed baseline
+  // below the stat rows rather than flowing under them - same reasoning
+  // showWeatherCard()'s own freshness line gives for not letting this move
+  // around the card as other fields change length.
+  char distanceBuf[32];
+  snprintf(distanceBuf, sizeof(distanceBuf), "%.1f mi away", distanceMiles);
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setTextSize(1);
+  lcd.setTextColor(muted(), bg());
+  lcd.setTextDatum(top_left);
+  lcd.drawString(distanceBuf, kCardMargin, rowY + 4);
+  if (updatedAt.length() > 0) {
+    drawRightJustified(updatedAt, rightX, rowY + 4, 160);
+  }
+
+  drawClock();
+  restoreDefaultFont();
+}
+
+void showListingsStatus(const String& headline, const String& detail, bool isProblem) {
+  lcd.fillScreen(bg());
+  drawCardBanner("LISTINGS", kListingsBanner, 130);
+
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setTextSize(1);
+  const uint32_t headlineColour = isProblem ? kWarn : muted();
+  const int headlineLines =
+      wrappedLeftText(headline, kCardMargin, 40, headlineColour, 22, 3, kScreenW - kCardMargin * 2);
+  if (detail.length() > 0) {
+    wrappedLeftText(detail, kCardMargin, 40 + headlineLines * 22 + 12, ink(), 18, 3,
+                    kScreenW - kCardMargin * 2);
   }
 
   drawClock();
