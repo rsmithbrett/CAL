@@ -1062,6 +1062,97 @@ distinct from weather's navy, aircraft's blue, sunrise/sunset's amber and
 announcement's green, since it is visually a new kind of card, not a
 variation on an existing one.
 
+### A QR-plus-text card: the App renders a QR code for the first time
+
+`App/QrText.h`/`.cpp` is the first card in this build where the App itself
+draws a scannable QR code — a fixed-URL-only image renders a QR code on
+CAL's own bootloader side (its setup-wizard "scan this to configure WiFi"
+screen, root `Display.cpp`'s `showQr()`), but nothing in `App/` did until
+now. `Display.cpp`'s own comment used to say so explicitly
+(`// No CalQr.h here: the App never renders a QR code.`); that comment is
+gone, because it is no longer true.
+
+**The rendering technique is ported verbatim, not redesigned.** CAL's own
+`showQr()` is proven, working code, so `Display::showQrTextCard()` reuses it
+almost unchanged: the same vendored, renamed copy of ricmoo/QRCode
+(`App/CalQr.h`/`.c` — a second copy of the two files at the repo root,
+because the Arduino build model compiles each sketch folder independently
+and `App/` cannot reach across to CAL's own copy, the same reason `App/`
+already carries its own `Display.cpp` rather than sharing CAL's), the same
+fixed version-6/ECC-LOW static buffer sizing (`qrcode_getBufferSize()` is a
+runtime function and cannot size a compile-time array), and the same
+`qrcode_initText()`/`qrcode_getModule()` render loop with a failure screen
+on a non-zero `qrcode_initText()` return rather than drawing garbage.
+
+**What changed is only the surrounding layout**, because this card has to
+share the panel with a banner above it, a caption/fallback line beneath it,
+and the App's own button row and corner clock further down — CAL's own
+`showQr()` owns the whole 240px-tall panel and answers to nothing else. The
+code is drawn at scale 2 (a 90px square) rather than CAL's own scale 3
+(135px): `kButtonRowY` starts at 190 and the banner already claims the top
+22px, leaving roughly 160px of drawable height against CAL's ~228, with a
+caption line and a fallback data line still to fit beneath the code. This is
+an honest, documented trade-off, not an oversight — see `showQrTextCard()`'s
+own remarks in `Display.cpp` — and, like every card in this build, it is
+**UNVERIFIED ON HARDWARE**: scan reliability at this smaller size has not
+been checked against a real camera on real glass.
+
+**Two content fields with two different roles, unlike every other single-field
+card.** The announcement card (above) has one field, `text`, that is both its
+content and its required-content gate. This card has two:
+
+- `qrData` (`CardPolicyEntry.QrData` → `Cards::PolicyEntry::qrData` →
+  `Cards::CardSpec::qrData`, a new fixed 101-byte buffer alongside `text` on
+  the same `CardSpec`) is the actual payload encoded into the code, and is
+  **required** — with nothing to encode there is no code to draw, so
+  `QrText::cardItemCount()` reports zero items exactly the way
+  `Announcement::cardItemCount()` does with no text.
+- `text` (the same field the announcement card uses) is an **optional**
+  caption shown above the code's raw-data fallback line, mirroring the role
+  a caption plays in CAL's own `showQr()`, where the URL itself is always
+  drawn and a caption is supplementary. A QR card with `qrData` but no
+  `text` is a perfectly ordinary, silent, caption-less code.
+
+**No fetch, same reasoning as the announcement card.** Both `qrData` and
+`text` arrive already complete on every check-in via
+`CardManager::applyPolicy()`, so there is nothing to cache and nothing that
+can fail to fetch — `QrText.cpp` registers no `fetch` function, and
+`CardManager.cpp`'s existing `card.fetch == nullptr` tolerance covers it.
+
+**`Cards::kMaxQrDataLength` (100) must equal
+`DiscoverAroundMe.AdminUI.CardPolicyEditing.MaxQrDataLength` on the server**,
+the same cross-repository discipline `kMaxTextLength` already keeps for the
+announcement card, pinned by a `static_assert` in `QrText.cpp`. The
+server-side number was derived from QR version 6's own published byte-mode
+capacity at ECC LOW (134 characters) with roughly 25% of that held back as
+margin — see that constant's own remarks on the server for the full
+derivation. An over-long `qrData` is **dropped, not truncated**, for a
+stronger reason than the announcement card's own "cut off mid-sentence": a
+QR payload chopped off mid-string is not a shorter version of the same
+code, it is a different one, and showing nothing is more honest than
+showing the wrong code.
+
+**Interstitial, registered at `order` 4 (grouped with `sunmoon`, `moonphase`
+and `announcement` — all four are singleton facts or admin-authored content
+rather than a feed) and `interleaveEvery` 9** — one past `announcement`'s 8
+and one before `clockdate`'s 10. Scanning a code asks more of a person than
+reading a line of text (find a phone, open the camera, wait for it to
+focus), so it earns a slightly longer gap than the plain-text notice beside
+it, while still appearing distinctly more often than the big clock face,
+which nobody needs to interact with at all.
+
+**`Cards::kMaxCards` moved from 10 to 11.** Ten registrations already
+existed (`weather`, `aircraft`, `graphic` × 3, `sunmoon`, `announcement`,
+`clockdate`, `moonphase`) — exactly at the cap — so `qrtext` as an eleventh
+would have hit `registerCard()`'s silent-log-and-drop overflow path.
+Sized to 11, one spare slot, rather than exactly 10, so the next card type
+is a registration, not also a bump here.
+
+A new banner colour, `kQrTextBanner` (teal), keeps this card visually
+distinct from every banner before it — weather's navy, aircraft's blue,
+sunrise/sunset's amber, moon's indigo and the notice's green all already
+carry a meaning this card should not borrow.
+
 ### Deciding when to reboot to the updater
 
 Three independent things can make the App call `Loader::requestUpdate()` —

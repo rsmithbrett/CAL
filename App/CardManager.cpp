@@ -599,6 +599,23 @@ void applyPolicy(const Cards::Policy& policy) {
       strncpy(card.text, entry.text.c_str(), Cards::kMaxTextLength);
       card.text[Cards::kMaxTextLength] = '\0';
     }
+
+    // The QR payload this card encodes, for the QR card - rewritten on every
+    // policy exactly like text above, including back to empty, which is how
+    // an admin takes a QR code down again. Dropped rather than truncated when
+    // over-long, for the same reason assetId is: a QR payload chopped off
+    // mid-string is not a shorter version of the same code, it is a
+    // different one, and the editor already refuses to save anything past
+    // this length (CardPolicyEditing.MaxQrDataLength), so this should only
+    // ever fire against a hand-crafted or future-server value.
+    card.qrData[0] = '\0';
+    if (entry.qrData.length() > Cards::kMaxQrDataLength) {
+      Log::printf("[cards] policy qrData for '%s' is too long (%u chars) - ignored",
+                  entry.id.c_str(), static_cast<unsigned>(entry.qrData.length()));
+    } else if (entry.qrData.length() > 0) {
+      strncpy(card.qrData, entry.qrData.c_str(), Cards::kMaxQrDataLength);
+      card.qrData[Cards::kMaxQrDataLength] = '\0';
+    }
   }
 
   if (matched == 0) {

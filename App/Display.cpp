@@ -11,14 +11,24 @@
 #include <LGFX_AUTODETECT.hpp>
 #include <time.h>
 
+// Vendored copy of ricmoo/QRCode, renamed - identical copy and identical reasoning as
+// CAL's own root Display.cpp: a plain <qrcode.h> resolves to the ESP32 core's own
+// esp_qrcode header instead of the library, which fails at compile time with the core's
+// differently-named API suggested in its place. Renaming both the file and its include
+// guard is what makes the local copy win; the functions inside are untouched and do not
+// clash with esp_qrcode_*. This is a second copy of the same two files (CalQr.h/.c),
+// vendored into App/ rather than referenced across sketch directories - the Arduino build
+// model compiles each sketch folder independently, so App needs its own copy exactly the
+// way it already has its own Display.cpp rather than sharing CAL's.
+#include "CalQr.h"
+
 #include "Display.h"
 #include "Log.h"
 
 namespace Display {
 namespace {
 
-// Same panel as CAL - see CAL's own Display.cpp for why autodetect over a pin
-// map. No CalQr.h here: the App never renders a QR code.
+// Same panel as CAL - see CAL's own Display.cpp for why autodetect over a pin map.
 LGFX lcd;
 
 constexpr int kScreenW = 320;
@@ -78,6 +88,9 @@ constexpr uint32_t kMoonPhaseBanner = 0x4B2E83u;
 // so it gets a colour that reads as neither "weather" nor "aircraft" nor
 // "sunrise" at a glance.
 constexpr uint32_t kAnnouncementBanner = 0x2E7D32u;
+// Teal, distinct from every banner above it - reads as "scan this" at a glance rather than
+// as any of weather/aircraft's blues, sun's amber, moon's indigo or the notice's green.
+constexpr uint32_t kQrTextBanner = 0x0E7490u;
 constexpr int kBannerHeight = 22;
 constexpr int kCardMargin = 10;
 
@@ -910,6 +923,93 @@ void showAnnouncementCard(const String& text) {
       wrappedLeftText(text, kCardMargin, 40, ink(), 18, 7, bodyWidth);
     }
   }
+
+  drawClock();
+  restoreDefaultFont();
+}
+
+// The QR card: a scannable code with an optional caption, ported from CAL's own
+// bootloader-side showQr() (root Display.cpp) - same vendored CalQr.h/.c, same fixed
+// version-6/ECC-LOW static buffer sizing, same qrcode_initText()/qrcode_getModule() render
+// loop. This is proven, working code (CAL's own setup-wizard "scan this to configure WiFi"
+// screen), so the rendering technique itself is carried over verbatim; only the surrounding
+// layout changes, because this card has to share the panel with a banner above it, a
+// caption/fallback line beneath it, and this file's own button row and corner clock further
+// down - CAL's own showQr() owns the whole 240px-tall panel and answers to nothing else.
+//
+// scale is 2 here (a 90px code) rather than CAL's own 3 (135px, on a screen with nothing
+// else on it): kButtonRowY starts at 190 and the banner already claims the top 22px, so this
+// card's whole drawable height is roughly 160px against CAL's ~228, and there is a caption
+// line and a fallback data line still to fit beneath the code. A smaller code is the honest
+// trade-off for sharing a smaller card - see this file's own UNVERIFIED-ON-HARDWARE caveat
+// in QrText.h, since scan reliability at this size has not been checked against a real
+// camera on real glass.
+//
+// caption is optional and drawn above the raw payload, exactly the role CAL's own
+// caption/subCaption parameters play beneath its code - supplementary, not the point. The
+// raw qrData is always drawn beneath the code regardless of whether caption is present,
+// mirroring CAL's own remark on its equivalent line: "the address in characters as well as
+// in the code, because cameras fail."
+void showQrTextCard(const String& qrData, const String& caption) {
+  lcd.fillScreen(bg());
+  drawCardBanner("SCAN", kQrTextBanner, 90);
+
+  const int bodyWidth = kScreenW - kCardMargin * 2;
+
+  // Same fixed QR parameters as CAL's own bootloader showQr(): version 6 at ECC LOW, a
+  // ~134-byte byte-mode capacity comfortably above CardPolicyEditing.MaxQrDataLength (100) -
+  // see that server-side constant's own remarks for the derivation. The buffer is sized
+  // here rather than by qrcode_getBufferSize(), which is a runtime function in this library
+  // and so cannot size a static array - same arithmetic, evaluated at compile time, as the
+  // reference implementation.
+  static constexpr uint8_t kQrVersion = 6;
+  static constexpr size_t kQrModules = kQrVersion * 4 + 17;                    // 41
+  static constexpr size_t kQrBufferBytes = (kQrModules * kQrModules + 7) / 8;  // 211
+
+  QRCode qr;
+  static uint8_t qrBuffer[kQrBufferBytes];
+  if (qrData.length() == 0 ||
+      qrcode_initText(&qr, qrBuffer, kQrVersion, ECC_LOW, qrData.c_str()) != 0) {
+    // qrData.length() == 0 is only reachable if the policy changed between the
+    // scheduler's itemCount() check and this call - see Announcement::cardDraw()'s
+    // identical remark on its own equivalent guard. A non-zero qrcode_initText()
+    // return is data too long for this fixed version to encode - defensive only,
+    // since CardPolicyEditing.MaxQrDataLength already keeps an ordinary saved
+    // policy well clear of that limit - handled by a failure message rather than
+    // drawing garbage, the same choice CAL's own showQr() makes.
+    wrappedLeftText("Cannot display code", kCardMargin, 60, ink(), 22, 2, bodyWidth);
+    if (qrData.length() > 0) {
+      wrappedLeftText(qrData, kCardMargin, 110, muted(), 18, 3, bodyWidth);
+    }
+    drawClock();
+    restoreDefaultFont();
+    return;
+  }
+
+  const int quiet = 2;
+  const int modules = qr.size + quiet * 2;
+  const int scale = 2;
+  const int side = modules * scale;
+  const int x0 = (kScreenW - side) / 2;
+  const int y0 = 28;
+
+  lcd.fillRect(x0, y0, side, side, 0xFFFFFFu);
+  for (uint8_t y = 0; y < qr.size; ++y) {
+    for (uint8_t x = 0; x < qr.size; ++x) {
+      if (qrcode_getModule(&qr, x, y)) {
+        lcd.fillRect(x0 + (x + quiet) * scale, y0 + (y + quiet) * scale, scale, scale, 0x000000u);
+      }
+    }
+  }
+
+  int y = y0 + side + 8;
+  if (caption.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    y += wrappedCenteredText(caption, y, ink(), 1, 22, 1) * 22;
+    y += 4;
+  }
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  wrappedCenteredText(qrData, y, muted(), 1, 16, 2);
 
   drawClock();
   restoreDefaultFont();

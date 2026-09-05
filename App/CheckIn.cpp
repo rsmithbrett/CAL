@@ -92,6 +92,10 @@ void parseCardPolicy(JsonVariantConst source, Cards::Policy& policy) {
     // case for every card that is not an announcement, and for an
     // announcement card nobody has typed anything into yet.
     entry.text = String(card["text"] | "");
+    // Same optionality again, for the QR card's payload. Absent (or blank) is
+    // the ordinary case for every card that does not draw a QR code, and for
+    // a QR card nobody has entered data into yet.
+    entry.qrData = String(card["qrData"] | "");
   }
 }
 

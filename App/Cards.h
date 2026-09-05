@@ -79,6 +79,16 @@ static constexpr uint8_t kMaxAssetIdLength = 48;
 /// arrives truncated to whatever this buffer happened to hold.
 static constexpr uint16_t kMaxTextLength = 280;
 
+/// The longest QR payload a policy entry can carry, in characters. Matches
+/// DiscoverAroundMe.AdminUI.CardPolicyEditing.MaxQrDataLength (100) on the server, which is
+/// what actually enforces the bound - QrText.cpp static_asserts that the two agree, the
+/// same cross-check Announcement.cpp already does for kMaxTextLength against
+/// CardPolicyEditing.MaxTextLength. See that server-side constant's own remarks for how 100
+/// was derived from QR version 6's own byte-mode capacity (134 characters at ECC LOW) - this
+/// firmware-side number only sizes the fixed buffer the value is carried in once it
+/// arrives, it does not re-derive the bound.
+static constexpr uint16_t kMaxQrDataLength = 100;
+
 struct CardSpec {
   /// Matches the `id` the server uses in cardPolicy/cardActions. An id the
   /// server sends that no descriptor here claims is ignored, not an error -
@@ -134,6 +144,18 @@ struct CardSpec {
   /// card that reads it.
   char text[kMaxTextLength + 1] = "";
 
+  /// The QR payload this card encodes - a URL or short data string - for the one card that
+  /// draws a scannable code. Empty for every other card, which is most of them. Same
+  /// fixed-buffer reasoning as `assetId`/`text` above: this struct must stay
+  /// constant-initialisable, and a String field would make it dynamically initialised
+  /// instead, racing every card module's own static-init registration. See
+  /// CardManager::applyPolicy() for how this is populated from a policy's `qrData` field,
+  /// and QrText.cpp for the card that reads it. Unlike `text` (this same card's optional
+  /// caption), an empty value here means the card has nothing to encode at all and reports
+  /// zero items - see QrText.h's own remarks on why QrData, not Text, is this card's
+  /// required content.
+  char qrData[kMaxQrDataLength + 1] = "";
+
   // ---- Per-card scheduling state. Each of these is a struct field
   // precisely because CYD-Dickey's equivalents are named globals, one set
   // per card type.
@@ -147,13 +169,13 @@ struct CardSpec {
   bool everFetched = false;
 };
 
-// 9 registrations exist today (weather, aircraft, graphic x3, sunmoon,
-// announcement, clockdate, moonphase) against a cap of 8 until this bump -
-// registerCard() only logs and drops a card past the cap rather than
+// 10 registrations exist today (weather, aircraft, graphic x3, sunmoon,
+// announcement, clockdate, moonphase, qrtext) against a cap of 10 before this
+// bump - registerCard() only logs and drops a card past the cap rather than
 // crashing, which is a silent-until-noticed failure on firmware with no
-// automated tests. Sized with one spare slot rather than exactly 9 so the
+// automated tests. Sized with one spare slot rather than exactly 10 so the
 // next card type is a registration, not also a bump here.
-static constexpr uint8_t kMaxCards = 10;
+static constexpr uint8_t kMaxCards = 11;
 
 /// Called from each card module's own translation unit at static-init time
 /// (see the `kRegistered` idiom at the bottom of Weather.cpp/Aircraft.cpp),
@@ -199,6 +221,12 @@ struct PolicyEntry {
   /// assetId: silence is a more honest failure than a sentence chopped off
   /// mid-word on a household's screen.
   String text;
+  /// Optional on the wire, and empty for every card that draws no QR code - which is every
+  /// card except the QR one. Same "dropped rather than truncated when over-long" rule as
+  /// text immediately above, for the same reason: a QR payload chopped off mid-string is
+  /// not a shorter version of the same code, it is a different (and likely useless) one, so
+  /// showing nothing is more honest than showing the wrong code.
+  String qrData;
 };
 
 struct Policy {
