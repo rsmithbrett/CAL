@@ -100,15 +100,16 @@ constexpr int kCardMargin = 10;
 // zones before the reverse/forward edge strips (see Touch.cpp's poll() and
 // its own remarks on why that ordering is fixed) - a tap landing inside a
 // button rect is always a button press, regardless of how close that rect
-// sits to the physical edge. So unlike the 16px edge strips themselves,
-// which have to stay clear of card content in the middle of the screen, a
-// button row has nothing logical to stay clear of horizontally, and can run
-// almost the full 320px width. Real fingers found the old 24px-to-296px row
-// (272px total, narrowing to 85px for a three-button card) too narrow to hit
-// reliably; it now runs 8px to 312px (304px total, 97px for three buttons -
-// roughly +14% per button), with a small residual margin from the true
-// bezel edge kept only because a resistive panel's accuracy is known to
-// degrade right at the glass edge, not because anything would misfire.
+// sits to the physical edge. So unlike the (now ~106px) edge strips
+// themselves, which have to stay clear of card content in the middle of the
+// screen, a button row has nothing logical to stay clear of horizontally,
+// and can run almost the full 320px width. Real fingers found the old
+// 24px-to-296px row (272px total, narrowing to 85px for a three-button card)
+// too narrow to hit reliably; it now runs 8px to 312px (304px total, 97px
+// for three buttons - roughly +14% per button), with a small residual
+// margin from the true bezel edge kept only because a resistive panel's
+// accuracy is known to degrade right at the glass edge, not because
+// anything would misfire.
 constexpr int kButtonRowY = 190;
 constexpr int kButtonHeight = 30;
 constexpr int kButtonRowLeft = 8;
@@ -132,15 +133,15 @@ constexpr int kChevronWidth = 7;
 constexpr int kChevronCentreY = kScreenH / 2;
 
 // Mirrors Touch.cpp's own kEdgeZoneWidth exactly (see that file's remarks on
-// why 16). Duplicated rather than shared for the same reason kScreenW here
-// and kScreenWidth there are already duplicated instead of one file
-// including the other's constant: Touch stays ignorant of Display and
-// Display stays ignorant of Touch's hit-testing internals. flashNavEdge()
-// below needs this to fill exactly the rect Touch::poll() reads taps from,
-// so if one of these two numbers ever changes without the other, a flash
-// would light up a strip narrower or wider than the zone that actually
-// responds to a finger.
-constexpr int kEdgeZoneWidth = 16;
+// why 106, not the original 16). Duplicated rather than shared for the same
+// reason kScreenW here and kScreenWidth there are already duplicated instead
+// of one file including the other's constant: Touch stays ignorant of
+// Display and Display stays ignorant of Touch's hit-testing internals.
+// flashNavEdge() below needs this to fill exactly the rect Touch::poll()
+// reads taps from, so if one of these two numbers ever changes without the
+// other, a flash would light up a strip narrower or wider than the zone that
+// actually responds to a finger.
+constexpr int kEdgeZoneWidth = 106;
 
 void clear() {
   lcd.fillScreen(bg());
