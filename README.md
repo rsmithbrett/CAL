@@ -203,8 +203,9 @@ namespace, same TLS trust setup) plus a trimmed `Config.h`. Unlike CAL, it is
 meant to run indefinitely — failures here retry rather than halt, because a
 display that goes dark until someone finds a USB cable is a worse outcome for
 a household than one that keeps trying. It renders a rotation of cards —
-weather, aircraft overhead, and a picture the server picks — scheduled by a
-policy the server hands down on check-in and navigable by touch (see *The card
+weather, aircraft overhead, a picture the server picks, sunrise/sunset, and a
+standalone clock/date card — scheduled by a policy the server hands down on
+check-in and navigable by touch (see *The card
 manager*, below).
 
 ### The weather and aircraft cards, styled after CYD-Dickey

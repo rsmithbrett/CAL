@@ -24,6 +24,18 @@ void begin();
 /// sensibly before any check-in has ever completed.
 void setEnvironment(int utcOffsetMinutes, bool isDaytime);
 
+/// Reads back the UTC offset most recently given to setEnvironment() - the
+/// same value drawClock()'s corner clock already uses on every card. A read
+/// accessor rather than a second pushed copy (the way SunMoon::setTimes()
+/// receives its own) because this file is already the one place tracking
+/// "what does the App currently believe about local time right now"; a card
+/// that wants that same belief (see ClockDate.cpp) should read it from here
+/// rather than keep a third copy that could drift from the two that already
+/// exist - App.ino's own lastUtcOffsetMinutes and this file's internal
+/// gUtcOffsetMinutes. Defaults to 0 (UTC), matching setEnvironment()'s own
+/// pre-first-check-in default.
+int utcOffsetMinutes();
+
 /// The raw touch read beneath Touch.h/.cpp's debounced, event-style API.
 /// Lives here, not in Touch.cpp, because this file already owns the one
 /// LGFX instance for this panel (see `lcd` and begin() below) - a second
@@ -131,6 +143,17 @@ void showAircraftStatus(const String& headline, const String& detail, bool isPro
 /// `detail` is the single line under the two times: day length on an ordinary
 /// day, and on a polar day or night the reason there is no time to show.
 void showSunMoonCard(const String& sunriseText, const String& sunsetText, const String& detail);
+
+/// The clock/date card: a large, room-readable HH:MM and today's date filling
+/// most of the panel - "a moment where the display is just a big clock",
+/// distinct from the small corner clock every card (this one included)
+/// carries regardless. Both strings arrive already formatted - ClockDate.cpp
+/// owns the time_t arithmetic and the strftime() call, the same split
+/// showSunMoonCard() above already uses for its own already-formatted
+/// sunrise/sunset strings - so this function only lays them out. No banner:
+/// unlike weather/aircraft/sun, this card names no data source of its own to
+/// label, and the space a banner would take is better spent on the numbers.
+void showClockDate(const String& timeText, const String& dateText);
 
 /// Shown when no registered card has anything to draw at all - which is the
 /// ordinary state for the first second or two after boot, before the first
