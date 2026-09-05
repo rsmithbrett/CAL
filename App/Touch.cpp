@@ -11,12 +11,20 @@ constexpr uint8_t kMaxZones = 4;
 Rect gZones[kMaxZones];
 uint8_t gZoneCount = 0;
 
-/// 1/20 of the 320px panel width, full height, no visible chrome - the same
-/// dimensions CYD-Dickey settled on for the same panel (`x < 16` and
-/// `x > 304` in its loop() touch handler). Wide enough to hit with a thumb,
-/// narrow enough that it never competes with card content for the middle of
-/// the screen.
-constexpr int32_t kEdgeZoneWidth = 16;
+/// Roughly 1/3 of the 320px panel width per side, full height, no visible
+/// chrome. Widened from the original 16px (1/20, matching CYD-Dickey's own
+/// `x < 16` / `x > 304`) after real-device feedback that a strip 5% of the
+/// screen wide was too easy to miss with a thumb and made edge navigation
+/// feel unresponsive - the same complaint the approved backlog suggestion
+/// "Increase the size of the area on the touchscreen you use to page to the
+/// left and right" describes. A wider strip can only ever compete with card
+/// content in the sense of covering more of it with an invisible zone, never
+/// with an actual button: Touch::poll() below checks action-button zones
+/// first regardless of how much they overlap the edge strips, so widening
+/// this can dim more of the reachable card content but can never swallow a
+/// button press. Leaves an inner ~108px strip (320 - 2*106) for whatever a
+/// card draws in the middle.
+constexpr int32_t kEdgeZoneWidth = 106;
 constexpr int32_t kScreenWidth = 320;
 
 bool contains(const Rect& rect, int32_t x, int32_t y) {

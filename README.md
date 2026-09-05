@@ -507,9 +507,13 @@ returned a bare `bool` from `wasTapped()` — `Display::readTouchRaw()` was
 already handing back `x` and `y` and they were discarded, so a tap anywhere
 on the glass meant one single thing. `Touch::poll()` now classifies the tap
 into a zone: an action button, the reverse (left edge) strip, the forward
-(right edge) strip, or none. The edge strips are 16px wide and full height,
-the same dimensions CYD-Dickey settled on for the same panel (`x < 16` /
-`x > 304` in its own touch handler).
+(right edge) strip, or none. The edge strips were originally 16px wide and
+full height, the same dimensions CYD-Dickey settled on for the same panel
+(`x < 16` / `x > 304` in its own touch handler); widened to roughly 1/3 of
+the 320px panel (106px) per side after real-device feedback that the
+original width was too easy to miss and made edge navigation feel
+unresponsive, matching the approved backlog suggestion to enlarge this
+touch area. The inner ~108px strip is what a card has left to itself.
 
 **Zone priority is fixed, not incidental:** action buttons are tested first,
 edges second. The edge strips have no visible chrome of their own and run the
@@ -738,13 +742,29 @@ just pressed a button on is not swapped out from under them.
 
 Geometry is entirely the device's: a row of up to three buttons along the
 bottom, from x=8 to x=312 and ending at y=220, clearing the corner clock's
-bottom-right patch above it. It does *not* need to clear the 16px
-reverse/forward edge strips on either side the way it looks like it should —
-`Touch.cpp`'s `poll()` checks action-button zones before the edge strips, so
-a tap landing inside a button rect is always a button press regardless of how
-close it sits to the physical edge; real fingers found the original,
-edge-clearing width too narrow to hit reliably. The server says what a
-button is called and what it means; only the device knows its own panel.
+bottom-right patch above it. It does *not* need to clear the reverse/forward
+edge strips on either side (now ~106px, up from an original 16px) the way it
+looks like it should — `Touch.cpp`'s `poll()` checks action-button zones
+before the edge strips, so a tap landing inside a button rect is always a
+button press regardless of how close it sits to the physical edge; real
+fingers found the original, edge-clearing width too narrow to hit reliably.
+The server says what a button is called and what it means; only the device
+knows its own panel.
+
+**Reverse/forward taps flash too, the same way** (`Display::flashNavEdge`),
+for the identical reason: an edge strip with no visible chrome of its own
+gave a tap there no acknowledgment at all before rewind()/advance() ran.
+The flash only fills up to `kButtonRowY`, not the panel's full height,
+specifically because the edge strip's x-range overlaps the button row's —
+Touch::poll()'s button-first priority means a tap actually lands on
+Hit::Reverse/Hit::Forward there only where no button covers it, but a
+flash filling the whole column would still paint over a button that *is*
+drawn at that x within the button row, and painting over a button is only
+harmless because the very next thing to happen is `drawCurrent()` redrawing
+everything — except on the one path that skips that redraw entirely
+(`rewind()` when there is no history to step back into), where the button
+would otherwise stay visibly bitten into until some unrelated redraw fixed
+it.
 
 ### Assets and the SD card
 

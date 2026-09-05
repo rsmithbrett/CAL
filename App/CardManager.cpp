@@ -410,11 +410,17 @@ void handleTap(const Touch::Tap& tap) {
     }
     case Touch::Hit::Reverse:
       Log::line("[cards] reverse tap");
+      // Same reasoning as the ActionButton case above: the edge strip has no
+      // chrome of its own, so without this the tap produced no visible
+      // reaction at all, registered or not. Flash first, then act, so the
+      // acknowledgment isn't delayed by whatever rewind() draws next.
+      Display::flashNavEdge(/*isForward=*/false, /*canReverse=*/gHistoryCursor > 0);
       rewind();
       holdOffAutoAdvance();
       return;
     case Touch::Hit::Forward:
       Log::line("[cards] forward tap");
+      Display::flashNavEdge(/*isForward=*/true, /*canReverse=*/gHistoryCursor > 0);
       advance();
       holdOffAutoAdvance();
       return;
