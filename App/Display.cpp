@@ -95,6 +95,12 @@ constexpr uint32_t kQrTextBanner = 0x0E7490u;
 // signage colour rather than anything borrowed from the weather/aircraft/
 // astronomy families this card has nothing to do with.
 constexpr uint32_t kListingsBanner = 0xA13D2Du;
+// A deep sea-teal, distinct from both weather/aircraft's brighter blues and
+// QR's cyan-teal despite sharing the same colour family - tides is the one
+// card whose content is genuinely ocean data, so it earns the "ocean" hue,
+// just a darker, greener shade than either of the two colours already in use
+// so the three are still told apart at a glance.
+constexpr uint32_t kTidesBanner = 0x0F6B5Cu;
 constexpr int kBannerHeight = 22;
 constexpr int kCardMargin = 10;
 
@@ -814,6 +820,35 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
     lcd.setTextColor(muted(), bg());
     wrappedLeftText(detail, kCardMargin, 140, muted(), 20, 2, kScreenW - kCardMargin * 2);
   }
+
+  drawClock();
+  restoreDefaultFont();
+}
+
+void showTidesCard(const String& nextHighTideText, const String& nextLowTideText) {
+  lcd.fillScreen(bg());
+  drawCardBanner("TIDES", kTidesBanner, 90);
+
+  // Same stat-row layout as showSunMoonCard() immediately above: two rows,
+  // label left and time right-justified. No third line here - see Tides.h
+  // and this function's own declaration in Display.h for why a tide has no
+  // "detail" worth adding.
+  const int rightX = kScreenW - kCardMargin;
+  const int rowValueWidth = 150;
+
+  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setTextSize(1);
+
+  lcd.setTextColor(muted(), bg());
+  lcd.setTextDatum(top_left);
+  lcd.drawString("Next high", kCardMargin, 44);
+  lcd.setTextColor(ink(), bg());
+  drawRightJustified(nextHighTideText, rightX, 44, rowValueWidth);
+
+  lcd.setTextColor(muted(), bg());
+  lcd.drawString("Next low", kCardMargin, 90);
+  lcd.setTextColor(ink(), bg());
+  drawRightJustified(nextLowTideText, rightX, 90, rowValueWidth);
 
   drawClock();
   restoreDefaultFont();

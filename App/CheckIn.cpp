@@ -203,6 +203,11 @@ Result perform() {
   result.moonPhase = responseDoc["moonPhase"] | -1.0;
   result.moonIlluminatedFraction = responseDoc["moonIlluminatedFraction"] | -1.0;
   result.moonPhaseName = String(responseDoc["moonPhaseName"] | "");
+  // `| -1` covers a JSON null and a field an older server never sends at all, the
+  // same reasoning as sunriseMinutesUtc/sunsetMinutesUtc above - both mean "no
+  // tide to show" here.
+  result.nextHighTideMinutesUtc = responseDoc["nextHighTideMinutesUtc"] | -1;
+  result.nextLowTideMinutesUtc = responseDoc["nextLowTideMinutesUtc"] | -1;
   const int intervalSeconds = responseDoc["checkInIntervalSeconds"] | 300;
   result.intervalMs = static_cast<uint32_t>(intervalSeconds) * 1000UL;
 

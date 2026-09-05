@@ -144,6 +144,16 @@ void showAircraftStatus(const String& headline, const String& detail, bool isPro
 /// day, and on a polar day or night the reason there is no time to show.
 void showSunMoonCard(const String& sunriseText, const String& sunsetText, const String& detail);
 
+/// The tides card: next high and next low tide, as already-formatted local
+/// wall-clock times ("06:32") or "--:--" for whichever one the server had
+/// nothing to report - same split, same reasoning as showSunMoonCard()
+/// immediately above, and the same white/bannered card family. Unlike
+/// showSunMoonCard() there is no third `detail` line: a tide has no
+/// polar-style story worth telling in words (see Tides.h), so this card is
+/// just the two rows and nothing else. This draws, it does not compute - the
+/// minutes-to-local arithmetic lives in Tides.cpp, not here.
+void showTidesCard(const String& nextHighTideText, const String& nextLowTideText);
+
 /// The Moon-phase card - the first of a new "graphical style" card family:
 /// an actual drawn disc rather than a text description, labeled with
 /// phaseName underneath. phase (0-1 elongation fraction) and

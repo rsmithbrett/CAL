@@ -81,6 +81,17 @@ struct Result {
   double moonIlluminatedFraction = -1.0;
   String moonPhaseName;
 
+  /// The next high and low tide as minutes after UTC midnight (0-1439), or -1
+  /// where the server reported none - same unit and the same "-1 rather than
+  /// 0" reasoning as sunriseMinutesUtc/sunsetMinutesUtc above. Backed by real
+  /// NOAA CO-OPS data on the server; absent means no NOAA station within
+  /// range of the resolved position, no position resolved at all, or NOAA
+  /// unreachable with nothing cached - all genuinely "there is no answer"
+  /// rather than an error, the same three-reasons-one-treatment shape
+  /// sunrise/sunset already has.
+  int nextHighTideMinutesUtc = -1;
+  int nextLowTideMinutesUtc = -1;
+
   /// How this device should rotate its cards. `present == false` means the
   /// server sent no policy this time, which means "keep whatever policy you
   /// already had" - explicitly not "show nothing". See
