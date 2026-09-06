@@ -154,6 +154,19 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
 /// minutes-to-local arithmetic lives in Tides.cpp, not here.
 void showTidesCard(const String& nextHighTideText, const String& nextLowTideText);
 
+/// The ISS flyover card: distance and compass direction to the International
+/// Space Station's current sub-satellite point, plus a one-line detail
+/// giving the actual coordinates - same two-stat-rows-plus-detail layout as
+/// showSunMoonCard() above, and the same white/bannered card family.
+/// distanceText and directionText arrive already formatted ("6,102 mi",
+/// "042 deg NE"); detail is the lat/lon line, or wording explaining why
+/// there is nothing to show. This draws, it does not compute - the
+/// distance/bearing/compass-point arithmetic lives in IssFlyover.cpp, not
+/// here, the same split every other check-in-driven card in this family
+/// uses.
+void showIssFlyoverCard(const String& distanceText, const String& directionText,
+                        const String& detail);
+
 /// The Moon-phase card - the first of a new "graphical style" card family:
 /// an actual drawn disc rather than a text description, labeled with
 /// phaseName underneath. phase (0-1 elongation fraction) and

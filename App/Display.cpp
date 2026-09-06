@@ -101,6 +101,11 @@ constexpr uint32_t kListingsBanner = 0xA13D2Du;
 // just a darker, greener shade than either of the two colours already in use
 // so the three are still told apart at a glance.
 constexpr uint32_t kTidesBanner = 0x0F6B5Cu;
+// Near-black indigo, distinct from every banner above it including moon's
+// lighter indigo - the one card whose subject is literally outer space, so
+// it earns the darkest banner on the device rather than competing for a hue
+// already claimed by an astronomy sibling.
+constexpr uint32_t kIssFlyoverBanner = 0x1A1A2Eu;
 // A plum/violet, distinct from every banner above it - closest in family to
 // moon's indigo, but far enough apart (magenta-leaning vs. blue-leaning) that
 // the two are told apart at a glance from across a room, matching how
@@ -855,6 +860,41 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
   lcd.drawString("Next low", kCardMargin, 90);
   lcd.setTextColor(ink(), bg());
   drawRightJustified(nextLowTideText, rightX, 90, rowValueWidth);
+
+  drawClock();
+  restoreDefaultFont();
+}
+
+void showIssFlyoverCard(const String& distanceText, const String& directionText,
+                        const String& detail) {
+  lcd.fillScreen(bg());
+  drawCardBanner("ISS", kIssFlyoverBanner, 90);
+
+  // Same stat-row layout as showSunMoonCard()/showTidesCard(): two rows,
+  // label left and value right-justified, plus the same third `detail` line
+  // showSunMoonCard() uses for day length - here, the actual coordinates.
+  const int rightX = kScreenW - kCardMargin;
+  const int rowValueWidth = 150;
+
+  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setTextSize(1);
+
+  lcd.setTextColor(muted(), bg());
+  lcd.setTextDatum(top_left);
+  lcd.drawString("Distance", kCardMargin, 44);
+  lcd.setTextColor(ink(), bg());
+  drawRightJustified(distanceText, rightX, 44, rowValueWidth);
+
+  lcd.setTextColor(muted(), bg());
+  lcd.drawString("Direction", kCardMargin, 90);
+  lcd.setTextColor(ink(), bg());
+  drawRightJustified(directionText, rightX, 90, rowValueWidth);
+
+  if (detail.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setTextColor(muted(), bg());
+    wrappedLeftText(detail, kCardMargin, 140, muted(), 20, 2, kScreenW - kCardMargin * 2);
+  }
 
   drawClock();
   restoreDefaultFont();

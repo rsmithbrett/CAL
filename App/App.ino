@@ -52,13 +52,14 @@ size_t getArduinoLoopTaskStackSize(void) {
 #include "Config.h"
 #include "Display.h"
 #include "Identity.h"
+#include "IssFlyover.h"
 #include "Loader.h"
 #include "Log.h"
 #include "SdStorage.h"
-// Included for setPhase()/setTimes() only, not to register any of these three
-// cards - cards still register themselves at static-init time and App.ino
-// names none of them. All three need a push because their content rides the
-// check-in response rather than a fetch of their own.
+// Included for setPhase()/setTimes()/setPosition() only, not to register any
+// of these four cards - cards still register themselves at static-init time
+// and App.ino names none of them. All four need a push because their
+// content rides the check-in response rather than a fetch of their own.
 #include "MoonPhase.h"
 #include "SunMoon.h"
 #include "Tides.h"
@@ -261,6 +262,11 @@ void performCheckIn() {
   // of its own either, and its content rides this exact response too.
   Tides::setTimes(result.nextHighTideMinutesUtc, result.nextLowTideMinutesUtc,
                    result.utcOffsetMinutes);
+  // Same reasoning, same push, one card over again: the ISS flyover card has
+  // no fetch of its own either, and its content rides this exact response
+  // too.
+  IssFlyover::setPosition(result.issLatitude, result.issLongitude, result.issDistanceMiles,
+                          result.issBearingDegrees);
 
   // The three card fields, in the order they have to happen in.
   //

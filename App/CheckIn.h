@@ -92,6 +92,21 @@ struct Result {
   int nextHighTideMinutesUtc = -1;
   int nextLowTideMinutesUtc = -1;
 
+  /// The International Space Station's current sub-satellite point, and the
+  /// distance/bearing from this device's resolved position to it - straight
+  /// off the check-in response, same as every field above. issDistanceMiles
+  /// negative means "nothing to report" (open-notify unreachable, the cached
+  /// position too stale to trust, or this device's position never
+  /// resolved) - see CheckInModels.cs's own IssLatitude remarks for the full
+  /// list of reasons, all genuinely "there is no answer" rather than an
+  /// error. issLatitude/issLongitude default outside any real coordinate
+  /// rather than to 0, so an accidental read before the first check-in reads
+  /// as obviously wrong rather than as the Gulf of Guinea.
+  double issLatitude = -999.0;
+  double issLongitude = -999.0;
+  double issDistanceMiles = -1.0;
+  double issBearingDegrees = -1.0;
+
   /// How this device should rotate its cards. `present == false` means the
   /// server sent no policy this time, which means "keep whatever policy you
   /// already had" - explicitly not "show nothing". See

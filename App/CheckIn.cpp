@@ -214,6 +214,13 @@ Result perform() {
   // tide to show" here.
   result.nextHighTideMinutesUtc = responseDoc["nextHighTideMinutesUtc"] | -1;
   result.nextLowTideMinutesUtc = responseDoc["nextLowTideMinutesUtc"] | -1;
+  // `| -999.0`/`| -1.0` cover a JSON null and a field an older server never sends at
+  // all, the same reasoning as nextHighTideMinutesUtc/nextLowTideMinutesUtc above -
+  // all mean "no ISS position to show" here.
+  result.issLatitude = responseDoc["issLatitude"] | -999.0;
+  result.issLongitude = responseDoc["issLongitude"] | -999.0;
+  result.issDistanceMiles = responseDoc["issDistanceMiles"] | -1.0;
+  result.issBearingDegrees = responseDoc["issBearingDegrees"] | -1.0;
   const int intervalSeconds = responseDoc["checkInIntervalSeconds"] | 300;
   result.intervalMs = static_cast<uint32_t>(intervalSeconds) * 1000UL;
 
