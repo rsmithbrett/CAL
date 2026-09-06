@@ -222,7 +222,16 @@ int8_t indexOf(const char* id);
 // so CardManager does not have to include the check-in module to be told
 // what its own policy is.
 
-static constexpr uint8_t kMaxPolicyCards = 8;
+// Was a fixed 8 - a leftover from before this project grew past 8 registered
+// card types, and never bumped alongside kMaxCards as new ones were added.
+// The real bug this caused: a device's own /diag stream logged "cardPolicy
+// has more than 8 cards - the rest are ignored" for any account with more
+// than 8 cards configured, silently dropping whichever cards the server
+// happened to list past position 8 in the JSON array - before this firmware
+// ever got the chance to accept or reject them by id. Tied to kMaxCards now
+// so the two can never drift apart again: a policy can name at most one entry
+// per registered card, so the registry's own cap is the right bound here too.
+static constexpr uint8_t kMaxPolicyCards = kMaxCards;
 
 struct PolicyEntry {
   String id;
