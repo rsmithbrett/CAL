@@ -6,16 +6,24 @@
 /// renders, sitting beside Weather.h and Aircraft.h as its own module for the
 /// same reason they are separate from one another.
 ///
-/// **This module provides three independently-configured instances**, ids
-/// `"graphic"`, `"graphic2"` and `"graphic3"`, each its own entry in the card
+/// **This module provides five independently-configured instances**, ids
+/// `"graphic"` through `"graphic5"`, each its own entry in the card
 /// registry with its own retained state (its own cached asset, its own
 /// ready flag, its own change-logging). A household that wants to rotate
 /// through a seasonal notice, a house rule and a QR code no longer has to
-/// pick one; it configures up to three policy entries, one per id, and each
+/// pick one; it configures up to five policy entries, one per id, and each
 /// behaves exactly as if it were the sole graphic card - independently
 /// fetched, independently drawn, independently silent when its own
-/// `assetId` is unset. Nothing here shares state across the three: instance
-/// 2's asset going stale has no effect on instance 1 or 3.
+/// `assetId` is unset. Nothing here shares state across the five: instance
+/// 2's asset going stale has no effect on instance 1 or any other.
+///
+/// Five, not three, as of the multi-instance generalisation that gave every
+/// content-configurable card the same headroom (see Cards.h's own remarks
+/// on kMaxCards, and the judgment call recorded in Announcement.h/QrText.h/
+/// Forecast.h about which card *types* got this treatment at all). Graphic
+/// was the original precedent this template idiom was extracted from; this
+/// change only widens its own instance count to match its siblings, nothing
+/// about the mechanism itself changed.
 ///
 /// **None of the three has content of its own.** Weather and aircraft each
 /// own a server route, a response shape and a status vocabulary; these own
@@ -82,5 +90,11 @@ extern const char* const kCardId2;
 
 /// The third instance's registered id, on the same terms as `kCardId2`.
 extern const char* const kCardId3;
+
+/// The fourth instance's registered id, on the same terms as `kCardId2`.
+extern const char* const kCardId4;
+
+/// The fifth instance's registered id, on the same terms as `kCardId2`.
+extern const char* const kCardId5;
 
 }  // namespace Graphic

@@ -12,9 +12,14 @@
 #include "Tls.h"
 
 namespace Forecast {
-namespace {
 
-constexpr const char* kCardId = "forecast";
+const char* const kCardId = "forecast";
+const char* const kCardId2 = "forecast2";
+const char* const kCardId3 = "forecast3";
+const char* const kCardId4 = "forecast4";
+const char* const kCardId5 = "forecast5";
+
+namespace {
 
 // Two fixed paths rather than building the query string at request time -
 // the value this card ever sends is exactly one of these two literals (see
@@ -175,124 +180,178 @@ Result fetch(bool useTarget) {
 }
 
 // ---------------------------------------------------------------------------
-// The card descriptor. See the equivalent block at the bottom of
-// Weather.cpp/Listings.cpp for why registration happens here rather than in
-// App.ino.
+// The card descriptors - five of them, one per Instance<N> instantiation. See
+// Forecast.h's own remarks for the judgment call on why this is the one
+// fetch-driven card in this build that got the multi-instance treatment.
 // ---------------------------------------------------------------------------
 namespace {
 
-/// This card's own Location choice, read straight off its descriptor rather
-/// than cached in a global - same reasoning Announcement.cpp's currentText()
-/// gives for its own field: the policy can change under this module at any
-/// check-in, and a cached choice would keep querying the location an admin
-/// just switched away from until the next fetch happened to re-read it
-/// anyway, which re-reading directly makes moot. "target" (case-insensitive)
-/// is the only value that means Target; absent, blank, "home", or a typo all
-/// mean Home, mirroring MyWeatherEndpoints' own tolerant default on the
-/// server exactly (see that endpoint's own remarks on why an unrecognised
-/// value is never rejected outright).
-bool wantsTarget() {
-  const int8_t index = Cards::indexOf(kCardId);
-  if (index < 0) {
-    return false;
-  }
-  return strcasecmp(Cards::at(static_cast<uint8_t>(index)).location, "target") == 0;
-}
+/// One forecast card's worth of fetch/itemCount/draw logic, parameterized on
+/// `N` to give each instantiation its own registered id AND its own retained
+/// fetch state - the same Instance<N> idiom Graphic.cpp established, but
+/// with a genuine network fetch (like Graphic's asset resolution) rather
+/// than Announcement/QrText's pure descriptor read. Each instantiation gets
+/// its own `gLast`/`gEverFetched`/`gLastOkMs` the same way Graphic's own
+/// `gCachedId`/`gReady` are per-instantiation: instance 2's forecast going
+/// stale has no effect on instance 1 or any other.
+template <int N>
+struct Instance {
+  /// This instance's registered id. Defined only for N = 1 through 5 via the
+  /// explicit specializations below - instantiating for any other N is a
+  /// link error, the same guardrail Graphic.cpp's own id() has.
+  static const char* id();
 
-Result gLast;
-bool gEverFetched = false;
+  static Result gLast;
+  static bool gEverFetched;
 
-/// millis() when gLast last became an Ok result - same field, same reasoning
-/// as Weather.cpp's/Listings.cpp's own gLastOkMs.
-unsigned long gLastOkMs = 0;
+  /// millis() when gLast last became an Ok result - same field, same
+  /// reasoning as Weather.cpp's/Listings.cpp's own gLastOkMs, one copy per
+  /// instantiation.
+  static unsigned long gLastOkMs;
 
-/// Unsigned subtraction, correct across the millis() rollover at ~49 days -
-/// identical to Weather.cpp's/Listings.cpp's own describeFreshness(),
-/// duplicated rather than shared for the same reason Listings.cpp's own copy
-/// is: the three cards' Result types are unrelated and a shared helper would
-/// need a fourth file just to hold one function used three times.
-String describeFreshness(unsigned long fetchedAtMs) {
-  const unsigned long ageMinutes = (millis() - fetchedAtMs) / 60000UL;
-  if (ageMinutes == 0) {
-    return "Updated just now";
-  }
-  if (ageMinutes == 1) {
-    return "Updated 1 min ago";
-  }
-  return String("Updated ") + ageMinutes + " min ago";
-}
-
-void cardFetch() {
-  const bool useTarget = wantsTarget();
-  gLast = fetch(useTarget);
-  gEverFetched = true;
-  if (gLast.status == Status::Ok) {
-    gLastOkMs = millis();
-    Log::printf("[forecast] card updated (%s): %u period(s), starting with '%s' %d%s %s",
-                useTarget ? "target" : "home", gLast.count, gLast.periods[0].name.c_str(),
-                gLast.periods[0].temperature, gLast.periods[0].unit.c_str(),
-                gLast.periods[0].shortForecast.c_str());
-  }
-}
-
-/// Real count while Ok (capped at kMaxPeriods by fetch() itself), one item
-/// for any other status - same "a message is content too" tolerance
-/// Weather's/Listings' own cardItemCount() already give their resting and
-/// error states, and zero before the first fetch so the scheduler passes
-/// over this card entirely until it has an answer at all.
-uint16_t cardItemCount() {
-  if (!gEverFetched) {
-    return 0;
-  }
-  return gLast.status == Status::Ok ? gLast.count : 1;
-}
-
-void cardDraw(uint16_t itemIndex) {
-  if (gLast.status == Status::Ok) {
-    if (itemIndex >= gLast.count) {
-      itemIndex = 0;
+  /// This instance's own Location choice, read straight off its own
+  /// descriptor rather than cached in a global - same reasoning the original
+  /// single-instance wantsTarget() gives: the policy can change under this
+  /// module at any check-in, and a cached choice would keep querying the
+  /// location an admin just switched away from until the next fetch
+  /// happened to re-read it anyway, which re-reading directly makes moot.
+  static bool wantsTarget() {
+    const int8_t index = Cards::indexOf(id());
+    if (index < 0) {
+      return false;
     }
-    const PeriodInfo& period = gLast.periods[itemIndex];
-    Display::showForecastCard(gLast.location, period.name, period.isDaytime, period.temperature,
-                              period.unit, period.shortForecast, /*index=*/itemIndex,
-                              /*total=*/gLast.count, describeFreshness(gLastOkMs));
-    return;
+    return strcasecmp(Cards::at(static_cast<uint8_t>(index)).location, "target") == 0;
   }
 
-  // NotActivated, ProviderDisabled and Empty are resting states - nothing
-  // wrong with the device, just nothing configured or nothing resolved yet -
-  // shown muted rather than amber, the same isProblem split Weather's and
-  // Listings' own cards make.
-  const bool isRestingState = gLast.status == Status::NotActivated ||
-                              gLast.status == Status::ProviderDisabled ||
-                              gLast.status == Status::Empty;
-  const String headline = gLast.status == Status::Empty ? "No forecast available right now"
-                          : isRestingState               ? "Forecast is not showing yet"
-                                                          : "Could not load the forecast";
-  Display::showForecastStatus(headline, gLast.message, /*isProblem=*/!isRestingState);
+  /// Unsigned subtraction, correct across the millis() rollover at ~49
+  /// days - identical to Weather.cpp's/Listings.cpp's own
+  /// describeFreshness(), duplicated per the same reasoning those two give
+  /// each other's copies.
+  static String describeFreshness(unsigned long fetchedAtMs) {
+    const unsigned long ageMinutes = (millis() - fetchedAtMs) / 60000UL;
+    if (ageMinutes == 0) {
+      return "Updated just now";
+    }
+    if (ageMinutes == 1) {
+      return "Updated 1 min ago";
+    }
+    return String("Updated ") + ageMinutes + " min ago";
+  }
+
+  /// Calls the free, parameterised `Forecast::fetch(bool)` above - qualified
+  /// explicitly because an unqualified call from inside this nested struct
+  /// would resolve to this very member (C++ member-name lookup stops at the
+  /// first scope that declares the name, regardless of arity), not the
+  /// enclosing namespace's function.
+  static void fetch() {
+    const bool useTarget = wantsTarget();
+    gLast = Forecast::fetch(useTarget);
+    gEverFetched = true;
+    if (gLast.status == Status::Ok) {
+      gLastOkMs = millis();
+      Log::printf("[%s] card updated (%s): %u period(s), starting with '%s' %d%s %s", id(),
+                  useTarget ? "target" : "home", gLast.count, gLast.periods[0].name.c_str(),
+                  gLast.periods[0].temperature, gLast.periods[0].unit.c_str(),
+                  gLast.periods[0].shortForecast.c_str());
+    }
+  }
+
+  /// Real count while Ok (capped at kMaxPeriods by fetch() itself), one item
+  /// for any other status - same "a message is content too" tolerance
+  /// Weather's/Listings' own cardItemCount() already give their resting and
+  /// error states, and zero before the first fetch so the scheduler passes
+  /// over this instance entirely until it has an answer at all.
+  static uint16_t itemCount() {
+    if (!gEverFetched) {
+      return 0;
+    }
+    return gLast.status == Status::Ok ? gLast.count : 1;
+  }
+
+  static void draw(uint16_t itemIndex) {
+    if (gLast.status == Status::Ok) {
+      if (itemIndex >= gLast.count) {
+        itemIndex = 0;
+      }
+      const PeriodInfo& period = gLast.periods[itemIndex];
+      Display::showForecastCard(gLast.location, period.name, period.isDaytime,
+                                period.temperature, period.unit, period.shortForecast,
+                                /*index=*/itemIndex, /*total=*/gLast.count,
+                                describeFreshness(gLastOkMs));
+      return;
+    }
+
+    // NotActivated, ProviderDisabled and Empty are resting states - nothing
+    // wrong with the device, just nothing configured or nothing resolved
+    // yet - shown muted rather than amber, the same isProblem split
+    // Weather's and Listings' own cards make.
+    const bool isRestingState = gLast.status == Status::NotActivated ||
+                                gLast.status == Status::ProviderDisabled ||
+                                gLast.status == Status::Empty;
+    const String headline = gLast.status == Status::Empty ? "No forecast available right now"
+                            : isRestingState               ? "Forecast is not showing yet"
+                                                            : "Could not load the forecast";
+    Display::showForecastStatus(headline, gLast.message, /*isProblem=*/!isRestingState);
+  }
+
+  /// Builds and registers this instance's descriptor. Called once per
+  /// instantiation from the static-init block at the bottom of this file.
+  static bool registerSelf(int16_t order) {
+    Cards::CardSpec spec;
+    spec.id = id();
+    spec.kind = Cards::Kind::List;
+    spec.fetch = &fetch;
+    spec.itemCount = &itemCount;
+    spec.draw = &draw;
+    spec.order = order;
+    spec.dwellSeconds = 10;
+    return Cards::registerCard(spec);
+  }
+};
+
+template <int N>
+Result Instance<N>::gLast;
+template <int N>
+bool Instance<N>::gEverFetched = false;
+template <int N>
+unsigned long Instance<N>::gLastOkMs = 0;
+
+// The one piece of Instance<N> that cannot be written generically - each
+// instance's id is a distinct string, not a function of N in any way the
+// compiler could derive on its own.
+template <>
+const char* Instance<1>::id() {
+  return kCardId;
+}
+template <>
+const char* Instance<2>::id() {
+  return kCardId2;
+}
+template <>
+const char* Instance<3>::id() {
+  return kCardId3;
+}
+template <>
+const char* Instance<4>::id() {
+  return kCardId4;
+}
+template <>
+const char* Instance<5>::id() {
+  return kCardId5;
 }
 
-/// Registers this card at static-init time, so App.ino never names it. The
-/// registry it writes into is constant-initialised (see the top of
-/// CardManager.cpp), so this cannot run before the registry exists.
-///
-/// List, not Interstitial: like Listings, the server can hand back several
-/// periods (up to kMaxPeriods) and this card cycles through them one per
-/// dwell rather than showing a single featured reading. Order 4 slots it
-/// right after Listings (3) among list cards; the scheduler's own tie-break
-/// (Cards.h's `earlier()`) means this ordering only matters relative to other
-/// List-kind cards, never against the Interstitials sharing the same numbers.
-[[maybe_unused]] const bool kRegistered = [] {
-  Cards::CardSpec spec;
-  spec.id = kCardId;
-  spec.kind = Cards::Kind::List;
-  spec.fetch = cardFetch;
-  spec.itemCount = cardItemCount;
-  spec.draw = cardDraw;
-  spec.order = 4;
-  spec.dwellSeconds = 10;
-  return Cards::registerCard(spec);
-}();
+// List, not Interstitial, for all five: like Listings, the server can hand
+// back several periods (up to kMaxPeriods) per instance and each cycles
+// through its own periods one per dwell rather than showing a single
+// featured reading. Order 4 slots all five right after Listings (3) among
+// list cards; the scheduler's own tie-break (Cards.h's `earlier()`) means
+// registration order settles ties among the five, which is as arbitrary -
+// and as harmless - as any other tie-break would be.
+[[maybe_unused]] const bool kRegistered1 = Instance<1>::registerSelf(4);
+[[maybe_unused]] const bool kRegistered2 = Instance<2>::registerSelf(4);
+[[maybe_unused]] const bool kRegistered3 = Instance<3>::registerSelf(4);
+[[maybe_unused]] const bool kRegistered4 = Instance<4>::registerSelf(4);
+[[maybe_unused]] const bool kRegistered5 = Instance<5>::registerSelf(4);
 
 }  // namespace
 

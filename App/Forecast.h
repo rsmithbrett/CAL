@@ -21,6 +21,44 @@
 /// through them one per dwell exactly the way it already does for listings -
 /// see Listings.h's own remarks on why that differs from Aircraft's "list
 /// kind, one item shown" today.
+///
+/// **This module provides five independently-configured instances**, ids
+/// `"forecast"` through `"forecast5"`, the same Instance<N> template idiom
+/// Graphic.cpp established - the one fetch-driven card in this build that
+/// gets that treatment. The judgment call, recorded here because Brett asked
+/// for it explicitly: Weather, Aircraft, Listings and Tides each hit a
+/// "mine"-style endpoint (or, for Tides, unconditional check-in data) with
+/// **no policy-configurable parameter at all** - a second instance of any of
+/// those would issue an identical request and draw an identical card, for no
+/// benefit and an extra HTTP round trip every refresh. Forecast is
+/// different: it already reads a per-card Location choice
+/// (`Cards::CardSpec::location`), so a second instance is a real,
+/// independently-useful configuration - "home forecast" and "target
+/// forecast" as two separate rotation entries - not a redundant duplicate.
+/// That is the dividing line this generalisation drew: a card gets multiple
+/// instances when its own descriptor already carries a field an admin can
+/// set differently per instance (assetId for Graphic, text for Announcement,
+/// qrData for QrText, location for Forecast), not merely because it has no
+/// network fetch. See Cards.h's own kMaxCards remarks for the fuller
+/// accounting of which of the eleven other card types did and did not get
+/// this treatment, and why.
+///
+/// Each instance independently fetches: instance 2 configured for "target"
+/// does its own GET /api/myweather/forecast?location=target on its own
+/// refresh timer, entirely unaware of what instance 1 fetched or when. That
+/// is more network traffic than a single forecast card generates - bounded,
+/// once a real cardPolicy has arrived, to only the instances an admin
+/// actually named (CardManager::applyPolicy() deactivates every registered
+/// card not mentioned in the policy, and an inactive card's `fetch` is never
+/// called - see CardManager.cpp's `refreshOneDueCard()`). Before that first
+/// check-in, though, every `CardSpec::active` defaults to true (see Cards.h),
+/// so a freshly-booted device fetches all five instances once each - one
+/// unconditional GET per instance, exactly as the original lone forecast
+/// card always has - before the first policy narrows the set down. That
+/// transient is bounded (five requests, once, at boot) and self-corrects the
+/// moment check-in completes; it was true of the single-instance card too,
+/// just multiplied by five now, and is called out here rather than left for
+/// someone reading a cold-boot log to puzzle out on their own.
 namespace Forecast {
 
 enum class Status {
@@ -79,5 +117,24 @@ struct Result {
 /// Forecast.cpp) before calling this, so this function itself stays a plain,
 /// parameterised fetch with no policy-reading of its own.
 Result fetch(bool useTarget);
+
+/// This instance's registered id, and the `id` a policy entry must use to
+/// schedule it or give it a Location choice. Exposed only so the id appears
+/// exactly once in the firmware, the same convention Graphic::kCardId/
+/// Announcement::kCardId/QrText::kCardId keep. Unlike those three, `fetch()`
+/// above stays a free, parameterised function rather than something each
+/// instance calls with no arguments - see Forecast.cpp's Instance<N>::fetch()
+/// for why it is called fully qualified as `Forecast::fetch(useTarget)` from
+/// inside each instantiation.
+extern const char* const kCardId;
+
+/// The second through fifth instances' registered ids, independent of
+/// `kCardId` and of each other in every respect - own retained fetch state,
+/// own Location choice, own place in the rotation. See Graphic::kCardId2's
+/// identical wording.
+extern const char* const kCardId2;
+extern const char* const kCardId3;
+extern const char* const kCardId4;
+extern const char* const kCardId5;
 
 }  // namespace Forecast
