@@ -8,6 +8,18 @@
 /// same idea. Sits beside Weather.h, Aircraft.h, SunMoon.h and Graphic.h as
 /// its own module for the same reason they are separate from one another.
 ///
+/// **This module provides five independently-configured instances**, ids
+/// `"announcement"` through `"announcement5"`, the same Instance<N> template
+/// idiom Graphic.cpp established: each id is its own entry in the card
+/// registry, addressed by its own policy row, with no shared state between
+/// them. A household that wants a rotating house rule AND a separate
+/// seasonal notice no longer has to pick one - each instance is silent
+/// until an admin types text into its own `text` field, exactly the way a
+/// lone announcement card always has been. Unlike Graphic there is no cache
+/// to keep per-instance (see the class remarks below); the five instances
+/// differ only in which id's `text` each one reads back off its own
+/// descriptor.
+///
 /// **This card has no network fetch at all, and that is the one real
 /// difference from Graphic.h.** A picture is an id that must be resolved
 /// through the Assets cache (SD hit, or an HTTP fetch and a decode); words are
@@ -50,5 +62,13 @@ namespace Announcement {
 /// schedule it or to give it `text`. Exposed only so the id appears exactly
 /// once in the firmware, the same convention Graphic::kCardId keeps.
 extern const char* const kCardId;
+
+/// The second through fifth instances' registered ids, independent of
+/// `kCardId` and of each other in every respect - see the class remarks
+/// above and Graphic::kCardId2's identical wording.
+extern const char* const kCardId2;
+extern const char* const kCardId3;
+extern const char* const kCardId4;
+extern const char* const kCardId5;
 
 }  // namespace Announcement

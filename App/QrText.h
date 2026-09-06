@@ -4,7 +4,15 @@
 
 /// A scannable QR code plus an optional caption - the QR equivalent of
 /// Announcement.h's admin-typed notice, and structured after it almost
-/// verbatim: **no network fetch at all**, for the same reason. The QR
+/// verbatim: **no network fetch at all**, for the same reason.
+///
+/// **This module provides five independently-configured instances**, ids
+/// `"qrtext"` through `"qrtext5"`, the same Instance<N> template idiom
+/// Graphic.cpp and Announcement.cpp both use: each id is its own registry
+/// entry, addressed by its own policy row, with no shared state between
+/// them. A household that wants a Wi-Fi guest code AND a separate event
+/// link no longer has to pick one - each instance is silent until an admin
+/// enters `qrData` into its own field. The QR
 /// payload and the caption both arrive complete on every check-in
 /// (`CardPolicyEntry.QrData`/`.Text` -> `Cards::PolicyEntry::qrData`/`.text`
 /// -> `Cards::CardSpec::qrData`/`.text`, see Cards.h and
@@ -56,5 +64,13 @@ namespace QrText {
 /// appears exactly once in the firmware, the same convention
 /// Announcement::kCardId and Graphic::kCardId keep.
 extern const char* const kCardId;
+
+/// The second through fifth instances' registered ids, independent of
+/// `kCardId` and of each other in every respect - see the class remarks
+/// above and Graphic::kCardId2's identical wording.
+extern const char* const kCardId2;
+extern const char* const kCardId3;
+extern const char* const kCardId4;
+extern const char* const kCardId5;
 
 }  // namespace QrText

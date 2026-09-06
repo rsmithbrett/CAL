@@ -1173,6 +1173,80 @@ distinct from every banner before it — weather's navy, aircraft's blue,
 sunrise/sunset's amber, moon's indigo and the notice's green all already
 carry a meaning this card should not borrow.
 
+### Multi-instance, generalized beyond the graphic card
+
+The graphic card above shipped as three independently-configured instances
+(`graphic`/`graphic2`/`graphic3`) from the start, via a hand-rolled
+`template <int N> class Instance` in `Graphic.cpp`. Brett asked for that
+pattern generalized to **every** card type, budgeted for up to five instances
+each. This section records what actually happened, because "every card type"
+turned out not to mean the same thing for all of them.
+
+**The dividing line: does the card's own descriptor carry a field an admin
+can set differently per instance?** Graphic has `assetId`. Announcement has
+`text`. QrText has `qrData` (and the same optional `text`). Forecast has
+`location` (Home vs Target). A second instance of any of these four is a
+real, independently-useful configuration — a second picture, a second
+notice, a second QR code, a second address's outlook — not a copy of the
+first. Weather, Aircraft and Listings each hit an unparameterised `/mine`
+endpoint with no field on their descriptor a policy could vary between two
+instances; a second instance would issue an identical HTTP request and draw
+an identical card, for the price of a second round trip every refresh. Tides
+is pushed unconditionally on every check-in with nothing to distinguish a
+second copy. SunMoon, MoonPhase and ClockDate each compute one fact for the
+device's own position/time — there is no field at all on their descriptor a
+second instance could be configured differently from; "clockdate2" would
+show the identical clock as "clockdate", forever.
+
+So `Graphic.cpp` widened from three instances to five (adding `graphic4`/
+`graphic5`, same `Instance<N>` template, same `order`/`interleaveEvery` for
+all five), and `Announcement.cpp`/`QrText.cpp` gained the identical
+`Instance<N>` treatment for the first time — five ids each
+(`announcement`..`announcement5`, `qrtext`..`qrtext5`). Both are simpler
+templates than Graphic's: neither has a cache or a ready flag to hold
+per-instance, since neither has a network fetch at all (see their own
+sections above) — the entire template is a pure read of whatever
+`text`/`qrData` the instance's own descriptor currently holds, so every
+member except `id()` needs no static data.
+
+**Forecast is the one fetch-driven card that got this treatment anyway**,
+because its `location` field is a real per-instance axis the other four
+fetch-driven cards lack. `Forecast.cpp`'s `Instance<N>` is the closest sibling
+to Graphic's own: each instantiation gets its own `gLast`/`gEverFetched`/
+`gLastOkMs`, and each instance's `fetch()` reads its *own* Location choice
+and issues its *own* GET to `/api/myweather/forecast`, entirely unaware of
+what any other instance fetched. A household can now configure "forecast" for
+Home and "forecast2" for Target as two independent rotation entries. One
+sharp edge worth stating plainly: `Cards::CardSpec::active` defaults to
+`true` until the first policy arrives (see `Cards.h`), so a freshly-booted
+device fetches all five forecast instances once each before that first
+check-in narrows the set down to whatever an admin actually configured —
+five requests instead of one, bounded and one-time, not a steady-state cost.
+
+Weather, Aircraft, Listings, Tides, SunMoon, MoonPhase and ClockDate were
+deliberately left single-instance. This is a judgment call, not something
+Brett specified precisely for these seven — he named the fetch-driven ones
+as a real open question and asked for it to be flagged rather than silently
+decided. It is flagged here, in `Cards.h`'s own `kMaxCards` comment, and in
+each of the four multi-instance cards' own header remarks.
+
+**`Cards::kMaxCards` moved from 14 to 28.** 27 registrations exist now: the
+seven single-instance cards above, plus Graphic/Announcement/QrText/Forecast
+at five instances each (20). Sized to 28, one spare slot, rather than exactly
+27, the same convention every earlier bump in this file has kept.
+
+**A real bug, found and fixed alongside this work: `Cards::kMaxPolicyCards`
+was a stale, independent literal (8), not tied to `kMaxCards` at all.**
+`CheckIn.cpp`'s `parseCardPolicy()` silently drops any policy entry past the
+8th, logging one line nobody watching a device would see. With 27
+registrations now possible, a policy naming more than 8 of them would have
+lost the rest with no symptom beyond "some of the cards I configured never
+show up" — exactly the kind of silent-until-noticed failure this codebase's
+own conventions exist to prevent. `kMaxPolicyCards` is now defined as
+`kMaxCards` rather than its own number, which makes this specific class of
+truncation structurally impossible rather than something the next
+card-count bump has to remember to also apply here.
+
 ### Deciding when to reboot to the updater
 
 Three independent things can make the App call `Loader::requestUpdate()` —

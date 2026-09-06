@@ -10,6 +10,8 @@ namespace Graphic {
 const char* const kCardId = "graphic";
 const char* const kCardId2 = "graphic2";
 const char* const kCardId3 = "graphic3";
+const char* const kCardId4 = "graphic4";
+const char* const kCardId5 = "graphic5";
 
 namespace {
 
@@ -19,7 +21,7 @@ namespace {
 /// CardManager::applyPolicy() drops over-long ids rather than truncating them
 /// precisely because of that; this makes a future divergence between the two
 /// limits a compile error instead of a picture nobody can explain. One
-/// static_assert covers all three instances below - they share the same
+/// static_assert covers all five instances below - they share the same
 /// descriptor shape, so there is only one limit to check.
 static_assert(Cards::kMaxAssetIdLength >= Assets::kMaxIdLength,
               "Cards::kMaxAssetIdLength must be able to hold any id Assets accepts");
@@ -27,26 +29,26 @@ static_assert(Cards::kMaxAssetIdLength >= Assets::kMaxIdLength,
 /// One picture card's worth of fetch/itemCount/draw logic, parameterized on
 /// `N` purely to give each instantiation its own set of static globals - the
 /// same file-scope globals a single card would hold, replicated by the
-/// compiler once per `N` instead of by hand three times in this file.
+/// compiler once per `N` instead of by hand five times in this file.
 /// `Cards::CardSpec::fetch/itemCount/draw` are raw function pointers with no
 /// per-instance context parameter (see Cards.h), which rules out a single
 /// runtime class with an id data member: there would be nowhere to stash
 /// `this` for the scheduler to pass back in. A template sidesteps that by
-/// having the compiler generate three distinct sets of static functions and
+/// having the compiler generate five distinct sets of static functions and
 /// statics instead, one per `N`, each usable directly as a plain function
 /// pointer.
 ///
 /// Only `id()` differs in a way that cannot be written once and reused - it
 /// names a different string per instance - so it alone is explicitly
-/// specialized for N = 1, 2, 3 below the class. Every other member here is
-/// the single, shared implementation; instantiating this template three
-/// times is what stands up three cards, not three copies of this logic.
+/// specialized for N = 1 through 5 below the class. Every other member here
+/// is the single, shared implementation; instantiating this template five
+/// times is what stands up five cards, not five copies of this logic.
 template <int N>
 struct Instance {
-  /// This instance's registered id. Defined only for N = 1, 2, 3 via the
+  /// This instance's registered id. Defined only for N = 1 through 5 via the
   /// explicit specializations below - instantiating for any other N is a
   /// link error, which is the intended guardrail against a copy-paste typo
-  /// introducing a fourth instance without also giving it an id.
+  /// introducing a sixth instance without also giving it an id.
   static const char* id();
 
   /// The id this instance successfully cached, and whether it is on the card
@@ -245,28 +247,36 @@ template <>
 const char* Instance<3>::id() {
   return kCardId3;
 }
+template <>
+const char* Instance<4>::id() {
+  return kCardId4;
+}
+template <>
+const char* Instance<5>::id() {
+  return kCardId5;
+}
 
 // ---------------------------------------------------------------------------
-// The card descriptors - three of them, one per Instance<N> instantiation.
+// The card descriptors - five of them, one per Instance<N> instantiation.
 //
 // Registered at static-init time exactly like Weather.cpp's and Aircraft.cpp's
 // - App.ino names no card, and adding these required no change to the
 // scheduler at all, which is the property the registry in Cards.h exists to
 // have.
 //
-// Interstitial, not list, for all three. `interleaveEvery` means "show after
+// Interstitial, not list, for all five. `interleaveEvery` means "show after
 // every N other cards", which is what a single picture wants: it appears on a
 // cadence of its own no matter how many aircraft happen to be overhead. A
 // list card would take one fixed slot in the list sequence and so be seen
 // proportionally less often as that sequence grows - the specific mistake
 // CardManager.h records having been corrected on a running CYD-Dickey device.
 //
-// All three share the same `order` (3) and `interleaveEvery` (8): they are
-// three peers of the same kind of card, not a priority chain, and giving them
-// distinct order values would only invent a meaningless ranking between three
+// All five share the same `order` (3) and `interleaveEvery` (8): they are
+// five peers of the same kind of card, not a priority chain, and giving them
+// distinct order values would only invent a meaningless ranking between five
 // things a household picks independently. `order` still matters as the
 // tie-break "two interstitials due on the same tick" case in Cards.h
-// describes; sharing a value there just means the three graphic instances
+// describes; sharing a value there just means the five graphic instances
 // settle any such tie among themselves in registration order, which is as
 // arbitrary - and as harmless - as any other tie-break would be.
 //
@@ -277,10 +287,16 @@ const char* Instance<3>::id() {
 // an id nobody has given a picture to. Ordered after weather and aircraft,
 // and interleaved less often than weather, so a decoration does not
 // out-compete the data cards for screen time before a policy has an opinion.
+//
+// Five rather than three as of the multi-instance generalisation - see
+// Cards.h's kMaxCards remarks and the judgment call in Announcement.h/
+// QrText.h/Forecast.h for which other card types got the same treatment.
 // ---------------------------------------------------------------------------
 [[maybe_unused]] const bool kRegistered1 = Instance<1>::registerSelf(3, 8);
 [[maybe_unused]] const bool kRegistered2 = Instance<2>::registerSelf(3, 8);
 [[maybe_unused]] const bool kRegistered3 = Instance<3>::registerSelf(3, 8);
+[[maybe_unused]] const bool kRegistered4 = Instance<4>::registerSelf(3, 8);
+[[maybe_unused]] const bool kRegistered5 = Instance<5>::registerSelf(3, 8);
 
 }  // namespace
 
