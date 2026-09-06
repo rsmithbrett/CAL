@@ -21,6 +21,28 @@
 
 #include <WiFi.h>
 
+// Overrides the ESP32 Arduino core's weak getArduinoLoopTaskStackSize() (see
+// cores/esp32/main.cpp), which otherwise sizes loopTask's stack at a fixed
+// 8192 bytes no matter what a sketch actually does in loop(). Must be a
+// plain global function, not inside any namespace - the core's own
+// definition isn't extern "C", so the linker matches this override by exact
+// mangled signature, and an anonymous-namespace or static definition here
+// would mangle differently and silently fail to replace it.
+//
+// Raised from the 8192-byte default after a live device crashed with "Guru
+// Meditation Error ... Stack canary watchpoint triggered (loopTask)" running
+// the multi-instance card build: Forecast::fetch() (see Forecast.cpp) keeps
+// a NetworkClientSecure, an HTTPClient and two JsonDocuments alive across a
+// TLS handshake and JSON parse, all as stack locals in one frame, and going
+// from one forecast instance to up to five meant that TLS-handshake-heavy
+// path got hit several times more often per rotation - turning an already
+// marginal peak into one this device reached during a real overnight run.
+// Doubling to 16384 leaves the same code path comfortable headroom without
+// meaningfully denting the ~320KB of RAM this chip has.
+size_t getArduinoLoopTaskStackSize(void) {
+  return 16384;
+}
+
 #include "Actions.h"
 #include "AppService.h"
 #include "AppUpdater.h"
