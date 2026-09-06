@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 #include <NetworkClientSecure.h>
 #include <SD.h>
+#include <mbedtls/sha256.h>
 
 #include "Config.h"
 #include "Display.h"
@@ -13,6 +14,20 @@
 
 namespace Assets {
 namespace {
+
+/// Same hex-encoding helper as CAL's own Updater.cpp uses to check a firmware
+/// image's sha256 - duplicated rather than shared because App and CAL are
+/// separate sketches with no common translation unit to hold it in.
+String toHex(const uint8_t* bytes, size_t len) {
+  static const char* kHex = "0123456789abcdef";
+  String out;
+  out.reserve(len * 2);
+  for (size_t i = 0; i < len; ++i) {
+    out += kHex[bytes[i] >> 4];
+    out += kHex[bytes[i] & 0x0F];
+  }
+  return out;
+}
 
 /// The device-authenticated fetch route. Corrected against the real,
 /// registered endpoint (`AssetsEndpoints.cs`: `MapGet("/api/assets/{id:guid}/content", ...)`)
@@ -87,10 +102,14 @@ bool fetchToCard(const String& id) {
     return false;
   }
 
-  // Read before writeToStream() below - some HTTPClient paths report this as
-  // -1 once the body has been consumed, so it has to be captured while the
-  // Content-Length header is still the thing getSize() is reading.
+  // Read before the body is consumed below - some HTTPClient paths report
+  // getSize() as -1 once the stream has been read from, so both have to be
+  // captured while the headers are still live. expectedHash is
+  // AssetsEndpoints.cs's own X-Asset-Sha256 - the same value Assets'
+  // ContentHash column holds, computed server-side from the exact bytes this
+  // response carries.
   const int expectedSize = http.getSize();
+  const String expectedHash = http.header("X-Asset-Sha256");
 
   // Written to a temporary name and renamed on success, so an interrupted
   // download (power loss, WiFi drop mid-body) can never leave a truncated
@@ -105,29 +124,137 @@ bool fetchToCard(const String& id) {
     return false;
   }
 
-  const int written = http.writeToStream(&out);
+  // Streamed with a running sha256 alongside the write, the same technique
+  // Updater.cpp already uses to verify a firmware image, rather than
+  // http.writeToStream()'s one-line copy: that copy only reports how many
+  // bytes it attempted to hand SD.write(), the same count whether every byte
+  // actually landed correctly or a marginal card silently dropped some of
+  // them. Bug found live - a fresh re-upload of a known-good image, on a
+  // device already running the size-check fix below, still failed to
+  // decode, which a same-byte-count-but-wrong-content failure (network fine,
+  // storage not) explains and a size check alone cannot catch.
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha);
+  mbedtls_sha256_starts(&sha, 0);
+
+  NetworkClient* stream = http.getStreamPtr();
+  uint8_t buffer[512];
+  int written = 0;
+  bool writeFailed = false;
+  const uint32_t deadline = millis() + Config::kHttpTimeoutMs;
+
+  while (http.connected() && (expectedSize < 0 || written < expectedSize)) {
+    const size_t available = stream->available();
+    if (available == 0) {
+      if (millis() > deadline) {
+        break;
+      }
+      delay(1);
+      continue;
+    }
+    const size_t toRead = available > sizeof(buffer) ? sizeof(buffer) : available;
+    const int read = stream->readBytes(buffer, toRead);
+    if (read <= 0) {
+      continue;
+    }
+    if (out.write(buffer, read) != static_cast<size_t>(read)) {
+      writeFailed = true;
+      break;
+    }
+    mbedtls_sha256_update(&sha, buffer, read);
+    written += read;
+  }
   out.close();
   http.end();
 
+  if (writeFailed) {
+    mbedtls_sha256_free(&sha);
+    SD.remove(tempPath);
+    Log::printf("[assets] fetch of '%s' - SD write failed after %d bytes", id.c_str(), written);
+    return false;
+  }
+
   if (written <= 0) {
+    mbedtls_sha256_free(&sha);
     SD.remove(tempPath);
     Log::printf("[assets] fetch of '%s' wrote nothing (%d)", id.c_str(), written);
     return false;
   }
 
-  // written > 0 is not the same guarantee as written == the whole body: a
-  // connection that drops mid-transfer can still hand writeToStream() a
-  // positive count for however much arrived before it did. Bug found live -
-  // a truncated PNG passed this check, got renamed into place, and every
-  // later draw failed to decode it forever, since a cache hit never
-  // re-fetches (see ensureCached() below). expectedSize is only checked when
-  // the server actually sent a Content-Length (chunked responses report -1
-  // here and skip this check, same as before this fix).
+  // Not the same guarantee as written == the whole body: a connection that
+  // drops mid-transfer still leaves a positive count for however much
+  // arrived before it did. expectedSize is only checked when the server
+  // actually sent a Content-Length (chunked responses report -1 here and
+  // skip this check).
   if (expectedSize >= 0 && written != expectedSize) {
+    mbedtls_sha256_free(&sha);
     SD.remove(tempPath);
     Log::printf("[assets] fetch of '%s' was truncated (wrote %d of %d bytes)", id.c_str(),
                 written, expectedSize);
     return false;
+  }
+
+  uint8_t digest[32];
+  mbedtls_sha256_finish(&sha, digest);
+  mbedtls_sha256_free(&sha);
+
+  // The size check above only proves the network side delivered the right
+  // byte count; it says nothing about whether those exact bytes are what
+  // the server actually sent, or whether SD.write() silently corrupted some
+  // of them on the way to flash - both invisible to a length comparison
+  // alone, and both are what left a same-length file undecodable on real
+  // hardware. expectedHash is only checked when the server actually sent it
+  // (an older server without X-Asset-Sha256 skips this check, same
+  // backward-compatibility posture as expectedSize above).
+  if (expectedHash.length() > 0 && !toHex(digest, sizeof(digest)).equalsIgnoreCase(expectedHash)) {
+    SD.remove(tempPath);
+    Log::printf("[assets] fetch of '%s' failed integrity check (hash mismatch)", id.c_str());
+    return false;
+  }
+
+  // A second, independent check: re-read the bytes actually sitting in flash
+  // and hash those, rather than trusting that a successful SD.write() call
+  // means the card faithfully stored what it was given. The check above only
+  // proves the in-RAM buffer matched before each write - a card silently
+  // corrupting a sector on the way to flash (wear, a marginal card, a brief
+  // power sag) would return success from write() and still be invisible to
+  // it. Only run when the first check had something to verify against, for
+  // the same backward-compatibility reason expectedHash's own check does.
+  if (expectedHash.length() > 0) {
+    File readBack = SD.open(tempPath, FILE_READ);
+    if (!readBack) {
+      SD.remove(tempPath);
+      Log::printf("[assets] fetch of '%s' - could not reopen %s to verify what was actually "
+                  "written",
+                  id.c_str(), tempPath.c_str());
+      return false;
+    }
+    mbedtls_sha256_context verifySha;
+    mbedtls_sha256_init(&verifySha);
+    mbedtls_sha256_starts(&verifySha, 0);
+    int readBackTotal = 0;
+    while (readBack.available()) {
+      const int read = readBack.read(buffer, sizeof(buffer));
+      if (read <= 0) {
+        break;
+      }
+      mbedtls_sha256_update(&verifySha, buffer, read);
+      readBackTotal += read;
+    }
+    readBack.close();
+    uint8_t verifyDigest[32];
+    mbedtls_sha256_finish(&verifySha, verifyDigest);
+    mbedtls_sha256_free(&verifySha);
+
+    if (readBackTotal != written ||
+        !toHex(verifyDigest, sizeof(verifyDigest)).equalsIgnoreCase(expectedHash)) {
+      SD.remove(tempPath);
+      Log::printf(
+          "[assets] fetch of '%s' - storage corrupted what was written (network side verified "
+          "fine, re-read from SD did not) - this card may be failing",
+          id.c_str());
+      return false;
+    }
   }
 
   SD.remove(finalPath);
@@ -137,7 +264,7 @@ bool fetchToCard(const String& id) {
     return false;
   }
 
-  Log::printf("[assets] cached '%s' (%d bytes)", id.c_str(), written);
+  Log::printf("[assets] cached '%s' (%d bytes, sha256 verified)", id.c_str(), written);
   return true;
 }
 
