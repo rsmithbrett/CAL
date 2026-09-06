@@ -87,6 +87,11 @@ bool fetchToCard(const String& id) {
     return false;
   }
 
+  // Read before writeToStream() below - some HTTPClient paths report this as
+  // -1 once the body has been consumed, so it has to be captured while the
+  // Content-Length header is still the thing getSize() is reading.
+  const int expectedSize = http.getSize();
+
   // Written to a temporary name and renamed on success, so an interrupted
   // download (power loss, WiFi drop mid-body) can never leave a truncated
   // file that every later ensureCached() then treats as a cache hit.
@@ -107,6 +112,21 @@ bool fetchToCard(const String& id) {
   if (written <= 0) {
     SD.remove(tempPath);
     Log::printf("[assets] fetch of '%s' wrote nothing (%d)", id.c_str(), written);
+    return false;
+  }
+
+  // written > 0 is not the same guarantee as written == the whole body: a
+  // connection that drops mid-transfer can still hand writeToStream() a
+  // positive count for however much arrived before it did. Bug found live -
+  // a truncated PNG passed this check, got renamed into place, and every
+  // later draw failed to decode it forever, since a cache hit never
+  // re-fetches (see ensureCached() below). expectedSize is only checked when
+  // the server actually sent a Content-Length (chunked responses report -1
+  // here and skip this check, same as before this fix).
+  if (expectedSize >= 0 && written != expectedSize) {
+    SD.remove(tempPath);
+    Log::printf("[assets] fetch of '%s' was truncated (wrote %d of %d bytes)", id.c_str(),
+                written, expectedSize);
     return false;
   }
 
