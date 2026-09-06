@@ -334,6 +334,14 @@ void drawCurrent() {
   if (gCurrent.item >= total) {
     gCurrent.item = 0;
   }
+  // The one choke point every card's draw passes through, regardless of kind
+  // or which module it lives in - a single line here, rather than one add per
+  // card file, is what makes "is card X actually reaching the screen"
+  // answerable from the remote debug stream for every card, including ones
+  // added after this line was written. See the standing verbose-logging
+  // mandate: the stream is the only diagnostic channel a deployed device has.
+  Log::printf("[cards] showing '%s' (item %u/%u)", card.id,
+              static_cast<unsigned>(gCurrent.item) + 1, static_cast<unsigned>(total));
   card.draw(gCurrent.item);
   drawChrome(card);
 }

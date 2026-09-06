@@ -73,6 +73,8 @@ void cardDraw(uint16_t) {
     Display::showNoContent("No QR code to show", "This card has no QR data configured yet.");
     return;
   }
+  Log::printf("[qrtext] drawing code for '%s'%s", qrData,
+              strlen(currentCaption()) > 0 ? " with caption" : "");
   Display::showQrTextCard(String(qrData), String(currentCaption()));
 }
 
