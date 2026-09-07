@@ -21,6 +21,15 @@ constexpr uint8_t kMaxReportedDecodeFailures = 4;
 String gDecodeFailureIds;
 uint8_t gDecodeFailureCount = 0;
 
+/// How many times drawFullScreen()/drawCachedInRect()/drawCached() retry a
+/// failed decode before giving up - centralised here (not duplicated per
+/// card module) so every current and future caller gets the same retry,
+/// invalidate-on-total-failure and decode-failure reporting for free. Found
+/// live: a decode failure can be a transient read glitch rather than
+/// genuine file corruption - see Assets.h's own remarks on invalidate().
+constexpr uint8_t kMaxDrawAttempts = 3;
+constexpr uint32_t kDrawRetryDelayMs = 75;
+
 void recordDecodeFailure(const String& assetId) {
   // Dedup within one reporting cycle: an aircraft logo overlay redraws (and
   // can refail) every time that card is shown, and without this a single
@@ -36,6 +45,20 @@ void recordDecodeFailure(const String& assetId) {
     gDecodeFailureIds += assetId;
   }
   gDecodeFailureCount++;
+}
+
+/// Every kMaxDrawAttempts-exhausted call site funnels through here, so the
+/// "giving up on this one" log line exists exactly once regardless of which
+/// caller (a full-screen picture, an in-rect overlay like the aircraft
+/// card's airline logo, ...) hit it - found live that logging this only
+/// from Graphic.cpp's own draw() left the aircraft logo's own decode
+/// failures silent past the generic Display::drawPngFromSd*() line, the
+/// same "loud, not silent" gap this whole mechanism exists to close.
+void giveUpOnDecodeFailure(const String& id) {
+  recordDecodeFailure(id);
+  invalidate(id);
+  Log::printf("[assets] '%s' would not decode after %u attempt(s) - invalidating the cache",
+              id.c_str(), static_cast<unsigned>(kMaxDrawAttempts));
 }
 
 /// Same hex-encoding helper as CAL's own Updater.cpp uses to check a firmware
@@ -327,33 +350,48 @@ bool drawFullScreen(const String& id) {
   if (!ensureCached(id)) {
     return false;
   }
-  const bool ok = Display::drawPngFromSd(pathFor(id));
-  if (!ok) {
-    recordDecodeFailure(id);
+  for (uint8_t attempt = 0; attempt < kMaxDrawAttempts; ++attempt) {
+    if (Display::drawPngFromSd(pathFor(id))) {
+      return true;
+    }
+    if (attempt + 1 < kMaxDrawAttempts) {
+      delay(kDrawRetryDelayMs);
+    }
   }
-  return ok;
+  giveUpOnDecodeFailure(id);
+  return false;
 }
 
 bool drawCachedInRect(const String& id, int32_t x, int32_t y, int32_t w, int32_t h) {
   if (!isCached(id)) {
     return false;
   }
-  const bool ok = Display::drawPngFromSdInRect(pathFor(id), x, y, w, h);
-  if (!ok) {
-    recordDecodeFailure(id);
+  for (uint8_t attempt = 0; attempt < kMaxDrawAttempts; ++attempt) {
+    if (Display::drawPngFromSdInRect(pathFor(id), x, y, w, h)) {
+      return true;
+    }
+    if (attempt + 1 < kMaxDrawAttempts) {
+      delay(kDrawRetryDelayMs);
+    }
   }
-  return ok;
+  giveUpOnDecodeFailure(id);
+  return false;
 }
 
 bool drawCached(const String& id) {
   if (!isCached(id)) {
     return false;
   }
-  const bool ok = Display::drawPngFromSd(pathFor(id));
-  if (!ok) {
-    recordDecodeFailure(id);
+  for (uint8_t attempt = 0; attempt < kMaxDrawAttempts; ++attempt) {
+    if (Display::drawPngFromSd(pathFor(id))) {
+      return true;
+    }
+    if (attempt + 1 < kMaxDrawAttempts) {
+      delay(kDrawRetryDelayMs);
+    }
   }
-  return ok;
+  giveUpOnDecodeFailure(id);
+  return false;
 }
 
 uint16_t cachedCount() {

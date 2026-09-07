@@ -1789,17 +1789,44 @@ than, the SHA-256 readback-verify `fetchToCard()` already does once, right
 after writing (see *Verified once ...* elsewhere in this file) - which a
 permanent blacklist can never recover from on its own.
 
-`Graphic.cpp`'s `draw()` now retries the same cached file up to three times
-(a short `delay(75)` between attempts) before giving up - cheap, and enough
-to ride out a simple transient glitch. If every attempt still fails, the
-cached file is deleted via a new `Assets::invalidate(id)` (`Assets.h`/`.cpp`)
-rather than kept and blacklisted: that forces the very next `fetch()`
-refresh cycle to re-download and re-verify a fresh copy from the server,
-which is what actually recovers from a bad read instead of just giving up
-on it once. A genuinely corrupt source image still ends up back here on the
-next refresh and gets invalidated again - loud, not silent, and now visible
-past the debug stream too (see the next section) - but no longer stuck
-until an operator happens to notice and reassigns a different `assetId`.
+`Assets::drawFullScreen()`/`drawCachedInRect()`/`drawCached()` themselves
+now retry a failed decode up to three times (a short `delay(75)` between
+attempts) before giving up - centralised in `Assets.cpp` rather than
+duplicated per card module, so every current and future caller gets this
+for free. That mattered live: the first version of this fix put the retry
+loop only in `Graphic.cpp`, and the very next occurrence failed instead on
+the aircraft card's airline-logo overlay (`Assets::drawCachedInRect()`, a
+different call site `Graphic.cpp`'s own retry never touched) - moving the
+retry into `Assets.cpp` itself was the actual fix, not a stylistic
+cleanup. If every attempt still fails, the cached file is deleted via
+`Assets::invalidate(id)` rather than kept and blacklisted: that forces the
+very next `fetch()`/draw to re-download and re-verify a fresh copy from
+the server, which is what actually recovers from a bad read instead of
+just giving up on it once.
+
+**Also found live, and this is consistent with genuine hardware flakiness
+rather than against it:** the same picture has been observed to display
+successfully, then fail to decode on a *later* draw of the exact same
+already-cached file - no re-fetch, no write, nothing changed between the
+two attempts. Separately, an SD reformat (`Assets::wipeCache()`, previous
+section) on the same device did not fix a subsequent failure either - a
+freshly re-downloaded, freshly re-verified replacement failed to decode
+almost immediately. Neither observation is proof on its own, but together
+they point at an intermittent SD *read* problem on this specific device -
+sometimes a read comes back wrong, sometimes it doesn't, independent of how
+recently the file was written - rather than either a deterministic decoder
+bug (which would fail the same bytes every time) or storage corrupted once
+and permanently (which a reformat would have fixed). That is exactly the
+failure shape retry-and-invalidate is built for: a plain retry catches the
+"succeeded before, glitched this time" case live in the moment, and
+invalidating on total failure means a persistently bad file at least gets
+re-verified fresh each time rather than blacklisted forever. Not a
+confirmed root cause - nobody can attach a debugger to the device itself -
+but the strongest lead so far, and the mitigation that fits it. A
+genuinely corrupt source image still ends up back here on the next refresh
+and gets invalidated again - loud, not silent, and now visible past the
+debug stream too (see the next section) - but no longer stuck until an
+operator happens to notice and reassigns a different `assetId`.
 
 ## Decode failures reach `/diag/audit`, not just the debug stream
 
