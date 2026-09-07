@@ -1861,3 +1861,68 @@ Server-side, `CheckInGatewayService.ProcessCheckInAsync` records a failed
 `AssetDecodeFailure` audit event when this is non-empty - same "audited,
 not merely logged" treatment `CardPolicyMismatch` already gets on
 `/diag/audit`, for the different silent failure this one is.
+
+## The likely root cause: the SD card's SPI lines are shared with the display's, by hardware design
+
+Found while chasing the decode failures above, and confirmed against this
+board's own manufacturer documentation rather than generic "Cheap Yellow
+Display" community pages - this board (an LCDWIKI E32R28T, see *The
+hardware* above) is a different manufacturer from the Sunton boards most
+CYD writeups describe, and this project's own notes already warned "the
+E32R28T's HSPI-style pinout differs from them." LCDWIKI's own manual for
+this exact board states directly:
+
+> "SPI_CLK, SPI_MISO, and SPI_MOSI pins are shared with the MicroSD card
+> SPI pins."
+>
+> — [LCDWIKI E32R28T & E32N28T User Manual (PDF)](https://www.lcdwiki.com/res/E32R28T/2.8inch_ESP32-32E_E32R28T_E32N28T_User_Manual.pdf),
+> also summarised at [manuals.plus's transcription](https://manuals.plus/lcd-wiki/e32r28t-2-8inch-esp32-32e-display-module-manual-2).
+> See also [LCDWIKI's E32R28T & E32N28T Specification (PDF)](https://www.lcdwiki.com/res/E32R28T/E32R28T_E32N28T_Specification_V1.0.pdf)
+> for the board's full pin reference (image-scanned; a PDF viewer that can
+> render scanned pages is needed to read it directly - text extraction
+> alone does not pull anything from it).
+
+That is the manufacturer stating, in its own words, that the SD card does
+not have its own independent SPI wiring on this board - it shares SCLK/
+MISO/MOSI with another on-board SPI device. The only other real hardware
+SPI peripheral in this build is the display itself: LovyanGFX's own
+board-autodetect source (`LGFX_AutoDetect_ESP32_all.hpp`, the CYD-family
+`_detector_Sunton_ESP32_2432S028_t` profile autodetect matches this board
+against) configures the XPT2046 touch controller with `cfg.spi_host = -1`
+(bit-banged software SPI on its own dedicated pins, not a hardware
+peripheral at all), which rules touch out as the other end of the shared
+bus - leaving the display as the only plausible co-tenant.
+
+That same LovyanGFX profile sets `cfg.bus_shared = false` on the display
+panel - telling the library it may assume *exclusive* ownership of that
+SPI bus, with no arbitration for a co-tenant. This firmware's own
+`SdStorage.cpp` brings the SD card up completely independently
+(`SD.begin(kChipSelectPin)`, Arduino's default `SPIClass`, zero
+coordination with LovyanGFX's own bus management). Two drivers, each
+assuming it alone owns a bus that the hardware itself does not give either
+one exclusively, is a textbook recipe for exactly the failure pattern
+observed live: intermittent (depends on whether the other driver happens
+to be mid-transaction at that instant), not specific to any one file,
+survives a full SD reformat (nothing wrong with the storage bytes - the
+contention is in the wire, not the flash), and concentrated on the one
+operation (`Assets::drawFullScreen()`/`drawCachedInRect()`/`drawCached()`,
+via `Display::drawPngFromSd*()`) that reads from SD and writes to the
+display in the same tight decode loop.
+
+**Why this is not being "fixed" by rewiring the bus tonight.** If the SD
+card's SCLK/MOSI/MISO are the literal same electrical wires as the
+display's - which is what the manual says, not merely the same *kind* of
+peripheral selectable in software - no software change can move the SD
+card onto a separate, uncontended bus; there is no second physical path
+to it on this board. The real fix would be properly serializing access to
+that one shared bus (a lock held around every SD operation and every
+display draw, on both sides), which means either patching the vendored
+LovyanGFX library to expose a hook around its own SPI transactions, or
+wrapping every call site project-wide with a shared mutex - real surgery,
+and not something to attempt correctly without a physical device in hand
+to verify against. The retry-and-invalidate mitigation in the two sections
+above is not a stand-in for that fix; it is the *correct, board-shaped*
+response to a genuinely transient bus-contention glitch - a short retry is
+exactly the right answer to "the other driver happened to be using the
+wire a moment ago" - and it is what ships until (if ever) the deeper fix
+is warranted and testable on real hardware.
