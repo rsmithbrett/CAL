@@ -6,6 +6,7 @@
 #include <time.h>
 
 #include "Actions.h"
+#include "CardManager.h"
 #include "Config.h"
 #include "Identity.h"
 #include "Log.h"
@@ -166,6 +167,22 @@ Result perform() {
   requestDoc["batteryPercent"] = 100;
   requestDoc["charging"] = true;
   addPendingActions(requestDoc);
+
+  // Reports how the *previous* policy this device received actually turned
+  // out - the same "N of M entries known" applyPolicy() already logs to the
+  // remote debug stream, ridden along on the very next check-in instead of
+  // only ever existing there for however long someone happens to be
+  // watching. Omitted entirely (rather than sent as 0/0) before this device
+  // has ever applied a policy at all, so the server can tell "never
+  // configured" apart from "configured with zero entries known".
+  if (CardManager::lastPolicyTotalCount() > 0) {
+    requestDoc["cardPolicyKnownCount"] = CardManager::lastPolicyKnownCount();
+    requestDoc["cardPolicyTotalCount"] = CardManager::lastPolicyTotalCount();
+    const String unknownIds = CardManager::lastPolicyUnknownIds();
+    if (unknownIds.length() > 0) {
+      requestDoc["cardPolicyUnknownIds"] = unknownIds;
+    }
+  }
 
   String body;
   serializeJson(requestDoc, body);

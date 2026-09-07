@@ -69,6 +69,26 @@ void poll();
 /// server turns one off.
 void applyPolicy(const Cards::Policy& policy);
 
+/// How many of the last-applied policy's entries named a card id this
+/// firmware actually registers - the same number applyPolicy() already logs
+/// as "[cards] policy applied (N of M entries known...)", kept here so
+/// App.ino's check-in path can report it back to the server instead of it
+/// only ever existing in the remote debug stream. Zero before the first
+/// policy this device has ever applied.
+uint8_t lastPolicyKnownCount();
+
+/// The total entry count the last-applied policy carried - the "M" half of
+/// the same log line lastPolicyKnownCount() reports the "N" half of. Zero
+/// before the first policy this device has ever applied.
+uint8_t lastPolicyTotalCount();
+
+/// Up to four of the last-applied policy's unrecognised card ids, comma-
+/// separated - empty if every entry matched, or if no policy has been
+/// applied yet. Capped rather than exhaustive: this rides the check-in
+/// request body, and naming a handful is enough for an operator to
+/// recognise the mistake without this becoming an unbounded field.
+String lastPolicyUnknownIds();
+
 /// Redraws whatever is currently showing, without advancing. Used when
 /// something outside the rotation changed what the screen should look like
 /// (the day/night theme, a new set of action buttons).

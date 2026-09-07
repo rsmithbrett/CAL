@@ -66,6 +66,18 @@ struct Position {
 
 Position gCurrent;
 
+/// The last-applied policy's match result - see CardManager.h's
+/// lastPolicyKnownCount()/lastPolicyTotalCount()/lastPolicyUnknownIds() for
+/// why this exists: App.ino's check-in path reports these back to the
+/// server, which is the only way "the policy silently dropped an entry"
+/// becomes something a server-side audit can see instead of only ever
+/// existing in the remote debug stream for however long someone happens to
+/// be watching it.
+uint8_t gLastPolicyKnownCount = 0;
+uint8_t gLastPolicyTotalCount = 0;
+String gLastPolicyUnknownIds;
+constexpr uint8_t kMaxReportedUnknownIds = 4;
+
 /// The position within the *list* cards specifically, kept separately from
 /// gCurrent so an interstitial firing does not lose the reader's place in the
 /// list sequence. This is exactly why CYD-Dickey keeps `baseCardIndex`
@@ -557,6 +569,8 @@ void applyPolicy(const Cards::Policy& policy) {
   }
 
   uint8_t matched = 0;
+  gLastPolicyUnknownIds = "";
+  uint8_t unknownReported = 0;
   for (uint8_t e = 0; e < policy.entryCount; ++e) {
     const Cards::PolicyEntry& entry = policy.entries[e];
     const int8_t index = Cards::indexOf(entry.id.c_str());
@@ -565,6 +579,13 @@ void applyPolicy(const Cards::Policy& policy) {
       // before firmware supports it, and what lets firmware up to six months
       // old keep working against a newer server.
       Log::printf("[cards] policy names unknown card '%s' - ignored", entry.id.c_str());
+      if (unknownReported < kMaxReportedUnknownIds) {
+        if (gLastPolicyUnknownIds.length() > 0) {
+          gLastPolicyUnknownIds += ",";
+        }
+        gLastPolicyUnknownIds += entry.id;
+        unknownReported++;
+      }
       continue;
     }
 
@@ -661,6 +682,8 @@ void applyPolicy(const Cards::Policy& policy) {
   Log::printf("[cards] policy applied (%u of %u entries known, defaultDwell=%us hold=%lus)",
               matched, policy.entryCount, gDefaultDwellSeconds,
               static_cast<unsigned long>(gManualNavHoldMs / 1000UL));
+  gLastPolicyKnownCount = matched;
+  gLastPolicyTotalCount = policy.entryCount;
 
   resetHistory(gCurrent);
   if (gCurrent.card < 0 || !showable(static_cast<uint8_t>(gCurrent.card))) {
@@ -673,5 +696,11 @@ void applyPolicy(const Cards::Policy& policy) {
 }
 
 void redraw() { drawCurrent(); }
+
+uint8_t lastPolicyKnownCount() { return gLastPolicyKnownCount; }
+
+uint8_t lastPolicyTotalCount() { return gLastPolicyTotalCount; }
+
+String lastPolicyUnknownIds() { return gLastPolicyUnknownIds; }
 
 }  // namespace CardManager
