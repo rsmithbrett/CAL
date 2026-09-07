@@ -1481,6 +1481,39 @@ No automated test covers this - see this file's own remarks elsewhere on why
 `App/` firmware changes are verified by a clean compile, CAL's CI producing
 a real release build, and confirmation on real hardware, not a test suite.
 
+### Sun, moon and tide icons, extending the forecast card's icon set
+
+`showSunMoonCard()` and `showTidesCard()` were two-row stat cards with no
+graphic of any kind - a muted label, a right-justified value, nothing in
+between. Brought in line with the forecast card's own condition icons (see
+"The weather card retired, folded into Forecast" above) by drawing one small
+icon per row in the gap that already existed between the label and the value
+column, rather than resizing either.
+
+The forecast card's sun-drawing code (filled disc plus eight rays) is now
+`drawSunIcon()`, pulled out of `drawWeatherIcon()`'s `Sunny` case so
+`showSunMoonCard()`'s sunrise row can call the identical routine instead of
+a second copy. Sunset gets `drawMoonIcon()` - a crescent, cut from a filled
+disc by overlaying a second circle in `bg()`, the same "one shape carves a
+bite out of another" idea `showMoonPhaseCard()`'s own terminator ellipse
+already uses, simplified to a fixed crescent because this icon only means
+"it is night now," not tonight's actual phase - that specific claim stays
+the dedicated moonphase card's job alone. Sun for sunrise, moon for sunset
+was the direct reading of this card's own id (`sunmoon`) once it was getting
+icons at all, rather than a sun on both rows and "moon" going unrepresented
+anywhere on the card.
+
+`showTidesCard()` gets `drawTideIcon()` - a zigzag wave under an arrow,
+pointing up for "Next high" and down for "Next low." That direction is
+worth drawing because it is the one thing neither row's own label states:
+"Next high" says a high tide is coming, not whether the water is presently
+rising toward it or still falling from the last one - the arrow answers the
+question a household actually has ("is it coming in or going out") that the
+text alone leaves for someone to work out from a tide table.
+
+Same verification and no-automated-test caveat as every other `App/` change
+in this file: a clean compile, CAL's CI, and confirmation on real hardware.
+
 ### A drawn degree symbol, because the font has none
 
 LovyanGFX's built-in font used here is ASCII-only — no Unicode glyphs, no

@@ -530,29 +530,80 @@ void drawCloudShape(int cx, int cy, int radius, uint32_t colour) {
   lcd.fillRect(cx - radius * 0.35f, cy, radius * 0.9f, radius * 0.4f, colour);
 }
 
+// Filled disc plus eight rays, shared by the forecast card's Sunny icon and
+// the sunrise row of showSunMoonCard() below - one drawing routine rather
+// than two copies that could drift apart. Eight ray directions as
+// precomputed unit vectors (cos/sin of 0/45/90.../315 degrees) rather than
+// calling cosf/sinf at draw time - same "do not lean on a platform feature
+// that might not be there" reasoning as this file's own compassDirection()
+// 8-point table and drawTemperature()'s hand-drawn degree ring, just applied
+// to trig instead of locale/glyph support.
+void drawSunIcon(int cx, int cy, int radius) {
+  lcd.fillCircle(cx, cy, radius * 0.5f, kIconSun);
+  static constexpr float kRayDirs[8][2] = {
+      {1.0f, 0.0f},   {0.71f, 0.71f},  {0.0f, 1.0f},   {-0.71f, 0.71f},
+      {-1.0f, 0.0f},  {-0.71f, -0.71f}, {0.0f, -1.0f},  {0.71f, -0.71f},
+  };
+  for (const auto& dir : kRayDirs) {
+    const int x0 = cx + static_cast<int>(dir[0] * radius * 0.65f);
+    const int y0 = cy + static_cast<int>(dir[1] * radius * 0.65f);
+    const int x1 = cx + static_cast<int>(dir[0] * radius * 0.95f);
+    const int y1 = cy + static_cast<int>(dir[1] * radius * 0.95f);
+    lcd.drawLine(x0, y0, x1, y1, kIconSun);
+  }
+}
+
+// A crescent, for showSunMoonCard()'s sunset row - the same "second circle
+// carves a bite out of the first" technique showMoonPhaseCard()'s own
+// terminator-ellipse trick uses, simplified to a fixed crescent rather than
+// a phase-accurate disc: this icon means "it is night now", not "tonight's
+// specific moon phase" (that distinction belongs to the moonphase card
+// alone). The bite is cut with bg() rather than muted(), so it reads as a
+// true gap down to the card background in both themes rather than a filled
+// grey shadow.
+void drawMoonIcon(int cx, int cy, int radius) {
+  lcd.fillCircle(cx, cy, radius * 0.5f, ink());
+  lcd.fillCircle(cx + radius * 0.22f, cy - radius * 0.15f, radius * 0.42f, bg());
+}
+
+// A wave (two stacked shallow arcs, drawn as short line segments rather than
+// a true arc call - see the sun icon's own remarks on not leaning on a
+// platform feature this file does not already use elsewhere) with an arrow
+// above it, for showTidesCard()'s two rows. `rising` picks the arrow
+// direction - up for the next high tide, down for the next low - the same
+// distinction a household actually cares about ("is the water coming in or
+// going out"), which neither row's own label states outright.
+void drawTideIcon(int cx, int cy, int radius, bool rising) {
+  // Each wave is 4 points (5 segments would overrun waveWidth) alternating
+  // above/below waveY, connected point to point - a plain zigzag rather than
+  // a true sine curve, same "shape reads as a wave at icon size" standard
+  // the cloud/lightning-bolt icons above already accept.
+  const int waveWidth = radius * 1.3f;
+  const int x0 = cx - waveWidth / 2;
+  for (int row = 0; row < 2; ++row) {
+    const int waveY = cy + radius * 0.1f + row * radius * 0.45f;
+    int prevX = x0;
+    int prevY = waveY;
+    for (int point = 1; point <= 4; ++point) {
+      const int x = x0 + point * waveWidth / 4;
+      const int y = waveY + ((point % 2 == 0) ? -radius * 0.15f : radius * 0.15f);
+      lcd.drawLine(prevX, prevY, x, y, kIconRain);
+      prevX = x;
+      prevY = y;
+    }
+  }
+
+  const int arrowBaseY = rising ? cy - radius * 0.75f : cy - radius * 0.25f;
+  const int arrowTipY = rising ? arrowBaseY - radius * 0.4f : arrowBaseY + radius * 0.4f;
+  lcd.fillTriangle(cx - radius * 0.22f, arrowBaseY, cx + radius * 0.22f, arrowBaseY, cx, arrowTipY,
+                   ink());
+}
+
 void drawWeatherIcon(WeatherIconKind kind, int cx, int cy, int radius) {
   switch (kind) {
-    case WeatherIconKind::Sunny: {
-      lcd.fillCircle(cx, cy, radius * 0.5f, kIconSun);
-      // Eight ray directions as precomputed unit vectors (cos/sin of
-      // 0/45/90.../315 degrees) rather than calling cosf/sinf at draw time -
-      // same "do not lean on a platform feature that might not be there"
-      // reasoning as this file's own compassDirection() 8-point table and
-      // drawTemperature()'s hand-drawn degree ring, just applied to trig
-      // instead of locale/glyph support.
-      static constexpr float kRayDirs[8][2] = {
-          {1.0f, 0.0f},   {0.71f, 0.71f},  {0.0f, 1.0f},   {-0.71f, 0.71f},
-          {-1.0f, 0.0f},  {-0.71f, -0.71f}, {0.0f, -1.0f},  {0.71f, -0.71f},
-      };
-      for (const auto& dir : kRayDirs) {
-        const int x0 = cx + static_cast<int>(dir[0] * radius * 0.65f);
-        const int y0 = cy + static_cast<int>(dir[1] * radius * 0.65f);
-        const int x1 = cx + static_cast<int>(dir[0] * radius * 0.95f);
-        const int y1 = cy + static_cast<int>(dir[1] * radius * 0.95f);
-        lcd.drawLine(x0, y0, x1, y1, kIconSun);
-      }
+    case WeatherIconKind::Sunny:
+      drawSunIcon(cx, cy, radius);
       break;
-    }
     case WeatherIconKind::PartlyCloudy:
       lcd.fillCircle(cx - radius * 0.3f, cy - radius * 0.3f, radius * 0.38f, kIconSun);
       drawCloudShape(cx + radius * 0.15f, cy + radius * 0.15f, radius * 0.85f, muted());
@@ -851,6 +902,17 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   lcd.setTextColor(ink(), bg());
   drawRightJustified(sunsetText, rightX, 90, rowValueWidth);
 
+  // One icon per row, in the gap between the label and the right-justified
+  // value column - "Sunrise"/"Sunset" at this font leave roughly x100-160
+  // empty, plenty of room for a 24px icon without touching either column.
+  // Sun for sunrise, a crescent for sunset - the card's own name ("sun and
+  // moon") made this the obvious pairing rather than drawing a sun on both
+  // rows and leaving "moon" in the id unrepresented anywhere on the card.
+  constexpr int kIconColumnX = 130;
+  constexpr int kIconRadius = 12;
+  drawSunIcon(kIconColumnX, 44 + 9, kIconRadius);
+  drawMoonIcon(kIconColumnX, 90 + 9, kIconRadius);
+
   if (detail.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextColor(muted(), bg());
@@ -885,6 +947,14 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
   lcd.drawString("Next low", kCardMargin, 90);
   lcd.setTextColor(ink(), bg());
   drawRightJustified(nextLowTideText, rightX, 90, rowValueWidth);
+
+  // Same icon-in-the-gap placement as showSunMoonCard()'s two rows -
+  // "Next high"/"Next low" are wider labels than "Sunrise"/"Sunset" at this
+  // font, so the column sits a little further right to stay clear of them.
+  constexpr int kIconColumnX = 145;
+  constexpr int kIconRadius = 12;
+  drawTideIcon(kIconColumnX, 44 + 9, kIconRadius, /*rising=*/true);
+  drawTideIcon(kIconColumnX, 90 + 9, kIconRadius, /*rising=*/false);
 
   drawClock();
   restoreDefaultFont();
