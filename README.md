@@ -334,6 +334,71 @@ this same standard to its own missing airline/route data for a while, until
 that gap was closed server-side — see "Airline name, logo, and route" below
 for what changed once it was.
 
+#### The weather card retired, folded into Forecast
+
+The five-day-strip gap described above was eventually closed server-side —
+`MyWeatherEndpoints.ForDeviceForecast` now sends up to
+`Forecast::kMaxPeriods` (10) trimmed periods over `/api/myweather/forecast`,
+and `App/Forecast.h`/`.cpp` became its own card built around that endpoint,
+independent of `Weather.h`. For a while the two lived side by side in the
+rotation: `weather` (`Display::showWeatherCard`) showing "right now" from
+`/api/myweather/mine`'s `periods[0]`, and up to five `forecast`/`forecast2`…
+instances each cycling through their own fetched periods one per dwell,
+paged with the same "N of M" caption `showListingsCard()` uses.
+
+That split stopped making sense once Forecast existed: `/api/myweather/mine`
+and `/api/myweather/forecast?location=home` resolve to the *same* NWS period
+for "today" — `Weather::fetchMine()`'s "current conditions" was never a
+distinct live reading, just periods[0] of a forecast response fetched from a
+second endpoint with its own auth round-trip. Two cards, two HTTP requests,
+one underlying fact. Brett asked for them to become one card — a single
+slide per Forecast instance showing today's reading as a hero the way
+Weather's card used to, with the rest of the week beneath it — so:
+
+- **`Weather.h`/`.cpp` and `Display::showWeatherCard`/`showWeatherStatus` are
+  deleted outright**, not deprecated in place. Nothing else called them —
+  `Weather::fetchMine()` was cited in `Aircraft.h`'s and `Listings.h`'s own
+  comments only as an example of the shared auth idiom, never actually
+  invoked from either — so there was no caller left to leave a compatibility
+  path for.
+- **Each Forecast instance now draws one combined slide instead of paging
+  through its periods.** `periods[0]` — "Today" in daylight, "Tonight" after
+  dark, whichever the NWS response's own first entry is — takes the hero
+  spot `showWeatherCard()`'s temperature used to occupy, doing double duty as
+  both "current conditions" and "day one of five". Beneath it, a five-column
+  strip reads `periods[0, 2, 4, 6, 8]` — every other entry, skipping the
+  interleaved overnight periods NWS always returns between two daytime ones —
+  so the strip is five distinct calendar days regardless of whether the
+  device happens to fetch at 2pm or 2am. This is the same data Forecast
+  already pulls in one request; the redesign costs no additional fetch.
+  `Cards::Kind::List`'s own "N of M" paging caption drops off this card as a
+  result — there is nothing left to page through — the same way it was never
+  drawn at all for a single-period response before this.
+- **Every period, hero and strip alike, gets a condition icon.** NWS's
+  `shortForecast` is free text ("Chance Showers And Thunderstorms then Partly
+  Sunny"), not a coded enum, so `Display.cpp`'s `classifyCondition()` matches
+  it against a short, ordered list of keywords — thunder/storm, snow/flurries/
+  sleet, rain/showers/drizzle, fog/haze/mist, cloud/overcast, partly, clear/
+  sunny/fair — and falls back to a plain cloud glyph for anything it does not
+  recognise, rather than guessing. The icons themselves
+  (`drawWeatherIcon()`/`drawCloudShape()`) are hand-drawn with LovyanGFX
+  primitives — filled circles for a sun, three overlapping circles plus a
+  base for a cloud, short lines or dots layered under it for rain/snow, a
+  filled zigzag for a storm bolt — the same reasoning `drawTemperature()`'s
+  hand-drawn degree ring already applies to this font: no bitmap asset, no SD
+  card or network fetch, nothing that can fail to decode. They are sized as a
+  parameter (`radius`) so the identical drawing code serves both the larger
+  hero icon and the five small strip icons.
+
+**No automated test exists for this change**, or for any `App/` display
+code — there is no ESP32 test harness in this repository (see the C# side's
+own `TEST_PLAN.md` for what *is* covered, none of it firmware rendering).
+This is called out rather than silently skipped: the change is verified by
+compiling clean, by CAL's CI (`ci/build-firmware.sh`) producing a real
+release build, and by Brett confirming on real hardware — inspection and a
+live device, not a test suite, same limitation `Assets.cpp`'s decode-retry
+logic and every other `App/` change this session shared.
+
 **The aircraft card** (`Display::showAircraftCard`, `App/Aircraft.h`/`.cpp`)
 is new. It fetches `/api/myaircraft/mine` with the device's own secret — the
 same authentication, refusal-body shape (`reason`/`message`), and

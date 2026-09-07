@@ -256,28 +256,41 @@ struct Instance {
     }
   }
 
-  /// Real count while Ok (capped at kMaxPeriods by fetch() itself), one item
-  /// for any other status - same "a message is content too" tolerance
-  /// Weather's/Listings' own cardItemCount() already give their resting and
-  /// error states, and zero before the first fetch so the scheduler passes
-  /// over this instance entirely until it has an answer at all.
-  static uint16_t itemCount() {
-    if (!gEverFetched) {
-      return 0;
-    }
-    return gLast.status == Status::Ok ? gLast.count : 1;
-  }
+  /// One item once anything has been fetched, zero before that - the whole
+  /// week now draws in a single combined slide (see draw() below), so unlike
+  /// the old per-period version of this card there is no longer a count of
+  /// pageable items to report. Same "a message is content too" tolerance
+  /// Weather's/Listings' own cardItemCount() give their resting and error
+  /// states.
+  static uint16_t itemCount() { return gEverFetched ? 1 : 0; }
 
-  static void draw(uint16_t itemIndex) {
+  static void draw(uint16_t) {
     if (gLast.status == Status::Ok) {
-      if (itemIndex >= gLast.count) {
-        itemIndex = 0;
+      // The strip reads every *other* fetched period - periods[0] is the
+      // hero's own day, periods[2]/[4]/[6]/[8] are the next four calendar
+      // days - skipping the overnight period NWS always interleaves between
+      // two daytime ones. See Display::showForecastCard()'s own remarks for
+      // why this stays correct whether the device fetched at 2pm or 2am.
+      String dayNames[Display::kMaxForecastStripDays];
+      int dayTemperatures[Display::kMaxForecastStripDays];
+      String dayUnits[Display::kMaxForecastStripDays];
+      String dayConditions[Display::kMaxForecastStripDays];
+      uint8_t dayCount = 0;
+      for (uint16_t sourceIndex = 0;
+           sourceIndex < gLast.count && dayCount < Display::kMaxForecastStripDays;
+           sourceIndex += 2) {
+        const PeriodInfo& period = gLast.periods[sourceIndex];
+        dayNames[dayCount] = period.name;
+        dayTemperatures[dayCount] = period.temperature;
+        dayUnits[dayCount] = period.unit;
+        dayConditions[dayCount] = period.shortForecast;
+        dayCount++;
       }
-      const PeriodInfo& period = gLast.periods[itemIndex];
-      Display::showForecastCard(gLast.location, period.name, period.isDaytime,
-                                period.temperature, period.unit, period.shortForecast,
-                                /*index=*/itemIndex, /*total=*/gLast.count,
-                                describeFreshness(gLastOkMs));
+
+      const PeriodInfo& current = gLast.periods[0];
+      Display::showForecastCard(gLast.location, current.isDaytime, current.temperature,
+                                current.unit, current.shortForecast, dayNames, dayTemperatures,
+                                dayUnits, dayConditions, dayCount, describeFreshness(gLastOkMs));
       return;
     }
 
@@ -340,13 +353,15 @@ const char* Instance<5>::id() {
   return kCardId5;
 }
 
-// List, not Interstitial, for all five: like Listings, the server can hand
-// back several periods (up to kMaxPeriods) per instance and each cycles
-// through its own periods one per dwell rather than showing a single
-// featured reading. Order 4 slots all five right after Listings (3) among
-// list cards; the scheduler's own tie-break (Cards.h's `earlier()`) means
-// registration order settles ties among the five, which is as arbitrary -
-// and as harmless - as any other tie-break would be.
+// List, not Interstitial, for all five: each instance takes its own fixed
+// slot in the rotation rather than interleaving after every N other cards
+// the way the retired standalone weather card did - unrelated to how many
+// periods it fetches, which no longer affects itemCount() now that every
+// period draws on one combined slide (see Instance<N>::draw()). Order 4
+// slots all five right after Listings (3) among list cards; the scheduler's
+// own tie-break (Cards.h's `earlier()`) means registration order settles
+// ties among the five, which is as arbitrary - and as harmless - as any
+// other tie-break would be.
 [[maybe_unused]] const bool kRegistered1 = Instance<1>::registerSelf(4);
 [[maybe_unused]] const bool kRegistered2 = Instance<2>::registerSelf(4);
 [[maybe_unused]] const bool kRegistered3 = Instance<3>::registerSelf(4);

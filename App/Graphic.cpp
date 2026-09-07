@@ -154,7 +154,7 @@ struct Instance {
   /// The one no-content screen this instance can put up. Reached only from
   /// draw(), and only in the two cases itemCount() could not see coming - see
   /// both call sites below. Routed through Display::showNoContent() rather
-  /// than showWeatherStatus()/showAircraftStatus(): those two carry their own
+  /// than showForecastStatus()/showAircraftStatus(): those two carry their own
   /// card's colour-banded banner, and a graphic card has no banner of its
   /// own to wear.
   static void drawNoContent(const String& detail) {

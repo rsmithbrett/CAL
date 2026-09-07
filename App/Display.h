@@ -50,42 +50,6 @@ void showStatus(const String& headline, const String& detail = "");
 /// A failure the household can act on.
 void showFailure(const String& headline, const String& whatToDo);
 
-/// The weather card itself. temperature/unit/shortForecast come from the
-/// nearest forecast period; location is Home or Target's city/state,
-/// whichever the caller resolved; updatedAt is a short human string ("Updated
-/// 2 min ago") the caller computes, not a raw timestamp Display has to format.
-///
-/// Styled after CYD-Dickey's drawWeatherCard() - colour-banded label in the
-/// top-left corner, headline number set left-aligned in a bold sans face,
-/// body copy left-margined below it - but deliberately NOT at their type
-/// sizes. Their card fills the panel with six live readings and a five-day
-/// strip; this one has three fields, because that is all the server sends.
-/// Matching their sizes on a third of their content produced a card that was
-/// both small and empty, so the hierarchy here is stretched to fit what is
-/// actually available: the temperature is a 24pt hero rather than 12pt, and
-/// the supporting lines are set in readable 9pt bold rather than the 6x8
-/// bitmap grey they were. See showWeatherCard()'s own layout note in
-/// Display.cpp, and the README on what the server would have to send for the
-/// missing half of their card to be possible at all.
-///
-/// The degree mark stays hand-drawn (see drawTemperature in Display.cpp) -
-/// CYD-Dickey sidesteps the glyph entirely by never printing one ("72F"), but
-/// CAL already solved this the better way and regressing to their workaround
-/// would be a downgrade, not alignment.
-void showWeatherCard(const String& location, int temperature, const String& unit,
-                     const String& shortForecast, const String& updatedAt);
-
-/// The weather card's non-Ok states (not activated, provider disabled, no
-/// address on file, network trouble). Kept in the same white/bannered card
-/// family as showWeatherCard() rather than routed through the black
-/// boot-ladder showStatus()/showFailure() above - CYD-Dickey makes this same
-/// split (drawStatusMessage's black Wi-Fi/menu screens vs. drawNoAircraftScreen/
-/// drawNoListingsScreen's white, card-styled ones for content problems).
-/// isProblem picks the headline colour: false (not activated/disabled - a
-/// resting state, nothing wrong with the device) reads muted grey; true
-/// (auth/network trouble) reads the same amber as showFailure()'s headline.
-void showWeatherStatus(const String& headline, const String& detail, bool isProblem);
-
 /// The aircraft-overhead card. Originally modeled on CYD-Dickey's
 /// drawFeaturedAircraft() minus the parts that assumed data the server didn't
 /// provide; the server now does (airline name, logo, route - see Aircraft.h's
@@ -249,26 +213,49 @@ void showListingsCard(const String& address, const String& propertyType, int pri
 /// muted-vs-amber split.
 void showListingsStatus(const String& headline, const String& detail, bool isProblem);
 
-/// The multi-day forecast card: one outlook period per screen, cycling
-/// through however many the device fetched (up to Forecast::kMaxPeriods) -
-/// same list-card shape as showListingsCard() above, weather periods instead
-/// of listings. `location` is the city/state (or bare postal code)
-/// GET /api/myweather/forecast resolved the card's own Home/Target choice to.
-/// `periodName` is the server's own period label ("Tonight", "Monday");
-/// `isDaytime` is drawn as a small Day/Night tag beside it rather than folded
-/// into the headline text - NWS period names usually already say so
-/// ("Monday Night") but this card cannot assume every period name does, and
-/// a card handed an explicit day/night flag that never shows it would be
-/// silently dropping a field the server bothered to send.
-/// temperature/unit/shortForecast reuse showWeatherCard()'s own hero-number-
-/// plus-condition-phrase layout and drawTemperature() technique - the same
-/// shape of information (one reading, one phrase), just for a specific day
-/// instead of "right now". `index`/`total` draw the same "2 of 5" caption
-/// showListingsCard() does, for the same reason: more than one period is the
-/// ordinary case here, unlike every list card before Listings.
-void showForecastCard(const String& location, const String& periodName, bool isDaytime,
-                      int temperature, const String& unit, const String& shortForecast,
-                      uint16_t index, uint16_t total, const String& updatedAt);
+/// Up to this many calendar days show in the forecast strip below - five
+/// columns fit the 320px panel at a readable size; Forecast::kMaxPeriods (10)
+/// is deliberately 2x this, since the strip reads every *other* fetched
+/// period (see showForecastCard()'s own remarks on why).
+constexpr uint8_t kMaxForecastStripDays = 5;
+
+/// The combined current-conditions-and-outlook card - one slide per Forecast
+/// instance. Replaces both the old per-period paging version of this card
+/// (which cycled one outlook period per dwell, "N of M" caption and all) and
+/// the retired standalone weather card - see the README's "The weather card
+/// retired, folded into Forecast" for why the two became one. `location` is
+/// the city/state (or bare postal code) GET /api/myweather/forecast resolved
+/// the card's own Home/Target choice to.
+///
+/// `currentIsDaytime`/`currentTemperature`/`currentUnit`/`currentShortForecast`
+/// are the fetched response's periods[0] - "Today" in daylight, "Tonight"
+/// after dark, whichever NWS's own first entry is - drawn as a hero the same
+/// way the retired showWeatherCard() drew /api/myweather/mine's own
+/// periods[0]: a 24pt number with the hand-drawn degree ring
+/// drawTemperature() already provides, the condition phrase truncated to one
+/// line beneath it. The period's own name ("Today"/"Tonight") is not a
+/// parameter here - it is never drawn, since currentIsDaytime already
+/// surfaces the one bit of it (day vs. night) this card shows, and the day
+/// strip's own first column carries the label "Now" rather than repeating
+/// it.
+///
+/// `dayNames`/`dayTemperatures`/`dayUnits`/`dayConditions` are parallel
+/// arrays of `dayCount` (<= kMaxForecastStripDays) entries - every *other*
+/// fetched period starting at index 0, skipping the overnight period NWS
+/// always interleaves between two daytime ones, so the strip is five
+/// distinct calendar days regardless of whether the device happens to fetch
+/// at 2pm or 2am. Column 0 duplicates the hero's own day (its name is
+/// shortened to "Now" rather than repeating "Today"/"Tonight" in a 60px-wide
+/// column); columns 1-4 are the four days after it.
+///
+/// Both the hero and every strip column draw a condition icon classified
+/// from their own shortForecast text - see classifyCondition() and
+/// drawWeatherIcon() in Display.cpp.
+void showForecastCard(const String& location, bool currentIsDaytime, int currentTemperature,
+                      const String& currentUnit, const String& currentShortForecast,
+                      const String* dayNames, const int* dayTemperatures,
+                      const String* dayUnits, const String* dayConditions, uint8_t dayCount,
+                      const String& updatedAt);
 
 /// The forecast card's non-Ok states: not activated, provider disabled, a
 /// fetch that succeeded but the requested location resolved to nothing or

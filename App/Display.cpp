@@ -53,7 +53,7 @@ constexpr uint32_t kMutedNight = 0x9A9A9Au;
 // Deliberately outside the day/night swap - see the note at the bottom of
 // Display.h for why: amber already reads against either background, and a
 // fixed white banner label needs to stay white regardless of theme since
-// the banner rects below (kWeatherBanner/kAircraftBanner) are their own
+// the banner rects below (kForecastBanner/kAircraftBanner) are their own
 // fixed dark colour blocks, not part of the swap either.
 constexpr uint32_t kWarn = 0xEDA100u;
 constexpr uint32_t kBannerLabelInk = 0xFFFFFFu;
@@ -69,12 +69,6 @@ uint32_t bg() { return gIsDaytime ? kBgDay : kBgNight; }
 uint32_t ink() { return gIsDaytime ? kInkDay : kInkNight; }
 uint32_t muted() { return gIsDaytime ? kMutedDay : kMutedNight; }
 
-// CYD-Dickey's WEATHER banner is navy (fillRect + TFT_NAVY); aircraft has no
-// banner of its own there (its card spends that space on an airline logo
-// CAL has no equivalent data for - see Aircraft.h), so this colour is new,
-// chosen only to read as visually distinct from weather's on the same
-// device.
-constexpr uint32_t kWeatherBanner = 0x0D2B52u;
 constexpr uint32_t kAircraftBanner = 0x1F6FEBu;
 // Amber, distinct from the two blues above so the three cards are told apart at
 // a glance from across a room rather than by reading the banner text.
@@ -455,6 +449,157 @@ void drawTemperature(int temperature, const String& unit, int x, int y, uint32_t
   lcd.drawString(unit, cursorX, y);
 }
 
+// ---------------------------------------------------------------------------
+// Condition icons for the forecast card (see showForecastCard() below and
+// the README's "The weather card retired, folded into Forecast"). Hand-drawn
+// with LovyanGFX primitives rather than a bitmap asset - the same reasoning
+// drawTemperature()'s own hand-drawn degree ring applies to this font's
+// missing glyph: nothing here can fail to decode, needs an SD card, or costs
+// a network fetch. `radius` is a parameter, not a constant, so the identical
+// drawing code serves both the forecast card's larger hero icon and its five
+// small strip icons - see showForecastCard()'s two call sites below.
+// ---------------------------------------------------------------------------
+
+enum class WeatherIconKind {
+  Sunny,
+  PartlyCloudy,
+  Cloudy,
+  Rain,
+  Storm,
+  Snow,
+  Fog,
+  Unknown,
+};
+
+// Amber, not a theme colour - same reasoning kWarn stays outside the
+// day/night swap: a sun glyph needs to read as "sun-coloured" against both a
+// white day background and a black night one, and this happens to share
+// kWarn's own value rather than inventing a second amber.
+constexpr uint32_t kIconSun = 0xEDA100u;
+// A medium blue, chosen for the same reason: legible on white and on black,
+// unlike either a pale blue (vanishes on white) or a dark navy (vanishes on
+// black).
+constexpr uint32_t kIconRain = 0x3F7FD9u;
+constexpr uint32_t kIconSnow = 0x7FB8E0u;
+
+// NWS's shortForecast is free text ("Chance Showers And Thunderstorms then
+// Partly Sunny"), not a coded enum - there is no field to switch on, only a
+// phrase to guess from. Checked in an order that puts the more specific,
+// more visually distinct conditions first (a "Thunderstorm" is also technically
+// a "Rain" event, but showing the bolt is the more useful read), and falls
+// through to Unknown - a plain cloud outline - for anything unrecognised
+// rather than guessing wrong. Case-insensitive since NWS capitalises whole
+// words ("Showers") inconsistently with how a household might describe the
+// same day.
+WeatherIconKind classifyCondition(const String& shortForecast) {
+  String lower = shortForecast;
+  lower.toLowerCase();
+  if (lower.indexOf("thunder") >= 0 || lower.indexOf("storm") >= 0) {
+    return WeatherIconKind::Storm;
+  }
+  if (lower.indexOf("snow") >= 0 || lower.indexOf("flurr") >= 0 || lower.indexOf("sleet") >= 0) {
+    return WeatherIconKind::Snow;
+  }
+  if (lower.indexOf("rain") >= 0 || lower.indexOf("shower") >= 0 || lower.indexOf("drizzle") >= 0) {
+    return WeatherIconKind::Rain;
+  }
+  if (lower.indexOf("fog") >= 0 || lower.indexOf("haze") >= 0 || lower.indexOf("mist") >= 0) {
+    return WeatherIconKind::Fog;
+  }
+  if (lower.indexOf("partly") >= 0 || lower.indexOf("mostly cloudy") >= 0 ||
+      lower.indexOf("mostly sunny") >= 0 || lower.indexOf("mostly clear") >= 0) {
+    return WeatherIconKind::PartlyCloudy;
+  }
+  if (lower.indexOf("cloud") >= 0 || lower.indexOf("overcast") >= 0) {
+    return WeatherIconKind::Cloudy;
+  }
+  if (lower.indexOf("clear") >= 0 || lower.indexOf("sunny") >= 0 || lower.indexOf("fair") >= 0) {
+    return WeatherIconKind::Sunny;
+  }
+  return WeatherIconKind::Unknown;
+}
+
+// Three overlapping filled circles plus a base rect, scaled off `radius` -
+// the smallest shape that still reads as a cloud silhouette rather than
+// three separate dots at the sizes this card actually draws it (14px radius
+// in the strip, 26px in the hero).
+void drawCloudShape(int cx, int cy, int radius, uint32_t colour) {
+  lcd.fillCircle(cx - radius * 0.35f, cy, radius * 0.42f, colour);
+  lcd.fillCircle(cx + radius * 0.05f, cy - radius * 0.18f, radius * 0.5f, colour);
+  lcd.fillCircle(cx + radius * 0.5f, cy + radius * 0.05f, radius * 0.35f, colour);
+  lcd.fillRect(cx - radius * 0.35f, cy, radius * 0.9f, radius * 0.4f, colour);
+}
+
+void drawWeatherIcon(WeatherIconKind kind, int cx, int cy, int radius) {
+  switch (kind) {
+    case WeatherIconKind::Sunny: {
+      lcd.fillCircle(cx, cy, radius * 0.5f, kIconSun);
+      // Eight ray directions as precomputed unit vectors (cos/sin of
+      // 0/45/90.../315 degrees) rather than calling cosf/sinf at draw time -
+      // same "do not lean on a platform feature that might not be there"
+      // reasoning as this file's own compassDirection() 8-point table and
+      // drawTemperature()'s hand-drawn degree ring, just applied to trig
+      // instead of locale/glyph support.
+      static constexpr float kRayDirs[8][2] = {
+          {1.0f, 0.0f},   {0.71f, 0.71f},  {0.0f, 1.0f},   {-0.71f, 0.71f},
+          {-1.0f, 0.0f},  {-0.71f, -0.71f}, {0.0f, -1.0f},  {0.71f, -0.71f},
+      };
+      for (const auto& dir : kRayDirs) {
+        const int x0 = cx + static_cast<int>(dir[0] * radius * 0.65f);
+        const int y0 = cy + static_cast<int>(dir[1] * radius * 0.65f);
+        const int x1 = cx + static_cast<int>(dir[0] * radius * 0.95f);
+        const int y1 = cy + static_cast<int>(dir[1] * radius * 0.95f);
+        lcd.drawLine(x0, y0, x1, y1, kIconSun);
+      }
+      break;
+    }
+    case WeatherIconKind::PartlyCloudy:
+      lcd.fillCircle(cx - radius * 0.3f, cy - radius * 0.3f, radius * 0.38f, kIconSun);
+      drawCloudShape(cx + radius * 0.15f, cy + radius * 0.15f, radius * 0.85f, muted());
+      break;
+    case WeatherIconKind::Cloudy:
+      drawCloudShape(cx, cy, radius, muted());
+      break;
+    case WeatherIconKind::Rain:
+      drawCloudShape(cx, cy - radius * 0.15f, radius * 0.85f, muted());
+      for (int i = -1; i <= 1; i++) {
+        const int x0 = cx + i * radius * 0.35f;
+        lcd.drawLine(x0, cy + radius * 0.4f, x0 - radius * 0.15f, cy + radius * 0.8f, kIconRain);
+      }
+      break;
+    case WeatherIconKind::Storm: {
+      drawCloudShape(cx, cy - radius * 0.15f, radius * 0.85f, muted());
+      // A simple zigzag bolt, three points wide - fillTriangle rather than a
+      // stroked polyline so it reads as a solid bolt, not a thin scratch, at
+      // the small sizes this icon draws at.
+      const int bx = cx, by = cy + radius * 0.35f;
+      lcd.fillTriangle(bx, by, bx + radius * 0.3f, by, bx - radius * 0.05f,
+                       by + radius * 0.35f, kIconSun);
+      lcd.fillTriangle(bx - radius * 0.05f, by + radius * 0.35f, bx + radius * 0.25f,
+                       by + radius * 0.35f, bx - radius * 0.2f, by + radius * 0.75f, kIconSun);
+      break;
+    }
+    case WeatherIconKind::Snow:
+      drawCloudShape(cx, cy - radius * 0.15f, radius * 0.85f, muted());
+      for (int i = -1; i <= 1; i++) {
+        lcd.fillCircle(cx + i * radius * 0.35f, cy + radius * 0.6f, radius * 0.09f, kIconSnow);
+      }
+      break;
+    case WeatherIconKind::Fog:
+      for (int i = 0; i < 4; i++) {
+        const int y = cy - radius * 0.3f + i * radius * 0.22f;
+        lcd.drawFastHLine(cx - radius * 0.7f, y, radius * 1.4f, muted());
+      }
+      break;
+    case WeatherIconKind::Unknown:
+    default:
+      // No confident match - an outline-only cloud rather than guessing at a
+      // specific condition the phrase never actually named.
+      drawCloudShape(cx, cy, radius, muted());
+      break;
+  }
+}
+
 // ADS-B's "track" field is degrees clockwise from true north (0=N, 90=E,
 // ...) - same 8-point compass lookup as CYD-Dickey's compassDirection(),
 // used identically here to turn Aircraft::Sighting::headingDegrees into
@@ -550,136 +695,6 @@ void showFailure(const String& headline, const String& whatToDo) {
   clear();
   const int headlineLines = wrappedCenteredText(headline, 75, kWarn, 2, 22, 3);
   wrappedCenteredText(whatToDo, 75 + headlineLines * 22 + 12, muted(), 1, 14, 3);
-}
-
-// Layout note, because this card was restyled twice and the second pass is
-// the one that matters.
-//
-// The first pass matched CYD-Dickey's *elements* - navy banner, bold
-// left-aligned temperature, left-margined body - and was still reported as
-// worse than the original on real hardware. Reading the two side by side
-// explains why, and it is not a detail either version got wrong: their card
-// carries five live readings plus a five-day strip (temperature, condition,
-// feels-like, humidity, wind, then M/D + high/low for five days) and fills
-// the panel top to bottom with them. This card has three fields to show,
-// because that is all /api/myweather/mine sends (see Weather.h). Copying a
-// dense layout's type sizes onto a third of its content produced a card that
-// was small AND empty - roughly 70 vertical pixels of content on a 240px
-// panel, with everything below y=120 blank.
-//
-// So this pass stops imitating their density and spends the space instead.
-// Fewer facts, set larger: the temperature becomes a genuine hero number at
-// 24pt rather than sharing 12pt with everything else, and the two lines that
-// were 6x8 bitmap grey are set in the same readable bold 9pt the clock
-// settled on. What is deliberately NOT done here is padding the empty space
-// with invented content - no fake humidity, no placeholder forecast strip.
-// The gap is real and it is server-side; see README.
-void showWeatherCard(const String& location, int temperature, const String& unit,
-                     const String& shortForecast, const String& updatedAt) {
-  lcd.fillScreen(bg());
-  drawCardBanner("WEATHER", kWeatherBanner, 110);
-
-  // Location on its own line directly under the banner, on the same left
-  // column as everything else on the card. CYD-Dickey's weather card has no
-  // location field at all (it assumes local weather); CAL's data carries one
-  // (Home or Target's city/state), so it stays - it is the difference between
-  // "72 degrees" and "72 degrees *where*", which matters precisely because
-  // this device may be sitting somewhere other than the address it reports.
-  //
-  // It previously sat right-justified on the banner row in Font0 - the 6x8
-  // bitmap font, in muted grey. That is the exact combination drawClock()
-  // above records as having failed on real hardware: roughly 3mm tall on this
-  // 2.8" panel, low contrast, read from across a room, and reported by the
-  // first person who saw it as simply not being there. The clock was fixed
-  // at the time; these two micro-text lines on the same card had the identical
-  // defect for the identical reason and were not. Both are now set in that
-  // same bold 9pt face.
-  if (location.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
-    lcd.setTextSize(1);
-    lcd.setTextColor(muted(), bg());
-    drawTruncatedLeft(location, kCardMargin, 28, kScreenW - kCardMargin * 2);
-  }
-
-  // The hero number. CYD-Dickey sets its temperature at 12pt because it is
-  // one of six things competing for the same panel; here it is one of three,
-  // so it gets the weight that buys. Tinted with the weather banner's own
-  // navy by day - it reads fine against the white day background, and echoes
-  // the banner colour the way CYD-Dickey's own card doesn't bother to. That
-  // same navy would be nearly invisible against the night background
-  // (dark-on-black), so night falls back to the plain theme ink colour
-  // instead - the banner rect above still carries the navy accent either way,
-  // so nothing brand-identifying is lost at night.
-  //
-  // 24pt digits are 35px tall, so this block occupies y 50-85 and the ring
-  // scales to match (see drawTemperature). Widest realistic string, a
-  // three-digit temperature, ends around x=150 - nowhere near the right edge.
-  lcd.setFont(&fonts::FreeSansBold24pt7b);
-  lcd.setTextSize(1);
-  drawTemperature(temperature, unit, kCardMargin, 50, gIsDaytime ? kWeatherBanner : ink(),
-                  /*ringRadius=*/8);
-
-  // The condition phrase. CYD-Dickey never wraps here because its
-  // weatherCodeDescription() is always a word or two ("Overcast"); NWS's
-  // shortForecast is a whole phrase ("Chance Showers And Thunderstorms then
-  // Partly Sunny"), so this picks the largest size the phrase actually fits
-  // in rather than clipping it: 12pt while it lands in two lines or fewer,
-  // dropping to 9pt and three lines when it does not. A forecast the
-  // household can read in full at a smaller size beats half a forecast at a
-  // larger one, and truncating mid-phrase can invert the meaning of exactly
-  // the sentences worth reading ("...then Clearing").
-  const int bodyWidth = kScreenW - kCardMargin * 2;
-  if (shortForecast.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold12pt7b);
-    lcd.setTextSize(1);
-    const int linesAtLargeSize = wrappedLeftText(shortForecast, kCardMargin, 100, ink(), 24, 3,
-                                                 bodyWidth, /*measureOnly=*/true);
-    if (linesAtLargeSize <= 2) {
-      wrappedLeftText(shortForecast, kCardMargin, 100, ink(), 24, 2, bodyWidth);
-    } else {
-      lcd.setFont(&fonts::FreeSansBold9pt7b);
-      wrappedLeftText(shortForecast, kCardMargin, 100, ink(), 18, 3, bodyWidth);
-    }
-  }
-
-  // Freshness, pinned to a fixed baseline rather than flowing under whatever
-  // the condition block happened to need. Both branches above bottom out
-  // above this line (12pt x 2 = y148, 9pt x 3 = y154), and a fixed position
-  // means this line does not jump around the card every time the forecast
-  // wording changes length - the card is looked at from across a room, where
-  // a moving element is read as a change in the data.
-  //
-  // The caller computes the wording. It is worth saying plainly that this
-  // used to be the hardcoded string "Updated just now" on every draw,
-  // including redraws of a card fetched twenty minutes earlier - see
-  // Weather.cpp, which now measures it.
-  if (updatedAt.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
-    lcd.setTextSize(1);
-    lcd.setTextColor(muted(), bg());
-    drawTruncatedLeft(updatedAt, kCardMargin, 162, bodyWidth);
-  }
-
-  drawClock();
-  restoreDefaultFont();
-}
-
-void showWeatherStatus(const String& headline, const String& detail, bool isProblem) {
-  lcd.fillScreen(bg());
-  drawCardBanner("WEATHER", kWeatherBanner, 110);
-
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
-  lcd.setTextSize(1);
-  const uint32_t headlineColour = isProblem ? kWarn : muted();
-  const int headlineLines =
-      wrappedLeftText(headline, kCardMargin, 40, headlineColour, 22, 3, kScreenW - kCardMargin * 2);
-  if (detail.length() > 0) {
-    wrappedLeftText(detail, kCardMargin, 40 + headlineLines * 22 + 12, ink(), 18, 3,
-                    kScreenW - kCardMargin * 2);
-  }
-
-  drawClock();
-  restoreDefaultFont();
 }
 
 void aircraftLogoZone(int16_t& x, int16_t& y, int16_t& w, int16_t& h) {
@@ -1284,100 +1299,121 @@ void showListingsStatus(const String& headline, const String& detail, bool isPro
   restoreDefaultFont();
 }
 
-// Styled after showWeatherCard()'s hero-number-plus-condition-phrase layout
-// (see that function's own remarks on the sizing choices this reuses) with
-// showListingsCard()'s "N of M" paging caption layered on top - this is the
-// first card to combine "one data reading" with "more than one item to page
-// through", so it borrows one technique from each rather than inventing a
-// third.
-void showForecastCard(const String& location, const String& periodName, bool isDaytime,
-                      int temperature, const String& unit, const String& shortForecast,
-                      uint16_t index, uint16_t total, const String& updatedAt) {
+// "Now" for column 0 - it is the same day/period the hero above already
+// names in full, and repeating "Today"/"Tonight" in a 60px-wide column would
+// either truncate to something unreadable or crowd out the temperature and
+// icon beneath it. Columns 1+ get the first three characters of whatever
+// name the server sent ("Monday" -> "Mon"), which is as far as this width
+// stretches at a size still legible from across a room.
+String shortDayLabel(uint8_t index, const String& name) {
+  if (index == 0) {
+    return "Now";
+  }
+  return name.length() > 3 ? name.substring(0, 3) : name;
+}
+
+// The combined current-plus-outlook layout (see Display.h's own remarks on
+// why this replaced both the old per-period paging version of this card and
+// the retired showWeatherCard()). Hero at top - icon, temperature, condition
+// phrase, freshness - answers "what is it doing right now"; a five-column
+// strip below answers "what about the rest of the week", each column its
+// own small icon over a compact temperature. Every number below is a fixed
+// pixel position, not a computed offset, because unlike the old version this
+// card no longer resizes its own body text to fit a phrase of unknown
+// length - the strip below has to start at the same y every time regardless
+// of how long today's shortForecast happens to be.
+void showForecastCard(const String& location, bool currentIsDaytime, int currentTemperature,
+                      const String& currentUnit, const String& currentShortForecast,
+                      const String* dayNames, const int* dayTemperatures,
+                      const String* dayUnits, const String* dayConditions, uint8_t dayCount,
+                      const String& updatedAt) {
   lcd.fillScreen(bg());
   drawCardBanner("FORECAST", kForecastBanner, 130);
-
-  // "2 of 5" - identical technique and reasoning to showListingsCard()'s own
-  // paging caption: drawn only once there is more than one period to page
-  // through, in the banner row but outside the coloured rect so it costs the
-  // period-name headline below no space.
-  if (total > 1) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
-    lcd.setTextSize(1);
-    lcd.setTextColor(muted(), bg());
-    char caption[16];
-    snprintf(caption, sizeof(caption), "%u of %u", static_cast<unsigned>(index) + 1,
-             static_cast<unsigned>(total));
-    lcd.setTextDatum(top_right);
-    lcd.drawString(caption, kScreenW - kCardMargin, 4);
-    lcd.setTextDatum(top_left);
-  }
-
-  // Location on its own line directly under the banner, same placement and
-  // sizing as showWeatherCard()'s own location line - this card answers the
-  // identical "72 degrees *where*" question that one does, just for a
-  // specific day picked from the household's Home or Target address rather
-  // than "right now".
-  if (location.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
-    lcd.setTextSize(1);
-    lcd.setTextColor(muted(), bg());
-    drawTruncatedLeft(location, kCardMargin, 28, kScreenW - kCardMargin * 2);
-  }
-
-  // The period name is this card's headline - "Tonight", "Monday" - the one
-  // fact that actually identifies *this* period from the last one shown,
-  // same role showListingsCard()'s address headline plays for a listing.
   const int bodyWidth = kScreenW - kCardMargin * 2;
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
-  lcd.setTextSize(1);
-  lcd.setTextColor(ink(), bg());
-  drawTruncatedLeft(periodName.length() > 0 ? periodName : String("Forecast"), kCardMargin, 48,
-                    bodyWidth - 60);
 
-  // Day/Night, drawn explicitly rather than assumed from the period name -
-  // see showForecastCard()'s own doc comment in Display.h for why this
-  // cannot be folded into the headline text above. Right-justified against
-  // the same margin the "N of M" caption uses above it, so both chrome-like
-  // labels line up on the same right edge.
+  // Day/Night, in the banner row's own right-hand corner where this card's
+  // old "N of M" paging caption used to sit - there is nothing left to page
+  // through now that every period draws on one slide, but the flag itself
+  // is still worth a glance: shortForecast for "Tonight" reads differently
+  // than the same phrase would for "Today".
   lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setTextSize(1);
   lcd.setTextColor(muted(), bg());
-  drawRightJustified(isDaytime ? "Day" : "Night", kScreenW - kCardMargin, 51, 70);
+  lcd.setTextDatum(top_right);
+  lcd.drawString(currentIsDaytime ? "Day" : "Night", kScreenW - kCardMargin, 4);
+  lcd.setTextDatum(top_left);
 
-  // The hero number - identical drawTemperature() technique and vertical
-  // rhythm to showWeatherCard()'s own (24pt digits, ring scaled to match),
-  // just shifted down 20px to make room for the period-name headline this
-  // card has and showWeatherCard() doesn't.
+  // Location, same placement as the retired showWeatherCard()'s own line -
+  // this card answers the identical "72 degrees *where*" question that one
+  // did.
+  if (location.length() > 0) {
+    lcd.setTextColor(muted(), bg());
+    drawTruncatedLeft(location, kCardMargin, 28, bodyWidth);
+  }
+
+  // The hero icon and temperature, side by side - icon on the left the way a
+  // household reads "sun, then the number" left to right, at a size (24px
+  // radius, 48px across) big enough to tell shapes apart from across a
+  // room. The period name itself ("Today"/"Tonight") is not drawn anywhere
+  // on this card: it would either duplicate the Day/Night tag above or the
+  // "Now" label the strip's own first column already carries.
+  constexpr int kHeroIconCx = 40;
+  constexpr int kHeroIconCy = 60;
+  constexpr int kHeroIconRadius = 24;
+  drawWeatherIcon(classifyCondition(currentShortForecast), kHeroIconCx, kHeroIconCy,
+                  kHeroIconRadius);
+
   lcd.setFont(&fonts::FreeSansBold24pt7b);
   lcd.setTextSize(1);
-  drawTemperature(temperature, unit, kCardMargin, 70, ink(), /*ringRadius=*/8);
+  drawTemperature(currentTemperature, currentUnit, 76, 40,
+                  gIsDaytime ? kForecastBanner : ink(), /*ringRadius=*/8);
 
-  // The condition phrase - identical two-tier sizing technique to
-  // showWeatherCard()'s own shortForecast block (see that function's remarks
-  // on why a phrase that fits whole at a smaller size beats a clipped one at
-  // a larger size), shifted down the same 20px as the hero number above it.
-  if (shortForecast.length() > 0) {
+  // The condition phrase - one truncated line, not the old two-tier wrap.
+  // The strip below needs a fixed starting y regardless of how long today's
+  // shortForecast is, so unlike the retired showWeatherCard() this cannot
+  // grow into a second or third line; a full phrase is still one touch away
+  // in the debug stream's own fetch-side log line (see Forecast.cpp).
+  if (currentShortForecast.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold12pt7b);
     lcd.setTextSize(1);
-    const int linesAtLargeSize = wrappedLeftText(shortForecast, kCardMargin, 120, ink(), 24, 3,
-                                                 bodyWidth, /*measureOnly=*/true);
-    if (linesAtLargeSize <= 2) {
-      wrappedLeftText(shortForecast, kCardMargin, 120, ink(), 24, 2, bodyWidth);
-    } else {
-      lcd.setFont(&fonts::FreeSansBold9pt7b);
-      wrappedLeftText(shortForecast, kCardMargin, 120, ink(), 18, 3, bodyWidth);
-    }
+    lcd.setTextColor(ink(), bg());
+    drawTruncatedLeft(currentShortForecast, 76, 80, kScreenW - 76 - kCardMargin);
   }
 
-  // Freshness, pinned to a fixed baseline for the same reason
-  // showWeatherCard()'s own freshness line is: both branches above bottom
-  // out above this line (12pt x 2 = y168, 9pt x 3 = y174), and a fixed
-  // position means this line does not jump around the card as the forecast
-  // wording's length changes from one period to the next.
   if (updatedAt.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
     lcd.setTextColor(muted(), bg());
-    drawTruncatedLeft(updatedAt, kCardMargin, 180, bodyWidth);
+    drawTruncatedLeft(updatedAt, kCardMargin, 104, bodyWidth);
+  }
+
+  // A thin rule separating "right now" from "the rest of the week" - the
+  // only line-art on this card that is not a weather icon.
+  lcd.drawFastHLine(kCardMargin, 118, bodyWidth, muted());
+
+  // The five-day strip. Column width divides the panel evenly
+  // (kMaxForecastStripDays = 5, so 60px per column with no remainder at
+  // kScreenW = 320); each column centres its own day label, icon and
+  // temperature independently rather than sharing any x position with its
+  // neighbours, so dayCount can be anywhere from 1 to
+  // kMaxForecastStripDays without leaving a lopsided gap.
+  constexpr int kColumnWidth = (kScreenW - kCardMargin * 2) / kMaxForecastStripDays;
+  for (uint8_t i = 0; i < dayCount && i < kMaxForecastStripDays; i++) {
+    const int columnCentreX = kCardMargin + i * kColumnWidth + kColumnWidth / 2;
+
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setTextSize(1);
+    lcd.setTextColor(muted(), bg());
+    lcd.setTextDatum(top_center);
+    lcd.drawString(shortDayLabel(i, dayNames[i]), columnCentreX, 122);
+
+    drawWeatherIcon(classifyCondition(dayConditions[i]), columnCentreX, 155, /*radius=*/17);
+
+    char tempBuffer[12];
+    snprintf(tempBuffer, sizeof(tempBuffer), "%d%s", dayTemperatures[i], dayUnits[i].c_str());
+    lcd.setTextColor(ink(), bg());
+    lcd.drawString(tempBuffer, columnCentreX, 178);
+    lcd.setTextDatum(top_left);
   }
 
   drawClock();

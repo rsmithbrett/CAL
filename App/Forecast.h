@@ -2,25 +2,28 @@
 
 #include <Arduino.h>
 
-/// The multi-day weather outlook card ("forecast" - see KnownCardCatalog on
-/// the server, which registers it with UsesLocationChoice: true). Sits beside
-/// Weather.h/Listings.h as its own module for the same reason every other
-/// server-fetched content type does (see Weather.h's own remarks on why
-/// cards get sibling files rather than growing into one another).
+/// The current-conditions-and-outlook card ("forecast" - see
+/// KnownCardCatalog on the server, which registers it with
+/// UsesLocationChoice: true). Sits beside Listings.h as its own module for
+/// the same reason every other server-fetched content type does (see
+/// Listings.h's own remarks on why cards get sibling files rather than
+/// growing into one another). It also absorbed the standalone weather
+/// card's old role - see the README's "The weather card retired, folded
+/// into Forecast" for that history; there is no Weather.h any more.
 ///
 /// This is the first card on this build that reads a per-card Location
 /// choice off its own policy row rather than the server deciding Home-vs-
-/// Target on its own the way Weather's "mine" endpoint does. See
-/// Cards::CardSpec::location for how that field arrives on the wire and
-/// CardManager::applyPolicy() for how it lands on this card's own
-/// descriptor; Forecast.cpp's wantsTarget() is what turns it into the
-/// "home"/"target" query value GET /api/myweather/forecast expects.
+/// Target for it. See Cards::CardSpec::location for how that field arrives
+/// on the wire and CardManager::applyPolicy() for how it lands on this
+/// card's own descriptor; Forecast.cpp's wantsTarget() is what turns it into
+/// the "home"/"target" query value GET /api/myweather/forecast expects.
 ///
-/// A genuine list card, like Listings: the server returns several periods
-/// (up to kMaxPeriods), oldest/nearest first, and the scheduler cycles
-/// through them one per dwell exactly the way it already does for listings -
-/// see Listings.h's own remarks on why that differs from Aircraft's "list
-/// kind, one item shown" today.
+/// The server returns several periods (up to kMaxPeriods), oldest/nearest
+/// first, but unlike Listings this card no longer pages through them one per
+/// dwell - it draws every one it has in a single combined slide, periods[0]
+/// as a "right now" hero and periods[0, 2, 4, ...] as a five-day strip
+/// beneath it. See Display::showForecastCard()'s own remarks for the layout
+/// and Forecast.cpp's Instance<N>::draw() for how the strip is built.
 ///
 /// **This module provides five independently-configured instances**, ids
 /// `"forecast"` through `"forecast5"`, the same Instance<N> template idiom
@@ -104,7 +107,7 @@ struct Result {
   uint8_t count = 0;
   PeriodInfo periods[kMaxPeriods];
   /// City/state the server resolved the requested location to, falling back
-  /// to a bare postal code the same way Weather.cpp's own describeLocation()
+  /// to a bare postal code the same way Forecast.cpp's own describeLocation()
   /// does - empty when the location could not be resolved at all.
   String location;
   /// Set on every non-Ok status, including Empty - what to put on screen.
@@ -114,7 +117,7 @@ struct Result {
 
 /// GETs /api/myweather/forecast?location=home|target with the device's own
 /// secret and no id anywhere in the request - identical authentication to
-/// Weather::fetchMine()/Listings::fetchMine(). `useTarget` selects which of
+/// Listings::fetchMine(). `useTarget` selects which of
 /// the two query values is sent; the card's own cardFetch() resolves this
 /// from this card's own descriptor Location field (see wantsTarget() in
 /// Forecast.cpp) before calling this, so this function itself stays a plain,

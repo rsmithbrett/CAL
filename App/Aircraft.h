@@ -104,7 +104,7 @@ struct Result {
 };
 
 /// GETs /api/myaircraft/mine with the device's own secret and no id anywhere
-/// in the request - identical authentication to Weather::fetchMine() and
+/// in the request - identical authentication to Listings::fetchMine() and
 /// every other request the App makes (see MyAircraftEndpoints.cs's remarks,
 /// which mirror MyWeatherEndpoints.cs's own for why "mine" replaced an
 /// id-bearing route).
