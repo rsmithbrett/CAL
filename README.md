@@ -1909,20 +1909,118 @@ operation (`Assets::drawFullScreen()`/`drawCachedInRect()`/`drawCached()`,
 via `Display::drawPngFromSd*()`) that reads from SD and writes to the
 display in the same tight decode loop.
 
-**Why this is not being "fixed" by rewiring the bus tonight.** If the SD
-card's SCLK/MOSI/MISO are the literal same electrical wires as the
-display's - which is what the manual says, not merely the same *kind* of
-peripheral selectable in software - no software change can move the SD
-card onto a separate, uncontended bus; there is no second physical path
-to it on this board. The real fix would be properly serializing access to
-that one shared bus (a lock held around every SD operation and every
-display draw, on both sides), which means either patching the vendored
-LovyanGFX library to expose a hook around its own SPI transactions, or
-wrapping every call site project-wide with a shared mutex - real surgery,
-and not something to attempt correctly without a physical device in hand
-to verify against. The retry-and-invalidate mitigation in the two sections
-above is not a stand-in for that fix; it is the *correct, board-shaped*
-response to a genuinely transient bus-contention glitch - a short retry is
-exactly the right answer to "the other driver happened to be using the
-wire a moment ago" - and it is what ships until (if ever) the deeper fix
-is warranted and testable on real hardware.
+**Rewiring the bus itself is still out of scope.** If the SD card's SCLK/
+MOSI/MISO are the literal same electrical wires as the display's - which
+is what the manual says, not merely the same *kind* of peripheral
+selectable in software - no software change can move the SD card onto a
+separate, uncontended bus; there is no second physical path to it on this
+board. Properly serializing access to that one shared bus (a lock held
+around every SD operation and every display draw, on both sides) would
+mean either patching the vendored LovyanGFX library to expose a hook
+around its own SPI transactions, or wrapping every call site project-wide
+with a shared mutex - real surgery, and not something to attempt correctly
+without a physical device in hand to verify against.
+
+## Reading the whole file before decoding it, instead of streaming and decoding at once
+
+The retry-and-invalidate mitigation above shipped first and helped, but
+live testing after it (`v2026.09.07.0005`) still showed occasional decode
+failures getting through the retry window - three attempts 75ms apart was
+not always enough. Rather than simply lengthening that window by trial and
+error, `Display::drawPngFromSd()`/`drawPngFromSdInRect()` were changed to
+attack the actual mechanism instead: LovyanGFX's `drawPngFile()` streams
+the image, interleaving an SD read with a display write for every chunk of
+the decode - on a board whose SD card and display share SPI wiring by
+design, that interleaving puts an SD transaction and a display transaction
+right next to each other in time, over and over, for the entire length of
+one decode. Both functions now call a new `readFileToBuffer()` first
+(`Display.cpp`), which reads the entire cached file into a heap buffer in
+one pass - the SD card is not touched again after this returns - and then
+hand that buffer to LovyanGFX's `drawPng(const uint8_t*, uint32_t, ...)`
+overload, which decodes and draws entirely from RAM with no further SD
+access at all. The SD read and every display write that follows are now
+separated in time as two clean, non-overlapping phases, even though they
+still share the same physical wire - this doesn't require knowing whether
+the true mechanism is genuine electrical contention or SPI peripheral
+configuration (clock speed/mode) not being re-asserted between two
+uncoordinated drivers; it removes the opportunity for either to matter
+during a decode.
+
+This works on this device's memory budget without a second thought: the
+largest asset in the catalog today is under 34KB, against roughly 250KB of
+free heap in ordinary operation, and the buffer is a one-shot allocation
+freed (`std::unique_ptr`, RAII) the instant the caller returns - there is
+no standing cost, and it does not grow with the size of the asset catalog
+(a hundred assets on SD costs nothing extra in RAM; only whichever *one*
+file is being drawn *right now* is ever buffered). Every failure path
+(file would not open, file is empty, out of memory, a short read) is
+logged to the remote debug stream by name, matching the standing
+verbose-logging mandate, and a successful read logs the byte count too -
+"SD access done, decoding from RAM now" - so the moment a card's SD
+activity ends and its display activity begins is directly visible live,
+not inferred.
+
+**Whether this needed prefetching multiple files ahead of time was
+considered and set aside for now.** Reading one file into RAM immediately
+before its own draw is not the same as eliminating SD activity from the
+device's timeline entirely - a prefetch-several-cards-ahead scheme would
+reduce how often an SD read happens at all, which helps *latency* (no
+stall waiting on SD right as a card comes up). But it would not by itself
+prevent contention any better than the single-file read above does: this
+firmware is single-threaded (`setup()`/`loop()`, no FreeRTOS tasks), and
+`fetch()` (which is the only thing that ever *writes* to SD) already runs
+on its own periodic refresh timer, separate in time from `draw()` - so
+there was never a second, concurrent SD user for a prefetch scheme to
+avoid contending with here that this fix does not already avoid. Worth
+revisiting as a pure latency optimization later; not needed for the
+contention problem this section addresses.
+
+## Memory management approach
+
+`readFileToBuffer()` above is this codebase's first real use of dynamic
+(heap) allocation for anything sized at runtime, so the rule it follows is
+worth stating plainly rather than leaving implicit:
+
+**Static by default.** Everything that persists for the device's whole
+run - a card's retained state, an asset id, an announcement's text - lives
+in a fixed-size buffer sized at compile time (`Cards::CardSpec`'s
+`assetId`/`text`/`qrData`/`location` char arrays are the clearest example:
+sized to the exact server-side limit, never a `String` that could grow
+unpredictably, and constant-initialisable so the registry exists before
+any card module's own static initialiser runs - see `Cards.h`'s own
+remarks). This is the ordinary case, and nothing above changes it.
+
+**Heap allocation only for a large, transient, one-shot need a fixed
+buffer cannot reasonably size in advance.** A cached PNG's byte size is
+neither fixed nor small enough to reserve a permanent buffer for it - the
+catalog already ranges from 2KB to 34KB and has no firmware-enforced
+ceiling - so `readFileToBuffer()` allocates exactly `fileSize` bytes,
+never a guess or a round-number ceiling, and only for the duration of one
+draw call.
+
+**Every heap allocation is RAII-owned, no exceptions.** `std::unique_ptr<
+uint8_t[]>` frees the buffer the instant `FileBuffer` goes out of scope,
+on *every* return path - success, a short read, an out-of-memory check
+failing outright - so a failure partway through can never leak. Plain
+`new`/`delete` pairs that rely on remembering every return statement are
+exactly the bug class this avoids, on a device with no heap fragmentation
+tooling to catch the leak later.
+
+**The budget is the largest plausible single item, not the fleet or the
+catalog.** A hundred assets in the catalog costs nothing extra in RAM,
+because only the one file currently being drawn is ever buffered at once
+- this is the same reasoning `Assets.h`'s own remarks give for treating SD
+storage as "unlimited but accountable": the cost that actually matters
+scales with one draw, not with how large the library grows. `new (
+std::nothrow)` is checked explicitly rather than left to a crash, and a
+failure is logged by name and byte count (`"[display] out of memory
+reading %s (%u bytes)"`) rather than silently returning a blank screen -
+the same "loud, not silent" standard every other failure path in this
+codebase already holds to.
+
+**Headroom is checked against real telemetry, not assumed.** The 34KB-
+against-~250KB comparison above is not a guess - both numbers come from
+this fleet's own `/diag/telemetry` (asset sizes) and live check-in reports
+(`freeHeapBytes`), the same standing preference this project has for
+reading real device state over estimating it (see `SdStorage.h`'s "measured,
+not assumed" framing for SD capacity, which this mirrors for heap).

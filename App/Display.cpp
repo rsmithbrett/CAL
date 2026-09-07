@@ -5,6 +5,7 @@
 // DataWrapperT<fs::SDFS>". CYD-Dickey hit exactly this and records the same
 // note at the top of its .ino.
 #include <SD.h>
+#include <memory>
 
 #define LGFX_AUTODETECT
 #include <LovyanGFX.hpp>
@@ -1549,13 +1550,79 @@ void flashNavEdge(bool isForward, bool canReverse) {
   drawNavAffordances(canReverse);
 }
 
+namespace {
+
+/// The whole file's bytes, read from SD in one pass, or a null `data` on any
+/// failure (open, zero-length, short read).
+struct FileBuffer {
+  std::unique_ptr<uint8_t[]> data;
+  size_t size = 0;
+};
+
+/// Reads `path` entirely into a heap buffer before either PNG draw function
+/// below ever calls into LovyanGFX's decoder - see README.md's "The likely
+/// root cause" section: this board's SD card shares its SPI wiring with the
+/// display, by the manufacturer's own documentation, and `drawPngFile()`'s
+/// own file-streaming decode interleaves an SD read with every display
+/// write for the entire length of the image, landing squarely on that
+/// shared bus for as long as the decode runs. Reading the whole file first
+/// means the SD read and every one of the display writes that follow are
+/// separated in time - the SD card is never touched again once this
+/// returns - even though they still share the same physical wire. The
+/// largest asset in the catalog today is under 34KB against roughly 250KB
+/// of free heap in the device's ordinary operating state, so this is a
+/// one-shot allocation freed the moment the caller returns, not a standing
+/// cost.
+FileBuffer readFileToBuffer(const String& path) {
+  FileBuffer result;
+  File file = SD.open(path, FILE_READ);
+  if (!file) {
+    Log::printf("[display] could not open %s to read into memory", path.c_str());
+    return result;
+  }
+  const size_t fileSize = file.size();
+  if (fileSize == 0) {
+    file.close();
+    Log::printf("[display] %s is empty on SD - nothing to read into memory", path.c_str());
+    return result;
+  }
+  std::unique_ptr<uint8_t[]> buffer(new (std::nothrow) uint8_t[fileSize]);
+  if (!buffer) {
+    file.close();
+    Log::printf("[display] out of memory reading %s (%u bytes)", path.c_str(),
+                static_cast<unsigned>(fileSize));
+    return result;
+  }
+  const size_t bytesRead = file.read(buffer.get(), fileSize);
+  file.close();
+  if (bytesRead != fileSize) {
+    Log::printf("[display] short read on %s (%u of %u bytes)", path.c_str(),
+                static_cast<unsigned>(bytesRead), static_cast<unsigned>(fileSize));
+    return result;
+  }
+  result.data = std::move(buffer);
+  result.size = fileSize;
+  Log::printf("[display] read %s into memory (%u bytes) - SD access done, decoding from RAM now",
+              path.c_str(), static_cast<unsigned>(fileSize));
+  return result;
+}
+
+}  // namespace
+
 bool drawPngFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, int32_t h) {
   // No fillScreen() here, deliberately - see this function's own header
   // comment. Same decode call as drawPngFromSd() below, just bounded to
   // (w, h) at (x, y) instead of the whole panel; scaleX/scaleY left at 0
   // is what makes LovyanGFX auto-fit the image within that box rather than
   // drawing it at native size.
-  const bool ok = lcd.drawPngFile(SD, path.c_str(), x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
+  const FileBuffer file = readFileToBuffer(path);
+  if (!file.data) {
+    Log::printf("[display] could not read %s for a %dx%d rect at (%d,%d)", path.c_str(),
+                (int)w, (int)h, (int)x, (int)y);
+    return false;
+  }
+  const bool ok =
+      lcd.drawPng(file.data.get(), file.size, x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
   lcd.releasePngMemory();
   if (!ok) {
     Log::printf("[display] failed to draw %s in %dx%d rect at (%d,%d)", path.c_str(), (int)w, (int)h, (int)x, (int)y);
@@ -1565,16 +1632,22 @@ bool drawPngFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, in
 
 bool drawPngFromSd(const String& path) {
   lcd.fillScreen(bg());
-  const bool ok =
-      lcd.drawPngFile(SD, path.c_str(), 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
-  // LovyanGFX keeps the PNG decoder's internal buffers allocated after a draw
-  // (intentional, for cheap repeat-draws). Released unconditionally, because
-  // a *failed* decode leaves them allocated too - CYD-Dickey found this
-  // starving the memory its Bluetooth init needed immediately afterwards, and
-  // this device has roughly 274KB of free heap to lose it out of.
-  lcd.releasePngMemory();
-  if (!ok) {
-    Log::printf("[display] failed to draw %s", path.c_str());
+  const FileBuffer file = readFileToBuffer(path);
+  bool ok = false;
+  if (!file.data) {
+    Log::printf("[display] could not read %s", path.c_str());
+  } else {
+    ok = lcd.drawPng(file.data.get(), file.size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
+    // LovyanGFX keeps the PNG decoder's internal buffers allocated after a
+    // draw (intentional, for cheap repeat-draws). Released unconditionally,
+    // because a *failed* decode leaves them allocated too - CYD-Dickey found
+    // this starving the memory its Bluetooth init needed immediately
+    // afterwards, and this device has roughly 274KB of free heap to lose it
+    // out of.
+    lcd.releasePngMemory();
+    if (!ok) {
+      Log::printf("[display] failed to draw %s", path.c_str());
+    }
   }
   restoreDefaultFont();
   return ok;
