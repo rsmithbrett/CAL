@@ -296,6 +296,22 @@ void performCheckIn() {
   // own remarks.
   Log::setStreamingEnabled(result.debugStreamRequested);
 
+  // One-shot, like updateAvailable below - the server already cleared its
+  // own copy of this flag the moment it answered true (see CheckIn.h's own
+  // remarks), so this fires exactly once per admin button press regardless
+  // of how many check-ins land before the next one. Deletes every cached
+  // image; nothing here forces an immediate re-fetch - the ordinary refresh
+  // sweep (refreshOneDueCard()) notices the cache miss on each card's own
+  // next due cycle and re-downloads through the same SHA-256-verified path
+  // as any other cache miss, so a card may show no picture for up to one
+  // refresh interval rather than the request blocking on several fetches
+  // back to back.
+  if (result.sdReformatRequested) {
+    Log::line("[checkin] server requested an SD card reformat");
+    const uint16_t removed = Assets::wipeCache();
+    Log::printf("[checkin] SD reformat complete (%u file(s) removed)", removed);
+  }
+
   // Piggybacks on check-in's own cadence rather than owning a timer of its
   // own - see Telemetry.h for why riding this exact cadence (instead of a
   // slower, independent one) is what keeps the server's own staleness

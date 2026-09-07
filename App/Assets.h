@@ -88,4 +88,24 @@ uint16_t cachedCount();
 /// decoration is least defensible.
 void showBootSplash();
 
+/// Deletes every cached asset (everything under the cache directory,
+/// including a stray ".part" left by an interrupted download) so the next
+/// ensureCached() for each one re-fetches and re-verifies from scratch.
+///
+/// Exists for the recovery path DeviceRegistry.RequestSdReformatAsync
+/// triggers remotely (see App.ino's handling of CheckIn::Result::
+/// sdReformatRequested): a card whose readback-verify keeps failing
+/// (fetchToCard()'s "storage corrupted... this card may be failing" log
+/// line) may have a corrupted FAT structure rather than genuinely dead
+/// flash, and a clean directory to refetch into is worth trying before
+/// physically swapping the card. This does NOT low-level format the
+/// filesystem itself - the ESP32 core's SD library (SdFat under the hood)
+/// exposes no such call through the SD.h wrapper this project uses - it
+/// deletes every file this firmware ever wrote to the card, which is the
+/// achievable, safe equivalent for what is, from this firmware's own
+/// perspective, a single directory of files it fully owns. Returns the
+/// number of files removed, purely for the debug log line the caller
+/// prints - callers do not need to branch on it.
+uint16_t wipeCache();
+
 }  // namespace Assets

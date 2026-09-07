@@ -733,12 +733,17 @@ been failing for a long stretch and the *earliest* presses are the ones that
 still describe what happened.
 
 **The one thing drawn that the contract does not describe:** a pressed button
-flashes and comes straight back (`Display::flashActionButton`). That
-acknowledges the *press*, not the delivery — a button that does not visibly
-react to a finger reads as a dead button, which is its own separate failure —
-and it claims nothing about what the server did with it. Pressing also
-triggers the same manual-nav hold a navigation tap does, so a card someone
-just pressed a button on is not swapped out from under them.
+answers with a big green checkmark held centre-screen for half a second
+(`Display::showButtonPressConfirmation`), then the card redraws underneath
+it. That acknowledges the *press*, not the delivery — a button that does not
+visibly react to a finger reads as a dead button, which is its own separate
+failure — and it claims nothing about what the server did with it. An
+earlier version of this just recolored the button itself
+(`Display::flashActionButton`); that was too easy to miss from any distance
+and was replaced outright once this bigger confirmation existed, rather than
+kept around unused. Pressing also triggers the same manual-nav hold a
+navigation tap does, so a card someone just pressed a button on is not
+swapped out from under them.
 
 Geometry is entirely the device's: a row of up to three buttons along the
 bottom, from x=8 to x=312 and ending at y=220, clearing the corner clock's

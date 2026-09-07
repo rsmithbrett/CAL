@@ -346,4 +346,37 @@ void showBootSplash() {
   Display::drawPngFromSd(path);
 }
 
+uint16_t wipeCache() {
+  if (!Sd::isReady()) {
+    return 0;
+  }
+  File dir = SD.open(kCacheDir);
+  if (!dir || !dir.isDirectory()) {
+    return 0;
+  }
+  uint16_t removed = 0;
+  for (File entry = dir.openNextFile(); entry; entry = dir.openNextFile()) {
+    const String name = entry.name();
+    const bool isDirectory = entry.isDirectory();
+    entry.close();
+    if (isDirectory) {
+      continue;
+    }
+    // entry.name() is the bare filename (SD.open(kCacheDir) already put us
+    // inside the directory), so the path passed to SD.remove() has to be
+    // rebuilt with kCacheDir - the same join pathFor() does for a known id,
+    // just for whatever name is actually sitting there rather than one this
+    // firmware is about to construct itself.
+    const String path = String(kCacheDir) + "/" + name;
+    if (SD.remove(path)) {
+      removed++;
+    } else {
+      Log::printf("[assets] wipeCache could not remove %s", path.c_str());
+    }
+  }
+  dir.close();
+  Log::printf("[assets] cache wiped (%u file(s) removed)", removed);
+  return removed;
+}
+
 }  // namespace Assets

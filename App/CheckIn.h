@@ -34,6 +34,16 @@ struct Result {
   /// naturally picks the right state back up after a reboot within one check-in
   /// interval, with no flag of its own to persist or fall out of sync.
   bool debugStreamRequested = false;
+  /// One-shot, unlike debugStreamRequested above: true means an admin used
+  /// DeviceRegistry's "Reformat SD card" button since this device's last
+  /// check-in. The server clears the underlying flag the moment it answers
+  /// with true (DeviceRegistryService.ConsumeSdReformatForcedAsync), the
+  /// same one-shot-consume contract updateAvailable already has for a forced
+  /// firmware update - so this is never true twice for one button press,
+  /// even if App.ino only checks it once per check-in. Absent on a server
+  /// that predates this field, which JsonDocument's `| false` default
+  /// already handles the same way every other additive field here does.
+  bool sdReformatRequested = false;
   /// Minutes to add to UTC to get this device's local time right now - DST
   /// already applied, recomputed by the server fresh on every check-in from
   /// the device's own location rather than looked up once and cached. Local

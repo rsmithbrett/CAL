@@ -419,10 +419,16 @@ void handleTap(const Touch::Tap& tap) {
       // deliberate about there being no "sent" state and no round trip - the
       // press rides the next ordinary check-in and the user waits for
       // nothing - but a button that does not visibly react to a finger reads
-      // as a dead button, which is its own failure. This flashes the button
-      // and puts it straight back; it claims nothing about what the server
-      // did with it.
-      Display::flashActionButton(tap.actionIndex, gButtonCount, pressed.label);
+      // as a dead button, which is its own failure. A big centre-screen
+      // checkmark, not the smaller in-place flashActionButton() this used to
+      // call - the user's explicit ask was a confirmation that reads clearly
+      // from across the room, not just at the button itself - and it claims
+      // nothing about what the server did with the press, same as that
+      // smaller flash never did. drawCurrent() puts the actual card (and its
+      // buttons) back afterward, since the checkmark was drawn over the
+      // whole panel, not just the one button rect.
+      Display::showButtonPressConfirmation();
+      drawCurrent();
       // A card someone just pressed a button on should not be yanked away a
       // second later, same as a manual navigation.
       holdOffAutoAdvance();

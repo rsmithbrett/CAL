@@ -160,6 +160,15 @@ constexpr uint32_t kButtonFill = 0x2E9FFFu;
 constexpr uint32_t kButtonPressedFill = 0x0B5FB0u;
 constexpr uint32_t kButtonInk = 0xFFFFFFu;
 
+// showButtonPressConfirmation()'s big centre-screen acknowledgment. Same
+// green as kAnnouncementBanner - "confirmed" reuses the one colour on this
+// panel that already reads as affirmative rather than introducing a second
+// green with a different meaning. Deliberately outside the day/night swap,
+// same reasoning as the button colours above: it needs to read clearly
+// against whichever background happens to be showing underneath it.
+constexpr uint32_t kConfirmFill = 0x2E7D32u;
+constexpr uint32_t kConfirmInk = 0xFFFFFFu;
+
 // Edge chevrons. Small, low-contrast, vertically centred - they mark the
 // touch zones without competing with the card for attention.
 constexpr int kChevronHalfHeight = 12;
@@ -1427,9 +1436,9 @@ void actionButtonZone(uint8_t index, uint8_t count, int16_t& x, int16_t& y, int1
 
 namespace {
 
-// Shared by drawActionButtons() and flashActionButton() so a pressed button
-// can never come back a different size or in a different font than the one
-// it replaced.
+// The one place a button's rect, font and text are actually painted, so
+// drawActionButtons() can never draw a button a different size or in a
+// different font than any other.
 void drawOneButton(uint8_t index, uint8_t count, const String& label, uint32_t fill) {
   int16_t x, y, w, h;
   actionButtonZone(index, count, x, y, w, h);
@@ -1467,11 +1476,29 @@ void drawActionButtons(const String* labels, uint8_t count) {
   restoreDefaultFont();
 }
 
-void flashActionButton(uint8_t index, uint8_t count, const String& label) {
-  drawOneButton(index, count, label, kButtonPressedFill);
-  delay(180);
-  drawOneButton(index, count, label, kButtonFill);
-  restoreDefaultFont();
+void showButtonPressConfirmation() {
+  const int cx = kScreenW / 2;
+  const int cy = kScreenH / 2;
+  const int radius = 46;
+  lcd.fillCircle(cx, cy, radius, kConfirmFill);
+
+  // A checkmark as two thick strokes rather than a filled glyph - the same
+  // "drawn as lines, not a font" convention drawNavAffordances() already
+  // uses for its edge chevrons, just heavier so it stays legible at this
+  // size. Several parallel 1px lines stand in for stroke width, since
+  // LovyanGFX's drawLine() itself is always 1px.
+  const int thickness = 5;
+  for (int t = -thickness / 2; t <= thickness / 2; t++) {
+    lcd.drawLine(cx - 22, cy + t, cx - 4, cy + 18 + t, kConfirmInk);
+    lcd.drawLine(cx - 4, cy + 18 + t, cx + 24, cy - 16 + t, kConfirmInk);
+  }
+
+  // Held long enough to actually register as "this happened" - the small
+  // per-button flash below is 180ms because it is a tiny accent the user's
+  // finger is already resting on; this occupies the centre of the panel
+  // and needs a genuinely readable beat before the caller redraws the card
+  // out from under it.
+  delay(500);
 }
 
 void drawNavAffordances(bool canReverse) {
@@ -1500,13 +1527,14 @@ void flashNavEdge(bool isForward, bool canReverse) {
   // y-range a tap only ever reaches Hit::Reverse/Hit::Forward where no
   // button rect covers it; a taller flash here would still paint over
   // whatever button *does* live in that row at that x, and unlike
-  // flashActionButton() (always followed by drawCurrent() redrawing
-  // everything, since a nav tap changes what's on screen) there is one path
-  // - rewind() at gHistoryCursor == 0, i.e. canReverse == false - that
-  // returns without redrawing at all, which would leave a bite taken out of
-  // a real button until some unrelated later redraw happened to fix it.
+  // showButtonPressConfirmation() (always followed by drawCurrent()
+  // redrawing everything, since a nav tap changes what's on screen) there
+  // is one path - rewind() at gHistoryCursor == 0, i.e. canReverse == false
+  // - that returns without redrawing at all, which would leave a bite
+  // taken out of a real button until some unrelated later redraw happened
+  // to fix it.
   const int x = isForward ? kScreenW - kEdgeZoneWidth : 0;
-  // kButtonPressedFill, not a new colour: reusing flashActionButton()'s own
+  // kButtonPressedFill, not a new colour: reusing the action row's own
   // "pressed" shade makes every touch on this panel answer back the same
   // way, rather than teaching the user two different flash colours for two
   // different kinds of button. It reads against either day/night background

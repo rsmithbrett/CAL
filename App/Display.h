@@ -305,13 +305,19 @@ void drawActionButtons(const String* labels, uint8_t count);
 void actionButtonZone(uint8_t index, uint8_t count, int16_t& x, int16_t& y, int16_t& w,
                       int16_t& h);
 
-/// Briefly redraws one button in its pressed colour and puts it straight
-/// back. This acknowledges the *press* only. It deliberately says nothing
-/// about delivery: a press is a passive push that rides the next ordinary
-/// check-in, with no confirmation and nothing for the user to wait for (see
-/// Actions.h). A button that does not visibly react to a finger reads as a
-/// dead button, which is its own, separate failure.
-void flashActionButton(uint8_t index, uint8_t count, const String& label);
+/// A big green checkmark, centred on the panel, held briefly - what a card's
+/// action button acknowledges a press with (CardManager::handleTap()'s
+/// Touch::Hit::ActionButton case). This acknowledges the *press* only. It
+/// deliberately says nothing about delivery: a press is a passive push that
+/// rides the next ordinary check-in, with no confirmation and nothing for
+/// the user to wait for (see Actions.h). A button that does not visibly
+/// react to a finger reads as a dead button, which is its own, separate
+/// failure - and a confirmation only the button itself shows is easy to
+/// miss from any distance, which is why this is a big centre-screen mark
+/// rather than a small in-place recolor. Draws over whatever card is
+/// currently showing; the caller is responsible for redrawing the card
+/// afterward, since this has no notion of what was under it.
+void showButtonPressConfirmation();
 
 /// Small chevrons at the left and right edges marking the reverse/forward
 /// touch zones. CYD-Dickey leaves its equivalent zones completely invisible;

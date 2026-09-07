@@ -212,6 +212,7 @@ Result perform() {
   result.acknowledged = responseDoc["acknowledged"] | false;
   result.updateAvailable = responseDoc["updateAvailable"] | false;
   result.debugStreamRequested = responseDoc["debugStreamRequested"] | false;
+  result.sdReformatRequested = responseDoc["sdReformatRequested"] | false;
   result.utcOffsetMinutes = responseDoc["utcOffsetMinutes"] | 0;
   result.isDaytime = responseDoc["isDaytime"] | true;
   // `| -1` covers a JSON null and a field an older server never sends at all. Both
@@ -246,11 +247,13 @@ Result perform() {
   parseAcceptedActionIds(responseDoc["acceptedActionIds"], result);
 
   Log::printf(
-      "[checkin] ok (acknowledged=%d updateAvailable=%d debugStream=%d intervalSeconds=%d "
-      "utcOffsetMinutes=%d isDaytime=%d cardPolicy=%d cards=%u actions=%u accepted=%u)",
-      result.acknowledged, result.updateAvailable, result.debugStreamRequested, intervalSeconds,
-      result.utcOffsetMinutes, result.isDaytime, result.cardPolicy.present,
-      result.cardPolicy.entryCount, result.cardActionCount, result.acceptedActionCount);
+      "[checkin] ok (acknowledged=%d updateAvailable=%d debugStream=%d sdReformat=%d "
+      "intervalSeconds=%d utcOffsetMinutes=%d isDaytime=%d cardPolicy=%d cards=%u actions=%u "
+      "accepted=%u)",
+      result.acknowledged, result.updateAvailable, result.debugStreamRequested,
+      result.sdReformatRequested, intervalSeconds, result.utcOffsetMinutes, result.isDaytime,
+      result.cardPolicy.present, result.cardPolicy.entryCount, result.cardActionCount,
+      result.acceptedActionCount);
   return result;
 }
 
