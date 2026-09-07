@@ -1767,3 +1767,70 @@ disposable tag can no longer cost the permanent one.
   designed.** See *Provisioning: how a device gets its secret*, above - what
   exists today (the server's public `/cal` page) covers a fresh unit that
   only needs generic firmware, not bulk provisioning with per-device secrets.
+
+## A decode failure now retries and self-heals, instead of being a life sentence
+
+Found live: `Graphic.cpp`'s picture cards used to treat any decode failure as
+permanent - one failed `Assets::drawCached()` call set `gReady = false` for
+good and left the cached file on the SD card untouched forever, on the
+stated assumption that "a PNG that will not decode will not decode next
+time either." That assumption turned out to be wrong at least some of the
+time: pulling the exact bytes of two assets that had failed to decode on
+real devices straight out of the server's database and decoding them
+independently (`file`'s PNG parser and .NET's GDI+ decoder both) showed
+perfectly well-formed images - not truncated, not bit-corrupted, nothing a
+standard decoder objects to. `App/lgfx_pngle.c` (LovyanGFX's actual PNG
+decoder, vendored under `LovyanGFX/src/lgfx/utility/`) uses a full,
+standard miniz/tinfl DEFLATE implementation and explicitly supports this
+exact PNG shape (8-bit, RGBA, non-interlaced, no exotic ancillary chunks),
+so this was not a decoder-incompatibility either. The leading explanation
+is an intermittent SD *read* glitch at draw time - separate from, and later
+than, the SHA-256 readback-verify `fetchToCard()` already does once, right
+after writing (see *Verified once ...* elsewhere in this file) - which a
+permanent blacklist can never recover from on its own.
+
+`Graphic.cpp`'s `draw()` now retries the same cached file up to three times
+(a short `delay(75)` between attempts) before giving up - cheap, and enough
+to ride out a simple transient glitch. If every attempt still fails, the
+cached file is deleted via a new `Assets::invalidate(id)` (`Assets.h`/`.cpp`)
+rather than kept and blacklisted: that forces the very next `fetch()`
+refresh cycle to re-download and re-verify a fresh copy from the server,
+which is what actually recovers from a bad read instead of just giving up
+on it once. A genuinely corrupt source image still ends up back here on the
+next refresh and gets invalidated again - loud, not silent, and now visible
+past the debug stream too (see the next section) - but no longer stuck
+until an operator happens to notice and reassigns a different `assetId`.
+
+## Decode failures reach `/diag/audit`, not just the debug stream
+
+A second gap the same investigation exposed: `CardManager.cpp`'s existing
+"N of M policy entries known" reporting (`lastPolicyKnownCount()` etc.,
+ridden along on the next check-in and recorded server-side as a failed
+`CardPolicyMismatch` audit event) only ever covers a card id the server's
+policy and this firmware's registry disagree about. A card whose id matched
+fine but whose *picture* would not decode never touched that count at all -
+it only ever showed up in `Graphic.cpp`'s own `Log::printf` line, visible
+only for however long someone happened to be watching the live debug
+stream.
+
+`Assets.cpp` now tracks up to four distinct asset ids that failed to decode
+since the last successful check-in (`decodeFailureCount()`/
+`decodeFailureIds()`, deduplicated per reporting cycle so one repeatedly-
+failing overlay - an aircraft card's airline logo redraws, and can refail,
+every time that card is shown - cannot fill the whole cap with copies of
+itself before anything else gets a slot). `CheckIn.cpp` reports these on
+the outgoing check-in request (`assetDecodeFailureCount`/
+`assetDecodeFailureIds`, additive and omitted entirely when nothing has
+failed) and clears the pending report only once that exact check-in
+actually succeeds - so a failure is reported once per occurrence, not
+resent on every subsequent check-in forever. Recorded inside
+`drawCached()`/`drawCachedInRect()`/`drawFullScreen()` themselves (the three
+choke points that already know both the asset id and whether
+`Display::drawPngFromSd*()` returned false for a file that was genuinely
+present), so this covers every current and future caller automatically,
+not just `Graphic.cpp`.
+
+Server-side, `CheckInGatewayService.ProcessCheckInAsync` records a failed
+`AssetDecodeFailure` audit event when this is non-empty - same "audited,
+not merely logged" treatment `CardPolicyMismatch` already gets on
+`/diag/audit`, for the different silent failure this one is.

@@ -183,25 +183,44 @@ struct Instance {
       return;
     }
 
-    if (Assets::drawCached(gCachedId)) {
-      return;
+    // A few immediate retries before giving up. Found live: a decode
+    // failure here can be a transient SD read glitch rather than genuine
+    // file corruption - the exact same bytes, pulled from the server and
+    // decoded independently off-device, turned out to be a perfectly
+    // well-formed PNG. A short pause between attempts gives whatever caused
+    // the glitch a chance to pass before the next read.
+    constexpr uint8_t kMaxDrawAttempts = 3;
+    for (uint8_t attempt = 0; attempt < kMaxDrawAttempts; ++attempt) {
+      if (Assets::drawCached(gCachedId)) {
+        return;
+      }
+      if (attempt + 1 < kMaxDrawAttempts) {
+        delay(75);
+      }
     }
 
-    // The decode failed, or the file went away between the check above and
-    // here. drawPngFromSd() has already cleared the panel to the theme
-    // background, so something has to go on it. Clearing gReady takes this
-    // instance straight back out of the rotation on the next computed card,
-    // so a corrupt asset costs one dwell rather than reappearing every
-    // cycle.
+    // Every attempt still failed. drawPngFromSd() has already cleared the
+    // panel to the theme background, so something has to go on it. Clearing
+    // gReady takes this instance straight back out of the rotation on the
+    // next computed card, so a bad asset costs one dwell rather than
+    // reappearing every cycle.
     //
-    // The cached file is deliberately NOT deleted. A PNG that will not
-    // decode will not decode next time either, and deleting it would turn a
-    // permanent failure into an HTTP fetch on every single refresh, forever -
-    // loud on the network and no better on screen. It stays on the card, the
-    // failure is in the log, and a new assetId is what fixes it.
+    // Unlike the single-shot behaviour this replaced, the cached file is
+    // now deleted (Assets::invalidate()) rather than kept and blacklisted
+    // forever: that forces the very next fetch() refresh cycle to
+    // re-download and re-verify a fresh copy, which is what actually
+    // recovers from an intermittent read glitch rather than just giving up
+    // on it once. A genuinely corrupt source image still ends up back here
+    // on the next refresh and gets invalidated again - loud in the log and
+    // (see Assets.h's decodeFailureCount()) in the /diag/audit
+    // AssetDecodeFailure trail, not silent, but no longer a life sentence
+    // for one bad read.
     gReady = false;
-    Log::printf("[%s] asset '%s' would not decode - dropping this card from the rotation",
-                id(), gCachedId.c_str());
+    Assets::invalidate(gCachedId);
+    Log::printf(
+        "[%s] asset '%s' would not decode after %u attempt(s) - invalidating the cache and "
+        "dropping this card for now",
+        id(), gCachedId.c_str(), static_cast<unsigned>(kMaxDrawAttempts));
     drawNoContent("This card's image could not be displayed.");
   }
 

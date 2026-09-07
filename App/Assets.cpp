@@ -15,6 +15,29 @@
 namespace Assets {
 namespace {
 
+/// State for decodeFailureCount()/decodeFailureIds()/clearDecodeFailures() -
+/// see Assets.h's own remarks on why this exists and how CheckIn.cpp uses it.
+constexpr uint8_t kMaxReportedDecodeFailures = 4;
+String gDecodeFailureIds;
+uint8_t gDecodeFailureCount = 0;
+
+void recordDecodeFailure(const String& assetId) {
+  // Dedup within one reporting cycle: an aircraft logo overlay redraws (and
+  // can refail) every time that card is shown, and without this a single
+  // bad logo would otherwise fill the whole 4-id cap with repeats of
+  // itself before anything else ever got a slot.
+  if (gDecodeFailureIds.indexOf(assetId) >= 0) {
+    return;
+  }
+  if (gDecodeFailureCount < kMaxReportedDecodeFailures) {
+    if (gDecodeFailureIds.length() > 0) {
+      gDecodeFailureIds += ",";
+    }
+    gDecodeFailureIds += assetId;
+  }
+  gDecodeFailureCount++;
+}
+
 /// Same hex-encoding helper as CAL's own Updater.cpp uses to check a firmware
 /// image's sha256 - duplicated rather than shared because App and CAL are
 /// separate sketches with no common translation unit to hold it in.
@@ -293,25 +316,44 @@ bool isCached(const String& id) {
   return Sd::isReady() && isSafeId(id) && SD.exists(pathFor(id));
 }
 
+void invalidate(const String& id) {
+  if (!Sd::isReady() || !isSafeId(id)) {
+    return;
+  }
+  SD.remove(pathFor(id));
+}
+
 bool drawFullScreen(const String& id) {
   if (!ensureCached(id)) {
     return false;
   }
-  return Display::drawPngFromSd(pathFor(id));
+  const bool ok = Display::drawPngFromSd(pathFor(id));
+  if (!ok) {
+    recordDecodeFailure(id);
+  }
+  return ok;
 }
 
 bool drawCachedInRect(const String& id, int32_t x, int32_t y, int32_t w, int32_t h) {
   if (!isCached(id)) {
     return false;
   }
-  return Display::drawPngFromSdInRect(pathFor(id), x, y, w, h);
+  const bool ok = Display::drawPngFromSdInRect(pathFor(id), x, y, w, h);
+  if (!ok) {
+    recordDecodeFailure(id);
+  }
+  return ok;
 }
 
 bool drawCached(const String& id) {
   if (!isCached(id)) {
     return false;
   }
-  return Display::drawPngFromSd(pathFor(id));
+  const bool ok = Display::drawPngFromSd(pathFor(id));
+  if (!ok) {
+    recordDecodeFailure(id);
+  }
+  return ok;
 }
 
 uint16_t cachedCount() {
@@ -331,6 +373,15 @@ uint16_t cachedCount() {
   }
   dir.close();
   return count;
+}
+
+uint8_t decodeFailureCount() { return gDecodeFailureCount; }
+
+String decodeFailureIds() { return gDecodeFailureIds; }
+
+void clearDecodeFailures() {
+  gDecodeFailureIds = "";
+  gDecodeFailureCount = 0;
 }
 
 void showBootSplash() {

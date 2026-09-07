@@ -81,12 +81,45 @@ bool drawCachedInRect(const String& id, int32_t x, int32_t y, int32_t w, int32_t
 /// fleet's storage view can show cache growth alongside sdUsedBytes.
 uint16_t cachedCount();
 
+/// The ids reported here failed to *decode* as a picture on this device -
+/// present on the card, downloaded and SHA-256 verified fine, but LovyanGFX
+/// still refused it (a corrupted PNG at the source, an encoding this
+/// decoder cannot read). Recorded by drawCached()/drawCachedInRect()/
+/// drawFullScreen() themselves whenever Display::drawPngFromSd*() returns
+/// false for an id that was genuinely cached - so this can never fire for
+/// the ordinary "hasn't fetched yet" case. Same "report what silently
+/// failed on the next check-in" reasoning as CardManager's own
+/// lastPolicyUnknownIds, and the same cap (4 ids, comma-joined) - see
+/// CheckIn.cpp's own remarks for how this reaches the server. Deduplicated
+/// per reporting cycle so one card redrawing the same bad asset every dwell
+/// (Graphic.cpp's cards stop retrying after one failure, but an aircraft
+/// logo overlay does not) cannot balloon the pending report.
+uint8_t decodeFailureCount();
+String decodeFailureIds();
+
+/// Clears the pending decode-failure report - called once it has actually
+/// been sent on a check-in, so a failure is reported once per occurrence
+/// rather than on every subsequent check-in forever.
+void clearDecodeFailures();
+
 /// Draws the "splash" asset at boot if it is already on the card, exactly the
 /// way CYD-Dickey's showSplashScreen() does, and silently does nothing when
 /// there is no card, no such asset, or the decode fails. Deliberately does
 /// NOT fetch: boot is the one moment where waiting on the network to draw a
 /// decoration is least defensible.
 void showBootSplash();
+
+/// Deletes just this one asset's cached file, so the next ensureCached()
+/// call for the same id re-fetches and re-verifies it from scratch. For a
+/// card that has retried reading its already-cached file a few times and
+/// still cannot decode it (see Graphic.cpp's draw()) - live evidence showed
+/// this can be a transient SD read glitch rather than genuine file
+/// corruption (the exact same bytes, pulled from the server and decoded
+/// independently, were a perfectly well-formed PNG), so deleting the stale
+/// copy and letting the very next refresh cycle fetch a fresh one recovers
+/// from that glitch instead of blacklisting the card until someone changes
+/// its assetId. A no-op if the id was never cached in the first place.
+void invalidate(const String& id);
 
 /// Deletes every cached asset (everything under the cache directory,
 /// including a stray ".part" left by an interrupted download) so the next

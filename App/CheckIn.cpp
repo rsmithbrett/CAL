@@ -6,6 +6,7 @@
 #include <time.h>
 
 #include "Actions.h"
+#include "Assets.h"
 #include "CardManager.h"
 #include "Config.h"
 #include "Identity.h"
@@ -184,6 +185,16 @@ Result perform() {
     }
   }
 
+  // Reports any asset that downloaded and SHA-256-verified fine but still
+  // would not decode as a picture - see Assets.h's own remarks. Omitted
+  // entirely when nothing has failed, the same "absent, not zero" contract
+  // cardPolicyKnownCount above uses. Cleared only once this request actually
+  // succeeds (see below), so a failed check-in never loses the report.
+  if (Assets::decodeFailureCount() > 0) {
+    requestDoc["assetDecodeFailureCount"] = Assets::decodeFailureCount();
+    requestDoc["assetDecodeFailureIds"] = Assets::decodeFailureIds();
+  }
+
   String body;
   serializeJson(requestDoc, body);
 
@@ -209,6 +220,17 @@ Result perform() {
   }
 
   result.ok = true;
+
+  // The round trip actually completed, so whatever decode failures were
+  // just reported above are now the server's problem to have seen - clear
+  // them so a persistent failure is reported once per occurrence rather
+  // than resending the same ids on every check-in forever. Symmetric with
+  // Actions::clearAccepted() below: both only drop what this exact
+  // successful response confirms was received.
+  if (Assets::decodeFailureCount() > 0) {
+    Assets::clearDecodeFailures();
+  }
+
   result.acknowledged = responseDoc["acknowledged"] | false;
   result.updateAvailable = responseDoc["updateAvailable"] | false;
   result.debugStreamRequested = responseDoc["debugStreamRequested"] | false;
