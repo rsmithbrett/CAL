@@ -78,10 +78,13 @@ enum class Status {
   NetworkError,      // couldn't reach the service, or the response made no sense
 };
 
-/// Matches MyWeatherEndpoints.MaxForecastPeriods (8) on the server, which is
+/// Matches MyWeatherEndpoints.MaxForecastPeriods (10) on the server, which is
 /// what actually bounds how many periods a response ever carries - this only
-/// sizes the fixed array those periods are kept in once they arrive.
-static constexpr uint8_t kMaxPeriods = 8;
+/// sizes the fixed array those periods are kept in once they arrive. 10
+/// periods is five day/night pairs - a real 5-day forecast, including today -
+/// raised from 8/four days; see that constant's own remarks for the byte
+/// budget this stays inside.
+static constexpr uint8_t kMaxPeriods = 10;
 
 /// One forecast period, trimmed to what Display::showForecastCard() actually
 /// draws - mirrors the anonymous period shape
