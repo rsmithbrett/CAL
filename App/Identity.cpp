@@ -17,6 +17,7 @@ constexpr const char* kKeyNetCount = "netcount";
 constexpr const char* kKeyAppVer = "appver";
 constexpr const char* kKeyUpdReq = "updreq";
 constexpr const char* kKeyBootAtt = "bootatt";
+constexpr const char* kKeyProvForced = "provforced";
 constexpr const char* kKeyTotBoots = "totboots";
 constexpr const char* kKeyUtcOffset = "utcoffmin";
 
@@ -109,6 +110,10 @@ void clearNetworks() {
 }
 
 bool hasAnyNetwork() { return networkCount() > 0; }
+
+bool provisioningForced() { return prefs.getBool(kKeyProvForced, false); }
+
+void setProvisioningForced(bool forced) { prefs.putBool(kKeyProvForced, forced); }
 
 String installedAppVersion() { return prefs.getString(kKeyAppVer, ""); }
 

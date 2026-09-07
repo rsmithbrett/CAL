@@ -80,7 +80,7 @@ bool wifiResetRequested() {
     return false;
   }
 
-  Display::showStatus("Keep holding BOOT to reset WiFi", "Release now to cancel");
+  Display::showStatus("Keep holding BOOT to set up WiFi", "Release now to cancel");
   const uint32_t deadline = millis() + kWifiResetHoldMs;
   while (millis() < deadline) {
     if (digitalRead(kBootButtonPin) != LOW) {

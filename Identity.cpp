@@ -17,6 +17,7 @@ constexpr const char* kKeyNetCount = "netcount";
 constexpr const char* kKeyAppVer = "appver";
 constexpr const char* kKeyUpdReq = "updreq";
 constexpr const char* kKeyBootAtt = "bootatt";
+constexpr const char* kKeyProvForced = "provforced";
 
 // Per-slot keys are built at runtime: "ssid0".."ssid2", "pass0".."pass2".
 // NVS keys are capped at 15 characters, so these stay deliberately short.
@@ -107,6 +108,10 @@ void clearNetworks() {
 }
 
 bool hasAnyNetwork() { return networkCount() > 0; }
+
+bool provisioningForced() { return prefs.getBool(kKeyProvForced, false); }
+
+void setProvisioningForced(bool forced) { prefs.putBool(kKeyProvForced, forced); }
 
 String installedAppVersion() { return prefs.getString(kKeyAppVer, ""); }
 

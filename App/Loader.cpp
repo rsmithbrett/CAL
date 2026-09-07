@@ -40,13 +40,18 @@ void requestUpdate() {
 }
 
 void returnToLoaderForReprovisioning() {
-  // Clearing networks is what makes CAL actually run Provisioning::run():
-  // CAL only raises its setup access point when joinStoredNetwork() first
-  // fails, and setUpdateRequested is what makes CAL attempt that join at all
-  // rather than skipping straight back to bootApplication() because a
-  // working application is already installed (see CAL.ino's
+  // setProvisioningForced is what makes CAL actually run Provisioning::run()
+  // unconditionally rather than only as a joinStoredNetwork() fallback - see
+  // that flag's own doc comment in Identity.h for why this used to be
+  // clearNetworks() instead, and why that silently defeated the whole point
+  // of remembering more than one network (README: "the
+  // 3-remembered-networks design had no path to ever reach 2"). Everything
+  // already remembered survives this call now; the portal still opens
+  // immediately either way. setUpdateRequested is what makes CAL attempt
+  // that join at all rather than skipping straight back to bootApplication()
+  // because a working application is already installed (see CAL.ino's
   // mustContactServer()).
-  Identity::clearNetworks();
+  Identity::setProvisioningForced(true);
   Identity::setUpdateRequested(true);
   Log::line("[loader] returning to CAL for reprovisioning");
   bootFactoryAndRestart();

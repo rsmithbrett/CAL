@@ -1421,6 +1421,66 @@ screen, which `ensureWifiConnected()` explicitly redraws back to "Could not
 join WiFi" afterward — so the screen never keeps telling someone to
 "release now to cancel" a hold that already ended.
 
+### Bug fix: the 3-remembered-networks design had no path to ever reach 2
+
+`Identity.h`'s own doc comment on `kMaxNetworks = 3` explains the intent
+plainly: "a device is enrolled at an agent's office and then carried to a
+household, and a unit that remembers only the network it is currently on has
+to be re-provisioned by hand every time it moves. Three is enough to cover
+office, home and one spare." `rememberNetwork()` genuinely implements that —
+an already-known SSID is promoted and refreshed, a new one is added, and only
+once the list is full does the least-recently-used entry get dropped.
+
+None of that mattered in practice, because the only door into the captive
+portal that adds a network was also the one that emptied the list first. The
+BOOT-hold "reset WiFi" gesture — the sole way to teach a device any network
+it does not already have, since the App carries no captive portal of its own
+(see this file's "Two BOOT-button gestures" above) — called
+`Identity::clearNetworks()` immediately before opening the portal, in both
+`App/Loader.cpp`'s `returnToLoaderForReprovisioning()` and `CAL.ino`'s own
+handling of the gesture. The portal itself (`Provisioning::run()`) accepts
+exactly one SSID/password per visit and returns. So every real provisioning
+session — however many times a technician repeated it — went wipe, add one,
+wipe, add one, and a device could never carry more than the single most
+recently provisioned network. Found live: two units in the field that had
+each been set up at more than one site still only answered to the last one.
+
+Why the wipe was there at all, and why deleting the call outright would have
+been worse: `Provisioning::run()` only gets invoked when
+`Provisioning::joinStoredNetwork()` first fails (`CAL.ino`: `if
+(!Provisioning::joinStoredNetwork()) { Provisioning::run(); ... }`) - the
+portal is not offered unconditionally, only as a fallback. `clearNetworks()`
+was doing double duty as the thing that *forced* that fallback to trigger,
+by making `joinStoredNetwork()` fail outright (`WifiJoin.cpp`: zero
+remembered networks is an immediate `return false`). Simply removing the
+call would have meant a device still in range of a network it already knows
+would rejoin silently and skip the portal entirely - the BOOT-hold gesture
+turning into the exact "dead button" failure mode the fix directly above
+this one already went to some trouble to rule out, just relocated from a
+timing bug to a logic one.
+
+The fix separates the two jobs `clearNetworks()` was accidentally doing.
+`Identity::provisioningForced()`/`setProvisioningForced()` is a new one-shot
+NVS flag, the same shape and lifecycle as `updateRequested` (set before a
+reboot into CAL, read once, cleared by the reader) rather than
+`kMaxNetworks`-shaped state. Both gesture handlers now call
+`setProvisioningForced(true)` instead of `clearNetworks()`; CAL's
+join-or-provision decision becomes `if (Identity::provisioningForced() ||
+!Provisioning::joinStoredNetwork())`, consuming the flag right before
+`Provisioning::run()`. Short-circuit evaluation means a forced request never
+even attempts the existing networks first - the portal opens immediately,
+exactly as before - but nothing already remembered is discarded to make that
+happen. A network added through the portal still lands through the same
+`rememberNetwork()` every automatic rejoin already uses, so the existing
+office/home/spare accumulation happens for the first time in practice
+instead of only on paper. `clearNetworks()` itself is unchanged and still
+exists for whatever genuinely wants a hard wipe - there is simply no caller
+left that reaches for it to solve "how do I force the portal open."
+
+No automated test covers this - see this file's own remarks elsewhere on why
+`App/` firmware changes are verified by a clean compile, CAL's CI producing
+a real release build, and confirmation on real hardware, not a test suite.
+
 ### A drawn degree symbol, because the font has none
 
 LovyanGFX's built-in font used here is ASCII-only — no Unicode glyphs, no

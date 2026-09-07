@@ -34,10 +34,11 @@ bool mustContactServer() {
 
 /// The BOOT button - the same one already used to enter flash mode over USB,
 /// so there is nothing new for anyone to learn. Holding it through power-on
-/// clears remembered WiFi networks and forces re-provisioning. This is the
-/// only user-accessible recovery path for "this device is on the wrong
-/// network" or "we moved it to a new house" - there is no touch UI and no
-/// menu, and CAL must not need one to recover from a bad WiFi credential.
+/// forces re-provisioning without discarding whatever networks are already
+/// remembered (see Identity::setProvisioningForced). This is the only
+/// user-accessible recovery path for "this device is on the wrong network"
+/// or "we moved it to a new house" - there is no touch UI and no menu, and
+/// CAL must not need one to recover from a bad WiFi credential.
 constexpr uint8_t kBootButtonPin = 0;
 constexpr uint32_t kWifiResetHoldMs = 3000;
 
@@ -47,7 +48,7 @@ bool wifiResetRequested() {
     return false;
   }
 
-  Display::showStatus("Keep holding BOOT to reset WiFi", "Release now to cancel");
+  Display::showStatus("Keep holding BOOT to set up WiFi", "Release now to cancel");
   const uint32_t deadline = millis() + kWifiResetHoldMs;
   while (millis() < deadline) {
     if (digitalRead(kBootButtonPin) != LOW) {
@@ -129,14 +130,22 @@ void setup() {
   // Only takes effect on a boot that goes on to actually join WiFi itself -
   // see mustContactServer() below. A device that already has a working
   // application installed hands off to it immediately without CAL touching
-  // WiFi at all, so clearing the list here does nothing observable until
-  // the next boot where CAL is the one doing the joining (no app installed
-  // yet, or an update was requested). That covers today's real case - first
-  // setup with the wrong network chosen - not "move an already-running
-  // device to a new house," which is the application's own concern.
+  // WiFi at all, so setting the flag here does nothing observable until the
+  // next boot where CAL is the one doing the joining (no app installed yet,
+  // or an update was requested).
+  //
+  // setProvisioningForced, not clearNetworks: this used to clear the
+  // remembered-networks list outright, which was the only thing that forced
+  // the join-or-provision check below to open the portal at all
+  // (joinStoredNetwork() fails immediately with nothing remembered - see
+  // WifiJoin.cpp). That meant every use of this gesture discarded whatever
+  // was already remembered before the portal added the one new network it
+  // captures, so a unit provisioned at more than one site only ever answered
+  // to the last one. See the README's "the 3-remembered-networks design had
+  // no path to ever reach 2" for the fuller incident writeup.
   if (wifiResetRequested()) {
-    Identity::clearNetworks();
-    Display::showStatus("WiFi reset", "Setting up again...");
+    Identity::setProvisioningForced(true);
+    Display::showStatus("Set up WiFi", "Opening setup...");
     delay(1000);
   }
 
@@ -151,7 +160,16 @@ void setup() {
                     "Restart the device. If this persists, contact support.");
   }
 
-  if (!Provisioning::joinStoredNetwork()) {
+  // Consumed immediately, one-shot per this decision - see its own doc
+  // comment in Identity.h. Short-circuits joinStoredNetwork() entirely when
+  // set, so a forced request opens the portal right away rather than trying
+  // (and possibly succeeding at rejoining) whatever is already remembered
+  // first - that would make the BOOT-hold gesture look like a dead button
+  // whenever the device is still in range of a network it already knows.
+  const bool forced = Identity::provisioningForced();
+  Identity::setProvisioningForced(false);
+
+  if (forced || !Provisioning::joinStoredNetwork()) {
     // Repeated failure means the stored credentials are wrong or the network
     // is gone - retrying them indefinitely would look identical to an outage.
     Provisioning::run();

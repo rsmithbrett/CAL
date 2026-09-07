@@ -59,6 +59,20 @@ void clearNetworks();
 
 bool hasAnyNetwork();
 
+/// One-shot, same shape and lifecycle as updateRequested below: set before a
+/// reboot into CAL, read (and consumed) once by the code deciding whether to
+/// open Provisioning::run() unconditionally, false again afterward.
+///
+/// Exists so the BOOT-hold "reset WiFi" gesture can force the captive portal
+/// open without calling clearNetworks() to do it - forcing via network count
+/// meant every reprovisioning wiped everything already remembered before
+/// adding the one new network the portal captures, which is why a unit set
+/// up at more than one site only ever answered to the last one. See the
+/// README's "the 3-remembered-networks design had no path to ever reach 2"
+/// for the incident this fixes.
+bool provisioningForced();
+void setProvisioningForced(bool forced);
+
 /// The application version currently installed in ota_0, as reported by the
 /// manifest that installed it. Empty means nothing is installed yet.
 String installedAppVersion();
