@@ -151,6 +151,33 @@ struct Result {
   time_t issNextPassSetUtc = 0;
   double issNextPassSetAzimuthDegrees = -1.0;
 
+  /// The household's home value, as an automated valuation model (AVM)
+  /// estimate from RentCast - pushed on every check-in the same way every
+  /// other check-in-driven card's data is, see App/HomeValue.h's own
+  /// remarks. homeValueEstimate is the headline dollar figure;
+  /// homeValueRangeLow/High are the AVM's own confidence range;
+  /// homeValuePricePerSquareFoot is that same estimate divided out per
+  /// square foot. -1/-1.0 for whichever the server has no answer for - the
+  /// device has no owner or no usable home address, RentCast was never
+  /// reached, or the device was rejected before this logic ever ran, all
+  /// genuinely "there is no answer" rather than an error, the same
+  /// three-reasons-one-treatment shape sunrise/sunset and the tide fields
+  /// above already have. A real dollar figure or per-square-foot price is
+  /// never negative, so -1/-1.0 is a safe, independent absence sentinel for
+  /// each of the four.
+  ///
+  /// homeValueUpdatedAtUtc is when RentCast was last actually asked, not when
+  /// this check-in happened - parsed off the server's ISO-8601 string by
+  /// CheckIn.cpp's own parseIso8601Utc(), the same helper issNextPassRiseUtc
+  /// above uses and for the same reason. 0 is the "absent" sentinel,
+  /// matching that field's own convention: a real instant is never exactly
+  /// the Unix epoch.
+  int homeValueEstimate = -1;
+  int homeValueRangeLow = -1;
+  int homeValueRangeHigh = -1;
+  double homeValuePricePerSquareFoot = -1.0;
+  time_t homeValueUpdatedAtUtc = 0;
+
   /// How this device should rotate its cards. `present == false` means the
   /// server sent no policy this time, which means "keep whatever policy you
   /// already had" - explicitly not "show nothing". See
