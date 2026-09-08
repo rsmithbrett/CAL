@@ -2182,3 +2182,102 @@ this fleet's own `/diag/telemetry` (asset sizes) and live check-in reports
 (`freeHeapBytes`), the same standing preference this project has for
 reading real device state over estimating it (see `SdStorage.h`'s "measured,
 not assumed" framing for SD capacity, which this mirrors for heap).
+
+## Why the PNG decoder's scratch buffer is never released
+
+The RAM-buffer approach above shipped, and then a live device found a
+failure the streaming approach never surfaced: one specific asset - a
+completely unremarkable 320x127, 8-bit truecolor PNG, no alpha, no
+interlacing - failed to decode every single time it was drawn, three
+attempts in a row, `kMaxDrawAttempts` apart. The remote debug log showed
+the SD read completing cleanly and matching the server's own recorded
+`SizeBytes` for that asset (`"read ... into memory (33865 bytes) - SD
+access done, decoding from RAM now"`), so this was not the SD-card-torn-
+mid-read failure the retry loop in `Assets.cpp` exists to paper over. The
+file itself checked out too - IHDR gave up nothing unusual.
+
+Both suspects that come with a RAM-buffer decode were traced by hand and
+cleared. First, `png_file_decoder_t::begin()` (LGFXBase.cpp) - the box-fit
+math that turns `maxWidth=0, maxHeight=0, zoom_x=zoom_y=0.0f` into an
+actual clip rect - was walked through for this exact call against a
+320x240 screen and a 320x127 source image: it lands on `zoom_x=zoom_y=1.0`
+and a `320x127` clip, both dimensions positive, which makes it return
+`true` (proceed to decode) rather than bail out early. Second,
+`PointerWrapper` (`lgfx/v1/misc/DataWrapper.hpp`) - the RAM-buffer
+stand-in for the SD-file `DataWrapper` the streaming path used - was
+compared read-for-read against it. Its `read()` clamps to
+`_length - _index` and never over-reads; its `skip()`/`seek()` just move
+`_index`; `memcpy_P` is a plain `memcpy` on this target (ESP32's own
+`pgmspace.h` `#define`s it that way, this is not a PROGMEM/flash pointer
+trick that could misbehave on a heap buffer). Working through
+`lgfx_pngle_decomp()`'s own chunk loop (`lgfx/utility/lgfx_pngle.c`)
+confirms it consumes exactly the file's total byte count no matter how
+many `IDAT` chunks the encoder split the pixel data into - it folds each
+chunk's trailing CRC into the next chunk's 12-byte header read, and the
+arithmetic cancels out exactly, with or without that fold, for one `IDAT`
+chunk or many. Neither piece of code is the bug.
+
+The actual bug was not in what got read, but in what got freed in between
+reads. `LGFXBase::draw_png()` keeps a single `pngle_t` around in a file-
+static pointer and only allocates a fresh one when it is null; the
+library's own comment on that pointer says why in Japanese - paraphrased,
+"repeated PNG decoding can fail to allocate pngle's memory, so it's been
+changed to not free it after use and be reusable; call `releasePngMemory()`
+explicitly if you want the memory back." That struct is not small: a
+32768-byte inflate window plus an ~11000-byte `tinfl` decompressor state
+plus assorted smaller buffers, comfortably over 40KB, allocated as one
+contiguous `malloc()`. `Display.cpp` was calling `lcd.releasePngMemory()`
+unconditionally after *every* `drawPngFromSd()`/`drawPngFromSdInRect()`
+call, success or failure alike - ported verbatim from CYD-Dickey, including
+its justification in the ported comment: CYD-Dickey frees it because a
+Bluetooth stack init runs immediately after its own splash-screen draw and
+needs that ~44KB back. Nobody checked whether that justification actually
+applied to CAL before copying the call along with it. It doesn't - this
+firmware has no Bluetooth code anywhere in it - so the unconditional
+release was paying a real cost for a benefit that could never be cashed
+in here.
+
+The cost: a ~44KB malloc-then-free on every single PNG draw is close to
+the textbook case for fragmenting a long-running ESP32 heap. Free bytes
+stay plentiful in total - nothing here leaks - but the single largest
+*contiguous* block available to satisfy the next big `malloc()` shrinks
+over time as smaller, unrelated allocations (JSON parsing, TLS buffers for
+a check-in, `String` churn) get interleaved into the gaps the 44KB
+alloc/free cycle leaves behind. `malloc()` for a 40KB+ struct has nowhere
+to fall back to smaller than the whole struct - it either finds a
+contiguous block that big or it returns `NULL`, and `lgfx_pngle_new()`'s
+caller checks exactly that (`LGFXBase.cpp`: `if (pngle == nullptr) return
+false;`) - which is why this failed cleanly, logged as "failed to draw",
+never a crash.
+
+Why this one asset and not the others: at 33865 bytes it is the closest
+any file in the catalog gets to the ~34KB ceiling `readFileToBuffer()`'s
+own remarks describe above, which means drawing it is also the one moment
+`readFileToBuffer()`'s own ~34KB read buffer and `lgfx_pngle_new()`'s
+~44KB decoder scratch buffer both have to be resident on the heap at the
+same time - a combined demand around 78KB that no smaller asset in the
+catalog comes close to. Every smaller asset kept finding a large-enough
+fragment; this was the first one that didn't. And the `freeHeapBytes=
+121544` this device reported around the failure looked "healthy" only
+because *total* free heap and the *largest single allocatable block* are
+different numbers - this file's own "roughly 250-274KB of free heap"
+figures, used earlier as evidence of headroom, are exactly that same
+total-free number, which is why the original diagnosis of "severe heap
+exhaustion seems unlikely" was true and beside the point at the same time.
+
+The fix (`Display.cpp`): stop calling `releasePngMemory()` after an
+ordinary draw, in both `drawPngFromSd()` and `drawPngFromSdInRect()`.
+Left alone, LovyanGFX's own default is exactly what this device wants -
+allocate the `pngle_t` scratch buffer once, on the first PNG draw of the
+process, and keep reusing it for every draw after that, success or
+failure. This is safe to reuse across completely unrelated images because
+`lgfx_pngle_prepare()` already resets every piece of per-image state at
+the top of every call - palette, scanline buffer, inflator, filter type -
+before the new image's `IHDR` is even read; the struct's *contents* are
+per-decode, only its *memory* is kept. That turns a ~44KB fragmentation
+gamble paid on every single card into a one-time, bounded cost paid once
+per boot. Both failure logs (`"[display] failed to draw ..."`) now also
+report `freeHeap` and `ESP.getMaxAllocHeap()` alongside the path - the
+second figure is the one that would have pointed straight at this the
+first time, and total free heap alone cannot tell the two apart if it
+happens again for a different reason.

@@ -1756,9 +1756,12 @@ bool drawPngFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, in
   }
   const bool ok =
       lcd.drawPng(file.data.get(), file.size, x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
-  lcd.releasePngMemory();
+  // No releasePngMemory() here - see drawPngFromSd()'s comment below for why
+  // freeing it every call is the wrong tradeoff for this device.
   if (!ok) {
-    Log::printf("[display] failed to draw %s in %dx%d rect at (%d,%d)", path.c_str(), (int)w, (int)h, (int)x, (int)y);
+    Log::printf("[display] failed to draw %s in %dx%d rect at (%d,%d) (freeHeap=%u maxAllocHeap=%u)",
+                path.c_str(), (int)w, (int)h, (int)x, (int)y,
+                static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
   }
   return ok;
 }
@@ -1771,15 +1774,26 @@ bool drawPngFromSd(const String& path) {
     Log::printf("[display] could not read %s", path.c_str());
   } else {
     ok = lcd.drawPng(file.data.get(), file.size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
-    // LovyanGFX keeps the PNG decoder's internal buffers allocated after a
-    // draw (intentional, for cheap repeat-draws). Released unconditionally,
-    // because a *failed* decode leaves them allocated too - CYD-Dickey found
-    // this starving the memory its Bluetooth init needed immediately
-    // afterwards, and this device has roughly 274KB of free heap to lose it
-    // out of.
-    lcd.releasePngMemory();
+    // Deliberately NOT calling lcd.releasePngMemory() here - see README.md's
+    // "Why the PNG decoder's scratch buffer is never released" section. This
+    // was ported from CYD-Dickey (which releases it unconditionally, every
+    // draw, to free the ~44KB back for a Bluetooth init immediately
+    // afterwards) without checking whether that reason applied here - it
+    // doesn't, CAL has no Bluetooth stack to feed. What it cost instead: a
+    // ~44KB malloc+free cycle on every single PNG draw is exactly the kind
+    // of repeated large-block churn that fragments an ESP32 heap over a long
+    // uptime, and this device's own asset catalog has a file that sits right
+    // at that edge - the largest PNG on SD needs its own ~34KB read buffer
+    // live at the same time as this ~44KB decoder scratch buffer, so it is
+    // the first (and, when this was diagnosed, the only) asset for which the
+    // second allocation had nowhere left to land. Leaving the decoder's
+    // buffer allocated after the first successful draw - which is exactly
+    // what LovyanGFX does by default when nobody calls releasePngMemory() -
+    // turns that into a one-time, bounded cost instead of a per-draw
+    // fragmentation gamble.
     if (!ok) {
-      Log::printf("[display] failed to draw %s", path.c_str());
+      Log::printf("[display] failed to draw %s (freeHeap=%u maxAllocHeap=%u)", path.c_str(),
+                  static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
     }
   }
   restoreDefaultFont();
