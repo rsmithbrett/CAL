@@ -110,6 +110,25 @@ uint32_t gManualHoldUntilMs = 0;
 Actions::Definition gButtons[Actions::kMaxButtonsPerCard];
 uint8_t gButtonCount = 0;
 
+/// drawChrome()'s own scratch copy of gButtons[].label, kept here as a
+/// file-scope static rather than a local inside drawChrome() for the same
+/// heap-fragmentation reasoning Display.cpp's gFileBuffer and Assets.h's
+/// RamAssetBuffer already apply to the much larger PNG read buffers they
+/// own: drawChrome() runs on every single card switch (every dwell, 8-30s,
+/// for as long as the device is up), and a local `String labels[N]` there
+/// would heap-allocate and free up to kMaxButtonsPerCard short strings on
+/// every single one of those switches, forever - the same "differently-sized
+/// allocation on a hot path" shape those two buffers exist to avoid, just at
+/// a smaller size. A file-scope static array's String objects persist across
+/// calls, so Arduino's String::operator=() reuses each element's existing
+/// buffer in place (via its own reserve()-then-copy, which only reallocates
+/// when the new value is longer than what is already held) instead of
+/// tearing one down and building a new one every draw - in the steady state
+/// (the same handful of button labels being redrawn) this costs zero
+/// allocations after the first draw of each distinct label, not one set of
+/// them per switch.
+String gButtonLabels[Actions::kMaxButtonsPerCard];
+
 /// Round-robin start point for the refresh sweep, so one card whose fetch
 /// keeps coming due first cannot starve the others.
 uint8_t gRefreshScan = 0;
@@ -314,11 +333,12 @@ uint32_t dwellMs() {
 void drawChrome(const Cards::CardSpec& card) {
   gButtonCount = Actions::forCard(card.id, gButtons, Actions::kMaxButtonsPerCard);
 
-  String labels[Actions::kMaxButtonsPerCard];
+  // See gButtonLabels' own remarks above for why this is a reused file-scope
+  // array rather than a fresh local built on every call.
   for (uint8_t i = 0; i < gButtonCount; ++i) {
-    labels[i] = gButtons[i].label;
+    gButtonLabels[i] = gButtons[i].label;
   }
-  Display::drawActionButtons(labels, gButtonCount);
+  Display::drawActionButtons(gButtonLabels, gButtonCount);
 
   Touch::Rect zones[Actions::kMaxButtonsPerCard];
   for (uint8_t i = 0; i < gButtonCount; ++i) {
