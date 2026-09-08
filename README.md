@@ -39,6 +39,23 @@ all; every one of its screens is either informational or a QR code, and the one
 place a person has to type something (a WiFi password) deliberately happens on
 their phone rather than on a resistive panel.
 
+**Measured, not assumed** - `esptool`'s own chip read against a real unit on
+the bench (`esptool.exe --chip esp32 --port COMx write_flash ...`), not the
+generic "ESP32" the module part number alone implies:
+
+```
+Chip type:          ESP32-D0WD-V3 (revision v3.1)
+Features:           Wi-Fi, BT, Dual Core + LP Core, 240MHz, Vref calibration in eFuse, Coding Scheme None
+Crystal frequency:  40MHz
+```
+
+The specific silicon revision matters for exactly one thing this project has
+already been burned by not knowing precisely: what a raw `esptool write_flash`
+at a hand-picked offset actually needs to match. See "Recovering a device from
+a bare/erased chip" below for why a whole-chip erase followed by the wrong
+merged image very nearly turned a stale-secret problem into two bricked
+partitions instead of one.
+
 The display is brought up through LovyanGFX's **`LGFX_AUTODETECT`** rather than
 a hand-written pin map. This is not laziness. Most published CYD pin maps
 describe the Sunton boards, and the E32R28T's HSPI-style pinout differs from
@@ -83,25 +100,81 @@ default; the partition is formatted and used as LittleFS despite the name. That
 is conventional, not an oversight, but it is the kind of detail that reads as a
 bug six months later.
 
-**CAL's own size is measured, not guessed, and re-verified on every build.**
-`ci/build-firmware.sh` compiles CAL, and the layout above is what actually gets
-used - see *Building*, below, for how that was confirmed rather than assumed.
-As of the last build: **1,318,891 bytes**, comfortably inside the 1,441,792-byte
-`factory` partition. Re-measure before trusting these numbers if the firmware
-grows meaningfully - `factory` cannot be resized for a unit already flashed.
-Nothing here is proven on hardware yet - see Open questions.
+**CAL's own size is measured, not guessed - but "re-verified on every build"
+overstated what actually happens, and that gap is worth being honest about.**
+The byte-for-byte partition-table decode described under *Building* below was
+a one-time manual diagnosis, not something `ci/build-firmware.sh` (or anything
+else) repeats automatically on every run. Every ordinary build only ever shows
+`arduino-cli`'s own generic percentage - which, as the App figure below has
+said for a while, reads against the *wrong* ceiling. Nothing currently fails
+loudly if a build actually exceeds its real partition. As of the last measured
+build: **1,323,599 bytes**, comfortably inside the 1,441,792-byte `factory`
+partition (118,193 bytes / 8.2% spare). Re-measure before trusting these
+numbers if the firmware grows meaningfully - `factory` cannot be resized for a
+unit already flashed, and there is no automated check standing between a
+future build and that exact mistake yet.
 
-**The App's own size, measured the same way.** As of the card-manager build:
-**1,353,683 bytes of program storage and 55,356 bytes of globals** (leaving
-272,324 bytes of the 327,680-byte DRAM for locals). That is **55.8% of the
-2,424,832-byte `ota_0` partition**, with 1,071,149 bytes spare. Note that
-`arduino-cli` reports this build as "68% of 1,966,080 bytes" - that is the
-stock `min_spiffs` table's own app slot, not this project's layout, and it is
-the wrong ceiling to read. `ota_0` above is the real one. The card manager,
-actions, SD and PNG support together cost **+71,136 bytes** over the previous
-build's 1,282,547, and **+1,752 bytes** of globals over its 53,604; nearly all
-of that is the SD library and LovyanGFX's PNG decoder being linked in for the
-first time, which was expected.
+**The App's own size, measured the same way.** As of tonight's ISS-pass-
+prediction / SD-mount-retry / RAM-fallback-graphics build: **1,474,960 bytes**,
+against the real 2,424,832-byte `ota_0` partition - **60.8%**, with 949,872
+bytes spare. `arduino-cli` reports this same build as "75% of 1,966,080
+bytes" - that is the stock `min_spiffs` table's own app slot, not this
+project's layout, and it is the wrong ceiling to read. `ota_0` above is the
+real one.
+
+**Found live, the hard way, the night this paragraph was last touched:** a
+bare-chip recovery flash used `App.ino.merged.bin` - a *standalone* merged
+image that assumes its own sketch owns the first app slot at `0x10000` - via
+a raw `esptool write_flash 0x0`. On this board's real, asymmetric table that
+address is `factory` (CAL's slot, 1,441,792 bytes), not `ota_0`. The result:
+`factory` got the App's bytes at the wrong offset and size ceiling ("Image
+length 1474960 doesn't fit in partition length 1441792"), `ota_0` was left
+entirely unwritten ("invalid magic byte"), and the device had no bootable
+partition of either kind - confirmed via a live serial monitor session, not
+guessed at. **`App.ino.merged.bin` and `CAL.ino.merged.bin` are not
+interchangeable for a bare-chip recovery, ever** - see "Recovering a device
+from a bare or erased chip" immediately below.
+
+## Recovering a device from a bare or erased chip
+
+Every release publishes, per sketch, a `bootloader.bin` + `partitions.bin` +
+raw `.ino.bin` trio and a single merged image combining all three at their
+correct offsets for that sketch alone. **The merged image is a convenience
+for flashing that one sketch onto a chip with nothing else on it** - it is
+not aware that this board's real, deployed layout has CAL and the App
+sharing one partition table. Each sketch's own merged build places its
+compiled binary at `0x10000`, because from that sketch's own standalone
+perspective that is simply "the first app slot" - correct for `CAL.ino.merged.bin`
+(CAL's rightful home really is `factory` at `0x10000`), silently wrong for
+`App.ino.merged.bin` (the App's rightful home is `ota_0` at `0x170000`, not
+`0x10000`).
+
+**To recover a device with nothing bootable on it (a fresh chip, or one that
+was just `erase_flash`'d):**
+
+1. Download that release's `CAL.ino.merged.bin` - never `App.ino.merged.bin` -
+   from its GitHub release assets.
+2. `esptool.exe --chip esp32 --port COMx write_flash 0x0 CAL.ino.merged.bin`
+   (no separate erase step needed if the chip is already blank; run
+   `erase_flash` first only if it is not).
+3. Power-cycle. CAL boots, shows its splash, and - since a full erase also
+   wipes remembered WiFi credentials, not just the device secret - opens its
+   own captive-portal WiFi setup (a QR code, network name
+   `Discover-Setup-XXXX`). Complete that on a phone.
+4. From there CAL's own `Updater::installApplication()` takes over: it finds
+   no bootable App installed, fetches the fleet's current release, and writes
+   it into `ota_0` through the ESP-IDF OTA partition API - which resolves the
+   real offset and size itself rather than needing anyone to know `0x170000`
+   by heart. This is the *only* correct way to get the App onto a bare chip;
+   never `write_flash` an App image directly unless you have independently
+   confirmed the exact offset and size against this file's own partition
+   table above, for this exact release.
+
+If a device only needs its *identity* (not its WiFi, not its installed App)
+reset, prefer the BOOT-button hold gesture over a full erase-and-reflash
+entirely - see "Two BOOT-button gestures" below, which as of this same
+incident has a second, longer tier that does exactly this without a serial
+cable at all.
 
 ## The boot ladder
 

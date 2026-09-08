@@ -39,25 +39,58 @@ bool mustContactServer() {
 /// user-accessible recovery path for "this device is on the wrong network"
 /// or "we moved it to a new house" - there is no touch UI and no menu, and
 /// CAL must not need one to recover from a bad WiFi credential.
+///
+/// A second, longer tier on the same gesture erases the device's identity
+/// (its secret) instead of its WiFi. Found live: a device whose server-side
+/// secret was reset (an admin's "Allow re-registration", or a straight
+/// RegenerateSecret) while the physical unit was already holding a
+/// different, now-orphaned secret has no way back without this - the App's
+/// own self-heal (CheckIn::Result::secretRejected ->
+/// Loader::returnToLoaderForReprovisioning(), which already calls
+/// Identity::clearSecret()) only fires from *inside a running App that is
+/// new enough to have it*, so a unit stuck on old firmware, or one that
+/// never gets far enough to attempt a check-in at all, had no recovery path
+/// short of a full serial erase-and-reflash. Continuing past the WiFi
+/// tier's release point to a second, longer hold gets there with nothing
+/// but the same button everyone already knows to hold.
 constexpr uint8_t kBootButtonPin = 0;
 constexpr uint32_t kWifiResetHoldMs = 3000;
+constexpr uint32_t kIdentityEraseHoldMs = 10000;
 
-bool wifiResetRequested() {
+enum class BootHoldResult { None, WifiReset, IdentityErase };
+
+BootHoldResult bootHoldRequested() {
   pinMode(kBootButtonPin, INPUT_PULLUP);
   if (digitalRead(kBootButtonPin) != LOW) {
-    return false;
+    return BootHoldResult::None;
   }
 
   Display::showStatus("Keep holding BOOT to set up WiFi", "Release now to cancel");
-  const uint32_t deadline = millis() + kWifiResetHoldMs;
+  uint32_t deadline = millis() + kWifiResetHoldMs;
   while (millis() < deadline) {
     if (digitalRead(kBootButtonPin) != LOW) {
-      // Released before the hold completed - a stray press, not a request.
-      return false;
+      // Released before the first tier completed - a stray press, not a request.
+      return BootHoldResult::None;
     }
     delay(50);
   }
-  return true;
+
+  // First tier reached. Announce the second tier and give the same
+  // released-early-means-stop-here treatment, just with a further deadline
+  // (measured from here, not from entry - the two tiers' own hold times stay
+  // exactly kWifiResetHoldMs and kIdentityEraseHoldMs apart from each other
+  // regardless of how long the first tier's own polling loop took) and a
+  // message that says what continuing to hold now does.
+  Display::showStatus("Keep holding BOOT to erase this device's identity",
+                       "Release now for WiFi setup instead");
+  deadline = millis() + (kIdentityEraseHoldMs - kWifiResetHoldMs);
+  while (millis() < deadline) {
+    if (digitalRead(kBootButtonPin) != LOW) {
+      return BootHoldResult::WifiReset;
+    }
+    delay(50);
+  }
+  return BootHoldResult::IdentityErase;
 }
 
 /// Shows a terminal condition and stops.
@@ -143,10 +176,28 @@ void setup() {
   // captures, so a unit provisioned at more than one site only ever answered
   // to the last one. See the README's "the 3-remembered-networks design had
   // no path to ever reach 2" for the fuller incident writeup.
-  if (wifiResetRequested()) {
-    Identity::setProvisioningForced(true);
-    Display::showStatus("Set up WiFi", "Opening setup...");
-    delay(1000);
+  switch (bootHoldRequested()) {
+    case BootHoldResult::IdentityErase:
+      // Wipes the secret only - not the remembered networks, for the same
+      // reason the WiFi tier below does not touch identity: a household
+      // stuck on a bad secret almost certainly has a perfectly good WiFi
+      // connection, and forcing them to redo that too would just be a second
+      // unrelated recovery step bolted onto the one they actually needed.
+      // Falls straight through into the ordinary boot below, which is what
+      // sends this unit down awaitKeyAssignment() naturally once
+      // Identity::hasSecret() reads false - no separate flag needed the way
+      // setProvisioningForced() is for the WiFi tier.
+      Identity::clearSecret();
+      Display::showStatus("Identity erased", "Re-registering...");
+      delay(1000);
+      break;
+    case BootHoldResult::WifiReset:
+      Identity::setProvisioningForced(true);
+      Display::showStatus("Set up WiFi", "Opening setup...");
+      delay(1000);
+      break;
+    case BootHoldResult::None:
+      break;
   }
 
   // A unit holding no secret is newly flashed, not faulty. Every device is
