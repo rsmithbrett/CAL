@@ -486,6 +486,36 @@ void setup() {
   Assets::begin();
   Assets::showBootSplash();
 
+  // One check-in here, before the rotation ever starts, so applyPolicy()
+  // narrows the active card set BEFORE CardManager::begin() hands out the
+  // first dwell slot - not after. Found live: every registered card defaults
+  // active until a policy says otherwise (see CardManager.cpp's own
+  // applyPolicy() remarks), and loop()'s own performCheckIn() doesn't fire
+  // until checkInIntervalMs has elapsed since boot - a full 5 minutes on a
+  // fresh boot, since that in-RAM default only shrinks to the server's real
+  // interval once a check-in response has actually arrived. On a household
+  // whose real policy is much narrower than "every registered card" (a
+  // handful of cards instead of all 28, including every multi-instance
+  // forecast/graphic slot), that multi-minute window of the wider default
+  // set materially adds to this board's own heap fragmentation - see
+  // App.ino's own heap-health watchdog below. A live device was caught
+  // restarting from fragmentation at almost exactly 180 seconds of uptime,
+  // boot after boot, because the default-active set never got narrowed
+  // before the watchdog's own 3-minute grace period ran out - the very
+  // first check-in that would have fixed this never had a chance to fire.
+  // A failed attempt here (no network yet, DNS hiccup, timeout) is not
+  // fatal: it changes nothing, loop()'s own timer retries on its ordinary
+  // schedule, and the device simply starts with the wider default set for
+  // one extra check-in interval, exactly as it always has.
+  //
+  // lastCheckInMs is set here too, matching what loop() itself does right
+  // before every other call to performCheckIn() - without it, loop()'s own
+  // first comparison still sees lastCheckInMs at its zero-initialised
+  // default and fires a second, near-redundant check-in within moments of
+  // this one succeeding, rather than a full interval later.
+  performCheckIn();
+  lastCheckInMs = millis();
+
   // Hands the screen over. Every card registered itself before setup() was
   // ever called; this is where the rotation starts running.
   Display::showStatus("Loading", "");
