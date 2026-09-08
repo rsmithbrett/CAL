@@ -2440,3 +2440,56 @@ report `freeHeap` and `ESP.getMaxAllocHeap()` alongside the path - the
 second figure is the one that would have pointed straight at this the
 first time, and total free heap alone cannot tell the two apart if it
 happens again for a different reason.
+
+## Bug fix: the RAM read buffer needed the same treatment the decoder's scratch buffer got
+
+Found live, the same night, on two separate physical devices: the fix
+directly above stopped one specific asset from failing to decode, but after
+several more hours of uptime both units started failing to even *read* two
+assets into memory at all - `"[display] out of memory reading
+/assets/f4d06f98-....png (80853 bytes)"` - three times per draw attempt,
+`Assets.cpp`'s retry-and-invalidate logic giving up and dropping the card
+each time, then the next fetch cycle failing a different way
+(`"[assets] could not open .../.png.part for writing"`) because the
+now-invalidated cache file's replacement had nowhere to write either. Two
+different devices, two different physical SD cards, hitting the identical
+pair of asset ids ruled out a bad card fairly quickly - this needed to be
+about the assets or the code, not the hardware.
+
+The section above ("Reading the whole file before decoding it") sized
+`readFileToBuffer()`'s reasoning against "the largest asset in the catalog
+today is under 34KB" - true when it was written, false again within the
+same session once an 80KB splash (`JIM-Face`) was uploaded, the same kind
+of stale-ceiling mistake `Assets.h`'s own "measured, not assumed" framing
+exists to catch. But the real defect was never the *size* of that one
+allocation - it was doing a fresh one at all, every single draw, for
+whichever asset happened to be showing. A 34KB graphic and an 80KB splash
+interleaved over hours, on an allocator with no compaction, is close to a
+textbook fragmentation generator by itself - and it got measurably worse
+the same night the fix above started leaving `lgfx_pngle_new()`'s own ~44KB
+scratch buffer permanently resident too. Two large, *differently-sized*
+blocks - one now permanent, one churning every few seconds - competing for
+the same fragmenting heap is a harder problem than either fix alone
+anticipated: the pngle fix assumed the read buffer was the transient one
+and only pngle's buffer needed to stop churning; it turned out both needed
+to.
+
+The fix (`Display.cpp`): `readFileToBuffer()` no longer allocates
+`fileSize` bytes fresh on every call and frees them (`std::unique_ptr`)
+the instant the caller returns. A single static `gFileBuffer`, grown with
+`realloc()` only when an asset larger than anything seen so far needs to be
+read, is reused as-is by every draw after that - in the ordinary case (a
+fleet running the same asset catalog for weeks without a bigger upload)
+this means at most one allocation per distinct file size ever encountered,
+for the rest of the device's uptime, rather than one every few seconds.
+`realloc()` rather than free-then-new deliberately: on the overwhelmingly
+common path where the buffer is already big enough, it is a no-op, not a
+allocation at all. The buffer is never shrunk or freed - handing back a
+smaller allocation later would just reintroduce the same churn this exists
+to stop, for a memory saving that only matters on a device already too
+tight for it to help. The "Memory management approach" section above's
+"heap allocation only for a large, transient, one-shot need" principle is
+now only half true of this buffer - it is still heap-allocated because its
+size is not knowable at compile time, but it is no longer transient or
+one-shot by design, the same static-once-grown shape `gFileBuffer` shares
+with `lgfx_pngle_new()`'s own scratch buffer one section up.

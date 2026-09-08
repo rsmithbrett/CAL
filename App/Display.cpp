@@ -5,7 +5,7 @@
 // DataWrapperT<fs::SDFS>". CYD-Dickey hit exactly this and records the same
 // note at the top of its .ino.
 #include <SD.h>
-#include <memory>
+#include <cstdlib>
 
 #define LGFX_AUTODETECT
 #include <LovyanGFX.hpp>
@@ -1756,14 +1756,60 @@ void flashNavEdge(bool isForward, bool canReverse) {
 
 namespace {
 
-/// The whole file's bytes, read from SD in one pass, or a null `data` on any
-/// failure (open, zero-length, short read).
+/// The whole file's bytes, read from SD in one pass - a non-owning view onto
+/// gFileBuffer below, not a per-call allocation. `data` null means any
+/// failure (open, zero-length, short read, out of memory).
 struct FileBuffer {
-  std::unique_ptr<uint8_t[]> data;
+  uint8_t* data = nullptr;
   size_t size = 0;
 };
 
-/// Reads `path` entirely into a heap buffer before either PNG draw function
+/// One persistent, grow-only buffer shared by every readFileToBuffer() call,
+/// instead of a fresh `new`/free every single draw. Found live: the original
+/// per-call allocation was sized against "the largest asset in the catalog
+/// today" (a comment that already read under-34KB at the time, and was
+/// wrong again within the same night once an 80KB splash was uploaded) -
+/// but the real problem was never the size of any one allocation, it was
+/// doing one at all, every few seconds, for however many hours a device
+/// stays up. Two different asset sizes (a 34KB graphic, an 80KB splash)
+/// interleaved over a long uptime is close to a textbook heap-fragmentation
+/// generator on an allocator with no compaction, and it got measurably
+/// worse the same night a different fix (see drawPngFromSd()'s own comment
+/// on releasePngMemory()) started leaving LovyanGFX's ~44KB decode scratch
+/// buffer permanently allocated alongside it - two large, differently-sized
+/// blocks competing for the same fragmenting heap. A buffer that only ever
+/// grows to whatever the largest file actually seen so far needed, and is
+/// then reused as-is by every smaller file after that, allocates at most
+/// once per distinct size ever encountered - in the ordinary case (a fleet
+/// running the same asset catalog for weeks) that means zero further
+/// allocations at all after the first draw of the current largest asset,
+/// for the rest of the device's uptime.
+uint8_t* gFileBuffer = nullptr;
+size_t gFileBufferCapacity = 0;
+
+/// Grows gFileBuffer to at least `needed` bytes if it is not already that
+/// large, and never shrinks it - handing back a smaller buffer later would
+/// reintroduce the exact alloc/free churn this whole mechanism exists to
+/// avoid, for a memory saving that only matters on a device already tight
+/// enough that it wouldn't help anyway. realloc() over free()-then-new():
+/// on the (ordinary) path where this is already big enough, realloc() is a
+/// no-op rather than any work at all, and on a genuine growth it can reuse
+/// the existing block in place when the heap allows it instead of a forced
+/// pair of separate calls.
+bool ensureFileBufferCapacity(size_t needed) {
+  if (needed <= gFileBufferCapacity) {
+    return true;
+  }
+  uint8_t* grown = static_cast<uint8_t*>(realloc(gFileBuffer, needed));
+  if (grown == nullptr) {
+    return false;
+  }
+  gFileBuffer = grown;
+  gFileBufferCapacity = needed;
+  return true;
+}
+
+/// Reads `path` entirely into gFileBuffer before either PNG draw function
 /// below ever calls into LovyanGFX's decoder - see README.md's "The likely
 /// root cause" section: this board's SD card shares its SPI wiring with the
 /// display, by the manufacturer's own documentation, and `drawPngFile()`'s
@@ -1772,11 +1818,7 @@ struct FileBuffer {
 /// shared bus for as long as the decode runs. Reading the whole file first
 /// means the SD read and every one of the display writes that follow are
 /// separated in time - the SD card is never touched again once this
-/// returns - even though they still share the same physical wire. The
-/// largest asset in the catalog today is under 34KB against roughly 250KB
-/// of free heap in the device's ordinary operating state, so this is a
-/// one-shot allocation freed the moment the caller returns, not a standing
-/// cost.
+/// returns - even though they still share the same physical wire.
 FileBuffer readFileToBuffer(const String& path) {
   FileBuffer result;
   File file = SD.open(path, FILE_READ);
@@ -1790,21 +1832,23 @@ FileBuffer readFileToBuffer(const String& path) {
     Log::printf("[display] %s is empty on SD - nothing to read into memory", path.c_str());
     return result;
   }
-  std::unique_ptr<uint8_t[]> buffer(new (std::nothrow) uint8_t[fileSize]);
-  if (!buffer) {
+  if (!ensureFileBufferCapacity(fileSize)) {
     file.close();
-    Log::printf("[display] out of memory reading %s (%u bytes)", path.c_str(),
-                static_cast<unsigned>(fileSize));
+    Log::printf(
+        "[display] out of memory growing the shared read buffer to %u bytes for %s "
+        "(freeHeap=%u maxAllocHeap=%u)",
+        static_cast<unsigned>(fileSize), path.c_str(), static_cast<unsigned>(ESP.getFreeHeap()),
+        static_cast<unsigned>(ESP.getMaxAllocHeap()));
     return result;
   }
-  const size_t bytesRead = file.read(buffer.get(), fileSize);
+  const size_t bytesRead = file.read(gFileBuffer, fileSize);
   file.close();
   if (bytesRead != fileSize) {
     Log::printf("[display] short read on %s (%u of %u bytes)", path.c_str(),
                 static_cast<unsigned>(bytesRead), static_cast<unsigned>(fileSize));
     return result;
   }
-  result.data = std::move(buffer);
+  result.data = gFileBuffer;
   result.size = fileSize;
   Log::printf("[display] read %s into memory (%u bytes) - SD access done, decoding from RAM now",
               path.c_str(), static_cast<unsigned>(fileSize));
@@ -1826,7 +1870,7 @@ bool drawPngFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, in
     return false;
   }
   const bool ok =
-      lcd.drawPng(file.data.get(), file.size, x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
+      lcd.drawPng(file.data, file.size, x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
   // No releasePngMemory() here - see drawPngFromSd()'s comment below for why
   // freeing it every call is the wrong tradeoff for this device.
   if (!ok) {
@@ -1844,7 +1888,7 @@ bool drawPngFromSd(const String& path) {
   if (!file.data) {
     Log::printf("[display] could not read %s", path.c_str());
   } else {
-    ok = lcd.drawPng(file.data.get(), file.size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
+    ok = lcd.drawPng(file.data, file.size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
     // Deliberately NOT calling lcd.releasePngMemory() here - see README.md's
     // "Why the PNG decoder's scratch buffer is never released" section. This
     // was ported from CYD-Dickey (which releases it unconditionally, every
@@ -1853,15 +1897,15 @@ bool drawPngFromSd(const String& path) {
     // doesn't, CAL has no Bluetooth stack to feed. What it cost instead: a
     // ~44KB malloc+free cycle on every single PNG draw is exactly the kind
     // of repeated large-block churn that fragments an ESP32 heap over a long
-    // uptime, and this device's own asset catalog has a file that sits right
-    // at that edge - the largest PNG on SD needs its own ~34KB read buffer
-    // live at the same time as this ~44KB decoder scratch buffer, so it is
-    // the first (and, when this was diagnosed, the only) asset for which the
-    // second allocation had nowhere left to land. Leaving the decoder's
-    // buffer allocated after the first successful draw - which is exactly
-    // what LovyanGFX does by default when nobody calls releasePngMemory() -
-    // turns that into a one-time, bounded cost instead of a per-draw
-    // fragmentation gamble.
+    // uptime. Leaving the decoder's buffer allocated after the first
+    // successful draw - which is exactly what LovyanGFX does by default when
+    // nobody calls releasePngMemory() - turns that into a one-time, bounded
+    // cost instead of a per-draw fragmentation gamble. readFileToBuffer()'s
+    // own gFileBuffer, above, is the other half of the same fix: this device
+    // used to pay for a *second* large, differently-sized allocation on top
+    // of this one, every single draw, which is what actually exhausted a
+    // fragmented heap on real hardware after enough uptime - see that
+    // function's own remarks for the full incident.
     if (!ok) {
       Log::printf("[display] failed to draw %s (freeHeap=%u maxAllocHeap=%u)", path.c_str(),
                   static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
