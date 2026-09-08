@@ -49,23 +49,6 @@ void verbose(const char* format, ...) __attribute__((format(printf, 1, 2)));
 /// A single already-formatted line, with no trailing newline expected.
 void line(const String& text);
 
-/// A second, quieter logging tier for call sites that would otherwise add
-/// real, ongoing cost to every device regardless of whether anyone is
-/// watching - narrating exactly what a card currently has on screen from
-/// inside its own draw function, say, which runs on every dwell cycle for as
-/// long as that card stays in rotation. printf()/line() above always pay for
-/// formatting and always write Serial, on purpose - Serial is this module's
-/// fallback of last resort and must never regress (see this file's own
-/// remarks at the top). verbose() does not carry that guarantee: it is a
-/// complete no-op, formatting included, whenever streamingEnabled() is
-/// false, which is every device's resting state and after every reboot. The
-/// trade this makes on purpose is that a line logged only through verbose()
-/// is invisible on a USB-Serial session with streaming off - acceptable here
-/// because everything verbose() is for is detail a card's ordinary printf()/
-/// line() calls already summarize on change, not the only record of
-/// something happening.
-void verbose(const char* format, ...) __attribute__((format(printf, 1, 2)));
-
 /// Called from performCheckIn() with the server's current
 /// debugStreamRequested value on every successful check-in - unlike the
 /// forced-update flag this is not one-shot, since streaming is meant to

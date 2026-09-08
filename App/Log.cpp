@@ -224,38 +224,6 @@ void line(const String& text) {
   }
 }
 
-void verbose(const char* format, ...) {
-  // The gate that makes this tier cheap on every device that has not turned
-  // on remote streaming - checked before touching va_start/vsnprintf at all,
-  // not after, since the whole point is to skip the formatting work itself,
-  // not merely to skip sending the result. See this function's own
-  // declaration in Log.h.
-  if (!streaming) {
-    return;
-  }
-
-  char scratch[256];
-  va_list args;
-  va_start(args, format);
-  const int written = vsnprintf(scratch, sizeof(scratch), format, args);
-  va_end(args);
-
-  if (written < 0) {
-    return;
-  }
-  if (static_cast<size_t>(written) >= sizeof(scratch)) {
-    // Same truncation marker as printf() above, for the same reason: a
-    // truncated line should read as truncated, not silently cut off
-    // mid-word.
-    static const char kMarker[] = "...(truncated)";
-    constexpr size_t kMarkerLen = sizeof(kMarker) - 1;
-    memcpy(scratch + sizeof(scratch) - 1 - kMarkerLen, kMarker, kMarkerLen);
-    scratch[sizeof(scratch) - 1] = '\0';
-  }
-
-  line(String(scratch));
-}
-
 void setStreamingEnabled(bool enabled) {
   if (enabled == streaming) {
     return;
