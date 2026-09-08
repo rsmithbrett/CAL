@@ -184,6 +184,38 @@ void printf(const char* format, ...) {
   line(String(scratch));
 }
 
+void verbose(const char* format, ...) {
+  // The whole point of this function: bail before even touching va_list or
+  // the scratch buffer below when nobody is watching the remote stream, so a
+  // fleet-wide call site costs nothing on every device except the one an
+  // admin actually turned streaming on for. printf() below duplicates this
+  // function's own formatting instead of the two sharing a helper - the
+  // early return here has to happen before formatting, not after, which
+  // makes "format, then decide" the one shape that cannot serve both.
+  if (!streaming) {
+    return;
+  }
+
+  char scratch[256];
+  va_list args;
+  va_start(args, format);
+  const int written = vsnprintf(scratch, sizeof(scratch), format, args);
+  va_end(args);
+
+  if (written < 0) {
+    return;
+  }
+  if (static_cast<size_t>(written) >= sizeof(scratch)) {
+    // Same truncation marker as printf() above, for the same reason.
+    static const char kMarker[] = "...(truncated)";
+    constexpr size_t kMarkerLen = sizeof(kMarker) - 1;
+    memcpy(scratch + sizeof(scratch) - 1 - kMarkerLen, kMarker, kMarkerLen);
+    scratch[sizeof(scratch) - 1] = '\0';
+  }
+
+  line(String(scratch));
+}
+
 void line(const String& text) {
   Serial.println(text);
 

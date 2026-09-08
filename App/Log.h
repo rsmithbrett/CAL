@@ -35,6 +35,17 @@ namespace Log {
 /// with a heap allocation on every single log call.
 void printf(const char* format, ...) __attribute__((format(printf, 1, 2)));
 
+/// Like printf(), but a complete no-op - not even formatted - unless remote
+/// debug streaming is currently on. Serial output for a fleet of devices
+/// only one of which is being actively debugged would otherwise get far
+/// noisier for no one watching it; this keeps that cost opt-in per device,
+/// the same way the remote stream itself already is. Meant for the kind of
+/// detail that is genuinely too much to want unconditionally - every server
+/// request/response, exactly what a card drew this cycle - where printf()'s
+/// existing "always on Serial" contract would be the wrong default rather
+/// than merely a noisier one.
+void verbose(const char* format, ...) __attribute__((format(printf, 1, 2)));
+
 /// A single already-formatted line, with no trailing newline expected.
 void line(const String& text);
 
