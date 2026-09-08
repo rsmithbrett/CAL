@@ -1,0 +1,138 @@
+#pragma once
+
+#include <Arduino.h>
+
+// Kept byte-identical to CAL's own Identity.h/.cpp deliberately: this is the same
+// NVS namespace ("cal") read and written by both binaries, so a change to a key
+// name or layout on one side and not the other silently corrupts the other's
+// reads. Diff against ../Identity.h/.cpp before editing either copy.
+
+/// The device's persistent identity and the state CAL needs across reboots.
+///
+/// All of it lives in NVS rather than in the application partition, because the
+/// application partition is overwritten by every update and this must survive
+/// that. The device secret in particular is written once at provisioning time -
+/// the loader flashes an NVS image containing it - and is never regenerated on
+/// the device.
+namespace Identity {
+
+/// Presented in the X-Device-Secret header on every request.
+///
+/// Empty on a freshly flashed unit, and that is the ordinary first-boot state
+/// rather than a fault. Every device receives the identical image; identity is
+/// established afterwards, by CAL reporting its hardware address and an
+/// administrator assigning it a key. See Enrollment.
+String deviceSecret();
+
+bool hasSecret();
+
+void saveSecret(const String& secret);
+
+/// Forgets the stored secret, so the next boot's `!hasSecret()` check is true
+/// again and CAL re-enrolls via Enrollment/RegisterViaMacAddress instead of
+/// presenting a value the server has already rejected forever. See
+/// App/Loader.cpp's `returnToLoaderForReprovisioning()` - the only caller -
+/// for why a rejected secret needs this and a rejected WiFi network does not.
+void clearSecret();
+
+/// The hardware address, formatted as the server expects it. This is what
+/// identifies an unprovisioned unit, since it has nothing else to offer.
+String macAddress();
+
+/// Remembered networks, most recently joined first.
+///
+/// More than one on purpose. A device is enrolled at an agent's office and then
+/// carried to a household, and a unit that remembers only the network it is
+/// currently on has to be re-provisioned by hand every time it moves. Three is
+/// enough to cover office, home and one spare without turning NVS into a
+/// database.
+static constexpr uint8_t kMaxNetworks = 3;
+
+struct Network {
+  String ssid;
+  String password;
+};
+
+/// Index 0 is the most recently joined.
+uint8_t networkCount();
+Network network(uint8_t index);
+
+/// Records a successful join. An SSID already known is moved to the front and
+/// its password refreshed rather than duplicated; the least recently used entry
+/// is dropped once the list is full.
+void rememberNetwork(const String& ssid, const String& password);
+
+void clearNetworks();
+
+bool hasAnyNetwork();
+
+/// One-shot, same shape and lifecycle as updateRequested below: set before a
+/// reboot into CAL, read (and consumed) once by the code deciding whether to
+/// open Provisioning::run() unconditionally, false again afterward.
+///
+/// Exists so the BOOT-hold "reset WiFi" gesture can force the captive portal
+/// open without calling clearNetworks() to do it - forcing via network count
+/// meant every reprovisioning wiped everything already remembered before
+/// adding the one new network the portal captures, which is why a unit set
+/// up at more than one site only ever answered to the last one. See the
+/// README's "the 3-remembered-networks design had no path to ever reach 2"
+/// for the incident this fixes.
+bool provisioningForced();
+void setProvisioningForced(bool forced);
+
+/// The application version currently installed in ota_0, as reported by the
+/// manifest that installed it. Empty means nothing is installed yet.
+String installedAppVersion();
+void setInstalledAppVersion(const String& version);
+
+/// Set by the application to ask CAL to perform an update on next boot. The
+/// application cannot write its own partition, so this flag plus a reboot is
+/// how it hands the job over.
+bool updateRequested();
+void setUpdateRequested(bool requested);
+
+/// Incremented by CAL immediately before handing control to the application,
+/// and cleared by the application once it reaches steady state. A value above
+/// the threshold means the installed application is not surviving boot, and CAL
+/// should treat it as bad rather than handing over again.
+uint8_t bootAttempts();
+void recordBootAttempt();
+void clearBootAttempts();
+static constexpr uint8_t kMaxBootAttempts = 3;
+
+/// How many times this App has started, ever. Deliberately NOT bootAttempts():
+/// that counter is cleared the moment the App reaches a network, which happens
+/// before the first telemetry report is sent, so it always reads 0 by the time
+/// anything reports it and is dead as a fleet health signal. This one is never
+/// cleared, so "is this device rebooting when it shouldn't be" is answerable
+/// from a single report instead of by watching uptime across several.
+///
+/// Saturates rather than wrapping: a counter that rolled over to 0 would read
+/// as a freshly provisioned device. At one boot a minute that is millennia
+/// away, so this is about being explicit rather than an expected case.
+uint32_t totalBoots();
+void recordBoot();
+
+/// The most recent `CheckIn::Result::utcOffsetMinutes` a successful check-in
+/// ever handed back, persisted so a device that hasn't completed one yet this
+/// boot - just powered on, WiFi still joining, first check-in still seconds
+/// away - has a real (if possibly a day stale) offset for the corner clock
+/// and day/night logic instead of drawing raw UTC until it does. Updated on
+/// every successful check-in, not just the first, the same "always current"
+/// treatment App.ino's own lastUtcOffsetMinutes already gives it in RAM - this
+/// is that same value's copy that survives a reboot.
+///
+/// 0 (UTC) on a device that has never completed a check-in, matching
+/// CheckIn::Result's own default - a freshly flashed unit gets exactly the
+/// behaviour it already had before this existed, not a new failure mode.
+///
+/// App-only key: CAL never reads or writes it, so - unlike every other member
+/// of this file - it does not need mirroring in CAL's own copy of
+/// Identity.h/.cpp despite the "kept byte-identical" note at the top. It's a
+/// new key, not a change to one CAL also uses.
+int lastUtcOffsetMinutes();
+void setLastUtcOffsetMinutes(int minutes);
+
+void begin();
+
+}  // namespace Identity
