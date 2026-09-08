@@ -101,7 +101,14 @@ void report(const char* lastCheckInOutcome) {
   String body;
   serializeJson(requestDoc, body);
 
+  // Found via grep alongside the other HTTPClient call sites this session
+  // instrumented (CheckIn.cpp, AppUpdater.cpp, Assets.cpp, the provider
+  // cards) - not one of those named up front, but it is exactly the same
+  // shape of server exchange the rest of this pass covers.
+  Log::verbose("[telemetry] POST %s body=%s", url.c_str(), body.c_str());
+
   const int status = http.POST(body);
+  Log::verbose("[telemetry] response status=%d", status);
   http.end();
 
   // Any HTTP 200 is success, same as CheckIn's own handling of its response

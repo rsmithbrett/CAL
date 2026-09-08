@@ -146,11 +146,15 @@ String nextPassDetailText() {
 
 void cardDraw(uint16_t) {
   if (hasData()) {
+    Log::verbose("[issflyover] drawing live position: %s, %s (%s)", distanceText().c_str(),
+                directionText().c_str(), coordinateText().c_str());
     Display::showIssFlyoverCard(distanceText(), directionText(), coordinateText());
     return;
   }
   // No live position, but cardItemCount() only let this run at all because
   // hasNextPass() is true - see IssFlyover.h's "second display mode" remarks.
+  Log::verbose("[issflyover] drawing next-pass prediction: rises %s (%s)",
+              nextPassRiseTimeText().c_str(), nextPassRiseDirectionText().c_str());
   Display::showIssNextPassCard(nextPassRiseTimeText(), nextPassRiseDirectionText(),
                                 nextPassDetailText());
 }

@@ -65,7 +65,9 @@ Result fetchMine() {
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
 
+  Log::verbose("[aircraft] GET %s", url.c_str());
   const int status = http.GET();
+  Log::verbose("[aircraft] response status=%d", status);
 
   if (status == 401) {
     http.end();
@@ -149,6 +151,16 @@ Result fetchMine() {
   result.nearest.originName = String((const char*)(nearest["originName"] | ""));
   result.nearest.destinationCode = String((const char*)(nearest["destinationCode"] | ""));
   result.nearest.destinationName = String((const char*)(nearest["destinationName"] | ""));
+
+  // A lightly-summarized response rather than the raw body - same filtering
+  // reasoning as Forecast::fetch()'s own verbose line: this endpoint's
+  // JsonDocument filter above already exists to keep only the fields this
+  // card draws in memory, and buffering the raw body just to log it would
+  // undo that.
+  Log::verbose("[aircraft] response radiusMiles=%.0f callsign=%s alt=%dft dist=%.1fmi",
+              result.radiusMiles, result.nearest.callsign.c_str(), result.nearest.altitudeFeet,
+              result.nearest.distanceMiles);
+
   return result;
 }
 
@@ -255,6 +267,16 @@ bool cardIsNotable(uint16_t) {
 
 void cardDraw(uint16_t) {
   if (gLast.status == Status::Ok) {
+    // What is actually on screen this draw, not just what the last fetch
+    // found - the two can diverge across a rewind, where this runs again
+    // with no fresh fetch behind it. cardFetch()'s own printf() summary
+    // above only fires on a successful fetch, not on every draw.
+    Log::verbose(
+        "[aircraft] drawing: %s alt=%dft speed=%.0fkts heading=%.0f dist=%.1fmi logo=%s",
+        gLast.nearest.callsign.c_str(), gLast.nearest.altitudeFeet, gLast.nearest.speedKnots,
+        gLast.nearest.headingDegrees, gLast.nearest.distanceMiles,
+        gLast.nearest.airlineLogoAssetId.length() > 0 ? gLast.nearest.airlineLogoAssetId.c_str()
+                                                        : "(none)");
     Display::showAircraftCard(gLast.nearest.callsign, gLast.nearest.airlineName,
                               gLast.nearest.altitudeFeet, gLast.nearest.speedKnots,
                               gLast.nearest.headingDegrees, gLast.nearest.distanceMiles,
@@ -286,6 +308,8 @@ void cardDraw(uint16_t) {
   const String headline = gLast.status == Status::Empty ? "Nothing overhead right now"
                           : isRestingState              ? "Aircraft overhead is not showing yet"
                                                         : "Could not load aircraft data";
+  Log::verbose("[aircraft] drawing status screen: %s (%s)", headline.c_str(),
+              gLast.message.c_str());
   Display::showAircraftStatus(headline, gLast.message, /*isProblem=*/!isRestingState);
 }
 

@@ -4,6 +4,7 @@
 
 #include "Cards.h"
 #include "Display.h"
+#include "Log.h"
 
 namespace ClockDate {
 
@@ -44,6 +45,7 @@ void cardDraw(uint16_t) {
   char dateBuffer[32];
   strftime(dateBuffer, sizeof(dateBuffer), "%A, %B %d", &localTm);
 
+  Log::verbose("[clockdate] drawing: %s %s", dateBuffer, timeBuffer);
   Display::showClockDate(String(timeBuffer), String(dateBuffer));
 }
 

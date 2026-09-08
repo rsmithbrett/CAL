@@ -85,10 +85,10 @@ uint16_t cardItemCount() { return gHasCheckedIn ? 1 : 0; }
 
 void cardDraw(uint16_t) {
   if (hasTimes()) {
-    Display::showSunMoonCard(
-        formatHhMm(toLocalMinutes(gSunriseMinutesUtc)),
-        formatHhMm(toLocalMinutes(gSunsetMinutesUtc)),
-        dayLength());
+    const String sunrise = formatHhMm(toLocalMinutes(gSunriseMinutesUtc));
+    const String sunset = formatHhMm(toLocalMinutes(gSunsetMinutesUtc));
+    Log::verbose("[sunmoon] drawing: sunrise=%s sunset=%s", sunrise.c_str(), sunset.c_str());
+    Display::showSunMoonCard(sunrise, sunset, dayLength());
     return;
   }
 
@@ -96,6 +96,7 @@ void cardDraw(uint16_t) {
   // night, or an unresolved position. The device cannot tell those apart from
   // the two nulls alone, so the wording covers all three without claiming
   // which: em-dashes rather than a fabricated "00:00".
+  Log::verbose("[sunmoon] drawing: no sunrise/sunset for this location");
   Display::showSunMoonCard(
       "--:--", "--:--",
       "No sunrise or sunset today for this location.");

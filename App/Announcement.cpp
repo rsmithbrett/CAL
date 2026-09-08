@@ -93,6 +93,12 @@ struct Instance {
       Display::showNoContent("No announcement to show", "This card has no text configured yet.");
       return;
     }
+    // The words actually on screen - nothing else in the log names this
+    // instance's configured text at all (CardManager::applyPolicy() only
+    // logs a length-too-long rejection, never the text itself), so without
+    // this line there is no way to reconstruct an announcement card from the
+    // remote stream.
+    Log::verbose("[%s] drawing: %s", id(), text);
     Display::showAnnouncementCard(String(text));
   }
 

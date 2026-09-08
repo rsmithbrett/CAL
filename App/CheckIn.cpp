@@ -234,7 +234,15 @@ Result perform() {
   String body;
   serializeJson(requestDoc, body);
 
+  // Every outgoing check-in, verbatim - the always-on summary line at the
+  // bottom of this function only ever reports the fields this firmware
+  // itself parsed back out of the response, never the raw exchange. With
+  // streaming off this costs nothing beyond Log::verbose()'s own early
+  // return.
+  Log::verbose("[checkin] POST %s body=%s", url.c_str(), body.c_str());
+
   const int status = http.POST(body);
+  Log::verbose("[checkin] response status=%d", status);
   if (status == 401) {
     result.secretRejected = true;
     http.end();
@@ -256,6 +264,20 @@ Result perform() {
   }
 
   result.ok = true;
+
+  // The raw response, re-serialized from what was just parsed rather than
+  // captured while streaming off http.getStream() above - that stream is
+  // consumed once, straight into responseDoc, precisely so this device never
+  // has to hold the whole body as a second, separate String at the same time
+  // it holds the parsed JsonDocument. Guarded on streamingEnabled() rather
+  // than left to Log::verbose()'s own internal gate, since building this
+  // String at all is the cost worth avoiding on every ordinary check-in, not
+  // just the verbose() call that would follow it.
+  if (Log::streamingEnabled()) {
+    String rawResponse;
+    serializeJson(responseDoc, rawResponse);
+    Log::verbose("[checkin] response body=%s", rawResponse.c_str());
+  }
 
   // The round trip actually completed, so whatever decode failures were
   // just reported above are now the server's problem to have seen - clear

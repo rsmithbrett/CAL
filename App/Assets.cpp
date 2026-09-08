@@ -162,7 +162,9 @@ bool fetchToCard(const String& id) {
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
 
+  Log::verbose("[assets] GET %s", url.c_str());
   const int status = http.GET();
+  Log::verbose("[assets] fetch of '%s' response status=%d", id.c_str(), status);
   if (status != 200) {
     http.end();
     Log::printf("[assets] fetch of '%s' failed, http status=%d", id.c_str(), status);
@@ -357,7 +359,9 @@ bool fetchToRamImpl(const String& id, RamAssetBuffer& buffer) {
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
 
+  Log::verbose("[assets] GET %s (direct-to-RAM)", url.c_str());
   const int status = http.GET();
+  Log::verbose("[assets] direct-to-RAM fetch of '%s' response status=%d", id.c_str(), status);
   if (status != 200) {
     http.end();
     Log::printf("[assets] direct-to-RAM fetch of '%s' failed, http status=%d", id.c_str(), status);

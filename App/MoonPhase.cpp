@@ -39,6 +39,8 @@ void cardFetch() {}
 uint16_t cardItemCount() { return hasData() ? 1 : 0; }
 
 void cardDraw(uint16_t) {
+  Log::verbose("[moonphase] drawing: phase=%.3f illuminated=%.0f%% (%s)", gPhase,
+              gIlluminatedFraction * 100.0, gPhaseName.c_str());
   Display::showMoonPhaseCard(gPhaseName, gPhase, gIlluminatedFraction);
 }
 

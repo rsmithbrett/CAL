@@ -68,7 +68,9 @@ Result fetchMine() {
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
 
+  Log::verbose("[listings] GET %s", url.c_str());
   const int status = http.GET();
+  Log::verbose("[listings] response status=%d", status);
 
   if (status == 401) {
     http.end();
@@ -184,6 +186,15 @@ Result fetchMine() {
     result.count++;
   }
 
+  // A lightly-summarized response rather than the raw body - same filtering
+  // reasoning as Forecast::fetch()'s/Aircraft::fetchMine()'s own verbose
+  // lines: this endpoint's JsonDocument filter above already exists to keep
+  // only the fields this card draws in memory.
+  Log::verbose("[listings] response cityState=%s count=%u nearest='%s' $%d %.1fmi",
+              result.cityState.c_str(), static_cast<unsigned>(result.count),
+              result.listings[0].address.c_str(), result.listings[0].price,
+              result.listings[0].distanceMiles);
+
   return result;
 }
 
@@ -262,6 +273,14 @@ void cardDraw(uint16_t itemIndex) {
       itemIndex = 0;
     }
     const ListingInfo& listing = gLast.listings[itemIndex];
+    // Which of the (possibly several) fetched listings is on screen this
+    // draw, not just what the last fetch found - this card, unlike
+    // Aircraft's and Forecast's, genuinely pages through multiple items, so
+    // "item 2/5" alone (CardManager's own choke-point line) does not say
+    // which address that actually is.
+    Log::verbose("[listings] drawing item %u/%u: '%s' $%d %.1fmi",
+                static_cast<unsigned>(itemIndex) + 1, static_cast<unsigned>(gLast.count),
+                listing.address.c_str(), listing.price, listing.distanceMiles);
     Display::showListingsCard(listing.address, listing.propertyType, listing.price,
                               listing.bedrooms, listing.bathrooms, listing.squareFootage,
                               listing.daysOnMarket, listing.distanceMiles,
@@ -281,6 +300,8 @@ void cardDraw(uint16_t itemIndex) {
                           : gLast.status == Status::NotConfigured ? "Listings are not set up yet"
                           : isRestingState                        ? "Listings are not showing yet"
                                                                   : "Could not load listings";
+  Log::verbose("[listings] drawing status screen: %s (%s)", headline.c_str(),
+              gLast.message.c_str());
   Display::showListingsStatus(headline, gLast.message, /*isProblem=*/!isRestingState);
 }
 

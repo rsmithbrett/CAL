@@ -74,7 +74,10 @@ void cardFetch() {}
 uint16_t cardItemCount() { return (gHasCheckedIn && hasAnyTide()) ? 1 : 0; }
 
 void cardDraw(uint16_t) {
-  Display::showTidesCard(highTideText(), lowTideText());
+  const String high = highTideText();
+  const String low = lowTideText();
+  Log::verbose("[tides] drawing: nextHigh=%s nextLow=%s", high.c_str(), low.c_str());
+  Display::showTidesCard(high, low);
 }
 
 // ---------------------------------------------------------------------------

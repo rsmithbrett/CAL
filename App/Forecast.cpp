@@ -92,7 +92,9 @@ Result fetch(bool useTarget) {
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
 
+  Log::verbose("[forecast] GET %s", url.c_str());
   const int status = http.GET();
+  Log::verbose("[forecast] response status=%d", status);
 
   if (status == 401) {
     http.end();
@@ -175,6 +177,23 @@ Result fetch(bool useTarget) {
     info.shortForecast = String((const char*)(period["shortForecast"] | ""));
     result.count++;
   }
+
+  // A lightly-summarized response, not the raw body: this endpoint's own
+  // filter (see the JsonDocument filter above) already exists to keep the
+  // untrimmed response's memory cost off this device (see the README's own
+  // account of a 9,194-byte unfiltered response failing to parse on real
+  // hardware) - reconstructing that same cost here by buffering the raw body
+  // just to log it would undo the reason the filter exists. What was
+  // actually parsed is enough to reconstruct what this fetch found.
+  // Untagged with a per-instance id on purpose: this free function is shared
+  // by all five Instance<N>s (see Instance<N>::fetch() below, which calls
+  // straight into it with no instance context of its own), so there is no
+  // single card id to name here - each instance's own draw() logs its id
+  // alongside the content actually shown.
+  Log::verbose("[forecast] response location=%s periods=%u first='%s' %d%s %s",
+              result.location.c_str(), static_cast<unsigned>(result.count),
+              result.periods[0].name.c_str(), result.periods[0].temperature,
+              result.periods[0].unit.c_str(), result.periods[0].shortForecast.c_str());
 
   return result;
 }
@@ -288,6 +307,14 @@ struct Instance {
       }
 
       const PeriodInfo& current = gLast.periods[0];
+      // What is actually on screen this draw, not just what the last fetch
+      // found - the two can diverge across a rewind, where this runs again
+      // with no fresh fetch behind it. Logged every draw, unlike fetch()'s
+      // own printf() summary above which only fires on a successful fetch.
+      Log::verbose("[%s] drawing: location=%s hero='%s' %d%s %s dayCount=%u", id(),
+                  gLast.location.c_str(), current.name.c_str(), current.temperature,
+                  current.unit.c_str(), current.shortForecast.c_str(),
+                  static_cast<unsigned>(dayCount));
       Display::showForecastCard(gLast.location, current.isDaytime, current.temperature,
                                 current.unit, current.shortForecast, dayNames, dayTemperatures,
                                 dayUnits, dayConditions, dayCount, describeFreshness(gLastOkMs));
@@ -304,6 +331,8 @@ struct Instance {
     const String headline = gLast.status == Status::Empty ? "No forecast available right now"
                             : isRestingState               ? "Forecast is not showing yet"
                                                             : "Could not load the forecast";
+    Log::verbose("[%s] drawing status screen: %s (%s)", id(), headline.c_str(),
+                gLast.message.c_str());
     Display::showForecastStatus(headline, gLast.message, /*isProblem=*/!isRestingState);
   }
 

@@ -239,6 +239,13 @@ struct Instance {
       return;
     }
 
+    // What is actually on screen this draw, not just what fetch() last
+    // resolved - the two can diverge across a rewind, where this runs again
+    // with no fresh fetch behind it. noteState() above only logs on a
+    // change of state, not on every draw.
+    Log::verbose("[%s] drawing '%s'%s", id(), gCachedId.c_str(),
+                gFromRam ? " (from RAM)" : " (from SD)");
+
     // gFromRam picks which of Assets' two draw entry points owns this
     // instance's bytes right now - drawCached() reads gCachedId back off
     // SD, drawRam() reads gRamBuffer, and using the wrong one for the
