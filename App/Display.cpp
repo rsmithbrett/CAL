@@ -119,11 +119,15 @@ constexpr int kCardMargin = 10;
 // itself is stuck at 9pt) and the corner clock below, which drawClock() sets
 // bottom-right at (314, 236). The clock was enlarged to FreeSans9pt after it
 // proved invisible on real hardware at its original 6x8 bitmap size, so it
-// now occupies roughly y 222-236, x 265-314. kButtonRowY/kButtonHeight are
-// therefore left exactly as they were: a row ending at y=220 clears the
-// clock by 2px, and starting at y=190 clears the card content above by a
-// similar margin, and neither number moves without the other three
-// (content layout, clock size, clock position) being reconsidered together.
+// now occupies roughly y 222-236, x 265-314. kButtonHeight doubled (30 to
+// 60) after real fingers found the original height hard to hit reliably -
+// same motivation as the width increase the next paragraph already
+// documents, just the other axis. The row's bottom edge stays pinned at
+// y=220 (still clearing the clock by 2px); the extra 30px comes out of the
+// top, moving kButtonRowY from 190 to 160 - which is why
+// showAnnouncementCard() and showQrTextCard() below both had their own
+// content budgets re-checked against the new boundary rather than left
+// assuming the old one.
 //
 // Width is a different story. The touch controller checks action-button
 // zones before the reverse/forward edge strips (see Touch.cpp's poll() and
@@ -139,8 +143,8 @@ constexpr int kCardMargin = 10;
 // margin from the true bezel edge kept only because a resistive panel's
 // accuracy is known to degrade right at the glass edge, not because
 // anything would misfire.
-constexpr int kButtonRowY = 190;
-constexpr int kButtonHeight = 30;
+constexpr int kButtonRowY = 160;
+constexpr int kButtonHeight = 60;
 constexpr int kButtonRowLeft = 8;
 constexpr int kButtonRowRight = 312;
 constexpr int kButtonGap = 6;
@@ -908,8 +912,12 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   // Sun for sunrise, a crescent for sunset - the card's own name ("sun and
   // moon") made this the obvious pairing rather than drawing a sun on both
   // rows and leaving "moon" in the id unrepresented anywhere on the card.
+  // Radius 16 (32px across) rather than the original 12 - reported too small to
+  // read at a glance on real hardware. Still clears both columns either side:
+  // "Sunrise"/"Sunset" at this font end around x=90, the value column starts at
+  // x=160, and a 32px icon centred at x=130 spans 114-146.
   constexpr int kIconColumnX = 130;
-  constexpr int kIconRadius = 12;
+  constexpr int kIconRadius = 16;
   drawSunIcon(kIconColumnX, 44 + 9, kIconRadius);
   drawMoonIcon(kIconColumnX, 90 + 9, kIconRadius);
 
@@ -951,8 +959,12 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
   // Same icon-in-the-gap placement as showSunMoonCard()'s two rows -
   // "Next high"/"Next low" are wider labels than "Sunrise"/"Sunset" at this
   // font, so the column sits a little further right to stay clear of them.
-  constexpr int kIconColumnX = 145;
-  constexpr int kIconRadius = 12;
+  // Same size bump as showSunMoonCard()'s icons, for the same reported reason -
+  // "Next high"/"Next low" leave a narrower gap (ending ~x110 vs. the value
+  // column's x160), so radius 16 centred at x=135 (119-151) rather than
+  // showSunMoonCard()'s x=130, to keep clearance on both sides.
+  constexpr int kIconColumnX = 135;
+  constexpr int kIconRadius = 16;
   drawTideIcon(kIconColumnX, 44 + 9, kIconRadius, /*rising=*/true);
   drawTideIcon(kIconColumnX, 90 + 9, kIconRadius, /*rising=*/false);
 
@@ -1150,18 +1162,22 @@ void showAnnouncementCard(const String& text) {
   if (text.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold12pt7b);
     lcd.setTextSize(1);
-    // 5 lines at 24px is y 40-160, clear of the button row that starts at
-    // y=190 (see this file's own remarks on kButtonRowY further up).
+    // Starts at y=30 rather than the original y=40 - kButtonRowY moved from
+    // 190 to 160 when the button row doubled in height, and shifting this
+    // block's own start up by 10px buys back exactly the clearance that
+    // move cost. 5 lines at 24px is now y 30-150, clear of the button row by
+    // 10px.
     const int linesAtLargeSize =
-        wrappedLeftText(text, kCardMargin, 40, ink(), 24, 5, bodyWidth, /*measureOnly=*/true);
+        wrappedLeftText(text, kCardMargin, 30, ink(), 24, 5, bodyWidth, /*measureOnly=*/true);
     if (linesAtLargeSize <= 5) {
-      wrappedLeftText(text, kCardMargin, 40, ink(), 24, 5, bodyWidth);
+      wrappedLeftText(text, kCardMargin, 30, ink(), 24, 5, bodyWidth);
     } else {
-      // 7 lines at 18px is y 40-166, same clearance at the smaller size - and
-      // 7 lines of roughly 38 characters each comfortably covers the full
-      // 280-character limit without a further fallback tier.
+      // 7 lines at 18px is y 30-156, a tighter but still real 4px clearance
+      // at the smaller size - and 7 lines of roughly 38 characters each
+      // still comfortably covers the full 280-character limit without a
+      // further fallback tier.
       lcd.setFont(&fonts::FreeSansBold9pt7b);
-      wrappedLeftText(text, kCardMargin, 40, ink(), 18, 7, bodyWidth);
+      wrappedLeftText(text, kCardMargin, 30, ink(), 18, 7, bodyWidth);
     }
   }
 
@@ -1179,12 +1195,20 @@ void showAnnouncementCard(const String& text) {
 // down - CAL's own showQr() owns the whole 240px-tall panel and answers to nothing else.
 //
 // scale is 2 here (a 90px code) rather than CAL's own 3 (135px, on a screen with nothing
-// else on it): kButtonRowY starts at 190 and the banner already claims the top 22px, so this
-// card's whole drawable height is roughly 160px against CAL's ~228, and there is a caption
-// line and a fallback data line still to fit beneath the code. A smaller code is the honest
-// trade-off for sharing a smaller card - see this file's own UNVERIFIED-ON-HARDWARE caveat
-// in QrText.h, since scan reliability at this size has not been checked against a real
-// camera on real glass.
+// else on it): kButtonRowY starts at 160 (moved up from 190 when the button row doubled in
+// height - see that constant's own remarks) and the banner already claims the top 22px, so
+// this card's whole drawable height is roughly 130px against CAL's ~228, and there is a
+// caption line and a fallback data line still to fit beneath the code. A smaller code is the
+// honest trade-off for sharing a smaller card - see this file's own UNVERIFIED-ON-HARDWARE
+// caveat in QrText.h, since scan reliability at this size has not been checked against a
+// real camera on real glass.
+//
+// The button row's move cost this card real margin it did not have much of to spare, so the
+// fallback qrData line beneath the code is capped at one line, not two, whenever a caption is
+// also present - the caption already gives the code a label, so the raw payload text becomes
+// belt-and-suspenders rather than the only one, and one line is what the remaining budget
+// below actually clears. Only when there is no caption - qrData is then the only label this
+// card has - does it still get the full two lines a maximum-length payload could need.
 //
 // caption is optional and drawn above the raw payload, exactly the role CAL's own
 // caption/subCaption parameters play beneath its code - supplementary, not the point. The
@@ -1243,14 +1267,17 @@ void showQrTextCard(const String& qrData, const String& caption) {
     }
   }
 
-  int y = y0 + side + 8;
-  if (caption.length() > 0) {
+  int y = y0 + side + 6;
+  const bool hasCaption = caption.length() > 0;
+  if (hasCaption) {
     lcd.setFont(&fonts::FreeSansBold12pt7b);
     y += wrappedCenteredText(caption, y, ink(), 1, 22, 1) * 22;
-    y += 4;
+    y += 2;
   }
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  wrappedCenteredText(qrData, y, muted(), 1, 16, 2);
+  // One line, not two, once a caption is already on screen - see this
+  // function's own header comment for why.
+  wrappedCenteredText(qrData, y, muted(), 1, 16, hasCaption ? 1 : 2);
 
   drawClock();
   restoreDefaultFont();
