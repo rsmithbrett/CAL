@@ -125,6 +125,30 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
 /// minutes-to-local arithmetic lives in Tides.cpp, not here.
 void showTidesCard(const String& nextHighTideText, const String& nextLowTideText);
 
+/// The home value card: an automated valuation model (AVM) estimate for the
+/// household's home address, same white/bannered card family and
+/// two-stat-rows-plus-detail layout as showIssFlyoverCard() below.
+/// `estimateText`/`rangeText` arrive already formatted ("$425,000",
+/// "$400K - $450K") or "--" for whichever the server had nothing to report;
+/// `detail` is the price-per-square-foot figure and the date RentCast was
+/// last actually asked, or empty if neither is available. This draws, it
+/// does not compute - the dollar grouping, range rounding and date
+/// arithmetic all live in HomeValue.cpp, not here, the same split every
+/// other check-in-driven card in this family uses.
+///
+/// **Always draws the "automated estimate, not an appraisal" qualifier**,
+/// fixed and unconditional, below `detail` regardless of what any of the
+/// three parameters say. This is not optional wording: a RentCast AVM figure
+/// is an estimate, not a valuation a household could rely on as a guaranteed
+/// sale price, and the server-side HomeValueResult this card's data rides on
+/// documents that this qualifier must survive onto every surface the record
+/// reaches. Drawing it here, unconditionally, rather than leaving it to
+/// HomeValue.cpp's own `detail` string to remember on every call site is the
+/// point - a future edit to that string can shorten or reword the
+/// price-per-square-foot line without ever being able to silently drop the
+/// one line compliance actually requires.
+void showHomeValueCard(const String& estimateText, const String& rangeText, const String& detail);
+
 /// The ISS flyover card: distance and compass direction to the International
 /// Space Station's current sub-satellite point, plus a one-line detail
 /// giving the actual coordinates - same two-stat-rows-plus-detail layout as

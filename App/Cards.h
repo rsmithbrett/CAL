@@ -193,29 +193,34 @@ struct CardSpec {
   bool everFetched = false;
 };
 
-// 27 registrations exist today: weather, aircraft, sunmoon, clockdate,
-// moonphase, listings and tides at one apiece (7), plus graphic, announcement,
-// qrtext and forecast at five independently-configured instances each (20) -
-// the multi-instance generalisation that widened Graphic's original
-// three-instance precedent to every card type whose own descriptor carries a
-// field an admin can set differently per instance (assetId/text/qrData/
-// location). Weather, aircraft, listings, tides, sunmoon, moonphase and
-// clockdate deliberately did NOT get multiple instances - each either has no
-// such field at all (sunmoon/moonphase/clockdate compute one fact for the
-// device's own position/time, with nothing a second instance could be
-// configured differently from) or fetches an unparameterised "mine" endpoint
-// that would return byte-identical data to a second instance for the price of
-// a second HTTP round trip (weather/aircraft/listings) or is pushed
-// unconditionally on every check-in with nothing to distinguish a second copy
-// (tides). See Graphic.h/Announcement.h/QrText.h/Forecast.h's own remarks for
-// the full accounting, and Forecast.h specifically for why it - alone among
-// the fetch-driven cards - got multi-instance treatment anyway (its Location
+// 28 registrations exist today: aircraft, clockdate, issflyover, listings,
+// moonphase, sunmoon, tides and homevalue at one apiece (8), plus graphic,
+// announcement, qrtext and forecast at five independently-configured
+// instances each (20) - the multi-instance generalisation that widened
+// Graphic's original three-instance precedent to every card type whose own
+// descriptor carries a field an admin can set differently per instance
+// (assetId/text/qrData/location). Aircraft, listings, tides, sunmoon,
+// moonphase, clockdate, issflyover and homevalue deliberately did NOT get
+// multiple instances - each either has no such field at all (sunmoon/
+// moonphase/clockdate compute one fact for the device's own position/time,
+// with nothing a second instance could be configured differently from) or
+// fetches an unparameterised "mine" endpoint that would return
+// byte-identical data to a second instance for the price of a second HTTP
+// round trip (aircraft/listings) or is pushed unconditionally on every
+// check-in with nothing to distinguish a second copy (tides/issflyover/
+// homevalue - see HomeValue.h's own remarks for that card specifically). See
+// Graphic.h/Announcement.h/QrText.h/Forecast.h's own remarks for the full
+// accounting, and Forecast.h specifically for why it - alone among the
+// fetch-driven cards - got multi-instance treatment anyway (its Location
 // field is a real per-instance axis the other four lack).
 //
 // registerCard() only logs and drops a card past the cap rather than
 // crashing, which is a silent-until-noticed failure on firmware with no
-// automated tests. Sized with one spare slot rather than exactly 27 so the
-// next card type is a registration, not also a bump here.
+// automated tests. Sized with one spare slot rather than exactly 27 when
+// that was the count, precisely so a card like homevalue could be added as
+// a registration and nothing else - which is exactly what just happened.
+// That spare slot is now spent: the next new card type past this one will
+// need this bound raised alongside its own registration.
 static constexpr uint8_t kMaxCards = 28;
 
 /// Called from each card module's own translation unit at static-init time

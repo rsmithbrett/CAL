@@ -333,6 +333,17 @@ Result perform() {
       responseDoc["issNextPassMaxElevationAzimuthDegrees"] | -1.0;
   result.issNextPassSetUtc = parseIso8601Utc(responseDoc["issNextPassSetUtc"] | "");
   result.issNextPassSetAzimuthDegrees = responseDoc["issNextPassSetAzimuthDegrees"] | -1.0;
+  // `| -1`/`| -1.0` cover a JSON null and a field an older server never sends
+  // at all, the same reasoning as every other optional numeric field above -
+  // all mean "no home value estimate to show" here. `| ""` then
+  // parseIso8601Utc() for the refresh timestamp is the same "both null and
+  // missing become 0" treatment issNextPassRiseUtc gets above. See
+  // CheckIn.h's own homeValueEstimate remarks.
+  result.homeValueEstimate = responseDoc["homeValueEstimate"] | -1;
+  result.homeValueRangeLow = responseDoc["homeValueRangeLow"] | -1;
+  result.homeValueRangeHigh = responseDoc["homeValueRangeHigh"] | -1;
+  result.homeValuePricePerSquareFoot = responseDoc["homeValuePricePerSquareFoot"] | -1.0;
+  result.homeValueUpdatedAtUtc = parseIso8601Utc(responseDoc["homeValueUpdatedAtUtc"] | "");
   const int intervalSeconds = responseDoc["checkInIntervalSeconds"] | 300;
   result.intervalMs = static_cast<uint32_t>(intervalSeconds) * 1000UL;
 

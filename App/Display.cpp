@@ -96,6 +96,12 @@ constexpr uint32_t kListingsBanner = 0xA13D2Du;
 // just a darker, greener shade than either of the two colours already in use
 // so the three are still told apart at a glance.
 constexpr uint32_t kTidesBanner = 0x0F6B5Cu;
+// A muted bronze/gold, distinct from every banner above it including
+// listings' brick-red and sunmoon's burnt-orange amber - this card's subject
+// is literally money, so it earns its own "value" hue rather than borrowing
+// either of the two nearest-in-warmth colours already claimed by an
+// unrelated real-estate or astronomy card.
+constexpr uint32_t kHomeValueBanner = 0x8A6D1Bu;
 // Near-black indigo, distinct from every banner above it including moon's
 // lighter indigo - the one card whose subject is literally outer space, so
 // it earns the darkest banner on the device rather than competing for a hue
@@ -1000,6 +1006,58 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
   constexpr int kIconRadius = 16;
   drawTideIcon(kIconColumnX, 44 + 9, kIconRadius, /*rising=*/true);
   drawTideIcon(kIconColumnX, 90 + 9, kIconRadius, /*rising=*/false);
+
+  drawClock();
+  restoreDefaultFont();
+}
+
+void showHomeValueCard(const String& estimateText, const String& rangeText, const String& detail) {
+  lcd.fillScreen(bg());
+  drawCardBanner("HOME VALUE", kHomeValueBanner, 150);
+
+  // Same stat-row layout as showSunMoonCard()/showTidesCard() above: two
+  // rows, label left and value right-justified. Unlike either of those,
+  // "Range" arrives already rounded to the nearest thousand by HomeValue.cpp
+  // rather than comma-grouped in full - see that module's own
+  // formatThousands() remarks for why a fully-precise range does not fit
+  // this column without either colliding with the label or being
+  // character-truncated into a wrong number.
+  const int rightX = kScreenW - kCardMargin;
+  const int rowValueWidth = 150;
+
+  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setTextSize(1);
+
+  lcd.setTextColor(muted(), bg());
+  lcd.setTextDatum(top_left);
+  lcd.drawString("Est. value", kCardMargin, 44);
+  lcd.setTextColor(ink(), bg());
+  drawRightJustified(estimateText, rightX, 44, rowValueWidth);
+
+  lcd.setTextColor(muted(), bg());
+  lcd.drawString("Range", kCardMargin, 90);
+  lcd.setTextColor(ink(), bg());
+  drawRightJustified(rangeText, rightX, 90, rowValueWidth);
+
+  // detail (price-per-square-foot and the RentCast refresh date) is optional
+  // and pushes the fixed compliance line below it down by however many lines
+  // it actually used - the same "grow down rather than overlap" reasoning
+  // showAircraftCard() applies to its own variable-height route line.
+  int nextY = 140;
+  if (detail.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    const int detailLines =
+        wrappedLeftText(detail, kCardMargin, nextY, muted(), 18, 2, kScreenW - kCardMargin * 2);
+    nextY += detailLines * 18 + 6;
+  }
+
+  // The one line this function draws unconditionally, regardless of what any
+  // of the three parameters say - see this function's own declaration in
+  // Display.h for why this compliance wording lives here rather than in
+  // whatever HomeValue.cpp happened to pass as `detail`.
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  wrappedLeftText("Automated estimate, not an appraisal.", kCardMargin, nextY, muted(), 18, 2,
+                  kScreenW - kCardMargin * 2);
 
   drawClock();
   restoreDefaultFont();
