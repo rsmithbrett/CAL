@@ -10,6 +10,17 @@
 /// because a household staring at a frozen screen while a 40KB PNG times out
 /// is a far worse outcome than a card with no picture on it.
 ///
+/// **When there is no SD card at all** (missing, or a card that will not
+/// mount even after Sd::begin()'s own retry), ensureCached() has nothing to
+/// stat or write to and returns false immediately - "fetch failed" in the
+/// path above, but for a reason no retry of the SD side will ever fix.
+/// fetchToRam()/drawRam() below exist for exactly that case: a caller who
+/// sees ensureCached() fail may fall back to fetching the same bytes
+/// straight into RAM and drawing them from there, with no SD dependency at
+/// all. It costs a network fetch every refresh instead of one ever - see
+/// fetchToRam()'s own remarks for why that is an accepted tradeoff rather
+/// than an oversight.
+///
 /// Same storage approach as CYD-Dickey, which keeps its PNGs on SD and
 /// addresses them by path (`splashImage = "/LRBH.PNG"`, see its SdCard.cpp
 /// and showSplashScreen()). The difference here is that the path is derived
@@ -76,6 +87,69 @@ bool drawCached(const String& id);
 /// whole card the way Graphic.cpp's is. Never fetches, same reasoning as
 /// drawCached().
 bool drawCachedInRect(const String& id, int32_t x, int32_t y, int32_t w, int32_t h);
+
+/// A caller-owned, grow-only heap buffer for one direct-to-RAM asset fetch -
+/// fetchToRam()'s/drawRam()'s equivalent of Display.cpp's own gFileBuffer,
+/// but owned per-caller rather than shared globally. It has to be per-caller:
+/// unlike an SD file (one independently-persisted copy per id, on the card),
+/// a RAM fetch has nowhere else to live between Graphic.cpp's fetch() call
+/// (which may run for several Instance<N>s back-to-back on the same refresh
+/// tick) and its later draw() call (which can happen many times before the
+/// next refresh). A single shared buffer would let one instance's fetch()
+/// silently overwrite another's still-needed bytes; giving each caller its
+/// own instance of this struct - exactly the way Graphic.cpp's Instance<N>
+/// already gives each picture its own gCachedId/gReady - avoids that while
+/// keeping the same "static, grow-only, never freed" discipline gFileBuffer
+/// established: this is meant to live as a member of something that persists
+/// for the process lifetime (a template's per-N static, in Graphic.cpp's
+/// case), not to be constructed fresh per call.
+struct RamAssetBuffer {
+  uint8_t* data = nullptr;
+  size_t capacity = 0;
+  /// Valid bytes currently held. Only meaningful when the most recent
+  /// fetchToRam() call into this buffer returned true; a caller must not
+  /// read `data`/`size` after a failed call, since a failure can leave a
+  /// partial write in place (see fetchToRam()'s own remarks).
+  size_t size = 0;
+};
+
+/// The RAM-only sibling of ensureCached(): same HTTP GET, same
+/// X-Device-Secret auth, same sha256 integrity check against the server's
+/// X-Asset-Sha256 header as fetchToCard() (see Assets.cpp), but the response
+/// body lands in `buffer` instead of an SD file - no SD access of any kind,
+/// so this is what keeps "no picture" from being the only option on a device
+/// whose SD card will not mount at all. `buffer` grows to fit (realloc,
+/// never shrinks) and is the caller's to keep reusing across calls; this
+/// function never frees it, even on failure, matching gFileBuffer's own
+/// never-shrink policy in Display.cpp.
+///
+/// **Deliberately not persisted anywhere - this is the tradeoff that makes
+/// the fallback possible, not a bug.** With no SD card there is nowhere to
+/// cache the bytes, so whatever calls this pays the network cost again on
+/// every refresh interval for as long as the fallback stays active, instead
+/// of the usual one-fetch-ever an SD-backed asset costs. That is real,
+/// ongoing network use this codebase does not normally ask of a "cached"
+/// asset - accepted here because showing the picture at all, even at that
+/// cost, is what "if it cannot do Graphics, it does not exist" requires, and
+/// because a device already in this state has a working network connection
+/// to spend it on (a card fetch happening at all is proof of that).
+///
+/// Returns false on any failure - TLS, non-200, a size/hash mismatch, or
+/// running out of heap growing `buffer` - having written nothing the caller
+/// should trust; `buffer.size` is only valid after a true return.
+bool fetchToRam(const String& id, RamAssetBuffer& buffer);
+
+/// Draws a buffer previously filled by fetchToRam(), with the same retry
+/// count, decode-failure reporting and dedup as drawFullScreen()/drawCached()
+/// give an SD-backed asset (see kMaxDrawAttempts in Assets.cpp) - a transient
+/// decode glitch deserves the same second chance regardless of which path the
+/// bytes arrived by. giveUpOnDecodeFailure()'s invalidate(id) call is a
+/// harmless no-op here (there is nothing on SD to invalidate, and
+/// invalidate() already early-returns when Sd::isReady() is false, which is
+/// exactly the condition this path exists for) - reused as-is rather than
+/// forked, so a RAM-fetched picture's decode failures show up in the same
+/// decodeFailureIds()/decodeFailureCount() report CheckIn.cpp already sends.
+bool drawRam(const String& id, const RamAssetBuffer& buffer);
 
 /// How many assets are currently cached - reported by Telemetry so the
 /// fleet's storage view can show cache growth alongside sdUsedBytes.

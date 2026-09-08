@@ -121,6 +121,27 @@ bool isSafeId(const String& id) {
 
 String pathFor(const String& id) { return String(kCacheDir) + "/" + id + kExtension; }
 
+/// Grows a caller-owned RamAssetBuffer to at least `needed` bytes, exactly
+/// the way Display.cpp's own ensureFileBufferCapacity() grows gFileBuffer -
+/// realloc(), never shrinks, so a buffer that has already grown to fit the
+/// largest asset a fallback-mode device has shown never pays another
+/// allocation for anything smaller. Takes the buffer by reference rather
+/// than operating on a single module-global precisely because it is not a
+/// single module-global - see RamAssetBuffer's own remarks in Assets.h for
+/// why each caller needs its own.
+bool ensureRamBufferCapacity(RamAssetBuffer& buffer, size_t needed) {
+  if (needed <= buffer.capacity) {
+    return true;
+  }
+  uint8_t* grown = static_cast<uint8_t*>(realloc(buffer.data, needed));
+  if (grown == nullptr) {
+    return false;
+  }
+  buffer.data = grown;
+  buffer.capacity = needed;
+  return true;
+}
+
 /// Streams the response straight to the card rather than through a String -
 /// an asset is tens of kilobytes and this device has roughly 274KB of free
 /// heap, so buffering the whole body first is exactly the allocation that
@@ -314,6 +335,135 @@ bool fetchToCard(const String& id) {
   return true;
 }
 
+/// The RAM-only sibling of fetchToCard() above - same request, same
+/// X-Device-Secret header, same streamed sha256, but the destination is
+/// `buffer` instead of a temp file on SD, and there is no rename-into-place
+/// or SD readback-verify step, because there is nothing on SD to rename or
+/// read back. See Assets.h's own remarks on fetchToRam() for why this
+/// exists and the network-cost tradeoff it accepts.
+bool fetchToRamImpl(const String& id, RamAssetBuffer& buffer) {
+  NetworkClientSecure client;
+  if (!Tls::configure(client)) {
+    Log::line("[assets] TLS setup failed (direct-to-RAM fetch)");
+    return false;
+  }
+
+  HTTPClient http;
+  const String url = String("https://") + Config::kServiceHost + kFetchPathPrefix + id + kFetchPathSuffix;
+  if (!http.begin(client, url)) {
+    Log::printf("[assets] could not begin direct-to-RAM request for '%s'", id.c_str());
+    return false;
+  }
+  http.setTimeout(Config::kHttpTimeoutMs);
+  http.addHeader("X-Device-Secret", Identity::deviceSecret());
+
+  const int status = http.GET();
+  if (status != 200) {
+    http.end();
+    Log::printf("[assets] direct-to-RAM fetch of '%s' failed, http status=%d", id.c_str(), status);
+    return false;
+  }
+
+  // Same "read before the body is consumed" reasoning as fetchToCard() above.
+  const int expectedSize = http.getSize();
+  const String expectedHash = http.header("X-Asset-Sha256");
+
+  // Grow up front when the server told us how big this is (the ordinary
+  // case) - one allocation instead of one per 512-byte chunk below. A
+  // chunked response with no Content-Length still works: ensureRamBufferCapacity()
+  // is called again inside the loop as bytes actually arrive.
+  if (expectedSize > 0 && !ensureRamBufferCapacity(buffer, static_cast<size_t>(expectedSize))) {
+    http.end();
+    Log::printf(
+        "[assets] out of memory for a %d-byte direct-to-RAM fetch of '%s' (freeHeap=%u "
+        "maxAllocHeap=%u)",
+        expectedSize, id.c_str(), static_cast<unsigned>(ESP.getFreeHeap()),
+        static_cast<unsigned>(ESP.getMaxAllocHeap()));
+    return false;
+  }
+
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha);
+  mbedtls_sha256_starts(&sha, 0);
+
+  NetworkClient* stream = http.getStreamPtr();
+  uint8_t chunk[512];
+  size_t written = 0;
+  bool outOfMemory = false;
+  const uint32_t deadline = millis() + Config::kHttpTimeoutMs;
+
+  while (http.connected() && (expectedSize < 0 || written < static_cast<size_t>(expectedSize))) {
+    const size_t available = stream->available();
+    if (available == 0) {
+      if (millis() > deadline) {
+        break;
+      }
+      delay(1);
+      continue;
+    }
+    const size_t toRead = available > sizeof(chunk) ? sizeof(chunk) : available;
+    const int read = stream->readBytes(chunk, toRead);
+    if (read <= 0) {
+      continue;
+    }
+    if (!ensureRamBufferCapacity(buffer, written + static_cast<size_t>(read))) {
+      outOfMemory = true;
+      Log::printf(
+          "[assets] out of memory growing the direct-to-RAM buffer past %u bytes for '%s' "
+          "(freeHeap=%u maxAllocHeap=%u)",
+          static_cast<unsigned>(written), id.c_str(), static_cast<unsigned>(ESP.getFreeHeap()),
+          static_cast<unsigned>(ESP.getMaxAllocHeap()));
+      break;
+    }
+    memcpy(buffer.data + written, chunk, static_cast<size_t>(read));
+    mbedtls_sha256_update(&sha, chunk, static_cast<size_t>(read));
+    written += static_cast<size_t>(read);
+  }
+  http.end();
+
+  if (outOfMemory) {
+    mbedtls_sha256_free(&sha);
+    return false;
+  }
+
+  if (written == 0) {
+    mbedtls_sha256_free(&sha);
+    Log::printf("[assets] direct-to-RAM fetch of '%s' received nothing", id.c_str());
+    return false;
+  }
+
+  // Same caveat as fetchToCard(): only checked when the server actually sent
+  // a Content-Length, and only proves the byte count, not the content.
+  if (expectedSize >= 0 && written != static_cast<size_t>(expectedSize)) {
+    mbedtls_sha256_free(&sha);
+    Log::printf("[assets] direct-to-RAM fetch of '%s' was truncated (got %u of %d bytes)",
+                id.c_str(), static_cast<unsigned>(written), expectedSize);
+    return false;
+  }
+
+  uint8_t digest[32];
+  mbedtls_sha256_finish(&sha, digest);
+  mbedtls_sha256_free(&sha);
+
+  // No SD readback-verify step here, unlike fetchToCard(): there is nothing
+  // written to storage to read back and re-hash. This sha256 check is
+  // therefore only the network-side half of fetchToCard()'s two - it proves
+  // the bytes now sitting in `buffer` are what the server actually sent, and
+  // that is the entire guarantee a RAM-only path can offer, since there is
+  // no storage step left afterwards for a card to silently corrupt.
+  if (expectedHash.length() > 0 && !toHex(digest, sizeof(digest)).equalsIgnoreCase(expectedHash)) {
+    Log::printf("[assets] direct-to-RAM fetch of '%s' failed integrity check (hash mismatch)",
+                id.c_str());
+    return false;
+  }
+
+  buffer.size = written;
+  Log::printf("[assets] fetched '%s' straight to RAM (%u bytes, sha256 verified) - no SD "
+              "dependency",
+              id.c_str(), static_cast<unsigned>(written));
+  return true;
+}
+
 }  // namespace
 
 void begin() {
@@ -337,6 +487,34 @@ bool ensureCached(const String& id) {
 
 bool isCached(const String& id) {
   return Sd::isReady() && isSafeId(id) && SD.exists(pathFor(id));
+}
+
+bool fetchToRam(const String& id, RamAssetBuffer& buffer) {
+  // isSafeId() here is not the path-traversal guard it is for the SD calls
+  // above - there is no filesystem path in this function at all - but the
+  // id still ends up concatenated into a URL and printed in log lines
+  // below, so the same bound and character allowlist are worth keeping
+  // rather than trusting an id that reached this far unchecked.
+  if (!isSafeId(id)) {
+    return false;
+  }
+  return fetchToRamImpl(id, buffer);
+}
+
+bool drawRam(const String& id, const RamAssetBuffer& buffer) {
+  if (buffer.data == nullptr || buffer.size == 0) {
+    return false;
+  }
+  for (uint8_t attempt = 0; attempt < kMaxDrawAttempts; ++attempt) {
+    if (Display::drawPngFromBuffer(buffer.data, buffer.size)) {
+      return true;
+    }
+    if (attempt + 1 < kMaxDrawAttempts) {
+      delay(kDrawRetryDelayMs);
+    }
+  }
+  giveUpOnDecodeFailure(id);
+  return false;
 }
 
 void invalidate(const String& id) {

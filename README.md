@@ -1040,6 +1040,52 @@ clears to the day/night background before decoding and centres the image on it
 every card's `draw()` returns, so there is nothing card-specific to do for
 either.
 
+**Falling back to RAM when there is no SD card at all.** Everything above
+assumes `ensureCached()` can at least stat or write a file — true for the
+ordinary "no card in the slot" case, and true again once `Sd::begin()`'s own
+retry recovers a marginal mount. It stopped being true for one real device
+tonight: three-plus consecutive power cycles, reseated in between, and the
+card would not mount at all — a bad card or connector, not a timing problem
+firmware can retry its way out of. Brett's standing rule is blunt about what
+that means: **if it cannot do Graphics, it does not exist.** A device that
+can reach the server perfectly well over WiFi but shows no pictures purely
+because of a dead SD slot is not an acceptable place to land.
+
+So `Graphic.cpp`'s `fetch()` now tries one more thing before giving up:
+when `Assets::ensureCached()` fails — no SD card, or a genuine cache-write
+failure — it calls `Assets::fetchToRam()`, the RAM-only sibling of
+`fetchToCard()`. Same HTTPS GET, same `X-Device-Secret` header, same
+streamed sha256 checked against the server's `X-Asset-Sha256`, but the
+response body lands in a heap buffer instead of an SD file, so the whole
+path never touches SD at all. Each `Instance<N>` owns its own
+`Assets::RamAssetBuffer` — static and grow-only, realloc'd in place exactly
+like `Display.cpp`'s own `gFileBuffer` (see the "Memory management approach"
+and "Why the PNG decoder's scratch buffer is never released" sections above)
+— rather than one buffer shared across all five, because a shared buffer
+would let one instance's fallback fetch silently overwrite another's
+still-showing picture in between fetches. `Display::drawPngFromBuffer()` is
+the matching draw entry point: same `fillScreen()`-first, same non-release
+of the decoder's scratch buffer, just skipping the SD read `drawPngFromSd()`
+would otherwise do, since the bytes are already in RAM.
+
+**The tradeoff, stated plainly rather than left implicit:** a RAM-fetched
+picture is not persisted anywhere — there is no SD to persist it to — so it
+re-fetches over the network on every `kContentRefreshIntervalMs` cycle
+(10 minutes) for as long as the fallback stays active, instead of the usual
+one-fetch-ever an SD-backed asset costs. That is real, ongoing network use
+this codebase does not normally ask of a cached asset. Accepted deliberately:
+a device already reaching this path has a working network connection (a
+fetch attempt happening at all proves it), and paying a repeated fetch is a
+far better trade than a household staring at a blank card where a picture
+belongs. `fetch()` logs distinctly at every stage of this — the fallback
+being tried, succeeding (with byte count), or failing — and `noteState()`
+reports "asset '...' is showing straight from RAM - no SD card available" on
+any state change, so a remote debug-log observer can see a device running
+this degraded path as a plainly visible, distinct state rather than
+inferring it from the absence of the ordinary SD-cache log line. A
+healthy-SD device's behaviour is completely unchanged: this fallback only
+ever runs after `ensureCached()` has already failed.
+
 ### An announcement card: admin-typed text, chosen by the server
 
 `App/Announcement.h`/`.cpp` is the text equivalent of the picture card just
@@ -1844,6 +1890,123 @@ resolved position, or no qualifying pass in the server's search window), and
 both a fresh pass arriving and a previously-known pass disappearing are
 logged to the remote debug stream on change, the same "state-change only"
 convention `Tides.cpp`'s tide logging already uses.
+
+## SelfTest: a diagnostic firmware for screen and SD isolation
+
+`SelfTest/` is a third sketch, sibling to `App/`, built the night of
+2026-09-06/07 after hours spent correlating scattered telemetry and debug-log
+lines across two real firmware bugs — the PNG-decode read-buffer heap
+fragmentation issue and the `Sd::begin()`-with-no-retry issue, both already
+fixed on `main` (see *Reading the whole file before decoding it* and *Bug
+fix: the RAM read buffer needed the same treatment* below, and `SdStorage.cpp`'s
+own remarks) — with no dedicated way to ask "does the screen work, does the
+SD card work" independent of the App's own incidental logging. In the user's
+own words: *"I want full instrumentation so that we can format and reformat
+as well as do file access and memory load tests with full telemetry. This is
+not acceptable behavior for the application. If it cannot do Graphics, it
+does not exist."*
+
+**Delivered exactly the way `App/` is.** CAL's own control flow needs zero
+changes: `Updater::installApplication()` already just installs whatever the
+manifest says, into `ota_0`. A per-device override on the server side (built
+concurrently, in the `DiscoverAroundMe` repo) is what points one specific
+unit at this build instead of the fleet's normal App version — SelfTest has
+no idea that override exists and doesn't need to. It reuses `App/`'s
+infrastructure rather than reinventing it: `Identity.h`/`.cpp` and
+`Tls.h`/`.cpp` are the same NVS-namespace-compatible copies App already
+carries, `WifiJoin.cpp` is the same stored-network join, `Log.h`/`.cpp` is
+the same remote debug-stream, and `Display.cpp` brings up the same
+`LGFX_AUTODETECT` panel and the same read-whole-file-into-RAM PNG decode
+technique `App/Display.cpp` uses post-fix — so a screen test here actually
+exercises the real driver stack a normal App run does, not a reimplementation
+of it.
+
+### The four test categories
+
+1. **Screen** (`ScreenTest.cpp`) — solid fills across a few colors, text
+   rendering at a few sizes, and, if any picture is already cached under
+   `/assets` on the card (the same directory `App/Assets.cpp` caches into —
+   this sketch shares the physical SD card and device with whatever App ran
+   here before), a real PNG decode through the exact RAM-buffer path that
+   broke tonight. **Honesty limit:** none of this can verify a human would
+   see the right picture — there is no camera on this device. A pass here
+   means every draw call completed and reported success where LovyanGFX's
+   API reports anything at all, not that the picture is correct.
+
+2. **SD format/reformat** (`SdTest.cpp`) — deliberately *not*
+   `App/Assets.cpp`'s `wipeCache()`, which the user directly criticized
+   tonight for silently reporting "0 files removed" success even when the
+   card was never mounted at all. This reports `SD.begin()`'s result
+   honestly, first, before anything else — a failed mount is a **failed**
+   test, not a silent no-op. If mounted, it reports card size/used bytes,
+   creates a test directory, writes three files sized to match real assets
+   from tonight's incident (2 KB, 34 KB, 80 KB) with a known deterministic
+   pattern, reads each back and verifies it byte-for-byte via a running
+   SHA-256 (the same technique `Assets.cpp`'s `fetchToCard()` uses), deletes
+   them, and confirms `SD.exists()` actually returns false afterward. Every
+   step reports its own pass/fail rather than one aggregate "reformat
+   complete." (There is no low-level format call in the Arduino `SD`
+   library — this is the honest substitute: a full create/write/verify/
+   delete round trip, which is what a "the card can be wiped and reused"
+   claim actually depends on.)
+
+3. **File I/O stress** (`SdTest.cpp`, `runFileIoTest`) — write/read/verify
+   at 2 KB, 34 KB, 80 KB and 150 KB, timing each write and read and verifying
+   content byte-for-byte via the same running-SHA-256 technique, so a
+   "network fine, storage corrupted the bytes" failure is caught the same
+   way `Assets.cpp`'s asset fetch already catches it.
+
+4. **Memory load** (`MemoryTest.cpp`) — allocates at 2 KB, 34 KB, 80 KB (the
+   exact sizes from the fixed read-buffer bug), then 100 KB and 150 KB to
+   find where this specific unit's heap actually gives out, reporting
+   `ESP.getFreeHeap()`/`ESP.getMaxAllocHeap()` before and after each
+   attempt and whether the allocation itself succeeded — directly answering
+   "how much contiguous memory does this specific unit actually have right
+   now," the exact question hours of manual log correlation were trying to
+   answer.
+
+### Reporting
+
+`Report.cpp` builds one JSON object per run, logs it in full to the remote
+debug stream unconditionally (so results are visible immediately even if the
+POST below fails or the endpoint isn't live yet), and makes a best-effort
+`POST /api/selftest/report` with the same `X-Device-Secret` header every
+other authenticated request uses. A non-200 response (or no route to the
+server at all) is logged clearly and never blocks or crashes the run — this
+sketch's server-side ingestion endpoint was being built concurrently by a
+separate session at the time this shipped, and a shape or path mismatch is
+expected to surface as a logged non-200 status, reconciled once both sides
+can compare notes, not as a crash.
+
+The shape, as implemented:
+
+```json
+{
+  "firmwareVersion": "selftest-1.0.0",
+  "screenTest": { "attempted": true, "passed": true, "detail": "fills=12ms text=8ms png=none-cached" },
+  "sdFormat": {
+    "attempted": true, "mountedBefore": true, "mountedAfter": true,
+    "formatSucceeded": true, "errorDetail": ""
+  },
+  "fileIo": [
+    { "sizeBytes": 2048, "writeSucceeded": true, "writeMs": 9, "readSucceeded": true, "readMs": 6, "verifySucceeded": true, "errorDetail": "" }
+  ],
+  "memoryLoad": [
+    { "requestedBytes": 2048, "allocationSucceeded": true, "freeHeapBefore": 210000, "freeHeapAfter": 207900, "maxAllocHeapBefore": 110000, "maxAllocHeapAfter": 108000 }
+  ],
+  "overallSummary": { "totalTestsRun": 11, "totalPassed": 11, "totalFailed": 0 }
+}
+```
+
+### After the report
+
+The full pass/fail summary is drawn on screen — one line per category with
+pass/fail/detail, matching the standing "if it cannot do Graphics, it does
+not exist" complaint this sketch exists to answer. The suite then re-runs
+automatically every `Config::kRerunIntervalMs` (30s) or immediately on a
+BOOT-button press, so a marginal SD card's intermittent behaviour has a
+chance to actually show up on a device someone is standing over, without
+needing a fresh flash between runs.
 
 ## Provisioning: how a device gets its secret
 

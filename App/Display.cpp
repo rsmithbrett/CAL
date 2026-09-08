@@ -1915,4 +1915,25 @@ bool drawPngFromSd(const String& path) {
   return ok;
 }
 
+bool drawPngFromBuffer(const uint8_t* data, size_t size) {
+  lcd.fillScreen(bg());
+  bool ok = false;
+  if (data == nullptr || size == 0) {
+    Log::line("[display] drawPngFromBuffer called with no data");
+  } else {
+    ok = lcd.drawPng(data, size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
+    // Deliberately NOT calling lcd.releasePngMemory() here either - same
+    // fragmentation reasoning as drawPngFromSd() above. This path exists to
+    // save a device whose SD card will not mount at all, not to reintroduce
+    // the exact per-draw allocation churn that reasoning already ruled out.
+    if (!ok) {
+      Log::printf("[display] failed to draw a %u-byte RAM buffer (freeHeap=%u maxAllocHeap=%u)",
+                  static_cast<unsigned>(size), static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(ESP.getMaxAllocHeap()));
+    }
+  }
+  restoreDefaultFont();
+  return ok;
+}
+
 }  // namespace Display

@@ -371,6 +371,17 @@ bool drawPngFromSd(const String& path);
 /// confirmed against an actual decode of an actual logo on this actual panel.
 bool drawPngFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, int32_t h);
 
+/// Draws a PNG already sitting in RAM, scaled to fit and centred on the
+/// whole panel - the no-SD-card counterpart to drawPngFromSd() above, for
+/// Assets::fetchToRam()'s direct-to-RAM fallback. Same fillScreen()-first
+/// (a failed decode leaves a clean screen, not a half-painted one), same
+/// deliberate non-release of the PNG decoder's scratch buffer afterwards
+/// (see drawPngFromSd()'s own comment for the fragmentation reasoning this
+/// shares), same false-means-drew-nothing contract. The only difference
+/// from drawPngFromSd() is that there is no SD read to do first: the caller
+/// already has the bytes, from the network rather than from a file.
+bool drawPngFromBuffer(const uint8_t* data, size_t size);
+
 }  // namespace Display
 
 // A note on the day/night theme this file implements (see setEnvironment()

@@ -60,11 +60,33 @@ struct Instance {
   static String gCachedId;
   static bool gReady;
 
+  /// True when gCachedId's bytes came from fetchToRam() rather than the SD
+  /// cache - set only when ensureCached() has already failed this cycle (no
+  /// SD card, or a genuine cache-write failure) and the direct-to-RAM
+  /// fallback below is what actually produced gReady. draw() reads this to
+  /// decide whether to hand gCachedId to Assets::drawCached() (an SD read)
+  /// or Assets::drawRam() (gRamBuffer, already in RAM) - drawing from the
+  /// wrong one would either miss the picture entirely or, worse, try to
+  /// read an SD file that was never written. See Assets.h's fetchToRam() for
+  /// why this is not persisted anywhere and has to be re-earned every fetch().
+  static bool gFromRam;
+
+  /// This instance's own direct-to-RAM buffer, used only while gFromRam is
+  /// true. One per instantiation, not one shared across all five - see
+  /// Assets.h's RamAssetBuffer remarks for why a single shared buffer would
+  /// let one instance's fallback fetch silently clobber another's still-
+  /// showing picture. Static and grow-only like every other buffer this
+  /// codebase added tonight: never freed for the process lifetime, so a
+  /// device stuck in fallback mode pays at most one allocation per distinct
+  /// size it has ever shown, not one per refresh.
+  static Assets::RamAssetBuffer gRamBuffer;
+
   /// Logged only on a change of state. This runs on the refresh timer, so
   /// logging unconditionally would put the same line in the remote debug
   /// stream every ten minutes forever, for every instance.
   static String gLastLoggedId;
   static bool gLastLoggedReady;
+  static bool gLastLoggedFromRam;
 
   /// The asset the *current* policy wants, read back off this instance's own
   /// descriptor. Deliberately not cached in a global of its own: the policy
@@ -88,13 +110,22 @@ struct Instance {
   }
 
   static void noteState(const char* assetId) {
-    if (gReady == gLastLoggedReady && gLastLoggedId == assetId) {
+    if (gReady == gLastLoggedReady && gLastLoggedId == assetId &&
+        gFromRam == gLastLoggedFromRam) {
       return;
     }
     gLastLoggedReady = gReady;
     gLastLoggedId = assetId;
+    gLastLoggedFromRam = gFromRam;
     if (strlen(assetId) == 0) {
       Log::printf("[%s] no assetId in this card's policy - nothing to show", id());
+    } else if (gReady && gFromRam) {
+      // Distinct wording on purpose - see Assets.h's fetchToRam() remarks:
+      // a remote debug-log observer should be able to tell "running without
+      // SD" apart from the ordinary cached path at a glance, not have to
+      // infer it from the absence of an SD-related line.
+      Log::printf("[%s] asset '%s' is showing straight from RAM - no SD card available", id(),
+                  assetId);
     } else if (gReady) {
       Log::printf("[%s] asset '%s' is on the card", id(), assetId);
     } else {
@@ -123,6 +154,31 @@ struct Instance {
     }
 
     gReady = Assets::ensureCached(String(wanted));
+    gFromRam = false;
+    if (!gReady) {
+      // ensureCached() failed - either there is no SD card at all, or a
+      // genuine cache-write failure. Either way the picture is not gone,
+      // only its usual SD-cached path is - the bytes are still perfectly
+      // fetchable over the network this device already reached the server
+      // on, so try that straight into RAM before giving up entirely. See
+      // Assets.h's fetchToRam() for the network-cost tradeoff this accepts
+      // and Assets.RamAssetBuffer for why gRamBuffer is this instance's own
+      // rather than shared.
+      Log::printf(
+          "[%s] SD cache unavailable for '%s' - falling back to a direct-to-RAM fetch (no SD "
+          "dependency)",
+          id(), wanted);
+      gReady = Assets::fetchToRam(String(wanted), gRamBuffer);
+      gFromRam = gReady;
+      if (gReady) {
+        Log::printf("[%s] direct-to-RAM fallback for '%s' succeeded (%u bytes) - showing without "
+                    "SD",
+                    id(), wanted, static_cast<unsigned>(gRamBuffer.size));
+      } else {
+        Log::printf("[%s] direct-to-RAM fallback for '%s' also failed - no picture this cycle",
+                    id(), wanted);
+      }
+    }
     gCachedId = gReady ? wanted : "";
     noteState(wanted);
   }
@@ -183,19 +239,29 @@ struct Instance {
       return;
     }
 
-    if (Assets::drawCached(gCachedId)) {
+    // gFromRam picks which of Assets' two draw entry points owns this
+    // instance's bytes right now - drawCached() reads gCachedId back off
+    // SD, drawRam() reads gRamBuffer, and using the wrong one for the
+    // current state would either miss an SD-cached picture or try to read
+    // an SD file the RAM fallback never wrote. Both give the same retry
+    // count and decode-failure reporting (see Assets.h's drawRam() remarks).
+    const bool drew =
+        gFromRam ? Assets::drawRam(gCachedId, gRamBuffer) : Assets::drawCached(gCachedId);
+    if (drew) {
       return;
     }
 
-    // Assets::drawCached() already retried this same file a few times,
-    // logged and invalidated it on total failure (see Assets.cpp's own
-    // giveUpOnDecodeFailure()), and left the next fetch() refresh cycle to
-    // re-download and re-verify a fresh copy - see Assets.h's own remarks.
-    // All this instance needs to do is stop showing the stale picture:
-    // clearing gReady takes it straight back out of the rotation on the
-    // next computed card, so a bad asset costs one dwell rather than
-    // reappearing every cycle, and it will reappear on its own once fetch()
-    // lands a working copy.
+    // Assets::drawCached()/drawRam() already retried this same asset a few
+    // times and logged the failure (see Assets.cpp's own
+    // giveUpOnDecodeFailure()) - drawCached() additionally invalidated the
+    // SD copy so the next fetch() re-downloads and re-verifies a fresh one
+    // (see Assets.h's own remarks); drawRam() has no SD copy to invalidate,
+    // and fetch() re-fetches into RAM every cycle regardless. All this
+    // instance needs to do here is stop showing the stale picture: clearing
+    // gReady takes it straight back out of the rotation on the next computed
+    // card, so a bad asset costs one dwell rather than reappearing every
+    // cycle, and it will reappear on its own once fetch() lands a working
+    // copy.
     gReady = false;
     Log::printf("[%s] asset '%s' would not decode - dropping this card for now", id(),
                 gCachedId.c_str());
@@ -225,9 +291,15 @@ String Instance<N>::gCachedId;
 template <int N>
 bool Instance<N>::gReady = false;
 template <int N>
+bool Instance<N>::gFromRam = false;
+template <int N>
+Assets::RamAssetBuffer Instance<N>::gRamBuffer;
+template <int N>
 String Instance<N>::gLastLoggedId;
 template <int N>
 bool Instance<N>::gLastLoggedReady = false;
+template <int N>
+bool Instance<N>::gLastLoggedFromRam = false;
 
 // The one piece of Instance<N> that cannot be written generically - each
 // instance's id is a distinct string, not a function of N in any way the
