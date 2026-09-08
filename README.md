@@ -1794,6 +1794,57 @@ logged and dropped, not retried before the next check-in comes around; this
 is diagnostics, not a control channel, and nothing downstream depends on it
 succeeding.
 
+### The ISS flyover card: a live position, and now a next-pass prediction
+
+`App/IssFlyover.h`/`.cpp` is one interstitial card (`issflyover`) with two
+display modes, both fed by check-in and neither fetching anything of its
+own — see the DiscoverAroundMe repo's README, its own ISS section, for the
+canonical wire contract and the server-side orbital mechanics behind both.
+
+**Live position**, the original half: `issLatitude`/`issLongitude`/
+`issDistanceMiles`/`issBearingDegrees` off the check-in response are the
+station's current sub-satellite point and this device's distance/bearing to
+it. `issDistanceMiles` negative means "nothing to show" — open-notify
+unreachable, a too-stale cached position, or this device's own position
+never resolved — and the card reports zero items and drops out of rotation,
+same as MoonPhase's and Tides' own cards.
+
+**Next-pass prediction, found live tonight**: the server side of this — a
+real CelesTrak element set and a vendored SGP4 propagator answering "when
+does the ISS next clear this device's horizon" — shipped earlier this same
+session, adding seven `issNextPass*` fields to the check-in response. Nobody
+ever taught this firmware to read them, and it took a household actually
+noticing — "space station is not reporting when it will fly over" — for that
+gap to surface. `CheckIn.cpp` now parses the four `issNextPass*Utc` fields
+(ISO-8601 UTC instants, unlike every other check-in-driven time field this
+firmware had before, which are minutes-into-today) into epoch seconds with
+its own `parseIso8601Utc()` — a hand-rolled `days_from_civil` calculation
+rather than `timegm()`/`mktime()`, since every field here is already UTC and
+this avoids depending on libc/TZ behavior that varies by platform. 0 is the
+"absent" sentinel for those four (an epoch of 0 is 1970, as obviously wrong
+for a predicted future pass as `issLatitude`'s -999.0 is for a coordinate);
+-1.0 is the sentinel for the three azimuth/elevation fields, matching
+`issBearingDegrees`'s own convention.
+
+`IssFlyover::setNextPass()` is called from `App.ino` right alongside
+`setPosition()`. When there is no live position but a pass is upcoming, the
+card falls back to it instead of showing nothing: "Next pass"/"Direction"
+rows for the local rise time and compass direction (converted from the
+absolute UTC instant with the same `time(nullptr) + utcOffsetMinutes * 60`
+then `gmtime_r` idiom `ClockDate.cpp` already uses for the current time, just
+applied to an arbitrary future instant), and a detail line giving the peak
+elevation, its compass direction, and the local set time — the single best
+"is this one worth going outside for" signal that would not otherwise fit in
+two stat rows. A pass stops counting as present once its own predicted set
+time is already behind `time(nullptr)`, so this card never keeps advertising
+a pass that has already happened just because the device has not checked in
+again since. Absent is a real answer here too, for the same three reasons
+the live position already has (no CelesTrak element set ever fetched, no
+resolved position, or no qualifying pass in the server's search window), and
+both a fresh pass arriving and a previously-known pass disappearing are
+logged to the remote debug stream on change, the same "state-change only"
+convention `Tides.cpp`'s tide logging already uses.
+
 ## Provisioning: how a device gets its secret
 
 The Device Client Specification's §13 lists "the factory provisioning process by

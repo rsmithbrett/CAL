@@ -27,6 +27,42 @@ String nowAsIso8601Utc() {
   return String(buffer);
 }
 
+/// Days from the civil epoch (1970-01-01) to the given UTC calendar date -
+/// Howard Hinnant's well-known days_from_civil algorithm. Used by
+/// parseIso8601Utc() below instead of reaching for timegm()/mktime(): both
+/// depend on libc/TZ behavior that varies by platform, where this is a pure
+/// integer calculation with no timezone concept to get wrong - exactly what
+/// is needed here since every field this parses is already UTC.
+long daysFromCivil(int year, int month, int day) {
+  year -= month <= 2 ? 1 : 0;
+  const long era = (year >= 0 ? year : year - 399) / 400;
+  const unsigned yearOfEra = static_cast<unsigned>(year - era * 400);
+  const unsigned dayOfYear =
+      (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+  const unsigned dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear;
+  return era * 146097 + static_cast<long>(dayOfEra) - 719468;
+}
+
+/// Parses the server's "2026-09-08T21:42:00Z"-style ISO-8601 UTC instant
+/// into epoch seconds, for the ISS next-pass fields below - see CheckIn.h's
+/// own remarks on why these are absolute instants rather than the
+/// minutes-into-today shape sunrise/tide fields use. Returns 0 (this
+/// firmware's "absent" sentinel for these fields) for a JSON null, a missing
+/// field, or anything this sscanf() cannot parse - deliberately tolerant
+/// rather than asserting, since a malformed instant is exactly as much "no
+/// answer" to this device as a JSON null is.
+time_t parseIso8601Utc(const char* text) {
+  if (text == nullptr || text[0] == '\0') {
+    return 0;
+  }
+  int year, month, day, hour, minute, second;
+  if (sscanf(text, "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &minute, &second) != 6) {
+    return 0;
+  }
+  const long days = daysFromCivil(year, month, day);
+  return static_cast<time_t>(days) * 86400 + hour * 3600 + minute * 60 + second;
+}
+
 /// Rides the ordinary check-in rather than getting an endpoint of its own -
 /// that is the whole shape of the feature. A press is a passive push: it is
 /// recorded locally, carried along on the next heartbeat, and the device's
@@ -261,6 +297,20 @@ Result perform() {
   result.issLongitude = responseDoc["issLongitude"] | -999.0;
   result.issDistanceMiles = responseDoc["issDistanceMiles"] | -1.0;
   result.issBearingDegrees = responseDoc["issBearingDegrees"] | -1.0;
+  // A different feature from the live position just above - the station's
+  // next predicted pass. `| ""` then parseIso8601Utc() covers a JSON null and
+  // a field an older server never sends at all the same way `| -1.0` does
+  // for the plain-number fields; parseIso8601Utc() itself returns 0 (this
+  // struct's "absent" sentinel for a time_t) for both. See CheckIn.h's own
+  // remarks on issNextPassRiseUtc for the full reasoning.
+  result.issNextPassRiseUtc = parseIso8601Utc(responseDoc["issNextPassRiseUtc"] | "");
+  result.issNextPassRiseAzimuthDegrees = responseDoc["issNextPassRiseAzimuthDegrees"] | -1.0;
+  result.issNextPassMaxElevationUtc = parseIso8601Utc(responseDoc["issNextPassMaxElevationUtc"] | "");
+  result.issNextPassMaxElevationDegrees = responseDoc["issNextPassMaxElevationDegrees"] | -1.0;
+  result.issNextPassMaxElevationAzimuthDegrees =
+      responseDoc["issNextPassMaxElevationAzimuthDegrees"] | -1.0;
+  result.issNextPassSetUtc = parseIso8601Utc(responseDoc["issNextPassSetUtc"] | "");
+  result.issNextPassSetAzimuthDegrees = responseDoc["issNextPassSetAzimuthDegrees"] | -1.0;
   const int intervalSeconds = responseDoc["checkInIntervalSeconds"] | 300;
   result.intervalMs = static_cast<uint32_t>(intervalSeconds) * 1000UL;
 

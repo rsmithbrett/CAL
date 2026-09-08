@@ -138,6 +138,21 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
 void showIssFlyoverCard(const String& distanceText, const String& directionText,
                         const String& detail);
 
+/// The ISS card's second display mode: the station's next predicted pass,
+/// shown instead of showIssFlyoverCard() above whenever there is no live
+/// position to draw but a future pass is known - see IssFlyover.h's own
+/// remarks on why this is the same registered card falling back rather than
+/// a separate one. Same white/bannered card family and two-stat-rows-plus-
+/// detail layout as showIssFlyoverCard(): riseTimeText/riseDirectionText are
+/// already-formatted local values ("21:42", "312 deg NW") for the "Next
+/// pass"/"Direction" rows, and detail is the highest-point-and-set-time
+/// line, or empty if somehow there is nothing to add. This draws, it does
+/// not compute - the local-time and compass arithmetic lives in
+/// IssFlyover.cpp, not here, the same split every other check-in-driven
+/// card in this family uses.
+void showIssNextPassCard(const String& riseTimeText, const String& riseDirectionText,
+                          const String& detail);
+
 /// The Moon-phase card - the first of a new "graphical style" card family:
 /// an actual drawn disc rather than a text description, labeled with
 /// phaseName underneath. phase (0-1 elongation fraction) and

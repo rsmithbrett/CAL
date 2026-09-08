@@ -1,6 +1,7 @@
 #include "IssFlyover.h"
 
 #include <math.h>
+#include <time.h>
 
 #include "Cards.h"
 #include "Display.h"
@@ -27,16 +28,46 @@ double gBearingDegrees = -1.0;
 /// gLastLoggedLowTide use.
 bool gLastLoggedHadData = false;
 
+/// The next predicted pass - see IssFlyover.h and CheckIn.h's own
+/// issNextPassRiseUtc remarks. 0 for the two epochs means "no pass to
+/// show", the same out-of-range-sentinel reasoning gLatitude/gLongitude
+/// above use; -1.0 for the azimuth/elevation fields matches gBearingDegrees'
+/// own convention.
+time_t gNextPassRiseUtc = 0;
+double gNextPassRiseAzimuthDegrees = -1.0;
+time_t gNextPassMaxElevationUtc = 0;
+double gNextPassMaxElevationDegrees = -1.0;
+double gNextPassMaxElevationAzimuthDegrees = -1.0;
+time_t gNextPassSetUtc = 0;
+double gNextPassSetAzimuthDegrees = -1.0;
+int gNextPassUtcOffsetMinutes = 0;
+
+/// Logged only on a change of state, same reasoning as gLastLoggedHadData.
+bool gLastLoggedHadNextPass = false;
+
 bool hasData() { return gDistanceMiles >= 0.0; }
+
+/// A pass counts as "present" only while it has not already happened - see
+/// IssFlyover.h's own remarks on why this card never keeps showing a pass
+/// whose predicted set time is already in the past just because the device
+/// has not checked in again since. time(nullptr) and the two epochs here are
+/// all the same absolute-UTC-seconds unit, so this comparison needs no
+/// local-offset arithmetic at all - that only enters when formatting a time
+/// for display, not when deciding whether one is still upcoming.
+bool hasNextPass() {
+  return gNextPassRiseUtc > 0 && gNextPassSetUtc > 0 && time(nullptr) < gNextPassSetUtc;
+}
 
 /// Nothing to fetch - see IssFlyover.h. Present because CardSpec requires
 /// one and the scheduler calls it.
 void cardFetch() {}
 
-/// One item once real data has arrived, none before - the same "report zero
-/// rather than invent wording" tolerance Tides.cpp's and MoonPhase.cpp's own
-/// cards get.
-uint16_t cardItemCount() { return hasData() ? 1 : 0; }
+/// One item once either the live position or a next pass has real data to
+/// show, none before - the same "report zero rather than invent wording"
+/// tolerance Tides.cpp's and MoonPhase.cpp's own cards get. cardDraw() below
+/// decides which of the two this actually draws, preferring the live
+/// position whenever both happen to be present at once.
+uint16_t cardItemCount() { return (hasData() || hasNextPass()) ? 1 : 0; }
 
 /// 8-point compass, matched to the nearest 45-degree sector - plenty of
 /// precision for "which way to look", which is all this card claims to
@@ -76,8 +107,52 @@ String coordinateText() {
   return String(buffer);
 }
 
+/// Local "HH:MM" for a UTC epoch instant - the same shift-then-gmtime_r
+/// idiom ClockDate.cpp uses for the current time (`time(nullptr) +
+/// utcOffsetMinutes*60` then gmtime_r), just applied to an arbitrary
+/// already-known instant instead of "now".
+String localHhMm(time_t utcEpoch) {
+  const time_t localEpoch = utcEpoch + static_cast<time_t>(gNextPassUtcOffsetMinutes) * 60;
+  struct tm localTm;
+  gmtime_r(&localEpoch, &localTm);
+  char buffer[6];
+  snprintf(buffer, sizeof(buffer), "%02d:%02d", localTm.tm_hour, localTm.tm_min);
+  return String(buffer);
+}
+
+String nextPassRiseTimeText() { return localHhMm(gNextPassRiseUtc); }
+
+/// Same "042 deg NE" shape as directionText() above, for the rise azimuth.
+String nextPassRiseDirectionText() {
+  char buffer[16];
+  snprintf(buffer, sizeof(buffer), "%03.0f deg %s", gNextPassRiseAzimuthDegrees,
+            compassPoint(gNextPassRiseAzimuthDegrees));
+  return String(buffer);
+}
+
+/// The two facts that do not fit in the two stat rows: how high the pass
+/// gets (the single best signal for "is this one worth going outside for")
+/// and when it is over - the same "extra context in the detail line" role
+/// showSunMoonCard()'s day-length string and this card's own coordinateText()
+/// already play.
+String nextPassDetailText() {
+  char buffer[64];
+  snprintf(buffer, sizeof(buffer), "Highest %.0f deg %s at %s, sets %s %s",
+            gNextPassMaxElevationDegrees, compassPoint(gNextPassMaxElevationAzimuthDegrees),
+            localHhMm(gNextPassMaxElevationUtc).c_str(), localHhMm(gNextPassSetUtc).c_str(),
+            compassPoint(gNextPassSetAzimuthDegrees));
+  return String(buffer);
+}
+
 void cardDraw(uint16_t) {
-  Display::showIssFlyoverCard(distanceText(), directionText(), coordinateText());
+  if (hasData()) {
+    Display::showIssFlyoverCard(distanceText(), directionText(), coordinateText());
+    return;
+  }
+  // No live position, but cardItemCount() only let this run at all because
+  // hasNextPass() is true - see IssFlyover.h's "second display mode" remarks.
+  Display::showIssNextPassCard(nextPassRiseTimeText(), nextPassRiseDirectionText(),
+                                nextPassDetailText());
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +196,32 @@ void setPosition(double latitude, double longitude, double distanceMiles, double
                   coordinateText().c_str());
     } else {
       Log::line("[issflyover] server reported no ISS position for this device");
+    }
+  }
+}
+
+void setNextPass(time_t riseUtc, double riseAzimuthDegrees, time_t maxElevationUtc,
+                  double maxElevationDegrees, double maxElevationAzimuthDegrees, time_t setUtc,
+                  double setAzimuthDegrees, int utcOffsetMinutes) {
+  gNextPassRiseUtc = riseUtc;
+  gNextPassRiseAzimuthDegrees = riseAzimuthDegrees;
+  gNextPassMaxElevationUtc = maxElevationUtc;
+  gNextPassMaxElevationDegrees = maxElevationDegrees;
+  gNextPassMaxElevationAzimuthDegrees = maxElevationAzimuthDegrees;
+  gNextPassSetUtc = setUtc;
+  gNextPassSetAzimuthDegrees = setAzimuthDegrees;
+  gNextPassUtcOffsetMinutes = utcOffsetMinutes;
+
+  const bool nowHasNextPass = hasNextPass();
+  if (nowHasNextPass != gLastLoggedHadNextPass) {
+    gLastLoggedHadNextPass = nowHasNextPass;
+    if (nowHasNextPass) {
+      Log::printf("[issflyover] next pass rises %s (%s), peaks %.0f deg near %s, sets %s",
+                  nextPassRiseTimeText().c_str(), nextPassRiseDirectionText().c_str(),
+                  gNextPassMaxElevationDegrees, localHhMm(gNextPassMaxElevationUtc).c_str(),
+                  localHhMm(gNextPassSetUtc).c_str());
+    } else {
+      Log::line("[issflyover] server reported no upcoming ISS pass for this device");
     }
   }
 }

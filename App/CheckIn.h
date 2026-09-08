@@ -117,6 +117,40 @@ struct Result {
   double issDistanceMiles = -1.0;
   double issBearingDegrees = -1.0;
 
+  /// The station's next predicted pass above this device's own horizon - a
+  /// completely different feature from issLatitude/issDistanceMiles above,
+  /// which are the live sub-satellite point right now. See CheckInModels.cs's
+  /// own IssNextPassRiseUtc remarks: this is real CelesTrak/SGP4 orbital
+  /// mechanics, a pass can be several days out, and it was pushed to the
+  /// check-in response long before this firmware ever read it - "found live"
+  /// while chasing the household's "space station is not reporting when it
+  /// will fly over" report, see IssFlyover.h.
+  ///
+  /// The three *Utc fields are absolute UTC instants (epoch seconds), unlike
+  /// sunriseMinutesUtc/nextHighTideMinutesUtc's minutes-into-today above -
+  /// parsed off the server's ISO-8601 strings by CheckIn.cpp's own
+  /// parseIso8601Utc(), since a pass can land on a different calendar day
+  /// than the check-in that reported it. 0 rather than -1 as the "absent"
+  /// sentinel: an epoch of 0 is 1970-01-01, as obviously wrong for a future
+  /// pass as issLatitude's -999.0 is for a real coordinate, and a real
+  /// instant is never exactly the Unix epoch. Absent for the same three
+  /// reasons issLatitude is: no CelesTrak element set ever fetched, this
+  /// device's own position never resolved, or no qualifying pass found in
+  /// the server's search window - all genuinely "there is no answer" rather
+  /// than an error.
+  ///
+  /// The four *AzimuthDegrees/the elevation field are compass/geometric
+  /// facts (0-360 and 0-90 respectively), so -1.0 is the "absent" sentinel
+  /// for them instead, matching issBearingDegrees's own convention - a real
+  /// azimuth or elevation is never negative.
+  time_t issNextPassRiseUtc = 0;
+  double issNextPassRiseAzimuthDegrees = -1.0;
+  time_t issNextPassMaxElevationUtc = 0;
+  double issNextPassMaxElevationDegrees = -1.0;
+  double issNextPassMaxElevationAzimuthDegrees = -1.0;
+  time_t issNextPassSetUtc = 0;
+  double issNextPassSetAzimuthDegrees = -1.0;
+
   /// How this device should rotate its cards. `present == false` means the
   /// server sent no policy this time, which means "keep whatever policy you
   /// already had" - explicitly not "show nothing". See

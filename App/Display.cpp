@@ -1040,6 +1040,44 @@ void showIssFlyoverCard(const String& distanceText, const String& directionText,
   restoreDefaultFont();
 }
 
+void showIssNextPassCard(const String& riseTimeText, const String& riseDirectionText,
+                          const String& detail) {
+  lcd.fillScreen(bg());
+  drawCardBanner("ISS", kIssFlyoverBanner, 90);
+
+  // Same stat-row layout and same banner/icon as showIssFlyoverCard()
+  // immediately above - this is that card's other display mode, not a
+  // different card (see IssFlyover.h) - just with "Next pass"/"Direction"
+  // rows for a future rise instead of "Distance"/"Direction" for a live
+  // position, and a detail line about the peak of the pass instead of the
+  // live coordinates.
+  const int rightX = kScreenW - kCardMargin;
+  const int rowValueWidth = 150;
+
+  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setTextSize(1);
+
+  lcd.setTextColor(muted(), bg());
+  lcd.setTextDatum(top_left);
+  lcd.drawString("Next pass", kCardMargin, 44);
+  lcd.setTextColor(ink(), bg());
+  drawRightJustified(riseTimeText, rightX, 44, rowValueWidth);
+
+  lcd.setTextColor(muted(), bg());
+  lcd.drawString("Direction", kCardMargin, 90);
+  lcd.setTextColor(ink(), bg());
+  drawRightJustified(riseDirectionText, rightX, 90, rowValueWidth);
+
+  if (detail.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setTextColor(muted(), bg());
+    wrappedLeftText(detail, kCardMargin, 140, muted(), 20, 2, kScreenW - kCardMargin * 2);
+  }
+
+  drawClock();
+  restoreDefaultFont();
+}
+
 // The Moon-phase card - the first "graphical style" card: an actual drawn
 // disc rather than a text description, captioned with phaseName underneath.
 //

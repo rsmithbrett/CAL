@@ -267,6 +267,14 @@ void performCheckIn() {
   // too.
   IssFlyover::setPosition(result.issLatitude, result.issLongitude, result.issDistanceMiles,
                           result.issBearingDegrees);
+  // Same reasoning, same push, one card over again, for that card's other
+  // display mode - the next predicted pass, shown when there is no live
+  // position (see IssFlyover.h). Found live tonight: the server side of
+  // this shipped earlier this session but nothing ever called setNextPass().
+  IssFlyover::setNextPass(result.issNextPassRiseUtc, result.issNextPassRiseAzimuthDegrees,
+                          result.issNextPassMaxElevationUtc, result.issNextPassMaxElevationDegrees,
+                          result.issNextPassMaxElevationAzimuthDegrees, result.issNextPassSetUtc,
+                          result.issNextPassSetAzimuthDegrees, result.utcOffsetMinutes);
 
   // The three card fields, in the order they have to happen in.
   //
