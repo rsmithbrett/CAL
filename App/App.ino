@@ -20,6 +20,7 @@
 // cable is a worse outcome for a household than one that keeps trying.
 
 #include <WiFi.h>
+#include <esp_system.h>  // esp_restart() - see checkHeapHealth() below
 
 // Overrides the ESP32 Arduino core's weak getArduinoLoopTaskStackSize() (see
 // cores/esp32/main.cpp), which otherwise sizes loopTask's stack at a fixed
@@ -146,6 +147,91 @@ void ensureWifiConnected() {
 
 uint32_t lastUpdateCheckMs = 0;
 uint32_t lastCheckInMs = 0;
+uint32_t lastHeapCheckMs = 0;
+
+// ---------------------------------------------------------------------------
+// Heap fragmentation watchdog.
+//
+// ESP.getFreeHeap() can stay generous (device 7 held ~85-140KB free all
+// night) while ESP.getMaxAllocHeap() - the largest still-*contiguous* free
+// block - keeps shrinking underneath it: enough small, long-lived
+// allocations (TLS session state, JSON documents, the PNG decoder's own
+// scratch buffer) scattered across an uptime eventually leave no single
+// block big enough for the next large one, even though the sum of free
+// memory looks fine. Observed live on device 7 tonight: maxAllocHeap fell
+// from 42996 to 34804 bytes within about a minute of uptime. Once it drops
+// below what a given asset's read buffer needs, that asset's card silently
+// stops decoding (see Graphic.cpp's "would not decode" line and Assets.cpp's
+// own out-of-memory logging) - the suspected, not yet proven, cause of this
+// device's periodic reboot pattern. Nothing else in this firmware reads this
+// value proactively today; Display.cpp and Assets.cpp only log it after an
+// allocation has already failed. This check acts before that point,
+// restarting deliberately - on this firmware's own terms, with a friendly
+// on-screen message and time for the log line explaining why to actually
+// reach the server - rather than waiting for a card to mysteriously vanish
+// or an allocation to fail somewhere less recoverable.
+//
+// This is independent of Loader.cpp's restart paths (requestUpdate(),
+// returnToLoaderForReprovisioning()): those hand control back to CAL in the
+// factory partition for a reprovision or an OTA install. This restart has
+// nothing to do with either - it only wants a clean heap for the *same*
+// App image already running, so it calls esp_restart() directly here rather
+// than routing through Loader.cpp.
+constexpr uint32_t kHeapCheckIntervalMs = 60000;  // once a minute
+
+// TLS handshakes and the rest of setup()'s own startup allocations
+// legitimately dip maxAllocHeap during the first stretch of a boot, before
+// the device has ever reached steady state - checking during that window
+// risks restarting a perfectly healthy device before it gets there at all,
+// which would turn this into the cause of a reboot loop rather than the fix
+// for one. 3 minutes is comfortably past every boot-time allocation this
+// firmware makes (WiFi join, SNTP, the first check-in, the first card
+// fetches) - this is not a hypothetical margin: it is exactly the kind of
+// mistake this codebase's own firmware-recovery procedure was caught making
+// earlier tonight, restarting before the device had ever settled.
+constexpr uint32_t kHeapCheckGraceMs = 3UL * 60UL * 1000UL;
+
+// 34804-42996 bytes is the range this was actually observed failing in
+// tonight (see the comment above) - 60000 leaves real headroom above that
+// range, so the device restarts on its own, controlled terms before a card
+// actually has to drop out for lack of a contiguous block.
+constexpr size_t kMinMaxAllocHeapBytes = 60000;
+
+/// Checked once per loop() iteration, but only actually reads
+/// ESP.getMaxAllocHeap() at most once every kHeapCheckIntervalMs - see the
+/// block comment above for the grace period and threshold this compares
+/// against.
+void checkHeapHealth() {
+  const uint32_t now = millis();
+  if (now < kHeapCheckGraceMs) {
+    return;
+  }
+  if (now - lastHeapCheckMs < kHeapCheckIntervalMs) {
+    return;
+  }
+  lastHeapCheckMs = now;
+
+  const size_t maxAllocHeap = ESP.getMaxAllocHeap();
+  if (maxAllocHeap >= kMinMaxAllocHeapBytes) {
+    return;
+  }
+
+  Log::printf(
+      "[health] maxAllocHeap=%u below %u byte threshold after %lu ms uptime - restarting to "
+      "clear fragmentation",
+      static_cast<unsigned>(maxAllocHeap), static_cast<unsigned>(kMinMaxAllocHeapBytes),
+      static_cast<unsigned long>(now));
+  // So the line above actually reaches the server instead of being lost with
+  // everything else in RAM at restart - same reasoning as every other
+  // pre-esp_restart() call site in this codebase (see Loader.cpp).
+  Log::flushNow();
+  Display::showStatus("Refreshing", "Reclaiming memory - back in a moment");
+  // Long enough for both the status message and the flushed log line to be
+  // visibly sent before the restart cuts everything off.
+  delay(1500);
+  esp_restart();
+  // Unreachable: the call above never returns.
+}
 
 // The server can shorten or lengthen this on every check-in response
 // (CheckInResponse.CheckInIntervalSeconds, resolved from the
@@ -401,6 +487,11 @@ void setup() {
 
 void loop() {
   ensureWifiConnected();
+
+  // Independent of every other timer in this loop, and checked early - see
+  // checkHeapHealth()'s own remarks for why this restarts the App directly
+  // rather than routing through Loader.cpp.
+  checkHeapHealth();
 
   if (forceUpdateCheckRequested()) {
     forceUpdateCheck();
