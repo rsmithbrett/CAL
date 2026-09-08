@@ -28,6 +28,13 @@ bool hasSecret();
 
 void saveSecret(const String& secret);
 
+/// Forgets the stored secret, so the next boot's `!hasSecret()` check is true
+/// again and CAL re-enrolls via Enrollment/RegisterViaMacAddress instead of
+/// presenting a value the server has already rejected forever. See
+/// App/Loader.cpp's `returnToLoaderForReprovisioning()` - the only caller -
+/// for why a rejected secret needs this and a rejected WiFi network does not.
+void clearSecret();
+
 /// The hardware address, formatted as the server expects it. This is what
 /// identifies an unprovisioned unit, since it has nothing else to offer.
 String macAddress();

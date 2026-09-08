@@ -110,7 +110,12 @@ it is written to be read top to bottom.
 
 1. **Display first, within about two seconds of power.** A dark screen is
    indistinguishable from a dead device and will be unplugged mid-setup. The
-   cached brand splash is shown if one exists, otherwise a neutral one.
+   cached brand splash is shown if one exists, otherwise a neutral one. Every
+   `showStatus()` screen for the rest of this ladder now draws that same
+   image again as its backdrop (moved up slightly to leave room for the
+   status line under it) rather than clearing to a blank screen and retyping
+   text - so a boot that works through several status lines in a row reads as
+   one continuous branded screen, not the brand flashing once and vanishing.
 2. **Load identity from NVS.** No device secret means the unit was never
    provisioned. That is a manufacturing fault, not something a household can
    resolve, so CAL says exactly that and stops rather than starting a setup
@@ -1377,7 +1382,11 @@ which sets the `updreq` flag and reboots into CAL, as described above:
    caught by a server-side re-registration mid-run would sit silently
    failing every `checkInIntervalMs` with no way back - invisible on its own
    screen, since a failed check-in draws nothing - until someone noticed and
-   held its BOOT button for 3 seconds by hand.
+   held its BOOT button for 3 seconds by hand. Unlike the BOOT-hold gesture
+   below, this reboot does not force the WiFi-setup portal - see this file's
+   "the secret-rejected path forced a WiFi reset it didn't need" for why a
+   rejected secret and a wrong network are different problems that got
+   conflated for a while.
 2. **`AppUpdater::newerVersionAvailable()` — kept, explicitly as a slower
    fallback.** This is the same plain yes/no manifest check it always was,
    still run independently on `Config::kUpdateCheckIntervalMs` (1 hour).
@@ -1501,6 +1510,84 @@ left that reaches for it to solve "how do I force the portal open."
 No automated test covers this - see this file's own remarks elsewhere on why
 `App/` firmware changes are verified by a clean compile, CAL's CI producing
 a real release build, and confirmation on real hardware, not a test suite.
+
+### Bug fix: the secret-rejected path forced a WiFi reset it didn't need
+
+Found live: a device whose secret was reset server-side (an admin's "Allow
+re-registration," or a straight `RegenerateSecret`) rebooted as designed via
+`performCheckIn()` → `Loader::returnToLoaderForReprovisioning()`, and landed
+on the captive-portal QR screen asking a person to redo WiFi setup - on a
+unit that had never moved, still sitting a foot from the same router it had
+joined a minute earlier.
+
+The cause was the previous fix directly above this one. It gave the
+BOOT-hold gesture and `returnToLoaderForReprovisioning()` the identical
+`setProvisioningForced(true)` call, on the reasoning that both were "force
+the provisioning flow open" requests. They are not the same request.
+BOOT-hold means a person is standing at the device asking to change its
+network - short-circuiting `joinStoredNetwork()` there is correct, exactly
+as documented above, because trying the old network first and quietly
+succeeding would make the gesture look dead. A rejected secret means the
+*server* stopped trusting this device's credential; it says nothing
+whatsoever about which WiFi network is right, and the network is
+overwhelmingly likely to still be correct. Forcing the portal in that case
+does not fix the actual problem (the secret) and adds a second, unrelated
+one (a device now stranded waiting for someone to re-enter WiFi credentials
+it already had).
+
+The fix: `returnToLoaderForReprovisioning()` no longer calls
+`setProvisioningForced`. It still calls `setUpdateRequested(true)`, which is
+all it ever needed - that alone makes `CAL.ino`'s `mustContactServer()`
+true, so CAL does its own WiFi join instead of handing straight back to the
+same still-installed App. CAL's ordinary `if (forced ||
+!Provisioning::joinStoredNetwork())` then behaves exactly like any other
+boot with `forced` false: it tries the remembered network first (which
+works, since nothing about the network changed) and only falls back to the
+portal if that genuinely fails. The BOOT-hold gesture is untouched - it is
+the one caller of `setProvisioningForced` left, and its short-circuit
+behaviour is exactly what that gesture still wants.
+
+This fix alone was still not enough - see the next one. It stopped the
+device from stranding itself on a WiFi-setup screen, but the underlying
+check-in-fails-forever loop it was rebooting out of was still a loop, just
+now with working WiFi at every iteration.
+
+### Bug fix: forgetting the network wasn't the missing piece - forgetting the secret was
+
+Found live, same incident as directly above, same afternoon: with the WiFi
+fix in place, a device whose secret had been reset server-side reconnected
+fine, checked in, got rejected again, and rebooted right back into the same
+state - "Cannot verify this device" recurring every `checkInIntervalMs`
+forever, network working the whole time.
+
+The cause: `CAL.ino` only ever attempts re-enrollment
+(`awaitKeyAssignment()` → `Enrollment::requestKey()` →
+`RegisterViaMacAddress`) when `!Identity::hasSecret()`. A device whose secret
+was rejected still has that exact secret sitting in NVS -
+`returnToLoaderForReprovisioning()` never touched it, only WiFi and the
+update-requested flag. So CAL boots, sees `hasSecret()` is true, skips
+enrollment entirely, fetches a manifest that says the installed version is
+already current, and hands straight back to the same App - which presents
+the same already-rejected secret on its next check-in and lands right back
+in `returnToLoaderForReprovisioning()`. Nothing in that cycle ever gives the
+device a reason to ask for a new one.
+
+The fix: a new `Identity::clearSecret()` (`prefs.remove` on the `"secret"`
+key, the read side of the same NVS entry `saveSecret()`/`deviceSecret()`
+already manage - added to both `App/Identity.h/.cpp` and the root copy,
+keeping the two byte-identical as this file's own comment requires), called
+from `returnToLoaderForReprovisioning()` right before the reboot. The next
+CAL boot now genuinely finds `!hasSecret()`, takes the enrollment path, and
+calls `RegisterViaMacAddress` - which succeeds for a device an admin
+actually reset for re-registration, because that server-side reset already
+cleared `SecretRetrievedAtUtc` (see the server's `DeviceRegistryService`),
+the field `RegisterViaMacAddress` checks before it will ever issue a second
+secret to a MAC it already issued one to. The two resets - the server
+forgetting it trusted this secret, and the device forgetting it has one -
+were always meant to happen together; only the second one was missing.
+
+No automated test covers either of these last two fixes, same reasoning as
+the fix above them.
 
 ### Sun, moon and tide icons, extending the forecast card's icon set
 

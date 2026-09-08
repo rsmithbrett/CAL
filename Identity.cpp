@@ -39,6 +39,8 @@ bool hasSecret() { return deviceSecret().length() > 0; }
 
 void saveSecret(const String& secret) { prefs.putString(kKeySecret, secret); }
 
+void clearSecret() { prefs.remove(kKeySecret); }
+
 String macAddress() {
   uint8_t mac[6];
   // The station address specifically. A device reporting its soft-AP address

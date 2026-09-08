@@ -13,9 +13,16 @@ namespace Loader {
 /// Never returns.
 [[noreturn]] void requestUpdate();
 
-/// Reboots into CAL with no update request set - CAL falls back to its
-/// own network-provisioning flow, the App's only path back to that flow
-/// since it has no captive-portal code of its own. Never returns.
+/// Forgets the locally stored device secret, then reboots into CAL (with the
+/// same update-requested flag requestUpdate() sets, so CAL does its own WiFi
+/// join rather than handing straight back to this same App) after the server
+/// has rejected this device's secret. CAL tries its normally-remembered
+/// network first, same as any other boot - this does not force the
+/// captive-portal network-setup flow, since a rejected secret says nothing
+/// about which network the device is on. Forgetting the secret is what makes
+/// the next CAL boot actually re-enroll instead of presenting the same
+/// already-rejected value forever - see the .cpp for the loop this closes.
+/// Never returns.
 [[noreturn]] void returnToLoaderForReprovisioning();
 
 }  // namespace Loader

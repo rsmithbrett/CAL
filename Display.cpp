@@ -131,7 +131,15 @@ void showNeutralSplash() {
   centeredText("starting", 170, kMuted, 2);
 }
 
-bool showBrandSplash() {
+// The row-streaming read shared by showBrandSplash() (the standalone,
+// centred boot splash) and drawSplashBackdrop() below (the same image, moved
+// higher to leave room underneath for status text) - one definition of "how
+// to get /brand.565 onto the panel" rather than two copies that could drift
+// on the row format or the truncated-file guard. Does not clear() - callers
+// decide that, since drawSplashBackdrop() needs the screen cleared before
+// this runs but showBrandSplash() needs it cleared at exactly the same point
+// it always was.
+bool drawBrandImage(int y0) {
   if (!LittleFS.exists(kBrandSplashPath)) {
     return false;
   }
@@ -149,13 +157,10 @@ bool showBrandSplash() {
     return false;
   }
 
-  clear();
-
   // Streamed a row at a time. A full-screen buffer would be 150KB and this
   // device has no PSRAM; one row is 480 bytes.
   static uint16_t row[kBrandW];
   const int x0 = (kScreenW - kBrandW) / 2;
-  const int y0 = 40;
   for (int y = 0; y < kBrandH; ++y) {
     if (f.read(reinterpret_cast<uint8_t*>(row), sizeof(row)) != sizeof(row)) {
       f.close();
@@ -167,16 +172,46 @@ bool showBrandSplash() {
   return true;
 }
 
-void showStatus(const String& headline, const String& detail) {
+// The backdrop every showStatus() call draws behind its text, so the several
+// seconds of "Looking for known networks" / "Contacting service" / etc. a
+// boot works through read as one continuous screen with a status line
+// updating on it, rather than the brand identity flashing once at the very
+// start and then vanishing behind blank-and-retype text for the rest of the
+// boot. Positioned higher (y0=20, so the 120px-tall image ends at 140) than
+// the standalone showBrandSplash()'s y0=40 specifically to leave the ~100px
+// below it that showStatus()'s text needs - the two callers want the same
+// image at different heights for different reasons, which is why this takes
+// y0 as a parameter instead of both reusing one fixed constant.
+void drawSplashBackdrop() {
   clear();
+  if (!drawBrandImage(20)) {
+    // No brand asset yet (a unit not yet authenticated, or one whose brand
+    // never uploaded one) - the identical two-line wordmark
+    // showNeutralSplash() uses, just smaller and higher, for the same
+    // leave-room-below reason as the branded case above.
+    centeredText("Discover", 45, kInk, 3);
+    centeredText("Around Me", 80, kAccent, 3);
+  }
+}
+
+void showStatus(const String& headline, const String& detail) {
+  drawSplashBackdrop();
   // Both wrapped, not just positioned with fixed offsets: headline in particular
   // can be a server-supplied sentence (see the enrollment "waiting"/"refused"
   // messages) with no length CAL controls, and detail's start position follows
   // however many lines the headline actually needed rather than assuming one.
-  const int headlineLines = wrappedCenteredText(headline, 85, kInk, 2, 22, 3);
+  // Capped at 2 lines (was 3) - the backdrop above now claims the screen's top
+  // ~140px, leaving less room below for text than the blank-screen version
+  // this replaces had.
+  const int headlineLines = wrappedCenteredText(headline, 155, kInk, 2, 22, 2);
   if (detail.length() > 0) {
-    wrappedCenteredText(detail, 85 + headlineLines * 22 + 12, kMuted, 1, 14, 3);
+    wrappedCenteredText(detail, 155 + headlineLines * 22 + 12, kMuted, 1, 14, 2);
   }
+}
+
+bool showBrandSplash() {
+  clear();
+  return drawBrandImage(40);
 }
 
 void showFailure(const String& headline, const String& whatToDo) {
