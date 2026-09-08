@@ -62,16 +62,22 @@ void showFailure(const String& headline, const String& whatToDo);
 /// exactly the 6-month compatibility case) - callsign is promoted back to the
 /// headline in that case, which is this card's entire original behaviour.
 ///
-/// originCode/destinationCode: empty destinationCode with a non-empty
-/// originCode draws a one-sided "from X" line (a filed departure with no
-/// filed arrival, or a route lookup partial); both empty draws no route line
-/// at all rather than an empty one - the honest rendering of "no route data",
-/// same reasoning as the card drawing nothing when there is no picture
-/// configured (see Graphic.h). Full names are not drawn here at all: two
-/// airport names plus everything else already on this card does not fit
-/// readably on a 320x240 panel - see the README on why codes were chosen
-/// over names for this card specifically, unlike the sunrise card's plain
-/// text.
+/// originCode/destinationCode/originName/destinationName: each side prefers
+/// its name and falls back to its own code independently - not as an
+/// all-or-nothing pair - because hexdb can resolve a route's code without a
+/// name for one particular airport (see AircraftSighting.cs's own remarks),
+/// and a server old enough to predate the two name fields sends codes alone.
+/// Empty destination (name and code both) with a non-empty origin draws a
+/// one-sided "from X" line (a filed departure with no filed arrival, or a
+/// route lookup partial); everything empty draws no route line at all rather
+/// than an empty one - the honest rendering of "no route data", same
+/// reasoning as the card drawing nothing when there is no picture configured
+/// (see Graphic.h). Unlike the code-only line this replaces, a full name on
+/// either or both sides can run past one line at this card's width - see the
+/// README on why that wrap grows the route line down into the stat rows'
+/// starting position instead of truncating or shrinking the font, and why a
+/// pure-code route (the common case today, and the only case a 6-month-old
+/// server can produce) still lands on exactly the one line it always has.
 ///
 /// This function draws no logo. The image lives in the Assets cache under a
 /// server-given id this file has no reason to know about (see aircraftLogoZone()
@@ -81,6 +87,7 @@ void showFailure(const String& headline, const String& whatToDo);
 void showAircraftCard(const String& callsign, const String& airlineName, int altitudeFeet,
                       double speedKnots, double headingDegrees, double distanceMiles,
                       const String& originCode, const String& destinationCode,
+                      const String& originName, const String& destinationName,
                       const String& updatedAt);
 
 /// The rectangle a small airline logo may be drawn into, alongside

@@ -414,12 +414,13 @@ short value and a long one both end flush at the same edge. The 8-point
 compass-direction lookup for `headingDegrees` is also a direct port of theirs.
 
 **Airline name, logo, and route — added after the gap above was closed
-server-side.** `AircraftSighting` now carries seven more fields, all optional:
+server-side.** `AircraftSighting` carries seven more fields, all optional:
 `airlineCode`, `airlineName`, `airlineLogoAssetId`, `originCode`,
-`destinationCode` (plus `originName`/`destinationName`, which this card reads
-the wire contract for but does not parse — see below). The server resolves
-these the same way CYD-Dickey's own `Airlines.h`/`Route.h` did, just fleet-wide
-in one cache instead of twelve entries of per-device RAM lost on every reboot.
+`originName`, `destinationCode`, `destinationName`. The server resolves these
+the same way CYD-Dickey's own `Airlines.h`/`Route.h` did, just fleet-wide in
+one cache instead of twelve entries of per-device RAM lost on every reboot.
+`originName`/`destinationName` reached the wire the same day the codes did —
+this card simply didn't read them yet; see below for why that changed.
 
 `airlineName` takes over the headline slot CYD-Dickey gives its logo/name and
 this card previously gave the bare callsign; callsign drops to the secondary
@@ -429,18 +430,38 @@ Empty `airlineName` — a server old enough to predate the field entirely, the
 headline, this card's entire original behaviour with nothing new to detect or
 branch on.
 
-A route line appears between the distance line and the stat rows when
-`originCode` is present: `"KRDU -> KLGA"`, or `"from KRDU"` alone when no
-destination was on file. Neither present draws no line at all, the same
-"nothing configured, nothing shown" rule Graphic.cpp already follows for a
-missing picture — this card does not fabricate a dash or a placeholder where
-there is no data. **Codes only, never the full names the server also sends**:
-two airport names plus everything else already on this card (headline,
-distance, three stat rows, freshness) does not fit readably on a 320x240
-panel, the identical "small and empty vs. too dense" tradeoff the missing
-weather forecast strip above already documents. `originName`/`destinationName`
-are consequently never parsed by `Aircraft.cpp` at all — a field the filter
-does not whitelist is simply never seen, not wastefully decoded and discarded.
+A route line appears between the distance line and the stat rows whenever
+either side resolves to *something* — a name or a code — and says nothing at
+all when neither does, the same "nothing configured, nothing shown" rule
+Graphic.cpp already follows for a missing picture: this card does not
+fabricate a dash or a placeholder where there is no data.
+
+What used to be codes-only (`"KRDU -> KLGA"`) now prefers each side's name and
+falls back to that side's bare code independently — not as an all-or-nothing
+pair. That "independently" matters because hexdb can resolve a route's ICAO
+code without a name for one particular airport (see `AircraftSighting.cs`'s
+own remarks on the server side), so a route with a good name for the origin
+and only a code for the destination shows exactly that:
+`"Raleigh-Durham Intl, NC -> KLGA"`, not a demotion of the whole line back to
+codes because one side came up short. A server old enough to predate
+`originName`/`destinationName` entirely — the 6-month compatibility case,
+same as every other optional field this card reads — sends codes on both
+sides, and the card renders precisely what it always has.
+
+The tradeoff the codes-only version of this line was dodging is real: two
+full airport names plus everything else already on this card (headline,
+distance, three stat rows, freshness) doesn't fit on one line of a 320x240
+panel the way two 4-letter codes always did. Rather than shrinking the font
+or truncating a name mid-word to force it back onto one line — the identical
+"small and empty vs. too dense" tradeoff the missing weather forecast strip
+above chose *not* to fake data for — this line wraps, up to two lines, using
+the same `wrappedLeftText` word-wrap the boot-ladder screens already use for
+server-supplied strings of a length this file doesn't control. The stat rows
+below aren't at a fixed y any more, either: they start right after however
+many lines the route text actually used (`Display::showAircraftCard`'s own
+`kRouteLineHeight` constant explains the arithmetic), so a plain one-line
+code route lands the stat rows at the exact same y=100 this card always used,
+and only a genuinely long name-based route pushes them down to make room.
 
 **The logo** is the first image this build draws that is *not* the whole
 card. Every existing PNG draw here (`Assets::drawCached`/`drawFullScreen`,

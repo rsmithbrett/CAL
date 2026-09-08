@@ -110,6 +110,14 @@ constexpr uint32_t kForecastBanner = 0x6A1B9Au;
 constexpr int kBannerHeight = 22;
 constexpr int kCardMargin = 10;
 
+// showAircraftCard()'s route line height, in its own constant rather than a
+// literal 18 at each of the two call sites that need to agree on it (the
+// wrap itself, and the stat rows' rowY computed from however many lines the
+// wrap used). 82 + kRouteLineHeight == 100, the fixed row-start y this card
+// used before names existed, so a one-line route reproduces the old layout
+// exactly rather than merely resembling it.
+constexpr int kRouteLineHeight = 18;
+
 // Card chrome geometry - see Display.h's own remarks on why all of it is
 // decided here rather than described by the server.
 //
@@ -766,6 +774,7 @@ void aircraftLogoZone(int16_t& x, int16_t& y, int16_t& w, int16_t& h) {
 void showAircraftCard(const String& callsign, const String& airlineName, int altitudeFeet,
                       double speedKnots, double headingDegrees, double distanceMiles,
                       const String& originCode, const String& destinationCode,
+                      const String& originName, const String& destinationName,
                       const String& updatedAt) {
   lcd.fillScreen(bg());
   drawCardBanner("OVERHEAD", kAircraftBanner, 130);
@@ -802,21 +811,38 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   lcd.setTextColor(muted(), bg());
   lcd.drawString(distanceBuf, kCardMargin, 64);
 
-  // Route, in the gap between the distance line and the stat rows. Codes
-  // only, not names: two airport names plus everything else on this card
-  // does not fit readably on a 320x240 panel (see Display.h's own remarks).
-  // Neither code present draws no line at all - the honest rendering of "no
-  // route data", the same reasoning Graphic.cpp draws nothing rather than an
-  // empty frame when it has no picture configured.
-  if (originCode.length() > 0) {
+  // Route, in the gap between the distance line and the stat rows.
+  // Name-with-code-fallback per side, independently - see Display.h's own
+  // remarks on why an all-or-nothing switch would be wrong here (hexdb can
+  // resolve one side's name and not the other's). Neither side present at
+  // all draws no line at all - the honest rendering of "no route data", the
+  // same reasoning Graphic.cpp draws nothing rather than an empty frame when
+  // it has no picture configured.
+  const String originDisplay = originName.length() > 0 ? originName : originCode;
+  const String destinationDisplay = destinationName.length() > 0 ? destinationName : destinationCode;
+  int routeLines = 0;
+  if (originDisplay.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    lcd.setTextColor(muted(), bg());
+    lcd.setTextSize(1);
     // "->" rather than a real arrow glyph, for the same reason as the
     // separator above - plain ASCII only.
-    const String routeLine = destinationCode.length() > 0
-        ? (originCode + " -> " + destinationCode)
-        : ("from " + originCode);
-    lcd.drawString(routeLine, kCardMargin, 82);
+    const String routeLine = destinationDisplay.length() > 0
+        ? (originDisplay + " -> " + destinationDisplay)
+        : ("from " + originDisplay);
+    // A pure-code route ("KRDU -> KLGA") always fits kRouteLineHeight's
+    // single line, the same one line this drew before names existed - the
+    // wrap only ever engages for a name long enough to need it, which is why
+    // a 6-month-old server's codes-only response reproduces this card's
+    // original layout exactly rather than merely approximating it. Two lines
+    // is the cap: a route that still doesn't fit in two gets its second line
+    // truncated by wrappedLeftText's own word-break rather than growing a
+    // third line into the stat rows further than accounted for below. No log
+    // line here - this is the draw path, and Aircraft.cpp's cardFetch()
+    // already logs this exact same name-with-code-fallback route once per
+    // fetch rather than once per draw, the same belongs-on-the-fetch-path
+    // rule Aircraft.cpp's own remarks give for the logo cache check.
+    routeLines = wrappedLeftText(routeLine, kCardMargin, 82, muted(), kRouteLineHeight,
+                                 /*maxLines=*/2, kScreenW - kCardMargin * 2);
   }
 
   // Stat rows: a muted label on the left, the value right-justified against
@@ -825,9 +851,16 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   // drawRightJustified above), applied per-row here instead of to a whole
   // second column of airline-specific fields CAL didn't used to have data
   // for.
+  //
+  // rowY starts right after however many lines the route text actually
+  // used, rather than a fixed y=100: a one-line (or absent) route reproduces
+  // the fixed y=100 this had before names existed (82 + 1*18 == 100), and a
+  // two-line name-based route pushes the rows down by exactly one more line
+  // height instead of overlapping it. See Display.h's own remarks on why
+  // this grows down rather than shrinking the font or truncating.
   const int rightX = kScreenW - kCardMargin;
   const int rowValueWidth = 150;
-  int rowY = 100;
+  int rowY = routeLines > 0 ? 82 + routeLines * kRouteLineHeight : 100;
   constexpr int kRowHeight = 30;
 
   lcd.setTextColor(muted(), bg());

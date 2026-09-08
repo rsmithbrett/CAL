@@ -91,11 +91,10 @@ Result fetchMine() {
   // Only the fields this card actually draws are worth keeping in the filter
   // - same rationale as CYD-Dickey's Aircraft.cpp filtering adsb.lol's
   // couple-dozen raw fields down to five, just applied to this server's own
-  // AircraftSighting shape. originName/destinationName are deliberately
-  // absent: the server sends them, this card draws codes only (see
-  // Display::showAircraftCard()'s remarks), and a field this filter does not
-  // whitelist is simply never seen rather than wastefully parsed and
-  // discarded.
+  // AircraftSighting shape. originName/destinationName are now whitelisted
+  // alongside their codes - see Display::showAircraftCard()'s remarks for
+  // why the card draws a name when one is on file and only falls back to the
+  // bare code per side when it isn't.
   JsonDocument filter;
   filter["radiusMiles"] = true;
   filter["aircraft"][0]["callsign"] = true;
@@ -107,7 +106,9 @@ Result fetchMine() {
   filter["aircraft"][0]["airlineName"] = true;
   filter["aircraft"][0]["airlineLogoAssetId"] = true;
   filter["aircraft"][0]["originCode"] = true;
+  filter["aircraft"][0]["originName"] = true;
   filter["aircraft"][0]["destinationCode"] = true;
+  filter["aircraft"][0]["destinationName"] = true;
 
   JsonDocument doc;
   const DeserializationError err =
@@ -145,7 +146,9 @@ Result fetchMine() {
   result.nearest.airlineName = String((const char*)(nearest["airlineName"] | ""));
   result.nearest.airlineLogoAssetId = String((const char*)(nearest["airlineLogoAssetId"] | ""));
   result.nearest.originCode = String((const char*)(nearest["originCode"] | ""));
+  result.nearest.originName = String((const char*)(nearest["originName"] | ""));
   result.nearest.destinationCode = String((const char*)(nearest["destinationCode"] | ""));
+  result.nearest.destinationName = String((const char*)(nearest["destinationName"] | ""));
   return result;
 }
 
@@ -207,11 +210,20 @@ void cardFetch() {
                   gLast.nearest.airlineCode.c_str(), gLast.nearest.airlineLogoAssetId.c_str());
     }
 
+    // Logged the same way it's drawn: per-side name-with-code-fallback, not
+    // an all-or-nothing switch, so this line tells you exactly what
+    // showAircraftCard() is about to put on screen rather than a summary
+    // that could disagree with it. See that function's own remarks for why
+    // the fallback is per-side.
+    const String originSummary =
+        gLast.nearest.originName.length() > 0 ? gLast.nearest.originName : gLast.nearest.originCode;
+    const String destinationSummary = gLast.nearest.destinationName.length() > 0
+        ? gLast.nearest.destinationName
+        : gLast.nearest.destinationCode;
     String routeSummary = "none on file";
-    if (gLast.nearest.originCode.length() > 0) {
-      routeSummary = gLast.nearest.destinationCode.length() > 0
-          ? (gLast.nearest.originCode + "->" + gLast.nearest.destinationCode)
-          : ("from " + gLast.nearest.originCode + " only");
+    if (originSummary.length() > 0) {
+      routeSummary = destinationSummary.length() > 0 ? (originSummary + "->" + destinationSummary)
+                                                       : ("from " + originSummary + " only");
     }
     Log::printf(
         "[aircraft] card updated: %s (%s) alt=%dft speed=%.0fkts heading=%.0f dist=%.1fmi route=%s",
@@ -247,6 +259,7 @@ void cardDraw(uint16_t) {
                               gLast.nearest.altitudeFeet, gLast.nearest.speedKnots,
                               gLast.nearest.headingDegrees, gLast.nearest.distanceMiles,
                               gLast.nearest.originCode, gLast.nearest.destinationCode,
+                              gLast.nearest.originName, gLast.nearest.destinationName,
                               describeFreshness(gLastOkMs));
 
     // Drawn after showAircraftCard(), not by it - same module boundary

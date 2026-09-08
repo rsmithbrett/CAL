@@ -70,16 +70,28 @@ struct Sighting {
   /// logo is on file for this row, which is the ordinary case for any
   /// airline nobody has uploaded one for yet, not a fetch failure.
   String airlineLogoAssetId;
-  /// ICAO airport codes ("KRDU"), not full names. The server also sends
-  /// originName/destinationName; this card draws codes only and does not
-  /// parse them - see Display::showAircraftCard()'s own remarks on why.
-  /// Either code can be empty independently: originCode set with
-  /// destinationCode empty is a filed departure with no filed arrival
-  /// (common for general aviation and some regional traffic); both empty is
-  /// "hexdb has nothing on file for this callsign", itself the common case
-  /// for GA and short-hop regional flights, not a lookup failure.
+  /// ICAO airport codes ("KRDU"). Either code can be empty independently:
+  /// originCode set with destinationCode empty is a filed departure with no
+  /// filed arrival (common for general aviation and some regional traffic);
+  /// both empty is "hexdb has nothing on file for this callsign", itself the
+  /// common case for GA and short-hop regional flights, not a lookup
+  /// failure.
   String originCode;
   String destinationCode;
+  /// Display names ("Raleigh-Durham Intl, NC") for the same two airports,
+  /// already shortened and suffixed server-side (AirportNameFormatter) so
+  /// this firmware never has to know a state abbreviation or trim
+  /// "International Airport" itself. Empty independently of its own code
+  /// field for two different reasons: a server old enough to predate these
+  /// two fields entirely never sends them (the 6-month compatibility case,
+  /// same as every other optional aircraft field), or hexdb has a route but
+  /// no name on file for that particular airport even though it has the
+  /// code (see AircraftSighting.cs's own remarks). Display::showAircraftCard()
+  /// prefers the name and falls back to the code per side, independently -
+  /// not as an all-or-nothing pair - so a route with one resolved name and
+  /// one bare code still shows the resolved half as a name.
+  String originName;
+  String destinationName;
 };
 
 struct Result {
