@@ -238,10 +238,40 @@ void checkHeapHealth() {
 // The server can shorten or lengthen this on every check-in response
 // (CheckInResponse.CheckInIntervalSeconds, resolved from the
 // "checkin_interval_seconds" config key) - a fleet's polling cadence is an
-// operational decision, not a constant this firmware should own. 5 minutes
-// only until the first real check-in response replaces it, matching
-// CheckInGatewayService's own DefaultIntervalSeconds.
+// operational decision, not a constant this firmware should own.
+//
+// The value here is only what a boot starts with, before any check-in
+// response has ever replaced it - and it can never itself come from the
+// server, since a device that has never yet reached the server has nothing
+// to ask. It used to be a flat 5 minutes, matching CheckInGatewayService's
+// own DefaultIntervalSeconds. Found live: that meant a fresh boot could not
+// discover its real card policy - or even that a check-in was failing at
+// all - for a full 5 minutes, which is a bad way to spend the first minutes
+// of testing a change, and separately left every registered card (all 28,
+// every multi-instance forecast/graphic slot included) running in their
+// default-active state for that whole window, adding real heap pressure on
+// a board that already fragments (see the heap-health watchdog below) - a
+// live device was caught restarting from fragmentation at almost exactly
+// 180 seconds of uptime, boot after boot, because its real (much narrower)
+// policy never had a chance to arrive before the watchdog's own 3-minute
+// grace period ran out.
+//
+// setup() overwrites this with a random 0-90 second jitter before the
+// first loop() iteration ever checks it - see kFirstCheckInMaxJitterMs
+// below for why a jitter, not simply "as fast as possible".
 uint32_t checkInIntervalMs = 5UL * 60UL * 1000UL;
+
+// Bounds the jitter setup() applies to checkInIntervalMs for the very first
+// check-in of a boot, before any server response has set a real interval.
+// Not zero, on purpose: a fleet that all rebooted within the same few
+// seconds of each other - the exact shape of an OTA rollout, the one
+// moment a fleet's reboots are most correlated - would otherwise send every
+// device's first check-in in that same instant. 90 seconds is short enough
+// that "did this boot's check-in even succeed" is still answered in well
+// under two minutes (the original complaint this replaces a flat 5-minute
+// wait for), while still spreading a simultaneous fleet-wide reboot's first
+// check-ins across a real window instead of one instant.
+constexpr uint32_t kFirstCheckInMaxJitterMs = 90UL * 1000UL;
 
 // The corner clock's offset and the day/night theme, both check-in-driven
 // (CheckIn::Result::utcOffsetMinutes/isDaytime) and both kept live here the
@@ -458,6 +488,16 @@ void setup() {
               Identity::installedAppVersion().c_str(),
               static_cast<unsigned long>(Identity::totalBoots()));
 
+  // See checkInIntervalMs's and kFirstCheckInMaxJitterMs's own remarks above
+  // for why this boot's first check-in fires from a random short interval
+  // rather than the old flat 5-minute default. esp_random() is the ESP-IDF
+  // hardware RNG - available this early, and true entropy rather than
+  // something that would need seeding from a value this device does not
+  // have yet anyway.
+  checkInIntervalMs = esp_random() % kFirstCheckInMaxJitterMs;
+  Log::printf("[boot] first check-in in %lu ms (jittered, not the old flat 5 minutes)",
+              static_cast<unsigned long>(checkInIntervalMs));
+
   if (wifiResetRequested()) {
     Loader::returnToLoaderForReprovisioning();
     // Unreachable: the call above never returns.
@@ -485,36 +525,6 @@ void setup() {
   Sd::begin();
   Assets::begin();
   Assets::showBootSplash();
-
-  // One check-in here, before the rotation ever starts, so applyPolicy()
-  // narrows the active card set BEFORE CardManager::begin() hands out the
-  // first dwell slot - not after. Found live: every registered card defaults
-  // active until a policy says otherwise (see CardManager.cpp's own
-  // applyPolicy() remarks), and loop()'s own performCheckIn() doesn't fire
-  // until checkInIntervalMs has elapsed since boot - a full 5 minutes on a
-  // fresh boot, since that in-RAM default only shrinks to the server's real
-  // interval once a check-in response has actually arrived. On a household
-  // whose real policy is much narrower than "every registered card" (a
-  // handful of cards instead of all 28, including every multi-instance
-  // forecast/graphic slot), that multi-minute window of the wider default
-  // set materially adds to this board's own heap fragmentation - see
-  // App.ino's own heap-health watchdog below. A live device was caught
-  // restarting from fragmentation at almost exactly 180 seconds of uptime,
-  // boot after boot, because the default-active set never got narrowed
-  // before the watchdog's own 3-minute grace period ran out - the very
-  // first check-in that would have fixed this never had a chance to fire.
-  // A failed attempt here (no network yet, DNS hiccup, timeout) is not
-  // fatal: it changes nothing, loop()'s own timer retries on its ordinary
-  // schedule, and the device simply starts with the wider default set for
-  // one extra check-in interval, exactly as it always has.
-  //
-  // lastCheckInMs is set here too, matching what loop() itself does right
-  // before every other call to performCheckIn() - without it, loop()'s own
-  // first comparison still sees lastCheckInMs at its zero-initialised
-  // default and fires a second, near-redundant check-in within moments of
-  // this one succeeding, rather than a full interval later.
-  performCheckIn();
-  lastCheckInMs = millis();
 
   // Hands the screen over. Every card registered itself before setup() was
   // ever called; this is where the rotation starts running.
