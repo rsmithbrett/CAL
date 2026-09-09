@@ -66,6 +66,26 @@ struct Position {
 
 Position gCurrent;
 
+/// Whether a real, present policy response has ever been applied this boot.
+/// Gates poll() below - see its own remarks. False from boot until the
+/// first successful check-in that actually carries a cardPolicy; never
+/// reset afterward, since every following boot gets its own fresh instance
+/// of this same wait.
+bool gPolicyEverApplied = false;
+
+/// When begin() was called, so poll()'s own wait for a real policy has a
+/// bound - see kMaxWaitForPolicyMs below.
+uint32_t gBeginAtMs = 0;
+
+/// The mirror image of kFirstCheckInMaxJitterMs and the heap-health
+/// watchdog's own 3-minute grace period in App.ino: this is how long poll()
+/// will hold the boot "Loading" screen waiting for a real policy before
+/// giving up and showing the wide, unfiltered default-active set anyway.
+/// Matched to the watchdog's own grace period on purpose - if a policy has
+/// not arrived by then, something is wrong with connectivity, not merely
+/// slow, and continuing to show nothing is worse than showing everything.
+constexpr uint32_t kMaxWaitForPolicyMs = 3UL * 60UL * 1000UL;
+
 /// The last-applied policy's match result - see CardManager.h's
 /// lastPolicyKnownCount()/lastPolicyTotalCount()/lastPolicyUnknownIds() for
 /// why this exists: App.ino's check-in path reports these back to the
@@ -510,6 +530,7 @@ void refreshOneDueCard() {
 
 void begin() {
   Actions::begin();
+  gBeginAtMs = millis();
 
   if (gCardCount == 0) {
     // Cannot happen with the cards this build registers, but a registry that
@@ -538,6 +559,20 @@ void begin() {
 }
 
 void poll() {
+  // Hold the boot splash/"Loading" screen (see App.ino's setup()) rather
+  // than starting the rotation on every registered card's own true-by-
+  // default active state - see CardSpec::active's default and
+  // gPolicyEverApplied's own remarks. Found live: a household whose real
+  // policy names a handful of cards (say, one forecast instance out of the
+  // five registered) would otherwise cycle through every unconfigured
+  // instance too for however long the first check-in takes, which reads as
+  // "showing the wrong cards" even though it always self-corrected once
+  // that check-in landed. Bounded by kMaxWaitForPolicyMs so a device that
+  // genuinely cannot reach the server does not sit on "Loading" forever.
+  if (!gPolicyEverApplied && (millis() - gBeginAtMs) < kMaxWaitForPolicyMs) {
+    return;
+  }
+
   Touch::Tap tap;
   if (Touch::poll(tap)) {
     handleTap(tap);
@@ -562,6 +597,11 @@ void applyPolicy(const Cards::Policy& policy) {
     // policy must never blank a screen that was working.
     return;
   }
+
+  // A present policy - even one that names nothing, or nothing this build
+  // recognises - is still the real, resolved answer poll() is holding the
+  // boot screen for. See gPolicyEverApplied's own remarks.
+  gPolicyEverApplied = true;
 
   if (policy.defaultDwellSeconds > 0) {
     gDefaultDwellSeconds = static_cast<uint16_t>(policy.defaultDwellSeconds);
