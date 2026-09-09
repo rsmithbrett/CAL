@@ -1,16 +1,14 @@
 #include "Assets.h"
 
-#include <HTTPClient.h>
-#include <NetworkClientSecure.h>
 #include <SD.h>
 #include <mbedtls/sha256.h>
 
 #include "Config.h"
 #include "Display.h"
+#include "Http.h"
 #include "Identity.h"
 #include "Log.h"
 #include "SdStorage.h"
-#include "Tls.h"
 
 namespace Assets {
 namespace {
@@ -147,18 +145,17 @@ bool ensureRamBufferCapacity(RamAssetBuffer& buffer, size_t needed) {
 /// heap, so buffering the whole body first is exactly the allocation that
 /// would make a slightly-too-large image fatal instead of merely slow.
 bool fetchToCard(const String& id) {
-  NetworkClientSecure client;
-  if (!Tls::configure(client)) {
+  if (!Http::ready()) {
     Log::line("[assets] TLS setup failed");
     return false;
   }
 
-  HTTPClient http;
   const String url = String("https://") + Config::kServiceHost + kFetchPathPrefix + id + kFetchPathSuffix;
-  if (!http.begin(client, url)) {
+  if (!Http::beginRequest(url)) {
     Log::printf("[assets] could not begin request for '%s'", id.c_str());
     return false;
   }
+  HTTPClient& http = Http::client();
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
 
@@ -344,18 +341,17 @@ bool fetchToCard(const String& id) {
 /// read back. See Assets.h's own remarks on fetchToRam() for why this
 /// exists and the network-cost tradeoff it accepts.
 bool fetchToRamImpl(const String& id, RamAssetBuffer& buffer) {
-  NetworkClientSecure client;
-  if (!Tls::configure(client)) {
+  if (!Http::ready()) {
     Log::line("[assets] TLS setup failed (direct-to-RAM fetch)");
     return false;
   }
 
-  HTTPClient http;
   const String url = String("https://") + Config::kServiceHost + kFetchPathPrefix + id + kFetchPathSuffix;
-  if (!http.begin(client, url)) {
+  if (!Http::beginRequest(url)) {
     Log::printf("[assets] could not begin direct-to-RAM request for '%s'", id.c_str());
     return false;
   }
+  HTTPClient& http = Http::client();
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
 

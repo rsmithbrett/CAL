@@ -1,15 +1,13 @@
 #include "Forecast.h"
 
 #include <ArduinoJson.h>
-#include <HTTPClient.h>
-#include <NetworkClientSecure.h>
 
 #include "Cards.h"
 #include "Config.h"
 #include "Display.h"
+#include "Http.h"
 #include "Identity.h"
 #include "Log.h"
-#include "Tls.h"
 
 namespace Forecast {
 
@@ -74,21 +72,20 @@ String describeLocation(JsonVariantConst body) {
 Result fetch(bool useTarget) {
   Result result;
 
-  NetworkClientSecure client;
-  if (!Tls::configure(client)) {
+  if (!Http::ready()) {
     result.message = "Cannot verify the service's identity.";
     Log::line("[forecast] TLS setup failed");
     return result;
   }
 
-  HTTPClient http;
   const String url =
       String("https://") + Config::kServiceHost + (useTarget ? kPathTarget : kPathHome);
-  if (!http.begin(client, url)) {
+  if (!Http::beginRequest(url)) {
     result.message = "Cannot reach the forecast service.";
     Log::line("[forecast] could not begin request");
     return result;
   }
+  HTTPClient& http = Http::client();
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
 

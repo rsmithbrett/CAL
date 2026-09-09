@@ -1,15 +1,13 @@
 #include "Log.h"
 
 #include <ArduinoJson.h>
-#include <HTTPClient.h>
-#include <NetworkClientSecure.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "Config.h"
+#include "Http.h"
 #include "Identity.h"
-#include "Tls.h"
 
 namespace Log {
 namespace {
@@ -124,16 +122,15 @@ void sendOneBatch() {
     ++taken;
   }
 
-  NetworkClientSecure client;
-  if (!Tls::configure(client)) {
+  if (!Http::ready()) {
     return;  // try again next poll(); nothing consumed from the buffer
   }
 
-  HTTPClient http;
   const String url = String("https://") + Config::kServiceHost + kPath;
-  if (!http.begin(client, url)) {
+  if (!Http::beginRequest(url)) {
     return;
   }
+  HTTPClient& http = Http::client();
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
   http.addHeader("Content-Type", "application/json");

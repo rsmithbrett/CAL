@@ -20,6 +20,15 @@ namespace Tls {
 /// updated over the air, and a device trusting exactly one leaf certificate
 /// would stop working the day that certificate is replaced - taking every unit
 /// in the field with it simultaneously.
+///
+/// Called exactly once per boot now, from Http::begin() - see Http.h. Every
+/// HTTP call site used to hold its own `NetworkClientSecure client;` as a
+/// stack local and call this on it fresh before every single request; those
+/// all now share one persistent client instead, so this only ever needs to
+/// run once for the client's whole lifetime. Safe to move this early because
+/// what this function actually does - attach a baked-in cert bundle - never
+/// touches the live connection and has nothing to redo once a connection has
+/// opened, closed, or reopened underneath it.
 bool configure(NetworkClientSecure& client);
 
 }  // namespace Tls

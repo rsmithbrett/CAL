@@ -1,29 +1,26 @@
 #include "AppUpdater.h"
 
 #include <ArduinoJson.h>
-#include <HTTPClient.h>
-#include <NetworkClientSecure.h>
 
 #include "Config.h"
+#include "Http.h"
 #include "Identity.h"
 #include "Log.h"
-#include "Tls.h"
 
 namespace AppUpdater {
 
 bool newerVersionAvailable() {
-  NetworkClientSecure client;
-  if (!Tls::configure(client)) {
+  if (!Http::ready()) {
     Log::line("[update] TLS setup failed while checking the manifest");
     return false;
   }
 
-  HTTPClient http;
   const String url = String("https://") + Config::kServiceHost + Config::kManifestPath;
-  if (!http.begin(client, url)) {
+  if (!Http::beginRequest(url)) {
     Log::line("[update] could not begin manifest request");
     return false;
   }
+  HTTPClient& http = Http::client();
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
 
