@@ -60,6 +60,30 @@ void begin();
 /// draw nothing rather than waiting.
 bool ensureCached(const String& id);
 
+/// The one caller that cannot just call ensureCached(): a device's configured
+/// boot-splash asset is chosen server-side per account (CheckInResponse.
+/// SplashAssetId), and its actual bytes need to land specifically in the
+/// fixed "splash" cache slot showBootSplash() below reads from - not in a
+/// file named after `assetId`, which is what ensureCached(assetId) would
+/// give it. Reuses the exact same SHA-256-verified, temp-file-then-rename
+/// fetch as ensureCached() (see fetchToCard() in Assets.cpp), just aimed at a
+/// different filename.
+///
+/// True when the "splash" slot already holds this exact asset id (tracked in
+/// a small sidecar file, since the slot's own filename never changes) or it
+/// was just fetched and stored there; false under the same conditions
+/// ensureCached() returns false for. Cheap to call on every check-in that
+/// reports a splash asset: the common case where the id has not changed does
+/// no network I/O at all, only a sidecar read.
+///
+/// **Does not make a new or changed splash appear on screen.** showBootSplash()
+/// only ever runs once, at boot, before this device's first check-in of the
+/// run has happened - see its own remarks. Calling this after a check-in
+/// only prepares the "splash" slot for the *next* boot; there is deliberately
+/// no mid-session redraw here, since boot-time branding is the entire point
+/// of this feature.
+bool ensureSplashCached(const String& assetId);
+
 /// True when the asset is already on the card, with no network access of any
 /// kind. This is the question a card's draw() may ask - fetching from a draw
 /// path would make stepping backwards through the rotation a network
@@ -181,6 +205,14 @@ void clearDecodeFailures();
 /// there is no card, no such asset, or the decode fails. Deliberately does
 /// NOT fetch: boot is the one moment where waiting on the network to draw a
 /// decoration is least defensible.
+///
+/// The only writer of that slot is ensureSplashCached() above, called from
+/// App.ino's performCheckIn() - and check-in only ever happens after this
+/// function has already run once at boot. That means a freshly-configured
+/// splash is invisible on the very boot that fetches it; it first draws on
+/// the boot after. Not a bug to fix by triggering a redraw mid-session - see
+/// ensureSplashCached()'s own remarks on why that is out of scope for what
+/// this feature is actually for.
 void showBootSplash();
 
 /// Deletes just this one asset's cached file, so the next ensureCached()

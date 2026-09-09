@@ -341,6 +341,10 @@ Result perform() {
   result.homeValueRangeHigh = responseDoc["homeValueRangeHigh"] | -1;
   result.homeValuePricePerSquareFoot = responseDoc["homeValuePricePerSquareFoot"] | -1.0;
   result.homeValueUpdatedAtUtc = parseIso8601Utc(responseDoc["homeValueUpdatedAtUtc"] | "");
+  // `| ""` covers a JSON null and a field an older server never sends at all, the
+  // same reasoning as moonPhaseName above - both mean "no splash configured" here.
+  // See CheckIn.h's own splashAssetId remarks for what this device does with it.
+  result.splashAssetId = String(responseDoc["splashAssetId"] | "");
   const int intervalSeconds = responseDoc["checkInIntervalSeconds"] | 300;
   result.intervalMs = static_cast<uint32_t>(intervalSeconds) * 1000UL;
 
@@ -351,11 +355,12 @@ Result perform() {
   Log::printf(
       "[checkin] ok (acknowledged=%d updateAvailable=%d debugStream=%d sdReformat=%d "
       "intervalSeconds=%d utcOffsetMinutes=%d isDaytime=%d cardPolicy=%d cards=%u actions=%u "
-      "accepted=%u)",
+      "accepted=%u splashAssetId=%s)",
       result.acknowledged, result.updateAvailable, result.debugStreamRequested,
       result.sdReformatRequested, intervalSeconds, result.utcOffsetMinutes, result.isDaytime,
       result.cardPolicy.present, result.cardPolicy.entryCount, result.cardActionCount,
-      result.acceptedActionCount);
+      result.acceptedActionCount,
+      result.splashAssetId.length() > 0 ? result.splashAssetId.c_str() : "(none)");
   return result;
 }
 
