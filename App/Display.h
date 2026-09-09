@@ -213,6 +213,24 @@ void showClockDate(const String& timeText, const String& dateText);
 /// calling this at all when there is nothing configured.
 void showAnnouncementCard(const String& text);
 
+/// The Banner / Banner Button themes (see Cards::Theme): a header strip
+/// reminding a household of something, drawn across the top of the panel
+/// instead of a card's own ordinary full-screen layout. Deliberately NOT
+/// full-screen - the strip claims only the top portion of the panel and
+/// leaves the rest showing nothing but chrome (a Banner Button's own button
+/// row, drawn separately by CardManager's drawChrome() exactly as it is for
+/// every other card, and the corner clock) - the visual point of this theme
+/// next to Full Screen is that it reads as a strip on the glass, not a card
+/// replaced.
+///
+/// `text` is whatever CardPolicyEntry.Text carries for this same policy
+/// entry, reused as-is rather than a second content field - see that
+/// property's own remarks. Never called with an empty string - CardManager's
+/// drawCurrent() falls back to a card's ordinary draw() when there is nothing
+/// to put in the strip, the same tolerance showAnnouncementCard() gets from
+/// Announcement.cpp above.
+void showBannerCard(const String& text);
+
 /// The QR card: a scannable code with an optional caption. Ported from CAL's own
 /// bootloader-side showQr() (root Display.cpp) - same vendored CalQr.h/.c, same fixed
 /// version-6/ECC-LOW static buffer sizing, same qrcode_initText()/qrcode_getModule() render

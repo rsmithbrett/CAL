@@ -116,6 +116,23 @@ constexpr uint32_t kForecastBanner = 0x6A1B9Au;
 constexpr int kBannerHeight = 22;
 constexpr int kCardMargin = 10;
 
+// The Banner/Banner Button themes' own header strip - see showBannerCard()
+// below. A warm amber-red, deliberately louder than every showCardBanner()
+// label colour above: those are a small corner tag on an otherwise ordinary
+// card, where this strip IS the card's entire reason for existing, so it
+// earns a colour that reads as "notice me" the way roadside signage does,
+// not a quiet corner label. Outside the day/night swap for the same reason
+// the button/confirmation colours are: it has to read against either
+// background sitting behind whatever a caller draws next.
+constexpr uint32_t kBannerStripFill = 0xC2410Cu;
+constexpr uint32_t kBannerStripInk = 0xFFFFFFu;
+// Tall enough for three wrapped lines of the strip's own 12pt bold font
+// (three lines at 26px plus margin - see showBannerCard()) while still
+// leaving the strip read as a partial-screen band rather than the whole
+// panel - kButtonRowY (160) minus this is the empty "not full-screen"
+// clearance a Banner theme's own visual signature depends on.
+constexpr int kBannerStripHeight = 100;
+
 // showAircraftCard()'s route line height, in its own constant rather than a
 // literal 18 at each of the two call sites that need to agree on it (the
 // wrap itself, and the stat rows' rowY computed from however many lines the
@@ -257,9 +274,16 @@ void drawClock() {
 // shortForecast, a content-gate refusal message) arrive with no length this
 // file controls. See wrappedLeftText further down for the card-layout
 // counterpart this restyle adds alongside it.
+// kUseCardBackground is the sentinel meaning "use bg() for this text's own
+// background colour", the ordinary case for every caller before
+// showBannerCard() below - a value no real 24-bit packed colour can equal, so
+// it can share the `background` parameter rather than needing a separate
+// bool flag.
+constexpr uint32_t kUseCardBackground = 0xFFFFFFFFu;
+
 int wrappedCenteredText(const String& text, int y, uint32_t colour, uint8_t size,
-                        int lineHeight, int maxLines) {
-  lcd.setTextColor(colour, bg());
+                        int lineHeight, int maxLines, uint32_t background = kUseCardBackground) {
+  lcd.setTextColor(colour, background == kUseCardBackground ? bg() : background);
   lcd.setTextSize(size);
   lcd.setTextDatum(top_center);
 
@@ -1316,6 +1340,36 @@ void showAnnouncementCard(const String& text) {
       lcd.setFont(&fonts::FreeSansBold9pt7b);
       wrappedLeftText(text, kCardMargin, 30, ink(), 18, 7, bodyWidth);
     }
+  }
+
+  drawClock();
+  restoreDefaultFont();
+}
+
+// The Banner / Banner Button themes - see Display.h's own remarks and
+// Cards::Theme. Deliberately not built on drawCardBanner()/showAnnouncementCard():
+// this is a genuinely different layout shape (a strip the full width of the
+// panel, tall enough to hold the whole message) rather than a corner label
+// plus a full card body, so it earns its own function instead of a parameter
+// bolted onto either of those.
+//
+// Below the strip is left as plain bg() - no second block of content, no
+// second banner - which is the deliberate visual difference from Full Screen
+// this theme exists to make: the empty space between the strip and the
+// button row/clock is the signal that this is a partial-screen reminder, not
+// a card that was replaced.
+void showBannerCard(const String& text) {
+  lcd.fillScreen(bg());
+  lcd.fillRect(0, 0, kScreenW, kBannerStripHeight, kBannerStripFill);
+
+  if (text.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    // Centred, not left-margined like showAnnouncementCard()'s body text -
+    // a short reminder read from across a room sits better centred in a
+    // strip than ranged left against an edge nothing else in the strip lines
+    // up with. Three lines at 26px (78px) inside a 100px-tall strip leaves
+    // an 11px margin top and bottom.
+    wrappedCenteredText(text, 11, kBannerStripInk, 1, 26, 3, kBannerStripFill);
   }
 
   drawClock();
