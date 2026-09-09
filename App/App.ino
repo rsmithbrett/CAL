@@ -20,6 +20,7 @@
 // cable is a worse outcome for a household than one that keeps trying.
 
 #include <WiFi.h>
+#include <esp_bt.h>      // esp_bt_mem_release() - see releaseBluetoothMemory() below
 #include <esp_system.h>  // esp_restart() - see checkHeapHealth() below
 
 // Overrides the ESP32 Arduino core's weak getArduinoLoopTaskStackSize() (see
@@ -82,6 +83,61 @@ size_t getArduinoLoopTaskStackSize(void) {
 #include "WifiJoin.h"
 
 namespace {
+
+/// Hands the Bluetooth controller's reserved DRAM back to the general heap.
+///
+/// This firmware contains no Bluetooth code whatsoever - no BluetoothSerial,
+/// no BLEDevice, nothing - but the ESP32 Arduino core links the BT stack in
+/// regardless, and the controller's DRAM region stays RESERVED at boot until
+/// an application explicitly releases it. A radio this device never turns on
+/// was therefore holding tens of KB out of the heap on every boot, for the
+/// entire uptime, on every device in the fleet.
+///
+/// Why this was worth finding: the symptom was not "out of memory" - free
+/// heap looked fine at 60-70KB. It was that `ESP.getMaxAllocHeap()` (the
+/// largest single CONTIGUOUS block) sat at exactly 32,756 bytes, boot after
+/// boot, on hardware. LovyanGFX's PNG decoder needs roughly 44KB contiguous
+/// for its scratch buffer, so every graphic card failed to decode
+/// ("[display] failed to draw ... maxAllocHeap=32756"), dropped itself from
+/// the rotation, and left the device cycling only the cards that need no
+/// picture - while the heap-health watchdog restarted it every ~3 minutes for
+/// a fragmentation it could never clear. A number that is constant to the
+/// byte across dozens of reboots is the signature of a fixed reservation, not
+/// of accumulated fragmentation, which is what pointed here.
+///
+/// ESP_BT_MODE_BTDM releases both the Classic and BLE regions - the whole
+/// reservation, since neither is ever used. This is deliberately
+/// irreversible: Bluetooth cannot be started again after this call without a
+/// reboot, which costs this firmware nothing and is exactly the point.
+///
+/// Called as the very first thing in setup(), before Display/WiFi/TLS take
+/// their own allocations, so everything after it is competing for a heap that
+/// already includes this region rather than fitting around it.
+///
+/// Note for anyone revisiting Display.cpp's decision never to call
+/// releasePngMemory(): its justification reads "CAL has no Bluetooth stack to
+/// feed" (true of the source, false of the binary until this line existed).
+/// That reasoning should be re-read now that this memory is actually free.
+void releaseBluetoothMemory() {
+  const uint32_t before = ESP.getMaxAllocHeap();
+  const esp_err_t err = esp_bt_mem_release(ESP_BT_MODE_BTDM);
+  const uint32_t after = ESP.getMaxAllocHeap();
+
+  if (err == ESP_OK) {
+    Log::printf(
+        "[boot] released the unused Bluetooth controller's DRAM - maxAllocHeap %lu -> %lu bytes "
+        "(freeHeap=%lu)",
+        static_cast<unsigned long>(before), static_cast<unsigned long>(after),
+        static_cast<unsigned long>(ESP.getFreeHeap()));
+  } else {
+    // Not fatal: the device runs exactly as it did before this existed, just
+    // without the reclaimed region. Logged loudly rather than ignored,
+    // because a silent failure here would look identical to the bug this
+    // call exists to fix.
+    Log::printf("[boot] could not release Bluetooth DRAM (esp_err=%d) - continuing without it",
+                static_cast<int>(err));
+  }
+}
 
 // Same pin and hold time as CAL's own WiFi-reset gesture, and deliberately so
 // - a household should not need to know which binary happens to be running to
@@ -495,6 +551,13 @@ void performCheckIn() {
 
 void setup() {
   Serial.begin(115200);
+
+  // First, before anything else allocates: hand back the DRAM the unused
+  // Bluetooth controller reserves at boot. See releaseBluetoothMemory()'s own
+  // remarks - this is what was capping maxAllocHeap below what the PNG
+  // decoder needs, and it has to happen before Display/WiFi/TLS carve up
+  // what is left.
+  releaseBluetoothMemory();
 
   Display::begin();
   Display::showStatus("Starting", "");
