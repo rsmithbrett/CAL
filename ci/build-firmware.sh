@@ -57,6 +57,41 @@ echo "==> Compiling App"
   arduino-cli compile --fqbn "$FQBN" --export-binaries .
 )
 
+# arduino-cli's own "Sketch uses X of Y bytes" line checks the FQBN's generic
+# min_spiffs scheme (1,966,080 bytes), not the real, asymmetric partitions.csv
+# actually baked into the binary - a build well within the true factory or
+# ota_0 ceiling can look alarming there, and worse, a build that has genuinely
+# grown past the real ceiling still reports "fits" against the wrong number.
+# This reads partitions.csv itself (the one source of truth for both real
+# ceilings) rather than trusting either arduino-cli's message or a
+# hand-maintained constant here that could drift from partitions.csv the next
+# time someone resizes a partition.
+echo "==> Verifying compiled size against the real partition table"
+partition_size() {
+  # $1: partition name from partitions.csv's own Name column (e.g. "factory").
+  # Column layout: Name, Type, SubType, Offset, Size, Notes - Size is the 5th
+  # comma-separated field, a hex literal like "0x160000".
+  local hex
+  hex=$(grep -E "^${1}," partitions.csv | head -1 | awk -F',' '{gsub(/ /,"",$5); print $5}')
+  printf '%d' "$hex"
+}
+check_size() {
+  # $1: human label for the message. $2: compiled .bin path. $3: real
+  # ceiling in bytes, from partition_size above.
+  local label="$1" bin_path="$2" ceiling="$3"
+  local actual
+  actual=$(stat -c%s "$bin_path")
+  local pct=$((actual * 100 / ceiling))
+  echo "    ${label}: ${actual} / ${ceiling} bytes (${pct}%)"
+  if [ "$actual" -gt "$ceiling" ]; then
+    echo "ERROR: ${label} binary (${actual} bytes) exceeds its real partition ceiling (${ceiling} bytes)." >&2
+    echo "        This is the actual flashable image size, not arduino-cli's generic scheme check above - a build this size will not fit and must not ship." >&2
+    exit 1
+  fi
+}
+check_size "CAL (factory)" "${BUILD_DIR}/CAL.ino.bin" "$(partition_size factory)"
+check_size "App (ota_0)" "App/${BUILD_DIR}/App.ino.bin" "$(partition_size ota_0)"
+
 echo "==> Computing checksums"
 (
   cd "$BUILD_DIR"
