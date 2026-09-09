@@ -32,14 +32,25 @@
 //
 // Raised from the 8192-byte default after a live device crashed with "Guru
 // Meditation Error ... Stack canary watchpoint triggered (loopTask)" running
-// the multi-instance card build: Forecast::fetch() (see Forecast.cpp) keeps
-// a NetworkClientSecure, an HTTPClient and two JsonDocuments alive across a
-// TLS handshake and JSON parse, all as stack locals in one frame, and going
-// from one forecast instance to up to five meant that TLS-handshake-heavy
-// path got hit several times more often per rotation - turning an already
-// marginal peak into one this device reached during a real overnight run.
-// Doubling to 16384 leaves the same code path comfortable headroom without
-// meaningfully denting the ~320KB of RAM this chip has.
+// the multi-instance card build: Forecast::fetch() (see Forecast.cpp) kept a
+// NetworkClientSecure, an HTTPClient and two JsonDocuments alive across a TLS
+// handshake and JSON parse, all as stack locals in one frame, and going from
+// one forecast instance to up to five meant that TLS-handshake-heavy path got
+// hit several times more often per rotation - turning an already marginal
+// peak into one this device reached during a real overnight run. Doubling to
+// 16384 leaves the same code path comfortable headroom without meaningfully
+// denting the ~320KB of RAM this chip has.
+//
+// Partly stale as of Http.h/.cpp: the NetworkClientSecure and HTTPClient are
+// no longer stack locals in Forecast::fetch() (or any of the other former
+// per-call-site owners) - they are one shared pair living for the whole
+// process (see Http.h's own remarks on why). That shrinks this frame's
+// actual stack cost somewhat, but not enough of the original crash's
+// reasoning to justify shrinking this constant back down without a live
+// device to verify against: the two JsonDocuments this comment also names
+// are untouched by that change, and 16384 costs this device nothing it would
+// otherwise use. Left doubled, not tuned back down, until someone has actual
+// headroom data from hardware running this change to act on.
 size_t getArduinoLoopTaskStackSize(void) {
   return 16384;
 }
@@ -53,6 +64,7 @@ size_t getArduinoLoopTaskStackSize(void) {
 #include "Config.h"
 #include "Display.h"
 #include "HomeValue.h"
+#include "Http.h"
 #include "Identity.h"
 #include "IssFlyover.h"
 #include "Loader.h"
@@ -475,6 +487,14 @@ void setup() {
   Display::showStatus("Starting", "");
 
   Identity::begin();
+
+  // Configures the one shared HTTPS connection's TLS trust bundle exactly
+  // once for this boot - see Http.h's own remarks for why every HTTP call
+  // site now shares one persistent NetworkClientSecure/HTTPClient pair
+  // instead of building its own. Needs no network of its own (it only
+  // attaches this device's baked-in cert bundle) so it can run this early,
+  // well before WiFi or the first check-in that will actually use it.
+  Http::begin();
 
   // Seeded from NVS before WiFi, time sync, or the first check-in - all of
   // which can take a while, or fail and retry, on a device that just powered

@@ -1,17 +1,15 @@
 #include "CheckIn.h"
 
 #include <ArduinoJson.h>
-#include <HTTPClient.h>
-#include <NetworkClientSecure.h>
 #include <time.h>
 
 #include "Actions.h"
 #include "Assets.h"
 #include "CardManager.h"
 #include "Config.h"
+#include "Http.h"
 #include "Identity.h"
 #include "Log.h"
-#include "Tls.h"
 
 namespace CheckIn {
 namespace {
@@ -181,18 +179,17 @@ void parseAcceptedActionIds(JsonVariantConst source, Result& result) {
 Result perform() {
   Result result;
 
-  NetworkClientSecure client;
-  if (!Tls::configure(client)) {
+  if (!Http::ready()) {
     Log::line("[checkin] TLS setup failed, skipping this check-in");
     return result;
   }
 
-  HTTPClient http;
   const String url = String("https://") + Config::kServiceHost + kPath;
-  if (!http.begin(client, url)) {
+  if (!Http::beginRequest(url)) {
     Log::line("[checkin] could not begin request, skipping this check-in");
     return result;
   }
+  HTTPClient& http = Http::client();
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
   http.addHeader("Content-Type", "application/json");

@@ -1,16 +1,14 @@
 #include "Aircraft.h"
 
 #include <ArduinoJson.h>
-#include <HTTPClient.h>
-#include <NetworkClientSecure.h>
 
 #include "Assets.h"
 #include "Cards.h"
 #include "Config.h"
 #include "Display.h"
+#include "Http.h"
 #include "Identity.h"
 #include "Log.h"
-#include "Tls.h"
 
 namespace Aircraft {
 namespace {
@@ -48,20 +46,19 @@ Result parseRefusal(const String& body) {
 Result fetchMine() {
   Result result;
 
-  NetworkClientSecure client;
-  if (!Tls::configure(client)) {
+  if (!Http::ready()) {
     result.message = "Cannot verify the service's identity.";
     Log::line("[aircraft] TLS setup failed");
     return result;
   }
 
-  HTTPClient http;
   const String url = String("https://") + Config::kServiceHost + kPath;
-  if (!http.begin(client, url)) {
+  if (!Http::beginRequest(url)) {
     result.message = "Cannot reach the aircraft service.";
     Log::line("[aircraft] could not begin request");
     return result;
   }
+  HTTPClient& http = Http::client();
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
 

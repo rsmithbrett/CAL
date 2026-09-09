@@ -1,16 +1,14 @@
 #include "Telemetry.h"
 
 #include <ArduinoJson.h>
-#include <HTTPClient.h>
-#include <NetworkClientSecure.h>
 #include <WiFi.h>
 
 #include "Assets.h"
 #include "Config.h"
+#include "Http.h"
 #include "Identity.h"
 #include "Log.h"
 #include "SdStorage.h"
-#include "Tls.h"
 
 namespace Telemetry {
 namespace {
@@ -20,18 +18,17 @@ constexpr const char* kPath = "/api/telemetry";
 }  // namespace
 
 void report(const char* lastCheckInOutcome) {
-  NetworkClientSecure client;
-  if (!Tls::configure(client)) {
+  if (!Http::ready()) {
     Log::line("[telemetry] TLS setup failed, skipping this report");
     return;
   }
 
-  HTTPClient http;
   const String url = String("https://") + Config::kServiceHost + kPath;
-  if (!http.begin(client, url)) {
+  if (!Http::beginRequest(url)) {
     Log::line("[telemetry] could not begin request, skipping this report");
     return;
   }
+  HTTPClient& http = Http::client();
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
   http.addHeader("Content-Type", "application/json");
