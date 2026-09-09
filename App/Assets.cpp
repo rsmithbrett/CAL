@@ -99,6 +99,12 @@ constexpr const char* kCacheDir = "/assets";
 /// its own SD-hosted splash.
 constexpr const char* kExtension = ".png";
 
+/// The fixed cache-slot name showBootSplash() always reads from, regardless
+/// of which catalog asset id an account has configured as its splash - see
+/// ensureSplashCached() for why that filename can never be the asset's own
+/// id the way every other cached asset's is.
+constexpr const char* kSplashCacheId = "splash";
+
 /// Refuses anything that would escape kCacheDir or confuse the filesystem.
 /// Asset ids come from the server, which is trusted, but a path built by
 /// string concatenation from a remote value deserves a guard regardless -
@@ -120,6 +126,41 @@ bool isSafeId(const String& id) {
 }
 
 String pathFor(const String& id) { return String(kCacheDir) + "/" + id + kExtension; }
+
+/// Sidecar recording which asset id is currently behind the fixed "splash"
+/// cache slot - see ensureSplashCached() below for why this needs recording
+/// at all. A plain text file, not a second SD.exists() check: unlike every
+/// other cached asset, "splash"'s filename never changes when the underlying
+/// asset id does, so the filename itself carries no information about which
+/// asset is currently sitting there.
+String splashSourceIdPath() { return String(kCacheDir) + "/splash.id"; }
+
+String readSplashSourceId() {
+  File f = SD.open(splashSourceIdPath(), FILE_READ);
+  if (!f) {
+    return String();
+  }
+  String id = f.readString();
+  f.close();
+  id.trim();
+  return id;
+}
+
+void writeSplashSourceId(const String& id) {
+  SD.remove(splashSourceIdPath());
+  File f = SD.open(splashSourceIdPath(), FILE_WRITE);
+  if (!f) {
+    // Non-fatal: the splash image itself is already on the card at this
+    // point (fetchToCard() already succeeded, or this would never be
+    // called). Losing this sidecar only costs one avoidable re-fetch the
+    // next time the same asset id is still configured - it does not lose
+    // the splash image, and does not stop showBootSplash() from drawing it.
+    Log::line("[assets] could not write splash.id sidecar - next check-in will re-fetch unnecessarily");
+    return;
+  }
+  f.print(id);
+  f.close();
+}
 
 /// Grows a caller-owned RamAssetBuffer to at least `needed` bytes, exactly
 /// the way Display.cpp's own ensureFileBufferCapacity() grows gFileBuffer -
@@ -146,7 +187,17 @@ bool ensureRamBufferCapacity(RamAssetBuffer& buffer, size_t needed) {
 /// an asset is tens of kilobytes and this device has roughly 274KB of free
 /// heap, so buffering the whole body first is exactly the allocation that
 /// would make a slightly-too-large image fatal instead of merely slow.
-bool fetchToCard(const String& id) {
+///
+/// `fetchId` and `cacheId` are the same value for every ordinary caller
+/// (ensureCached() below) - the asset's own id is both what the URL names and
+/// what the cached filename is keyed by. ensureSplashCached() is the one
+/// caller that splits them: it fetches whatever asset id the account has
+/// configured but always stores the result under the fixed "splash" slot,
+/// since that is the one filename showBootSplash() ever reads from and it has
+/// no way to know at boot which asset id last won. Every other line of this
+/// function - TLS, auth, streamed sha256, temp-file-then-rename, SD
+/// readback-verify - stays identical for both callers.
+bool fetchToCard(const String& fetchId, const String& cacheId) {
   NetworkClientSecure client;
   if (!Tls::configure(client)) {
     Log::line("[assets] TLS setup failed");
@@ -154,9 +205,9 @@ bool fetchToCard(const String& id) {
   }
 
   HTTPClient http;
-  const String url = String("https://") + Config::kServiceHost + kFetchPathPrefix + id + kFetchPathSuffix;
+  const String url = String("https://") + Config::kServiceHost + kFetchPathPrefix + fetchId + kFetchPathSuffix;
   if (!http.begin(client, url)) {
-    Log::printf("[assets] could not begin request for '%s'", id.c_str());
+    Log::printf("[assets] could not begin request for '%s'", fetchId.c_str());
     return false;
   }
   http.setTimeout(Config::kHttpTimeoutMs);
@@ -164,10 +215,10 @@ bool fetchToCard(const String& id) {
 
   Log::verbose("[assets] GET %s", url.c_str());
   const int status = http.GET();
-  Log::verbose("[assets] fetch of '%s' response status=%d", id.c_str(), status);
+  Log::verbose("[assets] fetch of '%s' response status=%d", fetchId.c_str(), status);
   if (status != 200) {
     http.end();
-    Log::printf("[assets] fetch of '%s' failed, http status=%d", id.c_str(), status);
+    Log::printf("[assets] fetch of '%s' failed, http status=%d", fetchId.c_str(), status);
     return false;
   }
 
@@ -182,8 +233,10 @@ bool fetchToCard(const String& id) {
 
   // Written to a temporary name and renamed on success, so an interrupted
   // download (power loss, WiFi drop mid-body) can never leave a truncated
-  // file that every later ensureCached() then treats as a cache hit.
-  const String finalPath = pathFor(id);
+  // file that every later ensureCached() then treats as a cache hit. Keyed by
+  // cacheId, not fetchId - see this function's own remarks above for why
+  // those differ for ensureSplashCached().
+  const String finalPath = pathFor(cacheId);
   const String tempPath = finalPath + ".part";
   SD.remove(tempPath);
   File out = SD.open(tempPath, FILE_WRITE);
@@ -239,14 +292,14 @@ bool fetchToCard(const String& id) {
   if (writeFailed) {
     mbedtls_sha256_free(&sha);
     SD.remove(tempPath);
-    Log::printf("[assets] fetch of '%s' - SD write failed after %d bytes", id.c_str(), written);
+    Log::printf("[assets] fetch of '%s' - SD write failed after %d bytes", fetchId.c_str(), written);
     return false;
   }
 
   if (written <= 0) {
     mbedtls_sha256_free(&sha);
     SD.remove(tempPath);
-    Log::printf("[assets] fetch of '%s' wrote nothing (%d)", id.c_str(), written);
+    Log::printf("[assets] fetch of '%s' wrote nothing (%d)", fetchId.c_str(), written);
     return false;
   }
 
@@ -258,7 +311,7 @@ bool fetchToCard(const String& id) {
   if (expectedSize >= 0 && written != expectedSize) {
     mbedtls_sha256_free(&sha);
     SD.remove(tempPath);
-    Log::printf("[assets] fetch of '%s' was truncated (wrote %d of %d bytes)", id.c_str(),
+    Log::printf("[assets] fetch of '%s' was truncated (wrote %d of %d bytes)", fetchId.c_str(),
                 written, expectedSize);
     return false;
   }
@@ -277,7 +330,7 @@ bool fetchToCard(const String& id) {
   // backward-compatibility posture as expectedSize above).
   if (expectedHash.length() > 0 && !toHex(digest, sizeof(digest)).equalsIgnoreCase(expectedHash)) {
     SD.remove(tempPath);
-    Log::printf("[assets] fetch of '%s' failed integrity check (hash mismatch)", id.c_str());
+    Log::printf("[assets] fetch of '%s' failed integrity check (hash mismatch)", fetchId.c_str());
     return false;
   }
 
@@ -295,7 +348,7 @@ bool fetchToCard(const String& id) {
       SD.remove(tempPath);
       Log::printf("[assets] fetch of '%s' - could not reopen %s to verify what was actually "
                   "written",
-                  id.c_str(), tempPath.c_str());
+                  fetchId.c_str(), tempPath.c_str());
       return false;
     }
     mbedtls_sha256_context verifySha;
@@ -321,7 +374,7 @@ bool fetchToCard(const String& id) {
       Log::printf(
           "[assets] fetch of '%s' - storage corrupted what was written (network side verified "
           "fine, re-read from SD did not) - this card may be failing",
-          id.c_str());
+          fetchId.c_str());
       return false;
     }
   }
@@ -333,7 +386,16 @@ bool fetchToCard(const String& id) {
     return false;
   }
 
-  Log::printf("[assets] cached '%s' (%d bytes, sha256 verified)", id.c_str(), written);
+  // Names both ids when they differ (ensureSplashCached()'s case) so the log
+  // reads "fetched X, stored as splash" rather than leaving which asset is
+  // now behind the fixed "splash" slot to be inferred from a check-in
+  // response minutes earlier.
+  if (fetchId == cacheId) {
+    Log::printf("[assets] cached '%s' (%d bytes, sha256 verified)", fetchId.c_str(), written);
+  } else {
+    Log::printf("[assets] fetched '%s', cached as '%s' (%d bytes, sha256 verified)",
+                fetchId.c_str(), cacheId.c_str(), written);
+  }
   return true;
 }
 
@@ -486,7 +548,28 @@ bool ensureCached(const String& id) {
   if (SD.exists(pathFor(id))) {
     return true;
   }
-  return fetchToCard(id);
+  return fetchToCard(id, id);
+}
+
+bool ensureSplashCached(const String& assetId) {
+  if (!Sd::isReady() || !isSafeId(assetId)) {
+    return false;
+  }
+  // Unlike ensureCached() above, a hit is not "the file exists" - the
+  // filename can't tell two different accounts' splash assets apart, since
+  // it is always "splash", never the asset's own id. It has to be "the file
+  // exists AND the sidecar says this is the asset currently behind it" -
+  // otherwise a device that switched from asset A to asset B would see
+  // splash.png already on disk, assume it was up to date, and keep showing A
+  // forever.
+  if (SD.exists(pathFor(kSplashCacheId)) && readSplashSourceId() == assetId) {
+    return true;
+  }
+  if (!fetchToCard(assetId, kSplashCacheId)) {
+    return false;
+  }
+  writeSplashSourceId(assetId);
+  return true;
 }
 
 bool isCached(const String& id) {
@@ -586,7 +669,11 @@ uint16_t cachedCount() {
   }
   uint16_t count = 0;
   for (File entry = dir.openNextFile(); entry; entry = dir.openNextFile()) {
-    if (!entry.isDirectory()) {
+    // splash.id is bookkeeping (see splashSourceIdPath()), not a cached
+    // picture - counting it here would make Telemetry's cache-growth number
+    // over-report by one for any device with a splash configured at all.
+    const String name = entry.name();
+    if (!entry.isDirectory() && name != "splash.id") {
       count++;
     }
     entry.close();
@@ -608,7 +695,7 @@ void showBootSplash() {
   if (!Sd::isReady()) {
     return;
   }
-  const String path = pathFor("splash");
+  const String path = pathFor(kSplashCacheId);
   if (!SD.exists(path)) {
     // Silently skipped, exactly like CYD-Dickey's own splash: a decoration
     // whose absence is the ordinary case for a device with no card.

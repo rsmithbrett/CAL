@@ -406,6 +406,19 @@ void performCheckIn() {
                           result.issNextPassMaxElevationAzimuthDegrees, result.issNextPassSetUtc,
                           result.issNextPassSetAzimuthDegrees, result.utcOffsetMinutes);
 
+  // Not a card push like everything above - there is no splash card, and
+  // nothing here redraws the screen. When the account has a boot splash
+  // configured, this fetches and SHA-256-verifies it into the fixed "splash"
+  // SD slot via the same Assets machinery every other cached picture uses
+  // (see Assets.h's ensureSplashCached()), doing nothing at all when the id
+  // has not changed since the last time this succeeded. This check-in cannot
+  // put the new splash on screen right now: showBootSplash() only ever runs
+  // once, at boot, before this run's first check-in - so a freshly-configured
+  // splash first appears on the *next* boot, not this session.
+  if (result.splashAssetId.length() > 0) {
+    Assets::ensureSplashCached(result.splashAssetId);
+  }
+
   // The three card fields, in the order they have to happen in.
   //
   // acceptedActionIds is consumed first: it acknowledges presses this very

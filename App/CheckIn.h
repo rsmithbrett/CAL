@@ -178,6 +178,21 @@ struct Result {
   double homeValuePricePerSquareFoot = -1.0;
   time_t homeValueUpdatedAtUtc = 0;
 
+  /// The Assets-catalog id of this device's configured boot splash, resolved
+  /// server-side per account (CheckInModels.cs's CheckInResponse.SplashAssetId) -
+  /// or empty when nothing is configured anywhere in this device's Device/
+  /// Account/Brand/SysAdmin chain, the ordinary state for an account nobody
+  /// has set one up for. Empty String rather than a -1/-999-style numeric
+  /// sentinel, matching moonPhaseName above: this is an id, not a
+  /// measurement, and an empty String is exactly as unambiguous an
+  /// absence-marker for text as a negative number is for something that is
+  /// never negative.
+  ///
+  /// See App.ino's own performCheckIn() for what a non-empty value here
+  /// actually does, and Assets.h's ensureSplashCached()/showBootSplash() for
+  /// why setting it does not make a new splash appear until the *next* boot.
+  String splashAssetId;
+
   /// How this device should rotate its cards. `present == false` means the
   /// server sent no policy this time, which means "keep whatever policy you
   /// already had" - explicitly not "show nothing". See
