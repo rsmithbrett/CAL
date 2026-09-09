@@ -227,6 +227,13 @@ void checkHeapHealth() {
   // everything else in RAM at restart - same reasoning as every other
   // pre-esp_restart() call site in this codebase (see Loader.cpp).
   Log::flushNow();
+  // The clock right now is already correct - this restart is deliberate and
+  // self-inflicted, not a power loss, so there is a real reading worth
+  // carrying into the next boot. See AppService::trySkipSyncAfterFastReboot()
+  // for what this buys: skipping the blocking SNTP wait entirely on the very
+  // next setup(), which is what most of this restart's own visible outage
+  // window was actually spent on.
+  AppService::stashTimeForFastReboot();
   Display::showStatus("Refreshing", "Reclaiming memory - back in a moment");
   // Long enough for both the status message and the flushed log line to be
   // visibly sent before the restart cuts everything off.
@@ -512,10 +519,19 @@ void setup() {
   // unbootable.
   Identity::clearBootAttempts();
 
-  Display::showStatus("Checking the time", "Needed before a secure connection");
-  while (!AppService::synchroniseTime()) {
-    Display::showFailure("Cannot reach the internet", "Retrying...");
-    delay(10000);
+  // A boot that immediately follows this same App's own heap-health restart
+  // already has a clock that was correct moments ago - see
+  // trySkipSyncAfterFastReboot()'s own remarks. Skips the blocking wait
+  // below entirely when that is true; falls through to the ordinary
+  // check-the-time screen otherwise (a genuine cold boot, a fresh flash, or
+  // handing back from CAL after an OTA install - none of which have
+  // anything to restore).
+  if (!AppService::trySkipSyncAfterFastReboot()) {
+    Display::showStatus("Checking the time", "Needed before a secure connection");
+    while (!AppService::synchroniseTime()) {
+      Display::showFailure("Cannot reach the internet", "Retrying...");
+      delay(10000);
+    }
   }
 
   // Storage is optional. A device with nothing in the card slot mounts
