@@ -140,10 +140,36 @@ uint8_t gRefreshScan = 0;
 /// within 10 mi", "weather is not activated") reports one item, not zero -
 /// that message is content, and only a card with genuinely nothing to say
 /// (typically one that has never fetched) is skipped.
+/// Whether `card`'s effectivity window (if any) includes right now - the
+/// firmware half of CardPolicyEntry.EffectiveFromUtc/EffectiveToUtc on the
+/// server. Both 0 (the ordinary case: no policy has ever set either field)
+/// means always effective, the ordinary "absent means no restriction"
+/// tolerance every other optional policy field on CardSpec already follows.
+/// Checked on every scheduling decision via showable() below, not just once
+/// when the policy arrives, so a window opening or closing while a policy is
+/// already in force takes effect without waiting for a fresh check-in.
+bool isEffectiveNow(const Cards::CardSpec& card) {
+  if (card.effectiveFromUtc == 0 && card.effectiveToUtc == 0) {
+    return true;
+  }
+  const uint32_t now = static_cast<uint32_t>(time(nullptr));
+  if (card.effectiveFromUtc != 0 && now < card.effectiveFromUtc) {
+    return false;
+  }
+  // Half-open [from, to): `now == effectiveToUtc` is already past the window,
+  // matching CardPolicyEditing.Validate's own "to <= from is never effective
+  // at all" rule on the server for the degenerate case where the two are
+  // equal.
+  if (card.effectiveToUtc != 0 && now >= card.effectiveToUtc) {
+    return false;
+  }
+  return true;
+}
+
 bool showable(uint8_t index) {
   const Cards::CardSpec& card = gCards[index];
   return card.active && card.itemCount != nullptr && card.draw != nullptr &&
-         card.itemCount() > 0;
+         !card.dismissedByButton && isEffectiveNow(card) && card.itemCount() > 0;
 }
 
 /// Total ordering over the registry: `order` first, registration index as the
@@ -374,7 +400,20 @@ void drawCurrent() {
   // mandate: the stream is the only diagnostic channel a deployed device has.
   Log::printf("[cards] showing '%s' (item %u/%u)", card.id,
               static_cast<unsigned>(gCurrent.item) + 1, static_cast<unsigned>(total));
-  card.draw(gCurrent.item);
+
+  // Banner/Banner Button themes draw this card's own `text` in a header strip
+  // instead of its ordinary full-screen draw() - see Cards::Theme's own
+  // remarks. With no text to put in the strip there is nothing to show there,
+  // so this falls back to the card's own draw() exactly as Full Screen
+  // already does - CardPolicyEditing.Warnings on the server is what tells an
+  // operator that theme is having no visible effect, not a special case here.
+  if (card.theme != Cards::Theme::FullScreen && strlen(card.text) > 0) {
+    Log::printf("[cards] '%s' drawing as a %s", card.id,
+                card.theme == Cards::Theme::BannerButton ? "banner button" : "banner");
+    Display::showBannerCard(String(card.text));
+  } else {
+    card.draw(gCurrent.item);
+  }
   drawChrome(card);
 }
 
@@ -435,6 +474,23 @@ void handleTap(const Touch::Tap& tap) {
       Log::printf("[cards] action button pressed: card=%s actionId=%s",
                   pressed.cardId.c_str(), pressed.actionId.c_str());
       Actions::recordPress(pressed);
+
+      // A Banner Button's whole reason for existing: pressing it clears the
+      // reminder locally, on top of - not instead of - whatever effect the
+      // press above just queued (including none at all, for a button whose
+      // server-side binding is DeviceActionEffects.Ignore and exists purely
+      // to clear). See CardManager::applyPolicy() for the one thing that
+      // undoes this again: the server sending different text or a different
+      // start time for this same entry, treated as a new reminder rather
+      // than the same one still being shown.
+      bool dismissed = false;
+      if (gCurrent.card >= 0 && gCurrent.card < static_cast<int8_t>(gCardCount) &&
+          gCards[gCurrent.card].theme == Cards::Theme::BannerButton) {
+        gCards[gCurrent.card].dismissedByButton = true;
+        dismissed = true;
+        Log::printf("[cards] '%s' dismissed locally (Banner Button press)", pressed.cardId.c_str());
+      }
+
       // Acknowledges the *press*, not the delivery. The contract is
       // deliberate about there being no "sent" state and no round trip - the
       // press rides the next ordinary check-in and the user waits for
@@ -444,11 +500,21 @@ void handleTap(const Touch::Tap& tap) {
       // call - the user's explicit ask was a confirmation that reads clearly
       // from across the room, not just at the button itself - and it claims
       // nothing about what the server did with the press, same as that
-      // smaller flash never did. drawCurrent() puts the actual card (and its
-      // buttons) back afterward, since the checkmark was drawn over the
-      // whole panel, not just the one button rect.
+      // smaller flash never did.
       Display::showButtonPressConfirmation();
-      drawCurrent();
+      if (dismissed) {
+        // The card the checkmark was drawn over just became unshowable -
+        // putting it straight back on screen a moment after its own button
+        // dismissed it would look like the press did nothing. Move on to
+        // whatever is next instead, the same as a manual forward tap.
+        resetHistory(gCurrent);
+        show(computeNext());
+      } else {
+        // drawCurrent() puts the actual card (and its buttons) back, since
+        // the checkmark was drawn over the whole panel, not just the one
+        // button rect.
+        drawCurrent();
+      }
       // A card someone just pressed a button on should not be yanked away a
       // second later, same as a manual navigation.
       holdOffAutoAdvance();
@@ -650,6 +716,13 @@ void applyPolicy(const Cards::Policy& policy) {
     card.notableDwellSeconds =
         static_cast<uint16_t>(entry.notableDwellSeconds > 0 ? entry.notableDwellSeconds : 0);
 
+    // What this card's Banner Button dismissal (if any) was actually
+    // dismissing, from BEFORE this policy's text/effectiveFromUtc overwrite
+    // it below - see the comparison at the end of this loop body, after both
+    // are rewritten, for why the OLD values are what matter here.
+    const String previousText = String(card.text);
+    const uint32_t previousEffectiveFromUtc = card.effectiveFromUtc;
+
     // The picture this card draws, for the cards that draw one. Rewritten on
     // every policy - including back to empty, which is how the server takes a
     // picture away again. An over-long id is dropped rather than truncated:
@@ -711,6 +784,40 @@ void applyPolicy(const Cards::Policy& policy) {
     } else if (entry.location.length() > 0) {
       strncpy(card.location, entry.location.c_str(), Cards::kMaxLocationLength);
       card.location[Cards::kMaxLocationLength] = '\0';
+    }
+
+    // Which of the three display styles this card draws - rewritten on every
+    // policy exactly like every field above. Unrecognised (including empty,
+    // which is every policy saved before this feature existed) means Full
+    // Screen - the same tolerant-default rule `kind` above already applies,
+    // rather than leaving whatever theme a previous policy set in place.
+    if (entry.theme == "banner") {
+      card.theme = Cards::Theme::Banner;
+    } else if (entry.theme == "bannerbutton") {
+      card.theme = Cards::Theme::BannerButton;
+    } else {
+      card.theme = Cards::Theme::FullScreen;
+    }
+
+    // The effectivity window - rewritten on every policy exactly like every
+    // field above, including back to 0 (no bound), which is how an admin
+    // removes a window they set previously. Already epoch seconds by the
+    // time it reaches here - see Cards::PolicyEntry::effectiveFromUtc's own
+    // remarks on why the ISO-8601 parsing happens once, in CheckIn.cpp, and
+    // not here.
+    card.effectiveFromUtc = static_cast<uint32_t>(entry.effectiveFromUtc);
+    card.effectiveToUtc = static_cast<uint32_t>(entry.effectiveToUtc);
+
+    // See CardSpec::dismissedByButton's own remarks: a Banner Button press
+    // dismisses THIS reminder, not this card id forever. If the server is
+    // now sending different text or a different start time for this same
+    // entry, an old dismissal must not silently suppress what is, as far as
+    // this device can tell, a genuinely new reminder.
+    if (card.dismissedByButton &&
+        (String(card.text) != previousText || card.effectiveFromUtc != previousEffectiveFromUtc)) {
+      Log::printf("[cards] '%s' un-dismissed - the server sent a new reminder for this entry",
+                  entry.id.c_str());
+      card.dismissedByButton = false;
     }
   }
 

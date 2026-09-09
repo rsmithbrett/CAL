@@ -140,6 +140,20 @@ void parseCardPolicy(JsonVariantConst source, Cards::Policy& policy) {
     // same tolerance already given to a stray assetId/text/qrData landing on
     // a card that draws none of those.
     entry.location = String(card["location"] | "");
+    // Optional again, for which of the three display themes this card uses -
+    // "banner"/"bannerbutton", absent (or anything else) meaning Full Screen.
+    // See Cards::Theme's own remarks; CardManager::applyPolicy() is what
+    // actually interprets this string, not here.
+    entry.theme = String(card["theme"] | "");
+    // These two arrive as ISO-8601 UTC instants, same shape as the ISS
+    // next-pass fields below - parsed straight to epoch seconds here rather
+    // than carried as strings, since nothing downstream needs the unparsed
+    // form. A JSON null, a missing field, or anything parseIso8601Utc() can't
+    // read all come back 0 - this struct's own "no bound" sentinel, the same
+    // absent-means-unrestricted tolerance every other optional card-policy
+    // field already gets.
+    entry.effectiveFromUtc = parseIso8601Utc(card["effectiveFromUtc"] | "");
+    entry.effectiveToUtc = parseIso8601Utc(card["effectiveToUtc"] | "");
   }
 }
 

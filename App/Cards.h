@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <time.h>
 
 /// What a card *is*, as data - the descriptor every card module hands to the
 /// scheduler, and the registry those descriptors live in.
@@ -41,6 +42,35 @@ enum class Kind : uint8_t {
   /// taking a fixed slot in the rotation. The distinction is load-bearing -
   /// see CardManager.cpp's computeNext() for why a fixed slot is wrong.
   Interstitial,
+};
+
+/// Which of three display styles a card draws once it takes its turn in the
+/// rotation - orthogonal to `Kind` above, which only decides *when* that turn
+/// comes. Mirrors the server's `CardPolicyEntry.Theme` (see that property's
+/// own remarks for the full reasoning); this is the firmware half.
+///
+/// `Banner`/`BannerButton` both draw `CardSpec::text` - reused as-is, there is
+/// no second content field - as a header strip across the top of the panel
+/// (`Display::showBannerCard()`) instead of this card's own `draw()`. With no
+/// text to show, `CardManager::drawCurrent()` falls back to `draw()` anyway,
+/// which is exactly Full Screen with no code path of its own needed for it.
+enum class Theme : uint8_t {
+  /// Every card's own ordinary full-screen layout - the only theme that
+  /// existed before this feature, and the default for every policy entry
+  /// that omits Theme entirely (every policy saved before this feature
+  /// existed).
+  FullScreen,
+  /// A header strip reminding a household of something - an emergency
+  /// weather alert, an upcoming calendar event - drawn across the top of the
+  /// panel instead of this card's own full-screen content.
+  Banner,
+  /// The same header strip, plus: pressing this card's own button (drawn and
+  /// wired up exactly like any other card's button - see Actions.h) clears
+  /// the reminder locally on this device, on top of whatever effect that
+  /// button is otherwise bound to fire server-side. See
+  /// CardManager::handleTap()'s `Touch::Hit::ActionButton` case for exactly
+  /// what "clears" means and how a later policy change undoes it.
+  BannerButton,
 };
 
 /// Refresh this card's retained state from the server. Called only by the
@@ -191,6 +221,33 @@ struct CardSpec {
   /// millis() of the last completed fetch. Drives the refresh timer only.
   uint32_t lastFetchMs = 0;
   bool everFetched = false;
+
+  // ---- Display theme and effectivity dates - see Theme's own remarks above
+  // and CardPolicyEntry.EffectiveFromUtc/EffectiveToUtc on the server. Both
+  // are rewritten wholesale on every policy exactly like every field above,
+  // except `dismissedByButton`, which is deliberately NOT reset by an
+  // unchanged policy - see CardManager::applyPolicy()'s own remarks on why.
+
+  /// FullScreen unless a policy names this card with a recognised Theme
+  /// value - see CardManager::applyPolicy().
+  Theme theme = Theme::FullScreen;
+  /// Epoch seconds (UTC). 0 means "no bound in this direction" - the same
+  /// absent-means-unrestricted convention every other optional policy field
+  /// on this struct already follows. Compared against time(nullptr) on every
+  /// scheduling decision, not just once when the policy arrives - see
+  /// CardManager::showable()'s isEffectiveNow().
+  uint32_t effectiveFromUtc = 0;
+  uint32_t effectiveToUtc = 0;
+
+  /// Set by CardManager::handleTap() when this card's Theme is BannerButton
+  /// and its own button is pressed - see that function's own remarks. RAM
+  /// only, deliberately not persisted to NVS: a press that a reboot erases is
+  /// the honest limit of a fire-and-forget, no-confirmation button press on
+  /// firmware with no automated hardware tests, not a guarantee this file
+  /// claims to make. Cleared again the moment applyPolicy() sees this same
+  /// entry's `text` or `effectiveFromUtc` change - a new reminder, as far as
+  /// this device can tell, must not stay suppressed by an old one's press.
+  bool dismissedByButton = false;
 };
 
 // 28 registrations exist today: aircraft, clockdate, issflyover, listings,
@@ -291,6 +348,20 @@ struct PolicyEntry {
   /// value is always short enough that the bound never fires against a real
   /// server.
   String location;
+  /// Optional on the wire: "banner", "bannerbutton", or absent/anything else
+  /// meaning Full Screen - see Cards::Theme and CardPolicyEntry.Theme on the
+  /// server for the full tolerance rule. Parsed into a CardSpec::theme value
+  /// by CardManager::applyPolicy(), not here - this struct only carries the
+  /// raw string the same way `kind` does.
+  String theme;
+  /// Already converted from the wire's ISO-8601 instant to epoch seconds by
+  /// CheckIn.cpp's own parseIso8601Utc() at parse time - unlike every other
+  /// field on this struct, there is no reason to carry the raw string only to
+  /// re-parse it in CardManager::applyPolicy(), since nothing else needs the
+  /// unparsed form. 0 for an absent field, the same sentinel
+  /// Cards::CardSpec::effectiveFromUtc uses for "no bound".
+  time_t effectiveFromUtc = 0;
+  time_t effectiveToUtc = 0;
 };
 
 struct Policy {
