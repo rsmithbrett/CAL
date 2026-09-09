@@ -210,6 +210,12 @@ bool fetchToCard(const String& fetchId, const String& cacheId) {
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
 
+  // HTTPClient only records a response header into _currentHeaders if it was
+  // registered here first - without this, http.header("X-Asset-Sha256")
+  // below always returns empty and the hash-verify blocks silently never run.
+  static const char* kAssetHeaderKeys[] = {"X-Asset-Sha256"};
+  http.collectHeaders(kAssetHeaderKeys, 1);
+
   Log::verbose("[assets] GET %s", url.c_str());
   const int status = http.GET();
   Log::verbose("[assets] fetch of '%s' response status=%d", fetchId.c_str(), status);
@@ -416,6 +422,11 @@ bool fetchToRamImpl(const String& id, RamAssetBuffer& buffer) {
   HTTPClient& http = Http::client();
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
+
+  // See fetchToCard()'s own comment on collectHeaders(): without this,
+  // http.header("X-Asset-Sha256") below always returns empty.
+  static const char* kAssetHeaderKeys[] = {"X-Asset-Sha256"};
+  http.collectHeaders(kAssetHeaderKeys, 1);
 
   Log::verbose("[assets] GET %s (direct-to-RAM)", url.c_str());
   const int status = http.GET();
