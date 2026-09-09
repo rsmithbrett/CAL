@@ -564,6 +564,48 @@ void setup() {
 
   Identity::begin();
 
+  // Storage and the boot splash come up HERE - before Http/WiFi/TLS - and the
+  // ordering is the whole fix, not a cosmetic preference.
+  //
+  // Measured on hardware: maxAllocHeap is 110,580 bytes at this point in boot
+  // and only 32,756 by the time the network stack has finished allocating.
+  // LovyanGFX's PNG decoder needs roughly 44KB contiguous for its scratch
+  // buffer, and readFileToBuffer() takes another ~52KB for the file itself
+  // (see Display.cpp's own remarks on both). Drawing the splash after WiFi
+  // therefore asked for 44KB out of 32,756 and failed every single time -
+  // silently, because showBootSplash() ignores the result and boot-time logs
+  // never reach the remote debug stream. Every graphic card then failed the
+  // same way for the rest of the run, dropped itself from the rotation, and
+  // left the device cycling only the cards that need no picture.
+  //
+  // Drawing it here instead succeeds, and the *reason it keeps working* is
+  // Display.cpp's deliberate decision never to call releasePngMemory(): the
+  // decoder's scratch buffer, allocated once here while memory is plentiful,
+  // stays allocated for the whole uptime. Every later card draw reuses it
+  // rather than trying to claw 44KB out of a heap the network stack has
+  // already carved up. That decision looked like the liability; it is
+  // actually what makes this work, provided the FIRST decode happens early.
+  //
+  // Streaming from SD instead (lcd.drawPngFile(), which is what CYD-Dickey
+  // does and why it never hit this) is deliberately NOT the fix here: this
+  // board is an LCDWIKI E32R28T whose SD card shares SCLK/MISO/MOSI with the
+  // display by the manufacturer's own documentation - see README's "The
+  // likely root cause" section. readFileToBuffer() exists precisely to keep
+  // the SD read and the display writes from interleaving on that shared bus.
+  //
+  // Also, incidentally, what the splash was always meant to do: put the logo
+  // up first and let WiFi connect underneath it, rather than showing it after
+  // the network is already up.
+  //
+  // Note on file timestamps: Sd::begin() used to run after time sync so a
+  // freshly-cached asset got a plausible modification time. Nothing is cached
+  // during setup() - showBootSplash() only reads - and every real cache write
+  // happens on check-in, long after the clock is set, so that property is
+  // unaffected.
+  Sd::begin();
+  Assets::begin();
+  Assets::showBootSplash();
+
   // Configures the one shared HTTPS connection's TLS trust bundle exactly
   // once for this boot - see Http.h's own remarks for why every HTTP call
   // site now shares one persistent NetworkClientSecure/HTTPClient pair
@@ -630,13 +672,11 @@ void setup() {
     }
   }
 
-  // Storage is optional. A device with nothing in the card slot mounts
-  // nothing, caches nothing, reports zeroes in telemetry and otherwise
-  // behaves identically - see SdStorage.h. Brought up after the clock so a
-  // just-cached asset gets a plausible modification time.
-  Sd::begin();
-  Assets::begin();
-  Assets::showBootSplash();
+  // Storage and the splash now come up much earlier, before Http/WiFi/TLS -
+  // see the block above Http::begin() for why that ordering is load-bearing
+  // rather than cosmetic. Storage itself remains optional: a device with
+  // nothing in the card slot mounts nothing, caches nothing, reports zeroes
+  // in telemetry and otherwise behaves identically (see SdStorage.h).
 
   // Hands the screen over. Every card registered itself before setup() was
   // ever called; this is where the rotation starts running.
