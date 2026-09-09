@@ -617,10 +617,18 @@ void drawTideIcon(int cx, int cy, int radius, bool rising) {
                    ink());
 }
 
-void drawWeatherIcon(WeatherIconKind kind, int cx, int cy, int radius) {
+// isDaytime only changes the Sunny case (a clear night is a moon, not a sun
+// with rays reading as daylight it isn't) - every other condition already
+// reads the same after dark as it does before it, so nothing else here
+// branches on it.
+void drawWeatherIcon(WeatherIconKind kind, int cx, int cy, int radius, bool isDaytime) {
   switch (kind) {
     case WeatherIconKind::Sunny:
-      drawSunIcon(cx, cy, radius);
+      if (isDaytime) {
+        drawSunIcon(cx, cy, radius);
+      } else {
+        drawMoonIcon(cx, cy, radius);
+      }
       break;
     case WeatherIconKind::PartlyCloudy:
       lcd.fillCircle(cx - radius * 0.3f, cy - radius * 0.3f, radius * 0.38f, kIconSun);
@@ -1587,7 +1595,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   constexpr int kHeroIconCy = 60;
   constexpr int kHeroIconRadius = 24;
   drawWeatherIcon(classifyCondition(currentShortForecast), kHeroIconCx, kHeroIconCy,
-                  kHeroIconRadius);
+                  kHeroIconRadius, currentIsDaytime);
 
   lcd.setFont(&fonts::FreeSansBold24pt7b);
   lcd.setTextSize(1);
@@ -1633,7 +1641,11 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
     lcd.setTextDatum(top_center);
     lcd.drawString(shortDayLabel(i, dayNames[i]), columnCentreX, 122);
 
-    drawWeatherIcon(classifyCondition(dayConditions[i]), columnCentreX, 155, /*radius=*/17);
+    // Always the daytime variant: each strip column summarises a whole day,
+    // not a specific night, so there is no isDaytime of its own to read the
+    // way the hero above reads currentIsDaytime for "right now".
+    drawWeatherIcon(classifyCondition(dayConditions[i]), columnCentreX, 155, /*radius=*/17,
+                    /*isDaytime=*/true);
 
     char tempBuffer[12];
     snprintf(tempBuffer, sizeof(tempBuffer), "%d%s", dayTemperatures[i], dayUnits[i].c_str());
