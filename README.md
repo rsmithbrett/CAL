@@ -1450,6 +1450,15 @@ device fetches all five forecast instances once each before that first
 check-in narrows the set down to whatever an admin actually configured —
 five requests instead of one, bounded and one-time, not a steady-state cost.
 
+**Corrected later: "entirely unaware of what any other instance fetched" and
+the five-request burst are both now out of date.** `Forecast.cpp` memoizes the
+response to each of its two possible URLs, so five instances issue at most two
+requests per refresh window rather than five — see "Three allocation-churn
+fixes" near the end of this file for how, and for why each instance still reads
+its *own* Location choice every time. The paragraph above is kept as written
+because the sharp edge it identifies is exactly what made the memoization worth
+doing.
+
 Weather, Aircraft, Listings, Tides, SunMoon, MoonPhase and ClockDate were
 deliberately left single-instance. This is a judgment call, not something
 Brett specified precisely for these seven — he named the fetch-driven ones
@@ -1806,7 +1815,10 @@ USB `Serial` unconditionally, before anything else happens. If the remote
 stream is ever broken, disabled, or the server unreachable, someone with a
 cable in hand still sees exactly what they would have seen before this module
 existed — that is the fallback of last resort this was built not to regress,
-not a nice-to-have.
+not a nice-to-have. (`Log::line()` is now two overloads, `const String&` and
+`const char*`, so that unconditional serial write costs no heap allocation on
+the ordinary streaming-off path — see "Three allocation-churn fixes" at the end
+of this file.)
 
 **Discovery is check-in-driven, and deliberately not one-shot.** `/api/checkin`'s
 response now carries `debugStreamRequested` alongside `acknowledged` /
@@ -1958,8 +1970,13 @@ for a predicted future pass as `issLatitude`'s -999.0 is for a coordinate);
 `issBearingDegrees`'s own convention.
 
 `IssFlyover::setNextPass()` is called from `App.ino` right alongside
-`setPosition()`. When there is no live position but a pass is upcoming, the
-card falls back to it instead of showing nothing: "Next pass"/"Direction"
+`setPosition()`. As shipped, the pass was the *fallback*: when there was no
+live position but a pass was upcoming, the card drew it instead of showing
+nothing. **That preference has since been reversed — the pass now leads and the
+live position is the fallback**; see "The ISS card now leads with the next
+visible pass" at the end of this file for the reasoning and for the server-side
+visibility filtering that made it safe. Everything below about *how* a pass is
+drawn is unchanged: "Next pass"/"Direction"
 rows for the local rise time and compass direction (converted from the
 absolute UTC instant with the same `time(nullptr) + utcOffsetMinutes * 60`
 then `gmtime_r` idiom `ClockDate.cpp` already uses for the current time, just
@@ -1974,7 +1991,11 @@ the live position already has (no CelesTrak element set ever fetched, no
 resolved position, or no qualifying pass in the server's search window), and
 both a fresh pass arriving and a previously-known pass disappearing are
 logged to the remote debug stream on change, the same "state-change only"
-convention `Tides.cpp`'s tide logging already uses.
+convention `Tides.cpp`'s tide logging already uses. (That convention has since
+been supplemented rather than replaced: this card, like every other card with
+data of its own, now also re-asserts its current status once per check-in —
+see "Re-asserting every provider's status once per check-in" at the end of this
+file for why change-only logging leaves a live stream blind.)
 
 ## SelfTest: a diagnostic firmware for screen and SD isolation
 
@@ -2588,6 +2609,18 @@ reading %s (%u bytes)"`) rather than silently returning a blank screen -
 the same "loud, not silent" standard every other failure path in this
 codebase already holds to.
 
+**A later exception worth naming here rather than leaving buried.** The three
+`static const JsonDocument` filters described in "Three allocation-churn fixes"
+at the end of this file are small, heap-backed and permanent — which is none of
+the three things the rule above allows. They are allowed anyway, on the ground
+the rule was actually written to serve: the point was never "minimise resident
+bytes", it was "do not hand large blocks back and forth on an allocator with no
+compaction". ~1KB per site, taken once on first fetch and never returned, is a
+smaller claim on this heap than the same 1KB taken and released every ten
+minutes for the life of the device. Same reasoning as `gFileBuffer` and the PNG
+decoder's scratch, applied to something small enough that the size is not what
+makes it interesting.
+
 **Headroom is checked against real telemetry, not assumed.** The 34KB-
 against-~250KB comparison above is not a guess - both numbers come from
 this fleet's own `/diag/telemetry` (asset sizes) and live check-in reports
@@ -3038,3 +3071,261 @@ other cached asset already behaves, via the `X-Asset-Sha256` header
 `fetchToCard()` verifies against; the splash is the one asset whose cache key
 is a slot name rather than its own id, so it is the one asset that had to have
 this checked separately - and did not.
+
+## Three allocation-churn fixes, and the motivation for them that turned out to be wrong
+
+These came out of an audit of `App/` read against the built ELF rather than
+against anybody's recollection of the code, and they are grouped here because
+they share a shape: none of them is a bug fix, all three remove repeated
+allocate-and-free cycles from paths that run constantly, and none of them
+changes what the device puts on screen.
+
+**Say the motivation problem first, because it is the more useful part of the
+record.** The audit framed all three as targeting "the heap fragmentation that
+trips the health watchdog at ~180s". That framing was wrong. The watchdog was
+not detecting fragmentation at all - it was firing on a threshold set above the
+steady state of a correctly working device, as "The heap-fragmentation watchdog
+had become the reboot loop it was written to prevent" above sets out in full,
+and `maxAllocHeap` on this board is pinned at 32,756 bytes from the first card
+draw onward rather than drifting downwards over an uptime. So nothing below
+fixed the 180-second restarts; a constant did. The three changes were kept
+anyway, on their own smaller merits: an allocator with no compaction is better
+off doing less allocating, and the churn each of them removes was paid for
+nothing in particular. That is a real but modest claim, and it is deliberately
+not dressed up as the one it was originally written to make. Repeating a
+motivation that has since been disproved is how a design document starts
+teaching the wrong lesson to whoever reads it next.
+
+**(a) `Log::line` gained a `const char*` overload (`Log.h`/`Log.cpp`).** Both
+`Log::printf()` and `Log::verbose()` used to end with `line(String(scratch))`,
+where `scratch` is the 256-byte stack buffer `vsnprintf()` just wrote into.
+That constructed an Arduino `String` - a heap allocation and an immediate free
+- on every log line the firmware emitted, whether or not anybody was listening,
+because `Log::line()` only pushes into the stream buffer when streaming is on
+and streaming is off on every device almost all of the time. This is the
+highest-frequency allocation site in the image: every fetch, every check-in
+field, every asset operation, and every card draw pass through it - the draw
+case being a genuine choke point, since `CardManager::poll()` logs
+`"[cards] showing '%s' (item %u/%u)"` once for every card that comes up in the
+rotation, forever.
+
+The new overload takes the C string it was always being handed, calls
+`Serial.println(const char*)` directly - which was never the part that needed a
+`String` - and constructs one only inside the `if (streaming)` branch, where
+`pushToBuffer()` genuinely stores a `String` and there is no way around it. The
+`const String&` overload stays, because plenty of call sites legitimately hold
+a `String` already and pushing them through `.c_str()` would move the same
+question somewhere less obvious rather than answer it. The pleasant part is
+that overload resolution does the rest for free: the 56 `Log::line("literal")`
+call sites scattered through `App/` now bind to the new overload without any of
+them being touched.
+
+Worth connecting this to the standing verbose-logging mandate this project
+holds to (see `readFileToBuffer()`'s own logging above, and "Watching a device
+live"). That mandate is normally in tension with cost - a deployed device's
+only diagnostic channel is the remote stream, so the instruction is to log
+generously, and generous logging is exactly what makes a per-line allocation
+expensive. This change resolves the tension in the direction that does not
+require choosing: logging more is now cheaper per line rather than something
+to be traded against.
+
+**(b) `Forecast.cpp` memoizes its two possible responses.** `Forecast::fetch(
+bool useTarget)` has exactly two URLs it can ever ask for - `kPathHome` and
+`kPathTarget` - so the five card instances "Multi-instance, generalized beyond
+the graphic card" above describes can between them produce at most two distinct
+responses. Before this, each instance did its own full HTTPS request and stood
+up its own `JsonDocument` pools to parse the answer, which makes three of the
+five provably redundant on every refresh. They also fire together rather than
+spread out: `CardManager` treats a card that has never fetched as immediately
+due, and `CardSpec::active` defaults `true` until the first policy arrives, so
+every fetch-capable card fetches back to back in the post-boot burst - the
+single worst moment to be doing three unnecessary TLS handshakes.
+
+The fix is a namespace-scope `SharedSlot gShared[2]`, indexed by the
+`useTarget` bool itself, and a `sharedFetch(bool)` that refetches only when the
+slot's existing entry is older than `Config::kContentRefreshIntervalMs` (10
+minutes). Using that specific constant is the load-bearing choice: it is the
+same interval the scheduler uses to decide a card is due, which makes this a
+de-duplicator for fetches that were going to happen anyway rather than a second
+cache policy competing with the first one. Instances asking for the same URL
+inside one refresh window share one answer; once the window passes, the next
+asker refetches on everyone's behalf.
+
+Two properties were preserved on purpose. `wantsTarget()` is still re-read per
+instance on every fetch, because which of the two URLs *this* card wants is
+genuinely per-instance state that an admin can change under it between
+refreshes - only the response to a given URL is shared, never the decision
+about which URL to ask for. And a *failed* fetch is memoized exactly like a
+successful one, which looks wrong at a glance and is the whole point: five
+instances retrying a service that is down, five times over, in the same second,
+is precisely the storm this exists to prevent, and the retry still happens on
+the next window like any other refresh.
+
+`Cards.h` had already argued for this fix before it existed - the reason
+aircraft and listings were denied multi-instance treatment is that a second
+instance would issue an identical request and draw an identical card for the
+price of a second round trip. Forecast got multi-instance treatment anyway
+because `location` is a real per-instance axis, and this is the piece that
+makes that exception affordable instead of merely defensible.
+
+**What was deliberately not done, and why.** The audit's second half suggested
+also making each instance's `gLast` a pointer into the shared slot, saving the
+duplicated copies of a `Forecast::Result` - roughly 4 x 600 bytes of `.bss` on
+the audit's own estimate. That was skipped. It would mean rewriting every
+`gLast.` in the draw path to `gLast->` (19 occurrences in the file today),
+turning a change contained to one new function into a refactor that touches
+everything the card draws, and the saving it buys is `.bss` on a device with no
+`.bss` pressure and something like 950KB of `ota_0` still spare (see the
+measured build sizes near the top of this file). The audit labelled it a bonus.
+It is being treated as one.
+
+**(c) The per-fetch `JsonDocument` filters became function-local `static
+const`** in `Aircraft.cpp`, `Listings.cpp` and `Forecast.cpp`. A
+`JsonDocument` takes a pool block from the heap the moment it holds anything -
+1KB on this 32-bit target, ArduinoJson's pool capacity being 128 slots - and
+each of these three filters was being built, allocated and freed on every
+single fetch in order to hold nothing but a handful of `true`s. The keys are
+string literals, so ArduinoJson links to them rather than copying them, and the
+shape never varies between calls: these documents have no per-fetch input at
+all. Making them resident trades ~1KB per site, 3KB in total, for zero
+allocation churn - the same direction of trade `gFileBuffer` and the PNG
+decoder's scratch buffer already make, and for the same reason, that the scarce
+resource on this device is contiguous blocks rather than total bytes
+("Contiguity, not free bytes" above).
+
+Function-local `static` rather than a namespace-scope global, deliberately:
+construction then happens on first use, inside a fetch, rather than during
+static init where this codebase has already learned not to rely on the heap
+being in any particular state (`Cards.h`'s constant-initialisable registry
+exists for that same reason). Forecast's is the one that benefits most of the
+three - five instances means what used to be five allocate/free pairs per
+refresh burst is now one resident document all five share.
+
+## Re-asserting every provider's status once per check-in, instead of only when it changes
+
+Every fetch-driven card already logs how its fetch went. The problem is *when*.
+The check-in-driven cards (`Tides.cpp`, `IssFlyover.cpp`, `HomeValue.cpp`, and
+`Graphic.cpp` for its own readiness) log strictly on a state *change*, via the
+`gLastLogged*` dedup statics, so a device sitting in one steady state emits
+nothing at all about it; the genuinely fetching cards state their outcome at
+the moment of a fetch, which is up to a whole `kContentRefreshIntervalMs` - ten
+minutes - apart. Both behaviours are right for the serial console, where
+somebody with a cable has the whole session's history in the scrollback.
+
+They are wrong for the live debug stream, and the difference is that a stream
+is joined *mid-flight*. An admin who turns streaming on twenty minutes into a
+device sitting in a steady refused state sees cards cycling through the
+rotation and has no way at all to tell a working fetch from a refused one,
+because the line that would have told them was emitted before they connected
+and is not coming again. Diagnosing two devices live cost real time to exactly
+this - not to a hard problem, to the absence of a sentence that the firmware
+already knew how to write and had simply decided not to repeat.
+
+**The fix is a new optional `StatusFn` on `CardSpec`** (`Cards.h`): a
+`String (*)()` a card can supply to answer "how did your last fetch go, right
+now", with `nullptr` meaning "nothing to report" - the correct answer for every
+card that fetches nothing at all, which is clockdate, announcement and qrtext.
+`Aircraft`, `Listings`, `Forecast` (per instance), `Tides`, `HomeValue` and
+`IssFlyover` each implement one. `Cards::logProviderStatuses()`
+(`CardManager.cpp`) walks the registry and emits **one consolidated line**
+naming each active card and its current status, rather than re-firing each
+module's own scattered logging - which leaves the existing change-only dedup
+intact for what it is actually good at, namely marking the moment something
+changed.
+
+**Where it is called from is a deliberate choice, not an incidental one.**
+`App.ino`'s `performCheckIn()` calls it once per successful check-in,
+positioned *after* `Log::setStreamingEnabled(result.debugStreamRequested)` and
+*after* the card policy has been applied. After the first, so an admin who has
+just this second switched streaming on gets the full picture on that very
+check-in instead of waiting a whole interval for the next one - which matters
+because the person watching is usually watching because something is already
+wrong. After the second, so that the statuses reported are the ones belonging
+to the policy now in force rather than to the one that was in force a
+millisecond ago.
+
+The details that keep it from becoming noise:
+
+- **It costs nothing when nobody is streaming.** `logProviderStatuses()` checks
+  `Log::streamingEnabled()` before it even begins walking the registry, which
+  matters here more than at an ordinary `Log::verbose` call site because every
+  `status()` implementation builds a `String` from live values. `Log::verbose`
+  would have discarded the finished line, but only after the statuses had all
+  been built to hand to it.
+- **Inactive cards are skipped.** A card the policy turned off has no current
+  provider state worth asserting, and a household with a dozen switched-off
+  cards would otherwise bury the two or three that matter under them every
+  check-in.
+- **If nothing qualifies, it says so out loud**
+  (`"[providers] no active fetch-driven cards to report"`) rather than staying
+  quiet. "No active fetch-driven cards" is itself a diagnosis, and a silent
+  check-in is indistinguishable from this whole feature being broken - which is
+  the same failure mode "Where the boot splash has to happen" above records for
+  a `showBootSplash()` that ignored its own return value.
+- **The strings name the specific refusal**, not just "not ok": "refused:
+  device not activated", "refused: provider disabled", "refused: device secret
+  rejected", "network error: ..." are four different problems with four
+  different owners, and "which of the six ways is this one failing" is the
+  entire question being asked. Forecast's names which of the two locations the
+  instance is configured for as well, because with five instances "forecast3 is
+  refused" is only half an answer.
+- **`Listings` distinguishes its resting state from its failures.**
+  `NotConfigured` - nobody has put a listings provider key on file - reports as
+  "resting: no listings provider key on file" rather than as a refusal, because
+  reading an unconfigured provider as a failure sends whoever is watching after
+  a bug that is not there.
+
+`Tides` and `HomeValue` implement `StatusFn` too, even though neither fetches
+anything of its own: their values ride in on the check-in response, so their
+only real states are "the server has told us" and "it has not", and
+distinguishing those two live is exactly what a silent stream could not do
+before.
+
+## The ISS card now leads with the next visible pass, not the live position
+
+`IssFlyover.cpp`'s `cardDraw()` and `cardItemCount()` reversed their
+preference: when both a next pass and a live position are available, the card
+now draws the pass, and the live position became the fallback for when there is
+no pass. This is the direct reverse of how the card shipped a few sections
+above ("The ISS flyover card"), where the pass was the fallback.
+
+The instruction was the product owner's: "change the display to when the next
+time the space station is visible, and the details". The reasoning behind it is
+worth writing down because it is a point about what a wall display is for
+rather than about the ISS. The live position is real, correct, freshly-fetched
+data, and it is almost never actionable - the station spends most of its orbit
+over open ocean thousands of miles from any given household, and "11,545 mi,
+212 deg SW, over 49.5S 114.1E" invites the person reading it to do precisely
+nothing. "Rises 22:10 to the NW, highest 16 deg, sets 22:14" gets somebody to
+put their coat on and go outside, which is the entire reason the ISS is worth a
+card on a wall in the first place. Accuracy was never the axis these two
+options differed on; both are accurate. Only one of them is a reason to look
+up.
+
+**The live position stays, underneath, because it is the honest answer for the
+gap.** Passes are not evenly distributed: some latitudes go days at a time with
+none at all while the orbital plane precesses back overhead, and during that
+stretch "where is it right now" beats an empty card, on the same
+report-nothing-rather-than-invent-wording tolerance `Tides.cpp` and
+`MoonPhase.cpp` already hold to. So `cardItemCount()` still reports one item
+when *either* half has data; only the order of preference inside `cardDraw()`
+changed.
+
+**A pass that reaches this card is one that can actually be seen, and that
+determination is not made here.** The server now filters candidate passes for
+visibility before sending them - the observer has to be in darkness *and* the
+station has to be in sunlight, both, because the ISS is nothing but reflected
+sunlight and roughly half of all geometrically-valid passes happen in daylight
+where there is nothing to see (see the DiscoverAroundMe server's
+`IssPassVisibility`). That is what makes leading with the pass defensible: if
+the card led with a pass that turned out to be an invisible daylight one, it
+would be sending people outside for nothing, which is worse than showing them
+an ocean coordinate.
+
+**This firmware does no visibility reasoning of its own and must not start.**
+It has neither the solar geometry nor - in the general case - a resolved
+observer position to do it with; both live on the server, which is also where
+the CelesTrak element set and the SGP4 propagator already are. The contract to
+hold onto is that a `issNextPass*` field arriving on a check-in response means
+"visible pass", full stop, and the correct place to fix a wrong answer is the
+server's filter rather than a second opinion added here.

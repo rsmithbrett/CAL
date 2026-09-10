@@ -62,12 +62,12 @@ bool hasNextPass() {
 /// one and the scheduler calls it.
 void cardFetch() {}
 
-/// One item once either the live position or a next pass has real data to
+/// One item once either a next pass or the live position has real data to
 /// show, none before - the same "report zero rather than invent wording"
 /// tolerance Tides.cpp's and MoonPhase.cpp's own cards get. cardDraw() below
-/// decides which of the two this actually draws, preferring the live
-/// position whenever both happen to be present at once.
-uint16_t cardItemCount() { return (hasData() || hasNextPass()) ? 1 : 0; }
+/// decides which of the two this actually draws, preferring the next pass
+/// whenever both happen to be present at once.
+uint16_t cardItemCount() { return (hasNextPass() || hasData()) ? 1 : 0; }
 
 /// 8-point compass, matched to the nearest 45-degree sector - plenty of
 /// precision for "which way to look", which is all this card claims to
@@ -144,19 +144,50 @@ String nextPassDetailText() {
   return String(buffer);
 }
 
+/// Re-asserted once per check-in - see Cards.h's StatusFn. Reports both halves
+/// separately because they fail independently: the server can have a live
+/// position but no upcoming visible pass (the common case - most geometric
+/// passes happen in daylight and are filtered out server-side), or a pass but
+/// no fresh position.
+String cardStatus() {
+  String state = hasNextPass()
+                     ? String("next pass ") + nextPassRiseTimeText() + " " + nextPassRiseDirectionText()
+                     : String("no upcoming visible pass");
+  state += hasData() ? String(", position ") + distanceText() : String(", no live position");
+  return state;
+}
+
+/// The next pass wins whenever there is one, and the live position is the
+/// fallback rather than the other way round.
+///
+/// This reverses the original preference, on the product owner's own framing:
+/// "change the display to when the next time the space station is visible, and
+/// the details". The live position is genuine data but it is almost never
+/// actionable - the station spends most of its orbit over ocean, thousands of
+/// miles away, and "11,545 mi, 212 deg SW, over 49.5S 114.1E" invites nobody
+/// to do anything. "Rises 22:10 to the NW, highest 16 deg, sets 22:14" gets
+/// someone outside, which is the entire point of putting the ISS on a wall
+/// display. Note the server now only ever sends a pass that is actually
+/// VISIBLE - observer in darkness, station in sunlight - so a pass reaching
+/// this card is one worth acting on (see the server's IssPassVisibility).
+///
+/// The live position keeps its place underneath because it is the honest
+/// answer when there is no upcoming pass at all: some latitudes go days
+/// between passes while the orbital plane precesses back overhead, and
+/// "where is it right now" beats an empty card during that gap.
 void cardDraw(uint16_t) {
-  if (hasData()) {
-    Log::verbose("[issflyover] drawing live position: %s, %s (%s)", distanceText().c_str(),
-                directionText().c_str(), coordinateText().c_str());
-    Display::showIssFlyoverCard(distanceText(), directionText(), coordinateText());
+  if (hasNextPass()) {
+    Log::verbose("[issflyover] drawing next-pass prediction: rises %s (%s)",
+                nextPassRiseTimeText().c_str(), nextPassRiseDirectionText().c_str());
+    Display::showIssNextPassCard(nextPassRiseTimeText(), nextPassRiseDirectionText(),
+                                  nextPassDetailText());
     return;
   }
-  // No live position, but cardItemCount() only let this run at all because
-  // hasNextPass() is true - see IssFlyover.h's "second display mode" remarks.
-  Log::verbose("[issflyover] drawing next-pass prediction: rises %s (%s)",
-              nextPassRiseTimeText().c_str(), nextPassRiseDirectionText().c_str());
-  Display::showIssNextPassCard(nextPassRiseTimeText(), nextPassRiseDirectionText(),
-                                nextPassDetailText());
+  // No upcoming pass, but cardItemCount() only let this run at all because
+  // hasData() is true - see IssFlyover.h's "second display mode" remarks.
+  Log::verbose("[issflyover] drawing live position: %s, %s (%s)", distanceText().c_str(),
+              directionText().c_str(), coordinateText().c_str());
+  Display::showIssFlyoverCard(distanceText(), directionText(), coordinateText());
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +209,7 @@ void cardDraw(uint16_t) {
   spec.fetch = cardFetch;
   spec.itemCount = cardItemCount;
   spec.draw = cardDraw;
+  spec.status = cardStatus;
   spec.order = 4;
   spec.dwellSeconds = 10;
   spec.interleaveEvery = 9;

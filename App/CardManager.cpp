@@ -40,6 +40,46 @@ uint8_t count() { return gCardCount; }
 
 CardSpec& at(uint8_t index) { return gCards[index]; }
 
+void logProviderStatuses() {
+  // Checked before anything else, including walking the registry: with
+  // streaming off this must cost nothing at all, and every status()
+  // implementation builds a String.
+  if (!Log::streamingEnabled()) {
+    return;
+  }
+
+  String summary;
+  uint8_t reported = 0;
+
+  for (uint8_t i = 0; i < gCardCount; ++i) {
+    const CardSpec& card = gCards[i];
+    // Inactive cards are skipped deliberately - a card the policy turned off
+    // has no current provider state worth asserting, and listing a dozen
+    // switched-off cards every check-in would bury the few that matter.
+    if (!card.active || card.status == nullptr) {
+      continue;
+    }
+
+    if (reported > 0) {
+      summary += ", ";
+    }
+    summary += card.id;
+    summary += '=';
+    summary += card.status();
+    ++reported;
+  }
+
+  if (reported == 0) {
+    // Said out loud rather than skipped: "no fetch-driven cards are active" is
+    // itself a diagnosis, and a silent check-in would look identical to this
+    // whole feature being broken.
+    Log::verbose("[providers] no active fetch-driven cards to report");
+    return;
+  }
+
+  Log::verbose("[providers] %s", summary.c_str());
+}
+
 int8_t indexOf(const char* id) {
   if (id == nullptr) {
     return -1;

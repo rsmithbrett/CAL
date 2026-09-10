@@ -178,7 +178,10 @@ void printf(const char* format, ...) {
     scratch[sizeof(scratch) - 1] = '\0';
   }
 
-  line(String(scratch));
+  // scratch is already a C string - handing it straight to the const char*
+  // overload skips a String temporary that was built and destroyed on every
+  // single log line whether or not anyone was listening.
+  line(scratch);
 }
 
 void verbose(const char* format, ...) {
@@ -210,7 +213,10 @@ void verbose(const char* format, ...) {
     scratch[sizeof(scratch) - 1] = '\0';
   }
 
-  line(String(scratch));
+  // Same const char* overload as printf() above. This path only runs with
+  // streaming on, so the buffer copy's String does get built - but inside
+  // line(), once, rather than here as a temporary that is then copied again.
+  line(scratch);
 }
 
 void line(const String& text) {
@@ -218,6 +224,23 @@ void line(const String& text) {
 
   if (streaming) {
     pushToBuffer(text);
+  }
+}
+
+void line(const char* text) {
+  if (text == nullptr) {
+    return;
+  }
+
+  Serial.println(text);
+
+  // The String is constructed HERE and nowhere else - inside the one branch
+  // that genuinely needs one, because pushToBuffer stores a String. With
+  // streaming off, which is every device almost all of the time, this
+  // performs no heap allocation at all. See Log.h's remarks on why that
+  // matters specifically at this call site's frequency.
+  if (streaming) {
+    pushToBuffer(String(text));
   }
 }
 

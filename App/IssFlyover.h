@@ -2,11 +2,31 @@
 
 #include <Arduino.h>
 
-/// Distance and compass direction to the International Space Station's
-/// current sub-satellite point, as a card - real open-notify.org data, same
-/// structural shape as Tides.h, its nearest sibling. Now a second display
-/// mode alongside that: when there is no live position to show, the same
-/// card falls back to the station's next predicted pass instead.
+/// When the International Space Station is next visible overhead, and what to
+/// look for - real CelesTrak/SGP4 orbital mechanics, same structural shape as
+/// Tides.h, its nearest sibling. A second display mode sits underneath: when
+/// there is no upcoming pass at all, the same card falls back to the station's
+/// live position (distance and compass direction to its sub-satellite point,
+/// from open-notify.org).
+///
+/// **The next pass leads and the live position is the fallback**, which is the
+/// reverse of how this card originally worked. From the product owner: "change
+/// the display to when the next time the space station is visible, and the
+/// details". The live position is real data that is almost never actionable -
+/// the station spends most of its orbit over open ocean, thousands of miles
+/// away, and "11,545 mi, 212 deg SW" asks nobody to do anything. A pass time
+/// gets someone outside to look up, which is the whole reason the ISS is worth
+/// a card. The live position stays as the honest answer for the gap: some
+/// latitudes go days between passes while the orbital plane precesses back
+/// overhead, and "where is it right now" beats a blank card meanwhile.
+///
+/// **A pass reaching this card is one that can actually be SEEN.** The server
+/// filters for visibility before sending it - observer in darkness and station
+/// in sunlight, both required, because the ISS is only ever reflected sunlight
+/// and roughly half of all geometric passes happen in daylight. See the
+/// server's IssPassVisibility. This firmware does no visibility reasoning of
+/// its own and must not start: it has neither the solar geometry nor the
+/// observer's position to do it with.
 ///
 /// **This card fetches nothing.** Everything it draws already arrives on the
 /// check-in response the device makes anyway - `issLatitude`, `issLongitude`,

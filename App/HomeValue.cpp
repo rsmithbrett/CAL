@@ -141,6 +141,15 @@ void cardFetch() {}
 /// HomeValue.h's own remarks on why they are tolerated independently absent.
 uint16_t cardItemCount() { return hasEstimate() ? 1 : 0; }
 
+/// Re-asserted once per check-in - see Cards.h's StatusFn. Like tides, this
+/// card's value arrives on the check-in response rather than through a fetch
+/// of its own, so "no estimate" means the server had none to send rather than
+/// that anything here failed.
+String cardStatus() {
+  return hasEstimate() ? String("ok, ") + estimateText()
+                       : String("no estimate sent by the server yet");
+}
+
 void cardDraw(uint16_t) {
   const String estimate = estimateText();
   const String range = rangeText();
@@ -181,6 +190,7 @@ void cardDraw(uint16_t) {
   spec.fetch = cardFetch;
   spec.itemCount = cardItemCount;
   spec.draw = cardDraw;
+  spec.status = cardStatus;
   spec.order = 4;
   spec.dwellSeconds = 10;
   spec.interleaveEvery = 6;

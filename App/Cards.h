@@ -94,6 +94,39 @@ using DrawFn = void (*)(uint16_t itemIndex);
 /// the edge of the radius.
 using NotableFn = bool (*)(uint16_t itemIndex);
 
+/// Optional: this card's own one-line view of how its last data fetch went -
+/// "ok, 6 aircraft", "refused: provider disabled for this account", "never
+/// fetched". nullptr means "nothing to report", which is the right answer for
+/// every card that fetches nothing (clockdate, announcement, qrtext).
+///
+/// **Why this exists.** Every fetch-driven card already logs its outcome, but
+/// never on a cadence anyone watching can rely on, and the two families of
+/// card are unhelpful in different ways:
+///
+///   The check-in-driven cards (Tides, IssFlyover, HomeValue, Graphic) log
+///   only on a STATE CHANGE - their gLastLogged* dedup statics. A device
+///   parked in one state for twenty minutes says nothing about it at all.
+///
+///   The fetching cards (Aircraft, Listings, Forecast) have no such statics
+///   and log at fetch time instead - which sounds better until you notice
+///   fetches are kContentRefreshIntervalMs apart, so "nothing for ten
+///   minutes" is the normal, healthy case there too.
+///
+/// Either way an admin who starts watching mid-flight sees cards cycling in
+/// rotation and has no way to tell a working fetch from a refused one without
+/// log history from before they connected. Diagnosing two devices live cost
+/// real time to exactly this.
+///
+/// So CardManager re-asserts every active card's status once per check-in
+/// (see logProviderStatuses()), unconditionally, whether or not it changed.
+/// One consolidated line rather than re-firing each module's own scattered
+/// call sites, which keeps the dedup logging intact for what it is good at.
+///
+/// Returning String rather than const char* because most implementations
+/// build the text from live values. It is called at most once per check-in per
+/// card, on the stream-only path, so that allocation is not on any hot path.
+using StatusFn = String (*)();
+
 /// The longest asset id a policy entry can carry. Matches Assets::kMaxIdLength,
 /// which is what actually validates one - Graphic.cpp static_asserts that the
 /// two agree, so a divergence is a compile error rather than a silently
@@ -141,6 +174,8 @@ struct CardSpec {
   ItemCountFn itemCount = nullptr;
   DrawFn draw = nullptr;
   NotableFn isNotable = nullptr;
+  /// Optional - see StatusFn. nullptr for every card with no fetch of its own.
+  StatusFn status = nullptr;
 
   // ---- Policy. Built-in defaults until a cardPolicy arrives on check-in,
   // then replaced wholesale by whatever the server said (see
@@ -375,5 +410,19 @@ struct Policy {
   uint8_t entryCount = 0;
   PolicyEntry entries[kMaxPolicyCards];
 };
+
+/// Re-asserts every active card's current fetch status to the debug log, in
+/// one consolidated line, whether or not anything changed since last time.
+///
+/// Called once per successful check-in from App.ino. See StatusFn above for
+/// why this exists at all: the per-module logging is deliberately
+/// change-only, which leaves a live stream silent about a device that has been
+/// sitting in the same refused state for twenty minutes - the case an admin is
+/// most likely to be watching for.
+///
+/// Costs nothing when nobody is streaming: it is a Log::verbose line, which
+/// returns before formatting anything if streaming is off, and it checks that
+/// first before even walking the registry.
+void logProviderStatuses();
 
 }  // namespace Cards

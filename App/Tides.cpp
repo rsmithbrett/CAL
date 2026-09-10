@@ -73,6 +73,21 @@ void cardFetch() {}
 /// stays out of the rotation instead of drawing a card with nothing on it.
 uint16_t cardItemCount() { return (gHasCheckedIn && hasAnyTide()) ? 1 : 0; }
 
+/// Re-asserted once per check-in - see Cards.h's StatusFn. This card fetches
+/// nothing of its own (the times ride in on the check-in response), so its
+/// only real states are "the server has told us" and "it hasn't" - and
+/// distinguishing those two is exactly what a silent debug stream could not do
+/// before.
+String cardStatus() {
+  if (!gHasCheckedIn) {
+    return "no check-in yet";
+  }
+  if (!hasAnyTide()) {
+    return "checked in, but the server sent no tide times";
+  }
+  return String("ok, next high ") + highTideText() + ", next low " + lowTideText();
+}
+
 void cardDraw(uint16_t) {
   const String high = highTideText();
   const String low = lowTideText();
@@ -100,6 +115,7 @@ void cardDraw(uint16_t) {
   spec.fetch = cardFetch;
   spec.itemCount = cardItemCount;
   spec.draw = cardDraw;
+  spec.status = cardStatus;
   spec.order = 4;
   spec.dwellSeconds = 10;
   spec.interleaveEvery = 6;

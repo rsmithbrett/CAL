@@ -94,20 +94,38 @@ Result fetchMine() {
   // alongside their codes - see Display::showAircraftCard()'s remarks for
   // why the card draws a name when one is on file and only falls back to the
   // bare code per side when it isn't.
-  JsonDocument filter;
-  filter["radiusMiles"] = true;
-  filter["aircraft"][0]["callsign"] = true;
-  filter["aircraft"][0]["altitudeFeet"] = true;
-  filter["aircraft"][0]["speedKnots"] = true;
-  filter["aircraft"][0]["headingDegrees"] = true;
-  filter["aircraft"][0]["distanceMiles"] = true;
-  filter["aircraft"][0]["airlineCode"] = true;
-  filter["aircraft"][0]["airlineName"] = true;
-  filter["aircraft"][0]["airlineLogoAssetId"] = true;
-  filter["aircraft"][0]["originCode"] = true;
-  filter["aircraft"][0]["originName"] = true;
-  filter["aircraft"][0]["destinationCode"] = true;
-  filter["aircraft"][0]["destinationName"] = true;
+  // Built once, on first fetch, and reused for the life of the device.
+  //
+  // A JsonDocument takes a pool block from the heap the moment it holds
+  // anything - 1KB on this 32-bit target, ARDUINOJSON_POOL_CAPACITY being 128
+  // slots - and this one was built, allocated and freed on every single fetch
+  // to hold nothing but a handful of booleans. The keys are string literals,
+  // so ArduinoJson links to them rather than copying, and the shape never
+  // varies: this document has no per-fetch input at all. Keeping it resident
+  // trades ~1KB of permanent heap for zero allocation churn on a device whose
+  // scarce resource is contiguous blocks rather than total bytes - the same
+  // trade Display.cpp's gFileBuffer and PNG decode scratch already make, for
+  // the same measured reason.
+  //
+  // Function-local static, so it is constructed on first use rather than
+  // during static init where the heap is in no state to be relied on.
+  static const JsonDocument filter = [] {
+    JsonDocument f;
+    f["radiusMiles"] = true;
+    f["aircraft"][0]["callsign"] = true;
+    f["aircraft"][0]["altitudeFeet"] = true;
+    f["aircraft"][0]["speedKnots"] = true;
+    f["aircraft"][0]["headingDegrees"] = true;
+    f["aircraft"][0]["distanceMiles"] = true;
+    f["aircraft"][0]["airlineCode"] = true;
+    f["aircraft"][0]["airlineName"] = true;
+    f["aircraft"][0]["airlineLogoAssetId"] = true;
+    f["aircraft"][0]["originCode"] = true;
+    f["aircraft"][0]["originName"] = true;
+    f["aircraft"][0]["destinationCode"] = true;
+    f["aircraft"][0]["destinationName"] = true;
+    return f;
+  }();
 
   JsonDocument doc;
   const DeserializationError err =
@@ -199,6 +217,32 @@ String describeFreshness(unsigned long fetchedAtMs) {
     return "Updated 1 min ago";
   }
   return String("Updated ") + ageMinutes + " min ago";
+}
+
+/// This card's current fetch state, re-asserted to the debug stream once per
+/// check-in - see Cards.h's StatusFn for why change-only logging was not
+/// enough. Names the refusal reason rather than just "not ok": "which of the
+/// six ways can this be failing" is the entire question an admin is asking.
+String cardStatus() {
+  if (!gEverFetched) {
+    return "never fetched";
+  }
+  switch (gLast.status) {
+    case Status::Ok:
+      return String("ok, nearest ") + gLast.nearest.callsign + " at " +
+             String(gLast.nearest.distanceMiles, 1) + " mi";
+    case Status::Empty:
+      return String("ok, nothing within ") + String(gLast.radiusMiles, 0) + " mi";
+    case Status::NotActivated:
+      return "refused: device not activated";
+    case Status::ProviderDisabled:
+      return "refused: provider disabled";
+    case Status::AuthError:
+      return "refused: device secret rejected";
+    case Status::NetworkError:
+      return String("network error: ") + gLast.message;
+  }
+  return "unknown";
 }
 
 void cardFetch() {
@@ -318,6 +362,7 @@ void cardDraw(uint16_t) {
   spec.itemCount = cardItemCount;
   spec.draw = cardDraw;
   spec.isNotable = cardIsNotable;
+  spec.status = cardStatus;
   spec.order = 2;
   spec.dwellSeconds = 8;
   spec.notableDwellSeconds = 20;

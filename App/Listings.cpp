@@ -110,19 +110,27 @@ Result fetchMine() {
   // already keep, and postalCode has no use on this card once cityState is
   // available. isConfigured/lastRefreshError are top-level siblings of the
   // array, not part of it, so they get their own filter entries.
-  JsonDocument filter;
-  filter["city"] = true;
-  filter["state"] = true;
-  filter["isConfigured"] = true;
-  filter["lastRefreshError"] = true;
-  filter["listings"][0]["address"] = true;
-  filter["listings"][0]["propertyType"] = true;
-  filter["listings"][0]["price"] = true;
-  filter["listings"][0]["bedrooms"] = true;
-  filter["listings"][0]["bathrooms"] = true;
-  filter["listings"][0]["squareFootage"] = true;
-  filter["listings"][0]["daysOnMarket"] = true;
-  filter["listings"][0]["distanceMiles"] = true;
+  // Built once and reused for the life of the device - see Aircraft.cpp's own
+  // filter for the full reasoning. Short version: a JsonDocument takes a 1KB
+  // heap pool block the moment it holds anything, this one's contents never
+  // vary, and re-taking that block on every fetch was pure churn on a device
+  // whose scarce resource is contiguous blocks.
+  static const JsonDocument filter = [] {
+    JsonDocument f;
+    f["city"] = true;
+    f["state"] = true;
+    f["isConfigured"] = true;
+    f["lastRefreshError"] = true;
+    f["listings"][0]["address"] = true;
+    f["listings"][0]["propertyType"] = true;
+    f["listings"][0]["price"] = true;
+    f["listings"][0]["bedrooms"] = true;
+    f["listings"][0]["bathrooms"] = true;
+    f["listings"][0]["squareFootage"] = true;
+    f["listings"][0]["daysOnMarket"] = true;
+    f["listings"][0]["distanceMiles"] = true;
+    return f;
+  }();
 
   JsonDocument doc;
   const DeserializationError err =
@@ -231,6 +239,33 @@ String describeFreshness(unsigned long fetchedAtMs) {
   return String("Updated ") + ageMinutes + " min ago";
 }
 
+/// Re-asserted once per check-in - see Cards.h's StatusFn. NotConfigured is
+/// called out distinctly from the refusals on purpose: "nobody has put a
+/// RentCast key on file" is an operational resting state someone can act on,
+/// and reading it as a failure sends whoever is watching after the wrong bug.
+String cardStatus() {
+  if (!gEverFetched) {
+    return "never fetched";
+  }
+  switch (gLast.status) {
+    case Status::Ok:
+      return String("ok, ") + gLast.count + " listing(s)";
+    case Status::Empty:
+      return "ok, none listed nearby";
+    case Status::NotConfigured:
+      return "resting: no listings provider key on file";
+    case Status::NotActivated:
+      return "refused: device not activated";
+    case Status::ProviderDisabled:
+      return "refused: provider disabled";
+    case Status::AuthError:
+      return "refused: device secret rejected";
+    case Status::NetworkError:
+      return String("network error: ") + gLast.message;
+  }
+  return "unknown";
+}
+
 void cardFetch() {
   gLast = fetchMine();
   gEverFetched = true;
@@ -310,6 +345,7 @@ void cardDraw(uint16_t itemIndex) {
   spec.itemCount = cardItemCount;
   spec.draw = cardDraw;
   spec.isNotable = cardIsNotable;
+  spec.status = cardStatus;
   spec.order = 3;
   spec.dwellSeconds = 10;
   spec.notableDwellSeconds = 18;

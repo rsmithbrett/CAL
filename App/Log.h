@@ -49,6 +49,27 @@ void verbose(const char* format, ...) __attribute__((format(printf, 1, 2)));
 /// A single already-formatted line, with no trailing newline expected.
 void line(const String& text);
 
+/// The same, for a line that is already a plain C string - which is what
+/// every literal call site and both formatting functions above actually
+/// have.
+///
+/// **This overload exists to not allocate.** `line(const String&)` binding to
+/// a `const char*` argument constructs a temporary Arduino `String`, which
+/// heap-allocates and immediately frees 20-256 bytes. That happened on every
+/// log line in the firmware whether or not anyone was listening: printf() and
+/// verbose() both ended in `line(String(scratch))`, and this is the
+/// highest-frequency allocation site in the whole image - every fetch, every
+/// check-in field, every asset operation, and every card draw (they all pass
+/// through CardManager's one draw choke point). Serial.println() takes a
+/// `const char*` perfectly well, and the buffer copy only has to exist when
+/// streaming is actually on, so on the ordinary path this now allocates
+/// nothing at all.
+///
+/// Kept as an overload rather than replacing the String form: the other call
+/// sites genuinely hold a String already, and forcing them through c_str()
+/// would just move the same question somewhere less obvious.
+void line(const char* text);
+
 /// Called from performCheckIn() with the server's current
 /// debugStreamRequested value on every successful check-in - unlike the
 /// forced-update flag this is not one-shot, since streaming is meant to

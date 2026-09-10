@@ -124,15 +124,23 @@ Result fetch(bool useTarget) {
   // what this card itself has to hold in memory to parse. A single index
   // anywhere inside "periods" (ArduinoJson's own filter semantics) keeps
   // those fields for every element the array actually has, not just index 0.
-  JsonDocument filter;
-  filter["city"] = true;
-  filter["state"] = true;
-  filter["postalCode"] = true;
-  filter["periods"][0]["name"] = true;
-  filter["periods"][0]["isDaytime"] = true;
-  filter["periods"][0]["temperature"] = true;
-  filter["periods"][0]["temperatureUnit"] = true;
-  filter["periods"][0]["shortForecast"] = true;
+  // Built once and reused for the life of the device - see Aircraft.cpp's own
+  // filter for the full reasoning. This site benefits most of the three:
+  // Forecast has five card instances, so what used to be five 1KB pool
+  // allocate/free pairs in the post-boot fetch burst is now a single resident
+  // document shared by all of them.
+  static const JsonDocument filter = [] {
+    JsonDocument f;
+    f["city"] = true;
+    f["state"] = true;
+    f["postalCode"] = true;
+    f["periods"][0]["name"] = true;
+    f["periods"][0]["isDaytime"] = true;
+    f["periods"][0]["temperature"] = true;
+    f["periods"][0]["temperatureUnit"] = true;
+    f["periods"][0]["shortForecast"] = true;
+    return f;
+  }();
 
   JsonDocument doc;
   const DeserializationError err =
@@ -194,6 +202,63 @@ Result fetch(bool useTarget) {
 
   return result;
 }
+
+namespace {
+
+/// One memoized response, per distinct URL this card can ask for.
+///
+/// **Why this exists.** `fetch(bool)` has exactly two possible URLs -
+/// kPathHome and kPathTarget - so five card instances can produce at most two
+/// distinct responses. Without this, all five did their own full HTTPS request
+/// plus their own ~1KB JsonDocument pools, meaning three of the five were
+/// provably redundant every time. They also fire together: CardManager treats
+/// a card that has never fetched as immediately due, and CardSpec::active
+/// defaults true, so every fetch-capable card fetches back-to-back in the
+/// post-boot burst - the worst possible moment to be doing three unnecessary
+/// TLS handshakes and six unnecessary pool allocations.
+///
+/// Cards.h already argued for exactly this: it is the reason aircraft and
+/// listings were denied multi-instance treatment in the first place. Forecast
+/// got the treatment anyway because its instances differ in a way theirs do
+/// not - and this is the piece that makes that affordable.
+struct SharedSlot {
+  Result result;
+  unsigned long fetchedAtMs = 0;
+  bool everFetched = false;
+};
+
+/// Indexed by the `useTarget` bool itself: [0] is home, [1] is target.
+SharedSlot gShared[2];
+
+/// The response for `useTarget`, fetched only if no recent enough one is
+/// already in hand.
+///
+/// Freshness uses the same kContentRefreshIntervalMs the scheduler uses to
+/// decide a card is due, which is what makes this a de-duplicator rather than
+/// a second, competing cache policy: instances asking for the same URL within
+/// one refresh window share one answer, and once that window passes the next
+/// asker refetches for everyone. Note that a failed fetch is memoized too, on
+/// purpose - five instances retrying a down service five times over is exactly
+/// the storm this exists to prevent, and the retry still happens on the next
+/// window.
+const Result& sharedFetch(bool useTarget) {
+  SharedSlot& slot = gShared[useTarget ? 1 : 0];
+  const unsigned long now = millis();
+
+  if (slot.everFetched && (now - slot.fetchedAtMs) < Config::kContentRefreshIntervalMs) {
+    Log::verbose("[forecast] reusing the %s response fetched %lu ms ago - no second request",
+                 useTarget ? "target" : "home",
+                 static_cast<unsigned long>(now - slot.fetchedAtMs));
+    return slot.result;
+  }
+
+  slot.result = Forecast::fetch(useTarget);
+  slot.fetchedAtMs = now;
+  slot.everFetched = true;
+  return slot.result;
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // The card descriptors - five of them, one per Instance<N> instantiation. See
@@ -260,8 +325,12 @@ struct Instance {
   /// first scope that declares the name, regardless of arity), not the
   /// enclosing namespace's function.
   static void fetch() {
+    // wantsTarget() is still re-read per instance, every time - the policy can
+    // change under this card between fetches, and which of the two URLs THIS
+    // instance wants is genuinely per-instance state. Only the response to a
+    // given URL is shared.
     const bool useTarget = wantsTarget();
-    gLast = Forecast::fetch(useTarget);
+    gLast = sharedFetch(useTarget);
     gEverFetched = true;
     if (gLast.status == Status::Ok) {
       gLastOkMs = millis();
@@ -333,6 +402,32 @@ struct Instance {
     Display::showForecastStatus(headline, gLast.message, /*isProblem=*/!isRestingState);
   }
 
+  /// Re-asserted once per check-in - see Cards.h's StatusFn. Names which of
+  /// the two locations this instance is configured for, because with five
+  /// instances "forecast3 is refused" is only half an answer: whether it was
+  /// asking for home or target is the other half.
+  static String status() {
+    if (!gEverFetched) {
+      return String(wantsTarget() ? "target" : "home") + ", never fetched";
+    }
+    const String where = wantsTarget() ? "target" : "home";
+    switch (gLast.status) {
+      case Status::Ok:
+        return where + ", ok: " + gLast.location;
+      case Status::Empty:
+        return where + ", ok: no periods returned";
+      case Status::NotActivated:
+        return where + ", refused: device not activated";
+      case Status::ProviderDisabled:
+        return where + ", refused: provider disabled";
+      case Status::AuthError:
+        return where + ", refused: device secret rejected";
+      case Status::NetworkError:
+        return where + ", network error: " + gLast.message;
+    }
+    return where + ", unknown";
+  }
+
   /// Builds and registers this instance's descriptor. Called once per
   /// instantiation from the static-init block at the bottom of this file.
   static bool registerSelf(int16_t order) {
@@ -342,6 +437,7 @@ struct Instance {
     spec.fetch = &fetch;
     spec.itemCount = &itemCount;
     spec.draw = &draw;
+    spec.status = &status;
     spec.order = order;
     spec.dwellSeconds = 10;
     return Cards::registerCard(spec);

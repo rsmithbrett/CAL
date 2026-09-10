@@ -541,6 +541,18 @@ void performCheckIn() {
   // own remarks.
   Log::setStreamingEnabled(result.debugStreamRequested);
 
+  // Deliberately AFTER setStreamingEnabled and after applyPolicy: an admin who
+  // has just switched streaming on gets a full picture of every active
+  // provider on this very check-in rather than having to wait for the next
+  // one, and the statuses reported are the ones for the policy now in force.
+  //
+  // This re-states each active card's fetch outcome whether or not it changed.
+  // The per-module logging is change-only by design, which means a device
+  // parked in a steady refused state emits nothing about it - the exact case
+  // someone watching a live stream is most likely trying to diagnose. Costs
+  // nothing when streaming is off; see Cards::logProviderStatuses().
+  Cards::logProviderStatuses();
+
   // One-shot, like updateAvailable below - the server already cleared its
   // own copy of this flag the moment it answered true (see CheckIn.h's own
   // remarks), so this fires exactly once per admin button press regardless
