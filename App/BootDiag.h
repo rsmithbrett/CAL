@@ -33,13 +33,34 @@
 /// A `NONE` beside a `SOFTWARE_RESET` is itself a finding worth acting on: it
 /// means something restarted this device deliberately without recording why,
 /// which is a gap in this instrumentation rather than a property of the device.
+///
+/// **That finding fired against this file's own first implementation, and the
+/// storage had to change because of it.** The intent was originally held in
+/// RTC memory (`RTC_NOINIT_ATTR`), on the reasoning that it survives a software
+/// reset and a panic, costs no flash write, and correctly does not survive a
+/// power cycle. Every part of that is true in isolation and it still did not
+/// work, because of something specific to this device's boot architecture: the
+/// App never restarts straight into itself. Every restart goes App -> CAL ->
+/// App, since CAL is the permanent factory-partition loader and runs on every
+/// boot. Two software resets, with a different binary executing in between.
+/// Observed on device 17: `recordRestartIntent(Ota)` runs at the check-in
+/// update branch, and the very next App boot reports `SOFTWARE_RESET + NONE`
+/// - twice in a row in one serial capture.
+///
+/// So the intent now lives in NVS, which is the one mechanism already proven to
+/// carry a value across that exact hop: it is how CAL's own
+/// `Identity::updateRequested` flag gets from the App to CAL in the first
+/// place. The flash write this costs is the price of the diagnostic working at
+/// all, and it is bounded - a write happens only on a deliberate restart, and
+/// the clear only when something was actually recorded, so an ordinary
+/// power-on boot writes nothing.
 namespace BootDiag {
 
 /// What this firmware was trying to do when it asked for a restart.
 ///
-/// Values are explicit and never renumbered: they are written to RTC memory by
-/// one boot and read by the next, so a build that renumbers them mid-upgrade
-/// would misreport the reason for exactly the restart that installed it.
+/// Values are explicit and never renumbered: they are written to NVS by one
+/// boot and read by the next, so a build that renumbers them mid-upgrade would
+/// misreport the reason for exactly the restart that installed it.
 enum class RestartCause : uint32_t {
   None = 0,
   /// The heap-health watchdog in App.ino decided the device could no longer
@@ -58,12 +79,15 @@ enum class RestartCause : uint32_t {
 /// `esp_restart()` (or handing off to Loader, which restarts on this
 /// firmware's behalf).
 ///
-/// Stored in RTC memory rather than NVS, deliberately. RTC survives a software
-/// reset and a panic but not a power cycle - which is exactly the desired
-/// behaviour, because a power cycle reports `POWERON_RESET` and there is no
-/// earlier intent worth carrying into it. It also costs no flash write, and a
-/// restart path is the last place to want one: NVS wear and a slow commit on
-/// the way out of a crash-adjacent reboot buy nothing.
+/// Stored in NVS, not RTC memory - see this namespace's own remarks above for
+/// the measurement that forced that, and why RTC's otherwise-correct
+/// properties are defeated by every restart passing through CAL.
+///
+/// One consequence of NVS worth knowing: unlike RTC, it DOES survive a power
+/// cycle. That is handled on the read side rather than the write side - a
+/// `POWERON_RESET` reports `NONE` regardless of what is stored, because a
+/// recorded intent that a power cut interrupted is not the reason the device
+/// came back up.
 ///
 /// Call it as late as possible, once the restart is certain. A recorded intent
 /// that is then not acted on would make the NEXT genuine crash report a cause
@@ -76,10 +100,11 @@ void recordRestartIntent(RestartCause cause);
 /// Call once, early in `setup()`, before anything else can obscure it.
 ///
 /// **The clear is not tidying, it is correctness.** Without it, a deliberate
-/// OTA restart would leave `OTA` sitting in RTC memory, and the next
-/// unrelated panic would be reported as `PANIC_RESET + OTA` - inventing a
-/// causal link that does not exist and sending whoever reads it after the
-/// wrong bug.
+/// OTA restart would leave `OTA` sitting in storage, and the next unrelated
+/// panic would be reported as `PANIC_RESET + OTA` - inventing a causal link
+/// that does not exist and sending whoever reads it after the wrong bug. With
+/// NVS this matters more than it did with RTC, not less: the stored value now
+/// outlives a power cycle, so nothing else would ever remove it.
 void logResetReason();
 
 /// True when the last restart was one this firmware did not ask for - a panic,

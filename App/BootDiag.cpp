@@ -1,5 +1,6 @@
 #include "BootDiag.h"
 
+#include <Preferences.h>
 #include <esp_system.h>
 
 #include "Log.h"
@@ -7,19 +8,18 @@
 namespace BootDiag {
 namespace {
 
-/// RTC_NOINIT_ATTR: kept in RTC memory and deliberately NOT zeroed by the
-/// startup code, which is the whole point - it has to survive a software reset
-/// and a panic. It does not survive a power cycle, and that is correct: a
-/// power cycle reports POWERON_RESET and has no earlier intent to carry.
+/// NVS rather than RTC memory. This was RTC_NOINIT_ATTR and it did not work -
+/// see BootDiag.h's own remarks for the capture that proved it. The short
+/// version: every restart on this device is App -> CAL -> App, with CAL's
+/// separate binary executing in between, and the recorded cause did not survive
+/// that. NVS does, demonstrably, because it is how CAL's own updateRequested
+/// flag crosses the same hop.
 ///
-/// The magic word is what makes the difference between "no intent was
-/// recorded" and "this is uninitialised RTC noise from a cold boot"
-/// detectable. Without it, garbage in the cause word on the very first boot
-/// after power-on would be reported as some arbitrary cause.
-RTC_NOINIT_ATTR uint32_t gCauseMagic;
-RTC_NOINIT_ATTR uint32_t gCauseValue;
-
-constexpr uint32_t kCauseMagic = 0x43414C31;  // "CAL1"
+/// No magic word is needed here, unlike the RTC version: an absent NVS key
+/// reads back as the supplied default, so "nothing recorded" is directly
+/// representable and there is no uninitialised-noise case to defend against.
+constexpr const char* kNvsNamespace = "bootdiag";
+constexpr const char* kKeyCause = "cause";
 
 /// The reason, in words, plus what it actually implies. The second half is the
 /// point: `ESP_RST_TASK_WDT` means nothing to someone who has not just been
@@ -92,18 +92,34 @@ const char* describeCause(RestartCause cause) {
   return "UNRECOGNISED";
 }
 
-/// Reads the recorded intent, treating an invalid magic as None.
-RestartCause readRecordedCause() {
-  if (gCauseMagic != kCauseMagic) {
+/// Reads the recorded intent and clears it in the same NVS session, so the
+/// read-then-clear pair costs one open instead of two. The clear is skipped
+/// entirely when nothing was recorded, which is what keeps an ordinary
+/// power-on boot free of flash writes.
+RestartCause takeRecordedCause() {
+  Preferences prefs;
+  if (!prefs.begin(kNvsNamespace, /*readOnly=*/false)) {
+    // Not fatal and not silent: without this the reason pair would read
+    // "+ NONE" and look like a missing recordRestartIntent() call somewhere,
+    // sending the reader after a bug in the wrong file.
+    Log::line("[boot] could not open NVS to read the recorded restart cause");
     return RestartCause::None;
   }
-  switch (static_cast<RestartCause>(gCauseValue)) {
+
+  const uint8_t stored = prefs.getUChar(kKeyCause, static_cast<uint8_t>(RestartCause::None));
+
+  if (stored != static_cast<uint8_t>(RestartCause::None)) {
+    prefs.putUChar(kKeyCause, static_cast<uint8_t>(RestartCause::None));
+  }
+  prefs.end();
+
+  switch (static_cast<RestartCause>(stored)) {
     case RestartCause::None:
     case RestartCause::LowHeap:
     case RestartCause::Ota:
     case RestartCause::Reprovision:
     case RestartCause::SelfTest:
-      return static_cast<RestartCause>(gCauseValue);
+      return static_cast<RestartCause>(stored);
   }
   // A value this build does not recognise - most likely an older or newer
   // firmware wrote it. Reported as None rather than guessed at.
@@ -113,8 +129,15 @@ RestartCause readRecordedCause() {
 }  // namespace
 
 void recordRestartIntent(RestartCause cause) {
-  gCauseMagic = kCauseMagic;
-  gCauseValue = static_cast<uint32_t>(cause);
+  Preferences prefs;
+  if (!prefs.begin(kNvsNamespace, /*readOnly=*/false)) {
+    Log::line("[boot] could not open NVS to record the restart cause - the next boot will say NONE");
+    return;
+  }
+  prefs.putUChar(kKeyCause, static_cast<uint8_t>(cause));
+  // Explicit, not left to the destructor: this is called immediately before a
+  // restart, and the commit has to have happened by the time the reset lands.
+  prefs.end();
 }
 
 bool lastResetWasUnexpected() { return describe(esp_reset_reason()).unexpected; }
@@ -122,14 +145,24 @@ bool lastResetWasUnexpected() { return describe(esp_reset_reason()).unexpected; 
 void logResetReason() {
   const esp_reset_reason_t reason = esp_reset_reason();
   const ResetDescription described = describe(reason);
-  const RestartCause cause = readRecordedCause();
 
-  // Cleared immediately after reading, and before anything else can restart
-  // the device. Not tidying - correctness: a recorded OTA intent left in place
-  // would make the next unrelated panic report PANIC_RESET + OTA, inventing a
-  // causal link and sending the reader after the wrong bug.
-  gCauseMagic = 0;
-  gCauseValue = static_cast<uint32_t>(RestartCause::None);
+  // Always taken, even on a power-on boot where the value is discarded below:
+  // the clear has to happen regardless, or a recorded intent interrupted by a
+  // power cut would sit in NVS and be attributed to some later restart.
+  const RestartCause recorded = takeRecordedCause();
+
+  // NVS outlives a power cycle, so a stored intent has to be suppressed here
+  // rather than relied on to evaporate the way the old RTC copy did. If power
+  // was applied, the reason the device came back up is that power was applied -
+  // whatever it had been meaning to do beforehand did not cause this boot.
+  const RestartCause cause = (reason == ESP_RST_POWERON) ? RestartCause::None : recorded;
+
+  if (reason == ESP_RST_POWERON && recorded != RestartCause::None) {
+    // Worth saying rather than swallowing: it means a deliberate restart was
+    // recorded and then interrupted by a power cut before it completed.
+    Log::printf("[boot] a %s restart was pending when power was lost - discarded",
+                describeCause(recorded));
+  }
 
   Log::printf("[boot] restart reason: %s + %s", described.name, describeCause(cause));
   Log::printf("[boot] %s", described.meaning);
@@ -140,6 +173,12 @@ void logResetReason() {
     // diagnostically.
     Log::line("[boot] that restart was NOT requested by this firmware");
   } else if (reason == ESP_RST_SW && cause == RestartCause::None) {
+    // Now a trustworthy diagnosis. When the cause lived in RTC memory this
+    // same line fired on restarts that HAD recorded an intent, because the
+    // storage could not survive App -> CAL -> App - so it accused the call
+    // sites of a fault that was really in this file. With the cause in NVS the
+    // storage is no longer a suspect and the message means what it says.
+    //
     // A deliberate restart that recorded no reason is a hole in this
     // instrumentation, not a property of the device - said out loud so it gets
     // fixed rather than shrugged at.
