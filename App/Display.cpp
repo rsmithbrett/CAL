@@ -6,6 +6,10 @@
 // note at the top of its .ino.
 #include <SD.h>
 #include <cstdlib>
+// For the per-capability heap queries in ensureFileBufferCapacity's failure
+// path - ESP.getMaxAllocHeap() reports only one capability set, and the whole
+// point of that diagnostic is to find out whether the others disagree.
+#include <esp_heap_caps.h>
 
 #define LGFX_AUTODETECT
 #include <LovyanGFX.hpp>
@@ -1953,9 +1957,91 @@ bool ensureFileBufferCapacity(size_t needed) {
   gFileBufferCapacity = 0;
 
   uint8_t* grown = static_cast<uint8_t*>(malloc(needed));
+
   if (grown == nullptr) {
-    return false;
+    // ---------------------------------------------------------------------
+    // A malloc this small should not be failing, so find out what is true
+    // rather than guessing again.
+    //
+    // The observed contradiction: malloc(5686) returns null while
+    // ESP.getMaxAllocHeap() reports 32,756 bytes free in one block. That is
+    // impossible for a plain malloc, which means one of the two numbers does
+    // not mean what it appears to. Note also that 32,756 is reported
+    // *identically* on every device, every boot, in every log line, while
+    // freeHeap moves around it - a real largest-free-block measurement would
+    // not sit that still. 32,756 is 0x7FF4, twelve bytes short of 32KiB,
+    // which looks far more like a region boundary or a cap than a
+    // measurement.
+    //
+    // An earlier fix in this same function (realloc to free-then-malloc) was
+    // justified by arithmetic that fit the numbers at the time - old block
+    // held plus new block wanted - and it is a real improvement. But it
+    // cannot be the cause of THIS, because after it there is only ever one
+    // block in flight and the failure persists at a smaller size than
+    // before. The explanation did not survive its own fix, so it is retired
+    // rather than defended.
+    //
+    // Each cap is queried separately because malloc() and
+    // ESP.getMaxAllocHeap() do not necessarily ask the same question:
+    // getMaxAllocHeap() reports MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT, while
+    // malloc() takes MALLOC_CAP_DEFAULT. If those diverge, the log has been
+    // quoting a number that was never the constraint.
+    Log::printf(
+        "[heapdiag] malloc(%u) FAILED. largest free block by cap: 8BIT=%u "
+        "INTERNAL|8BIT=%u DMA=%u DEFAULT=%u",
+        static_cast<unsigned>(needed),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(
+            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_DMA)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)));
+    Log::printf(
+        "[heapdiag] total free by cap: 8BIT=%u INTERNAL|8BIT=%u DMA=%u DEFAULT=%u "
+        "minimum-ever-free=%u",
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_DMA)),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_DEFAULT)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT)));
+
+    // Corruption would explain an impossible failure completely: a trashed
+    // free-list makes allocations fail unpredictably regardless of how much
+    // room the totals claim. Cheap to rule in or out, and worth knowing
+    // before anybody theorises further. Passing `false` so it reports rather
+    // than aborting - this runs on a household's wall display.
+    Log::printf("[heapdiag] heap integrity check: %s",
+                heap_caps_check_integrity_all(false) ? "OK" : "CORRUPT");
+
+    // Retry against explicit capabilities. This is diagnosis that doubles as
+    // a possible fix: if any of these succeeds where malloc() did not, then
+    // the constraint was the capability set all along, the answer is to keep
+    // asking this way, and the log above says exactly which one worked.
+    struct CapAttempt {
+      const char* name;
+      uint32_t caps;
+    };
+    static const CapAttempt kAttempts[] = {
+        {"8BIT", MALLOC_CAP_8BIT},
+        {"INTERNAL|8BIT", MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT},
+        {"DMA", MALLOC_CAP_DMA},
+    };
+
+    for (const CapAttempt& attempt : kAttempts) {
+      grown = static_cast<uint8_t*>(heap_caps_malloc(needed, attempt.caps));
+      if (grown != nullptr) {
+        Log::printf("[heapdiag] heap_caps_malloc(%u, %s) SUCCEEDED where malloc() failed",
+                    static_cast<unsigned>(needed), attempt.name);
+        break;
+      }
+    }
+
+    if (grown == nullptr) {
+      Log::printf("[heapdiag] every capability refused %u bytes - the shortage is real",
+                  static_cast<unsigned>(needed));
+      return false;
+    }
   }
+
   gFileBuffer = grown;
   gFileBufferCapacity = needed;
   return true;
