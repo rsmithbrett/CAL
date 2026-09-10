@@ -307,8 +307,19 @@ void checkHeapHealth() {
   }
   lastHeapCheckMs = now;
 
-  const size_t maxAllocHeap = ESP.getMaxAllocHeap();
-  if (maxAllocHeap >= kMinMaxAllocHeapBytes) {
+  // heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), not
+  // ESP.getMaxAllocHeap(). The Arduino wrapper is not measuring the pool that
+  // allocations actually come from: at one instant on device 17 it reported
+  // 32,756 while the real largest 8BIT block was 6,132, and ESP.getFreeHeap()
+  // claimed 49,960 against a real 11,340. Every earlier threshold in this
+  // function was chosen against those inflated figures, which is why none of
+  // them bore any relationship to whether a draw would succeed.
+  //
+  // 8BIT specifically because that is what a byte buffer needs - see
+  // Display.cpp's ensureFileBufferCapacity, whose failures are the harm this
+  // watchdog is trying to anticipate.
+  const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (largestBlock >= kMinMaxAllocHeapBytes) {
     return;
   }
 
@@ -347,10 +358,11 @@ void checkHeapHealth() {
   // its cards", needs no theory about which pool is short, and cannot be
   // fooled by a metric that means something other than it appears to.
   Log::printf(
-      "[health] maxAllocHeap=%u is below the %u byte reference after %lu ms uptime - "
-      "NOT restarting: this metric is under investigation, see Display.cpp's heapdiag",
-      static_cast<unsigned>(maxAllocHeap), static_cast<unsigned>(kMinMaxAllocHeapBytes),
-      static_cast<unsigned long>(now));
+      "[health] largest 8BIT block=%u is below the %u byte reference after %lu ms uptime - "
+      "NOT restarting: threshold not yet re-derived against real figures (ESP.getMaxAllocHeap "
+      "reported %u at the same instant)",
+      static_cast<unsigned>(largestBlock), static_cast<unsigned>(kMinMaxAllocHeapBytes),
+      static_cast<unsigned long>(now), static_cast<unsigned>(ESP.getMaxAllocHeap()));
 
   // The restart this function used to perform is deleted rather than commented
   // out or guarded behind a flag. A disabled branch left in place invites
@@ -617,6 +629,18 @@ void performCheckIn() {
     Loader::requestUpdate();
     // Unreachable: the call above never returns.
   }
+
+  // Last thing, once every request this cycle has been made: give the TLS
+  // session's memory back before the card rotation starts needing contiguous
+  // blocks again.
+  //
+  // Placed here rather than inside Http itself so it happens once per check-in
+  // cycle instead of once per request - the asset fetches above are a burst,
+  // and tearing the session down between each of them would pay a handshake
+  // per asset for no benefit, since nothing draws in between. See
+  // Http::releaseTlsSession() for the measured reason this exists: ~32KB of
+  // mbedTLS buffers were resident while a draw had 11,340 bytes to work with.
+  Http::releaseTlsSession();
 }
 
 }  // namespace

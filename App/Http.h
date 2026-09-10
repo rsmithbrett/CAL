@@ -81,6 +81,27 @@ bool beginRequest(const String& url);
 /// close the underlying socket (that is the entire point).
 HTTPClient& client();
 
+/// Hands mbedTLS's per-session memory back, ending the session this module
+/// otherwise keeps alive on purpose.
+///
+/// **Call this after a request when what happens next needs contiguous RAM
+/// more than it needs a warm TLS session.** Measured on device 17: roughly
+/// 32KB of mbedTLS buffers were resident while a graphics draw had 11,340
+/// bytes of 8BIT heap to work with and its largest free block was 6,132 - so
+/// the draw could not get the 10,568 bytes it needed even though nothing was
+/// wrong with the heap. Peak concurrent use, not fragmentation, is what
+/// actually fails on this board.
+///
+/// The trade is a full handshake on the next request instead of a resumed
+/// session. At the 60-second check-in cadence that is affordable; across an
+/// asset-fetch burst it is paid per asset. Not calling it at all was the
+/// previous behaviour and cost the device its graphics entirely.
+///
+/// Logs the before/after 8BIT free size and largest block, so the saving is
+/// reported from hardware rather than assumed. Safe to call when no session is
+/// open - stop() on an idle client does nothing.
+void releaseTlsSession();
+
 /// Says which layer an HTTPS failure actually happened at, for a call site
 /// that just got a negative status back. HTTPClient reports a DNS failure, a
 /// refused TCP connect and a rejected TLS handshake all as -1, which is not

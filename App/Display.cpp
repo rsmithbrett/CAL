@@ -28,6 +28,11 @@
 #include "CalQr.h"
 
 #include "Display.h"
+// Provisional, for the TLS-release retry experiment in
+// ensureFileBufferCapacity() - see that block's own remarks. A display module
+// has no business knowing about the network stack; this include goes when the
+// experiment does.
+#include "Http.h"
 #include "Log.h"
 
 namespace Display {
@@ -2092,7 +2097,52 @@ bool ensureFileBufferCapacity(size_t needed) {
     if (grown == nullptr) {
       Log::printf("[heapdiag] every capability refused %u bytes - the shortage is real",
                   static_cast<unsigned>(needed));
-      return false;
+
+      // ---- THE CONTROLLED EXPERIMENT, at the exact point of failure ----
+      //
+      // Release the TLS session and immediately retry the same allocation.
+      // Nothing about the request is different; the only thing that changed is
+      // that ~32KB of mbedTLS buffers went back to the heap. So the retry is a
+      // clean test of one hypothesis:
+      //
+      //   retry SUCCEEDS -> peak concurrent use was the whole problem. A live
+      //     TLS session and a graphics draw cannot both fit on this board, the
+      //     heap was never unhealthy, and the case is closed.
+      //   retry FAILS    -> something else holds the memory, and the TLS
+      //     session was a red herring however large it looks.
+      //
+      // releaseTlsSession() logs the 8BIT free size and largest block either
+      // side of the release, so the log says how much it actually returned
+      // rather than how much it was supposed to.
+      //
+      // Deliberately placed here, not merely before the draw: bracketing the
+      // failing allocation itself is what makes this causal rather than
+      // circumstantial.
+      //
+      // **This coupling of Display to Http is provisional.** A display module
+      // reaching into the network stack to free memory is the wrong shape to
+      // keep - it is here to settle the question on real hardware. Once the
+      // answer is in, the fix belongs upstream: release around draws from the
+      // scheduler, and stop needing 10KB contiguous at all by moving fixed
+      // screens to streamed RGB565 (which removes the PNG decoder's ~44KB
+      // scratch as well). Delete this block then.
+      Log::line("[heapdiag] retrying after releasing the TLS session");
+      Http::releaseTlsSession();
+
+      grown = static_cast<uint8_t*>(malloc(needed));
+      if (grown != nullptr) {
+        Log::printf(
+            "[heapdiag] RETRY SUCCEEDED for %u bytes after the TLS release - peak concurrent "
+            "use was the constraint, not heap health",
+            static_cast<unsigned>(needed));
+      } else {
+        logHeapSnapshot("after TLS release, still failing");
+        Log::printf(
+            "[heapdiag] retry still failed for %u bytes - the TLS session was not what was "
+            "holding the memory",
+            static_cast<unsigned>(needed));
+        return false;
+      }
     }
   }
 
