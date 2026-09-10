@@ -6,6 +6,15 @@
 #include <SD.h>
 #include <cstdlib>
 
+// For heap_caps_get_free_size/heap_caps_get_largest_free_block. Deliberately
+// used in place of ESP.getFreeHeap()/ESP.getMaxAllocHeap() in this file: the
+// Arduino wrappers were measured on this board reporting 49,960 free and 32,756
+// largest at a moment when MALLOC_CAP_8BIT actually had 11,340 free and a
+// 6,132-byte largest block - overstating the figure that decides whether a
+// decode can allocate by roughly 4x. A self-test that prints a number four
+// times better than the truth is worse than one that prints nothing.
+#include <esp_heap_caps.h>
+
 #define LGFX_AUTODETECT
 #include <LovyanGFX.hpp>
 #include <LGFX_AUTODETECT.hpp>
@@ -73,19 +82,21 @@ int wrappedCenteredText(const String& text, int topY, uint32_t colour, uint8_t t
   return linesDrawn;
 }
 
-// --- The shared, only-grows read buffer for PNG decode - see Display.h's
-// own remarks on drawPngFromSdTest() for why this exists at all: it is the
-// exact fix App/Display.cpp applies to the read-buffer heap-fragmentation
-// bug this whole sketch exists to catch earlier next time.
+// --- The shared, only-grows read buffer for PNG decode - see Display.h's own
+// remarks on drawPngFromSdTest() for why this exists at all. In short: App no
+// longer reads whole files into RAM (it streams, and the shared-SPI-bus premise
+// that justified buffering turned out to be false), so this is not "the fix App
+// applies" any more. It is kept as the deliberate worst case - the one path that
+// still demands a single contiguous file-sized block, and so fails first on a
+// fragmented heap.
 uint8_t* gFileBuffer = nullptr;
 size_t gFileBufferCapacity = 0;
 
-// Frees before allocating rather than calling realloc(), matching
-// App/Display.cpp - and for the reason given at length there: realloc()
-// preserves contents, so a grow it cannot satisfy in place holds the old block
-// and the new one at once, and the caller overwrites every byte from SD
-// immediately anyway. Doubling the peak contiguous demand is exactly the
-// failure mode this sketch is meant to detect, so it must not reproduce it.
+// Frees before allocating rather than calling realloc(): realloc() preserves
+// contents, so a grow it cannot satisfy in place holds the old block and the new
+// one at once, and the caller overwrites every byte from SD immediately anyway.
+// Doubling the peak contiguous demand is exactly the failure mode this sketch is
+// meant to detect, so it must not reproduce it.
 bool ensureFileBufferCapacity(size_t needed) {
   if (needed <= gFileBufferCapacity) {
     return true;
@@ -162,11 +173,15 @@ bool drawPngFromSdTest(const String& path) {
   }
   if (!ensureFileBufferCapacity(fileSize)) {
     file.close();
+    // Both figures, not just free: a failure with plenty free but a small
+    // largest block is fragmentation, and a failure with both small is genuine
+    // exhaustion. Those want opposite fixes, so the log has to tell them apart.
     Log::printf(
         "[display] out of memory growing the read buffer to %u bytes for %s "
-        "(freeHeap=%u maxAllocHeap=%u)",
-        static_cast<unsigned>(fileSize), path.c_str(), static_cast<unsigned>(ESP.getFreeHeap()),
-        static_cast<unsigned>(ESP.getMaxAllocHeap()));
+        "(free8=%u largest8=%u)",
+        static_cast<unsigned>(fileSize), path.c_str(),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
     return false;
   }
   const size_t bytesRead = file.read(gFileBuffer, fileSize);
@@ -180,8 +195,13 @@ bool drawPngFromSdTest(const String& path) {
   const bool ok =
       lcd.drawPng(gFileBuffer, fileSize, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
   if (!ok) {
-    Log::printf("[display] failed to decode/draw %s (freeHeap=%u maxAllocHeap=%u)", path.c_str(),
-                static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
+    // The read succeeded and the decode did not, so the interesting figure is
+    // what was left for the decoder's own scratch after this buffer was taken.
+    Log::printf("[display] failed to decode/draw %s (free8=%u largest8=%u bufferedBytes=%u)",
+                path.c_str(),
+                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+                static_cast<unsigned>(fileSize));
   }
   return ok;
 }

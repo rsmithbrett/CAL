@@ -45,15 +45,25 @@ bool fillColorTest(uint32_t color888);
 /// drawString() reports having drawn a non-zero width.
 bool textRenderTest(uint8_t sizeMultiplier);
 
-/// Reads `path` off the SD card into RAM (the same shared, only-grows
-/// buffer technique App/Display.cpp's readFileToBuffer()/drawPngFromSd()
-/// use - see that file's own extensive remarks on why: this board's SD card
-/// and display share an SPI bus, and decoding straight off a streamed SD
-/// read interleaves reads and writes on that shared bus for the whole
-/// decode) and hands the bytes to LovyanGFX's PNG decoder. Returns false if
-/// the file could not be read at all, or if the decode itself reported
-/// failure - either way logged with the free/max-alloc heap at the moment
-/// of failure, the same diagnostic App's own copy of this function logs.
+/// Reads `path` off the SD card into RAM through a shared, only-grows buffer
+/// and hands the bytes to LovyanGFX's PNG decoder. Returns false if the file
+/// could not be read at all, or if the decode itself reported failure -
+/// either way logged with the capability-specific heap figures at the moment
+/// of failure.
+///
+/// **This is deliberately no longer what App does, and the difference is the
+/// point.** App/Display.cpp used to read whole files into RAM this way, on the
+/// stated premise that this board's SD card and display share an SPI bus so a
+/// streamed decode would interleave reads and writes on it for the whole
+/// decode. That premise was measured and is false: the panel is on HSPI_HOST
+/// (14/12/13) and SD is on VSPI, `pin_tfcard_cs` is -1, and the two never
+/// contend. App now streams via drawImageFromSd() and holds no file copy at
+/// all. What survives here is the *buffered* path, kept on purpose as the
+/// worst-case memory probe: it is the shape that needs one contiguous
+/// file-sized block, so it fails first and loudest on a fragmented heap, which
+/// is precisely what a self-test wants to catch. Do not "fix" this to match
+/// App - a self-test that allocates no more than the product does would stop
+/// detecting the condition this sketch exists for.
 bool drawPngFromSdTest(const String& path);
 
 /// The final pass/fail summary, one line per test category plus an overall

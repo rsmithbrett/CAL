@@ -5,8 +5,12 @@
 /// Category 1 of the four SelfTest suites - see the SelfTest README section
 /// for the full brief. Exercises the same LovyanGFX/LGFX_AUTODETECT driver
 /// stack App and CAL both use: solid fills, text at a couple of sizes, and -
-/// the specific path that actually broke tonight - decoding a real PNG read
-/// off SD into RAM the same way App/Display.cpp's fixed drawPngFromSd() does.
+/// the specific path that actually broke - decoding a real PNG read off SD
+/// into RAM. Note that App itself no longer does that: it streams straight
+/// from SD via drawImageFromSd(). This suite keeps the buffered read on
+/// purpose, as the worst-case contiguous-allocation probe; SelfTest/Display.h's
+/// remarks on drawPngFromSdTest() explain why that divergence is the point and
+/// should not be "fixed".
 ///
 /// **Honesty limit, stated once here rather than at every call site:** none
 /// of this can verify a human would see the right picture. There is no

@@ -2139,6 +2139,28 @@ The shape, as implemented:
 }
 ```
 
+`memoryLoad`'s `freeHeap*`/`maxAllocHeap*` keys are named after
+`ESP.getFreeHeap()`/`ESP.getMaxAllocHeap()` but no longer come from them. They
+now carry `heap_caps_get_free_size(MALLOC_CAP_8BIT)` and
+`heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)` — the wrappers were measured
+on this board reporting 49,960 free and 32,756 largest while `MALLOC_CAP_8BIT`
+actually held 11,340 free with a 6,132-byte largest block, so a self-test using
+them would have called a unit healthy on the same night its 5,686-byte decode
+could not allocate. The **keys** keep the old names deliberately: they are a wire
+contract with the server's `SelfTestReportRequest`, and the server has to keep
+accepting reports from firmware up to six months old, so renaming the field to
+match the better source would break precisely that guarantee. Read them as
+"8-bit free" and "8-bit largest block". The example values above are
+illustrative and predate the change — a real ESP32 in this fleet reports figures
+an order of magnitude smaller.
+
+The example's `png=none-cached` is also worth noting: `screenTest` still decodes
+a PNG by reading the whole file into RAM, which is **no longer what App does**
+(App streams from SD via `drawImageFromSd()`). That divergence is intentional —
+the buffered read is the worst-case contiguous-allocation probe, so it fails
+first and loudest on a fragmented heap, which is what a self-test is for. See
+`SelfTest/Display.h`'s remarks on `drawPngFromSdTest()`.
+
 ### After the report
 
 The full pass/fail summary is drawn on screen — one line per category with

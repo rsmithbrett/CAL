@@ -4,11 +4,23 @@
 
 /// Category 4: how much contiguous memory this specific unit actually has
 /// right now - the exact question hours of manual telemetry/debug-log
-/// correlation were trying to answer tonight for the read-buffer
-/// fragmentation bug (see App/Display.cpp's own remarks on
-/// readFileToBuffer()/ensureFileBufferCapacity()).
+/// correlation were trying to answer for the read-buffer fragmentation bug.
+/// (App no longer buffers whole files at all; it streams. This suite still
+/// asks the allocation question directly, which is why it kept its point when
+/// that code went away - see SelfTest/Display.h's remarks on
+/// drawPngFromSdTest().)
 namespace MemoryTest {
 
+/// **The two heap fields are named after the Arduino wrappers but no longer
+/// come from them.** `freeHeap*` now carries
+/// heap_caps_get_free_size(MALLOC_CAP_8BIT) and `maxAllocHeap*` carries
+/// heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) - see MemoryTest.cpp for
+/// the measurement showing the wrappers overstate by ~4x on this board. The
+/// names stay because they are the JSON keys in the self-test report the
+/// server already parses (SelfTestReportRequest), and the server must keep
+/// accepting reports from firmware up to six months old; renaming the wire
+/// field to match the improved source would break exactly that. Read them as
+/// "8-bit free" and "8-bit largest block" regardless of what they are called.
 struct AllocResult {
   uint32_t requestedBytes = 0;
   bool allocationSucceeded = false;
