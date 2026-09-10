@@ -24,7 +24,36 @@ bool gReady = false;
 }  // namespace
 
 void begin() {
-  // Tls::configure() already distinguishes "no bundle" from a validated
+  // Cap how long a TLS handshake may block before it is abandoned.
+  //
+  // **The argument is in SECONDS, not milliseconds.** NetworkClientSecure
+  // multiplies it by 1000 internally (NetworkClientSecure.cpp:450), so passing
+  // a millisecond figure here would ask for a timeout a thousand times longer
+  // than intended and look like it had done nothing.
+  //
+  // Why this is needed at all: the core defaults handshake_timeout to 120000 ms
+  // (NetworkClientSecure.cpp:41), and http.setTimeout(kHttpTimeoutMs) does NOT
+  // cover it - that is HTTPClient's read timeout, a different clock entirely.
+  // A device was measured blocking its whole loop for 121,019 ms on one failed
+  // handshake, which is the 120-second default firing almost exactly. For those
+  // two minutes the App renders nothing, samples no touches, and sends no
+  // telemetry: the device looks frozen to anyone in front of it, and looks
+  // silent to the server. That is precisely the "frozen on the clock" symptom
+  // this fleet has been showing.
+  //
+  // 15 seconds because it has to sit above the worst SUCCESSFUL handshake and
+  // below anything a person would call frozen. Observed good handshakes on this
+  // hardware complete inside a second (see the [assets] fetch traces, which
+  // include connection setup and land at 241-787 ms); the slowest full-loop
+  // iteration containing a successful check-in was about 8 s. 15 s clears that
+  // with room and still turns a two-minute freeze into a hiccup.
+  //
+  // This does NOT fix whatever makes a handshake stall - mbedTLS reports only
+  // "-1 generic error" when it happens, and that is still open. It bounds the
+  // damage, which is worth having regardless of the cause.
+  gClient.setHandshakeTimeout(15);
+
+  // Tls::configure() already distinguishes "no trust source" from a validated
   // client internally; nothing more specific to add here. Every call site
   // logs its own message off ready() the same way it used to log its own
   // per-request Tls::configure() failure.
