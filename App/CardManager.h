@@ -57,6 +57,29 @@ void begin();
 /// call with touch and the dwell timer unserviced for the whole stretch.
 void poll();
 
+/// Samples the touch panel once and handles a tap if there was one - the touch
+/// half of poll() above, on its own.
+///
+/// **Why this is separately callable.** Touch used to be sampled exactly once
+/// per loop() iteration, and loop() does not run at a steady rate: a check-in
+/// is a synchronous TLS handshake plus request and response, and a card
+/// refresh is a synchronous HTTPS fetch, so the gap between two touch samples
+/// is occasionally seconds rather than the 50ms the loop's own pacing
+/// suggests. A finger is on the glass for a fraction of that, so a tap landing
+/// in one of those stretches was simply never seen - which is the reported
+/// symptom of advance/rewind feeling unresponsive and presses going missing.
+///
+/// Calling this from inside loop()'s pacing wait raises the sample rate
+/// BETWEEN blocking operations from once per 50ms to once per 5ms. It does
+/// nothing for sampling DURING one - that needs the network work off this path
+/// entirely, which is a much larger change - so loop() also measures how long
+/// its blocking phases actually take, to establish how much of the problem
+/// each half really is before anyone rewrites the request path over a guess.
+///
+/// Safe to call as often as you like: Touch::poll() does its own debouncing
+/// and returns false when there is nothing new.
+void pollTouch();
+
 /// Applies a cardPolicy received on check-in. A policy with `present == false`
 /// changes nothing - "the server sent no policy" means keep using whatever is
 /// already in force, never "blank the screen".

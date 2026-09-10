@@ -40,6 +40,136 @@ uint8_t count() { return gCardCount; }
 
 CardSpec& at(uint8_t index) { return gCards[index]; }
 
+namespace {
+
+Cards::Announcement gAnnouncements[Cards::kMaxAnnouncements];
+uint8_t gAnnouncementCount = 0;
+
+/// Rotates which of several matching announcements a card shows - see
+/// announcementFor(). One counter for the whole device rather than one per
+/// card: a household reads one screen at a time, and a per-card cursor would
+/// mean a card revisited after twenty others resumes mid-list instead of
+/// showing what is most current.
+uint8_t gAnnouncementCursor = 0;
+
+/// Whether this announcement is allowed on this card. An empty target list is
+/// a wildcard - see Announcement::targetCardIds.
+bool targetsCard(const Cards::Announcement& announcement, const char* cardId) {
+  if (announcement.targetCount == 0) {
+    return true;
+  }
+  for (uint8_t i = 0; i < announcement.targetCount; ++i) {
+    if (strcmp(announcement.targetCardIds[i], cardId) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace
+
+void setAnnouncements(const Cards::Announcement* announcements, uint8_t count) {
+  // Clamped defensively rather than reported: the only caller is
+  // CheckIn.cpp's parser, which already bounds its own staging buffer and logs
+  // when the server offered more than it kept, so a count over the ceiling
+  // here would mean a second caller appeared without reading either.
+  const uint8_t incoming = count > Cards::kMaxAnnouncements ? Cards::kMaxAnnouncements : count;
+
+  // Which ids this device had already dismissed, copied out BY VALUE before
+  // the store is touched.
+  //
+  // By value, not by pointer, and not by copying whole Announcements. Pointers
+  // into gAnnouncements would dangle the moment the loop below overwrote the
+  // slot they pointed at, silently comparing against whatever had just been
+  // written there instead of against the old id. Copying whole Announcements
+  // instead would put another kMaxAnnouncements-sized struct on the stack
+  // while CheckIn::Result is still live on it - the exact cost that struct's
+  // own remarks explain it moved to a file-static buffer to avoid. Three short
+  // id strings is a hundred-odd bytes and neither problem.
+  char dismissedIds[Cards::kMaxAnnouncements][sizeof(Cards::Announcement::id)] = {};
+  uint8_t dismissedCount = 0;
+  for (uint8_t i = 0; i < gAnnouncementCount; ++i) {
+    if (gAnnouncements[i].dismissedLocally) {
+      strncpy(dismissedIds[dismissedCount], gAnnouncements[i].id,
+              sizeof(dismissedIds[dismissedCount]) - 1);
+      dismissedIds[dismissedCount][sizeof(dismissedIds[dismissedCount]) - 1] = '\0';
+      dismissedCount++;
+    }
+  }
+
+  for (uint8_t i = 0; i < incoming; ++i) {
+    gAnnouncements[i] = announcements[i];
+
+    // Carry a local dismissal across, matched on id - see setAnnouncements'
+    // own remarks in Cards.h. Without this, the check-in immediately after a
+    // press puts the banner straight back on screen, because the server has
+    // not heard about the press yet.
+    gAnnouncements[i].dismissedLocally = false;
+    for (uint8_t j = 0; j < dismissedCount; ++j) {
+      if (strcmp(dismissedIds[j], gAnnouncements[i].id) == 0) {
+        gAnnouncements[i].dismissedLocally = true;
+        break;
+      }
+    }
+  }
+
+  for (uint8_t i = incoming; i < Cards::kMaxAnnouncements; ++i) {
+    gAnnouncements[i] = Cards::Announcement{};
+  }
+
+  const bool changed = gAnnouncementCount != incoming;
+  gAnnouncementCount = incoming;
+  if (gAnnouncementCursor >= gAnnouncementCount) {
+    gAnnouncementCursor = 0;
+  }
+
+  if (changed || incoming > 0) {
+    Log::printf("[banner] %u announcement(s) in force", static_cast<unsigned>(gAnnouncementCount));
+  }
+}
+
+const Cards::Announcement* announcementFor(const Cards::CardSpec& card) {
+  if (!card.allowBanner || gAnnouncementCount == 0) {
+    return nullptr;
+  }
+
+  // Walks the whole array starting at the cursor, so cycling is fair across
+  // however many match this particular card without needing a per-card index.
+  for (uint8_t offset = 0; offset < gAnnouncementCount; ++offset) {
+    const uint8_t index = (gAnnouncementCursor + offset) % gAnnouncementCount;
+    const Cards::Announcement& candidate = gAnnouncements[index];
+    if (candidate.dismissedLocally || strlen(candidate.text) == 0) {
+      continue;
+    }
+    if (!targetsCard(candidate, card.id)) {
+      continue;
+    }
+    return &candidate;
+  }
+
+  return nullptr;
+}
+
+void advanceAnnouncementCursor() {
+  if (gAnnouncementCount == 0) {
+    return;
+  }
+  gAnnouncementCursor = static_cast<uint8_t>((gAnnouncementCursor + 1) % gAnnouncementCount);
+}
+
+bool dismissAnnouncement(const char* announcementId) {
+  if (announcementId == nullptr || strlen(announcementId) == 0) {
+    return false;
+  }
+  for (uint8_t i = 0; i < gAnnouncementCount; ++i) {
+    if (strcmp(gAnnouncements[i].id, announcementId) == 0) {
+      gAnnouncements[i].dismissedLocally = true;
+      return true;
+    }
+  }
+  return false;
+}
+
 void logProviderStatuses() {
   // Checked before anything else, including walking the registry: with
   // streaming off this must cost nothing at all, and every status()
@@ -164,6 +294,19 @@ uint32_t gManualNavHoldMs = 30000UL;
 uint32_t gLastSwitchMs = 0;
 uint32_t gManualHoldUntilMs = 0;
 
+/// The announcement currently drawn as a banner, or nullptr when the card on
+/// screen is drawing its own content. Set on every draw by drawCurrent().
+///
+/// Points into the announcement store rather than copying, which is safe for
+/// exactly one reason worth writing down: the store is only ever rewritten by
+/// setAnnouncements() on a check-in, and a check-in cannot interleave with a
+/// draw on this single-threaded firmware. It is re-read on the next draw
+/// regardless, so a stale pointer can never survive one.
+///
+/// Needed because a button press has to know WHICH announcement it satisfied,
+/// and the press arrives from the touch handler long after the draw decided.
+const Cards::Announcement* gBannerOnScreen = nullptr;
+
 /// The buttons currently drawn, in the same order as the touch zones handed
 /// to Touch::setActionZones() - so a Hit::ActionButton's index addresses this
 /// array directly.
@@ -209,7 +352,7 @@ bool isEffectiveNow(const Cards::CardSpec& card) {
 bool showable(uint8_t index) {
   const Cards::CardSpec& card = gCards[index];
   return card.active && card.itemCount != nullptr && card.draw != nullptr &&
-         !card.dismissedByButton && isEffectiveNow(card) && card.itemCount() > 0;
+         isEffectiveNow(card) && card.itemCount() > 0;
 }
 
 /// Total ordering over the registry: `order` first, registration index as the
@@ -441,17 +584,20 @@ void drawCurrent() {
   Log::printf("[cards] showing '%s' (item %u/%u)", card.id,
               static_cast<unsigned>(gCurrent.item) + 1, static_cast<unsigned>(total));
 
-  // Banner/Banner Button themes draw this card's own `text` in a header strip
-  // instead of its ordinary full-screen draw() - see Cards::Theme's own
-  // remarks. With no text to put in the strip there is nothing to show there,
-  // so this falls back to the card's own draw() exactly as Full Screen
-  // already does - CardPolicyEditing.Warnings on the server is what tells an
-  // operator that theme is having no visible effect, not a special case here.
-  if (card.theme != Cards::Theme::FullScreen && strlen(card.text) > 0) {
-    Log::printf("[cards] '%s' drawing as a %s", card.id,
-                card.theme == Cards::Theme::BannerButton ? "banner button" : "banner");
-    Display::showBannerCard(String(card.text));
+  // A banner-eligible card carrying an effective announcement draws that
+  // announcement in a header strip instead of its own full-screen content.
+  // Everything else - no eligibility, nothing due, everything due already
+  // dismissed - falls through to the card's ordinary draw(), which is what
+  // makes allowBanner eligibility rather than a promise: a card with it set
+  // and nothing to show looks exactly like a card without it.
+  const Cards::Announcement* banner = Cards::announcementFor(card);
+  if (banner != nullptr) {
+    Log::printf("[banner] '%s' showing announcement %s as a %s", card.id, banner->id,
+                banner->isAction ? "banner button" : "banner");
+    gBannerOnScreen = banner;
+    Display::showBannerCard(String(banner->text));
   } else {
+    gBannerOnScreen = nullptr;
     card.draw(gCurrent.item);
   }
   drawChrome(card);
@@ -464,6 +610,11 @@ void show(const Position& position) {
 }
 
 void advance() {
+  // One rotation step, one step through the announcement queue - so a banner
+  // gets a full dwell to be read rather than however long until the next
+  // incidental redraw. See Cards::advanceAnnouncementCursor().
+  Cards::advanceAnnouncementCursor();
+
   // Behind the frontier: replay the card that was actually shown here rather
   // than recomputing. Recomputing could put a different card in a position
   // the user has already stepped past, which would make "which card is where"
@@ -515,20 +666,29 @@ void handleTap(const Touch::Tap& tap) {
                   pressed.cardId.c_str(), pressed.actionId.c_str());
       Actions::recordPress(pressed);
 
-      // A Banner Button's whole reason for existing: pressing it clears the
-      // reminder locally, on top of - not instead of - whatever effect the
-      // press above just queued (including none at all, for a button whose
-      // server-side binding is DeviceActionEffects.Ignore and exists purely
-      // to clear). See CardManager::applyPolicy() for the one thing that
-      // undoes this again: the server sending different text or a different
-      // start time for this same entry, treated as a new reminder rather
-      // than the same one still being shown.
+      // A Banner Button's whole reason for existing: pressing it satisfies the
+      // announcement, on top of - not instead of - whatever effect the press
+      // above just queued (including none at all, for a button whose
+      // server-side binding is DeviceActionEffects.Ignore and exists purely to
+      // clear). The durable record is the server's: it maps this press back to
+      // the announcement and writes the dismissal against whichever entity
+      // owns this device, so it stops sending it. This local flag only covers
+      // the gap until that press actually arrives on the next check-in -
+      // without it the banner would sit there looking unpressed.
+      //
+      // Dismissed against the announcement on screen rather than the card,
+      // because the announcement is what was satisfied. The same reminder can
+      // be showing on several banner-eligible cards, and pressing it once
+      // means it is done everywhere - which is what keying on the announcement
+      // gets and what keying on the card would not.
       bool dismissed = false;
-      if (gCurrent.card >= 0 && gCurrent.card < static_cast<int8_t>(gCardCount) &&
-          gCards[gCurrent.card].theme == Cards::Theme::BannerButton) {
-        gCards[gCurrent.card].dismissedByButton = true;
-        dismissed = true;
-        Log::printf("[cards] '%s' dismissed locally (Banner Button press)", pressed.cardId.c_str());
+      if (gBannerOnScreen != nullptr && gBannerOnScreen->isAction) {
+        dismissed = Cards::dismissAnnouncement(gBannerOnScreen->id);
+        if (dismissed) {
+          Log::printf("[banner] announcement %s dismissed locally (button press on '%s')",
+                      gBannerOnScreen->id, pressed.cardId.c_str());
+        }
+        gBannerOnScreen = nullptr;
       }
 
       // Acknowledges the *press*, not the delivery. The contract is
@@ -543,10 +703,17 @@ void handleTap(const Touch::Tap& tap) {
       // smaller flash never did.
       Display::showButtonPressConfirmation();
       if (dismissed) {
-        // The card the checkmark was drawn over just became unshowable -
-        // putting it straight back on screen a moment after its own button
-        // dismissed it would look like the press did nothing. Move on to
-        // whatever is next instead, the same as a manual forward tap.
+        // The card is still perfectly showable - only the announcement that
+        // was overlaying it has gone - but redrawing that card the instant its
+        // banner was dismissed would put the reminder's own card back up
+        // wearing its ordinary content, which reads as "the press did
+        // something confusing" rather than "the reminder is dealt with". Move
+        // on to whatever is next instead, the same as a manual forward tap.
+        //
+        // This used to be true in the stronger sense: dismissal set a per-card
+        // flag that showable() tested, so the card genuinely dropped out of
+        // the rotation. It no longer does, and that is the point - dismissing
+        // a reminder should never cost a household a card.
         resetHistory(gCurrent);
         show(computeNext());
       } else {
@@ -634,6 +801,13 @@ void refreshOneDueCard() {
 
 }  // namespace
 
+void pollTouch() {
+  Touch::Tap tap;
+  if (Touch::poll(tap)) {
+    handleTap(tap);
+  }
+}
+
 void begin() {
   Actions::begin();
   gBeginAtMs = millis();
@@ -679,10 +853,7 @@ void poll() {
     return;
   }
 
-  Touch::Tap tap;
-  if (Touch::poll(tap)) {
-    handleTap(tap);
-  }
+  pollTouch();
 
   const uint32_t now = millis();
   // Signed difference rather than a plain `now >= gManualHoldUntilMs`, so a
@@ -756,13 +927,6 @@ void applyPolicy(const Cards::Policy& policy) {
     card.notableDwellSeconds =
         static_cast<uint16_t>(entry.notableDwellSeconds > 0 ? entry.notableDwellSeconds : 0);
 
-    // What this card's Banner Button dismissal (if any) was actually
-    // dismissing, from BEFORE this policy's text/effectiveFromUtc overwrite
-    // it below - see the comparison at the end of this loop body, after both
-    // are rewritten, for why the OLD values are what matter here.
-    const String previousText = String(card.text);
-    const uint32_t previousEffectiveFromUtc = card.effectiveFromUtc;
-
     // The picture this card draws, for the cards that draw one. Rewritten on
     // every policy - including back to empty, which is how the server takes a
     // picture away again. An over-long id is dropped rather than truncated:
@@ -826,18 +990,19 @@ void applyPolicy(const Cards::Policy& policy) {
       card.location[Cards::kMaxLocationLength] = '\0';
     }
 
-    // Which of the three display styles this card draws - rewritten on every
-    // policy exactly like every field above. Unrecognised (including empty,
-    // which is every policy saved before this feature existed) means Full
-    // Screen - the same tolerant-default rule `kind` above already applies,
-    // rather than leaving whatever theme a previous policy set in place.
-    if (entry.theme == "banner") {
-      card.theme = Cards::Theme::Banner;
-    } else if (entry.theme == "bannerbutton") {
-      card.theme = Cards::Theme::BannerButton;
-    } else {
-      card.theme = Cards::Theme::FullScreen;
-    }
+    // Whether this card may carry a banner - rewritten on every policy
+    // exactly like every field above, including back to false, which is how an
+    // admin switches banners off for a card. Absent means false, which is
+    // every policy saved before this feature existed.
+    //
+    // No dismissal bookkeeping happens here any more. It used to: a per-card
+    // Banner Button flag had to be un-dismissed whenever the server sent
+    // different text for the same entry, because "this reminder" and "this
+    // card" were the same thing and there was no way to tell a new reminder
+    // from the old one still being shown. Announcements have their own ids, so
+    // that whole guess is gone - a dismissal is keyed to the announcement it
+    // satisfied, and a genuinely new announcement is simply a different id.
+    card.allowBanner = entry.allowBanner;
 
     // The effectivity window - rewritten on every policy exactly like every
     // field above, including back to 0 (no bound), which is how an admin
@@ -845,20 +1010,13 @@ void applyPolicy(const Cards::Policy& policy) {
     // time it reaches here - see Cards::PolicyEntry::effectiveFromUtc's own
     // remarks on why the ISO-8601 parsing happens once, in CheckIn.cpp, and
     // not here.
+    //
+    // Note this is the CARD's own scheduling window - whether the card appears
+    // in the rotation at all - and has nothing to do with an announcement's
+    // effectivity, which the server evaluates before sending (see
+    // Cards::Announcement).
     card.effectiveFromUtc = static_cast<uint32_t>(entry.effectiveFromUtc);
     card.effectiveToUtc = static_cast<uint32_t>(entry.effectiveToUtc);
-
-    // See CardSpec::dismissedByButton's own remarks: a Banner Button press
-    // dismisses THIS reminder, not this card id forever. If the server is
-    // now sending different text or a different start time for this same
-    // entry, an old dismissal must not silently suppress what is, as far as
-    // this device can tell, a genuinely new reminder.
-    if (card.dismissedByButton &&
-        (String(card.text) != previousText || card.effectiveFromUtc != previousEffectiveFromUtc)) {
-      Log::printf("[cards] '%s' un-dismissed - the server sent a new reminder for this entry",
-                  entry.id.c_str());
-      card.dismissedByButton = false;
-    }
   }
 
   if (matched == 0) {

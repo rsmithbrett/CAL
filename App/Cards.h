@@ -44,34 +44,6 @@ enum class Kind : uint8_t {
   Interstitial,
 };
 
-/// Which of three display styles a card draws once it takes its turn in the
-/// rotation - orthogonal to `Kind` above, which only decides *when* that turn
-/// comes. Mirrors the server's `CardPolicyEntry.Theme` (see that property's
-/// own remarks for the full reasoning); this is the firmware half.
-///
-/// `Banner`/`BannerButton` both draw `CardSpec::text` - reused as-is, there is
-/// no second content field - as a header strip across the top of the panel
-/// (`Display::showBannerCard()`) instead of this card's own `draw()`. With no
-/// text to show, `CardManager::drawCurrent()` falls back to `draw()` anyway,
-/// which is exactly Full Screen with no code path of its own needed for it.
-enum class Theme : uint8_t {
-  /// Every card's own ordinary full-screen layout - the only theme that
-  /// existed before this feature, and the default for every policy entry
-  /// that omits Theme entirely (every policy saved before this feature
-  /// existed).
-  FullScreen,
-  /// A header strip reminding a household of something - an emergency
-  /// weather alert, an upcoming calendar event - drawn across the top of the
-  /// panel instead of this card's own full-screen content.
-  Banner,
-  /// The same header strip, plus: pressing this card's own button (drawn and
-  /// wired up exactly like any other card's button - see Actions.h) clears
-  /// the reminder locally on this device, on top of whatever effect that
-  /// button is otherwise bound to fire server-side. See
-  /// CardManager::handleTap()'s `Touch::Hit::ActionButton` case for exactly
-  /// what "clears" means and how a later policy change undoes it.
-  BannerButton,
-};
 
 /// Refresh this card's retained state from the server. Called only by the
 /// scheduler's refresh timer, never by a navigation path.
@@ -161,6 +133,83 @@ static constexpr uint16_t kMaxQrDataLength = 100;
 /// arrives: an unrecognised value here is treated as Home, not truncated into
 /// a different unrecognised value.
 static constexpr uint8_t kMaxLocationLength = 16;
+
+/// The longest card id an announcement's target list can carry. Card ids are
+/// short, fixed, firmware-defined strings ("issflyover" is the longest today at
+/// 10), so this is sized with generous headroom rather than derived - an id
+/// that would not fit is one this firmware does not implement anyway, and the
+/// target simply never matches.
+static constexpr uint8_t kMaxAnnouncementCardIdLength = 32;
+
+/// The longest announcement text this device holds. Shorter than
+/// kMaxTextLength on purpose: this is a header strip across the top of a
+/// 320x240 panel, not a full-screen card, and Display::showBannerCard() has
+/// room for roughly three lines at 26px. Longer text arrives truncated rather
+/// than rejected - a banner is a reminder, and most of a reminder beats none.
+static constexpr uint16_t kMaxAnnouncementTextLength = 120;
+
+/// The most currently-effective announcements this device tracks at once, and
+/// the most cards one announcement may name explicitly. Bounds on fixed arrays
+/// rather than a claim about the server, which may send more; the surplus is
+/// dropped with a log line rather than growing the heap.
+///
+/// **These are sized against DRAM, not against what a server might want to
+/// send.** Every slot costs its bytes twice - once in CardManager's live store
+/// and once in CheckIn.cpp's parse buffer - and it costs them in .bss, which
+/// is heap this device does not get back. That matters more here than the
+/// numbers suggest: maxAllocHeap settles at 32,756 bytes once WiFi and TLS are
+/// up (see the contiguity section in README.md), and App.ino's heap watchdog
+/// restarts the device below 28,000, so a few kilobytes of static buffers is a
+/// meaningful fraction of the margin between working and rebooting. Three
+/// concurrent announcements is a generous ceiling for a household display -
+/// they cycle, so a fourth would be waiting behind three others anyway - and
+/// four explicit targets covers naming a handful of cards before the wildcard
+/// (an empty target list) becomes the sensible way to say "all of them".
+static constexpr uint8_t kMaxAnnouncements = 3;
+static constexpr uint8_t kMaxAnnouncementTargets = 4;
+
+/// One message to overlay on a card, as it arrives on the check-in response.
+///
+/// **Effectivity is not on this struct, and that is deliberate.** The server
+/// sends only the announcements effective right now for this device and not
+/// already dismissed by whoever owns it - see the server's
+/// AnnouncementsService.GetEffectiveForDeviceAsync, which filters on both
+/// before serialising. So this device needs no date arithmetic, no clock
+/// comparison, and no dismissal history beyond the current session: an
+/// announcement's presence in the array IS the statement that it should be
+/// showing. That keeps the one rule which has to agree between two codebases
+/// living in exactly one of them.
+struct Announcement {
+  /// The announcement's own id, as text. Used only to tell one from another
+  /// across check-ins, so a banner this device just dismissed is not
+  /// resurrected by the very next response - the server cannot know about the
+  /// press until that press reaches it, so it will still be listing the
+  /// announcement for one more round.
+  char id[37] = "";
+  char text[kMaxAnnouncementTextLength + 1] = "";
+  /// True when this announcement wants a press to satisfy it. **This, not the
+  /// card, is what makes a banner a "Banner Button"**: whether a reminder needs
+  /// acknowledging is a property of the reminder, not of whatever card it
+  /// happens to be sitting on.
+  bool isAction = false;
+  /// The action to record when that button is pressed. Rides the existing
+  /// PendingActions path exactly like any other card button (see Actions.h),
+  /// which is why dismissal needed no new wire route of its own. Empty
+  /// whenever isAction is false.
+  char actionId[kMaxAnnouncementCardIdLength + 1] = "";
+  /// Which cards this announcement may appear on. **Empty means every card
+  /// whose policy allows banners**, not none - a wildcard, matching the
+  /// server's own TargetCardIds contract.
+  char targetCardIds[kMaxAnnouncementTargets][kMaxAnnouncementCardIdLength + 1] = {};
+  uint8_t targetCount = 0;
+  /// Set when this device's own press satisfied it, so the banner stops
+  /// drawing immediately instead of lingering until the next check-in. RAM
+  /// only, deliberately not persisted: a press a reboot erases is the honest
+  /// limit of a fire-and-forget button on firmware with no automated hardware
+  /// tests. The server holds the durable record - it writes the dismissal when
+  /// the press arrives and stops sending the announcement after that.
+  bool dismissedLocally = false;
+};
 
 struct CardSpec {
   /// Matches the `id` the server uses in cardPolicy/cardActions. An id the
@@ -257,15 +306,34 @@ struct CardSpec {
   uint32_t lastFetchMs = 0;
   bool everFetched = false;
 
-  // ---- Display theme and effectivity dates - see Theme's own remarks above
-  // and CardPolicyEntry.EffectiveFromUtc/EffectiveToUtc on the server. Both
-  // are rewritten wholesale on every policy exactly like every field above,
-  // except `dismissedByButton`, which is deliberately NOT reset by an
-  // unchanged policy - see CardManager::applyPolicy()'s own remarks on why.
+  // ---- Banner eligibility and this card's own scheduling window. Both are
+  // rewritten wholesale on every policy exactly like every field above - there
+  // is no field down here that survives a policy any more. There used to be:
+  // a `dismissedByButton` flag that applyPolicy() deliberately did not reset,
+  // because a per-card banner had no id and "is this the same reminder" could
+  // only be guessed at by diffing text. Announcements carry ids, so the
+  // dismissal moved to the announcement and the guess is gone - see
+  // Cards::Announcement::dismissedLocally.
 
-  /// FullScreen unless a policy names this card with a recognised Theme
-  /// value - see CardManager::applyPolicy().
-  Theme theme = Theme::FullScreen;
+  /// Whether this card may be overlaid by a banner announcement.
+  ///
+  /// **Eligibility, not a promise.** True only means this card is a candidate
+  /// to carry one of whatever announcements are currently effective and
+  /// targeting it. A card with this set and nothing due draws exactly as it
+  /// would with it false - its own ordinary full-screen content, never a blank
+  /// space or a stuck "waiting for a banner" state.
+  ///
+  /// This replaced a per-card `Theme` field (FullScreen/Banner/BannerButton)
+  /// which was the first draft of this feature. The reason it could not stay
+  /// is worth keeping: a theme on the card could express exactly one fixed
+  /// message per card, so it had nowhere to put a queue of independently
+  /// dismissible announcements, and nothing to say about which of several
+  /// currently-effective ones a card should show. Whether a banner is a plain
+  /// reminder or one with a button is also not a property of the CARD - it
+  /// belongs to the announcement, which knows whether it wants a press (see
+  /// Cards::Announcement::isAction). The card only ever says "banners are
+  /// allowed here".
+  bool allowBanner = false;
   /// Epoch seconds (UTC). 0 means "no bound in this direction" - the same
   /// absent-means-unrestricted convention every other optional policy field
   /// on this struct already follows. Compared against time(nullptr) on every
@@ -274,15 +342,6 @@ struct CardSpec {
   uint32_t effectiveFromUtc = 0;
   uint32_t effectiveToUtc = 0;
 
-  /// Set by CardManager::handleTap() when this card's Theme is BannerButton
-  /// and its own button is pressed - see that function's own remarks. RAM
-  /// only, deliberately not persisted to NVS: a press that a reboot erases is
-  /// the honest limit of a fire-and-forget, no-confirmation button press on
-  /// firmware with no automated hardware tests, not a guarantee this file
-  /// claims to make. Cleared again the moment applyPolicy() sees this same
-  /// entry's `text` or `effectiveFromUtc` change - a new reminder, as far as
-  /// this device can tell, must not stay suppressed by an old one's press.
-  bool dismissedByButton = false;
 };
 
 // 28 registrations exist today: aircraft, clockdate, issflyover, listings,
@@ -383,12 +442,11 @@ struct PolicyEntry {
   /// value is always short enough that the bound never fires against a real
   /// server.
   String location;
-  /// Optional on the wire: "banner", "bannerbutton", or absent/anything else
-  /// meaning Full Screen - see Cards::Theme and CardPolicyEntry.Theme on the
-  /// server for the full tolerance rule. Parsed into a CardSpec::theme value
-  /// by CardManager::applyPolicy(), not here - this struct only carries the
-  /// raw string the same way `kind` does.
-  String theme;
+  /// Optional on the wire, false when absent - which is every policy saved
+  /// before this feature existed. Mirrors CardPolicyEntry.AllowBanner on the
+  /// server; see Cards::CardSpec::allowBanner for what it does and does not
+  /// promise, and for why it replaced a per-card `theme` string.
+  bool allowBanner = false;
   /// Already converted from the wire's ISO-8601 instant to epoch seconds by
   /// CheckIn.cpp's own parseIso8601Utc() at parse time - unlike every other
   /// field on this struct, there is no reason to carry the raw string only to
@@ -410,6 +468,54 @@ struct Policy {
   uint8_t entryCount = 0;
   PolicyEntry entries[kMaxPolicyCards];
 };
+
+/// Replaces the set of announcements currently in force, wholesale, from a
+/// check-in response.
+///
+/// Wholesale rather than merged, for the same reason applyPolicy() rewrites
+/// every card field: the response is a complete statement of what should be
+/// showing, so anything absent from it has stopped being effective, been
+/// dismissed elsewhere, or been deleted - and all three mean "stop drawing
+/// it". A merge would leave a withdrawn announcement on screen forever.
+///
+/// One exception is carried across: an announcement still listed by the server
+/// that this device already dismissed locally stays dismissed. The server
+/// cannot know about a press until that press reaches it on the next check-in,
+/// so it will legitimately still be listing the announcement, and matching on
+/// id is what stops the banner flickering back for one cycle.
+void setAnnouncements(const Announcement* announcements, uint8_t count);
+
+/// The announcement this card should currently be overlaid with, or nullptr
+/// for none - which is the ordinary case and means the card draws its own
+/// content. See CardManager::drawCurrent() for the caller.
+///
+/// **A pure read.** Calling it twice for the same card returns the same
+/// announcement, which matters because drawCurrent() runs on more than just a
+/// rotation step - an in-place refresh, the redraw after a button press, and
+/// the end of applyPolicy() all reach it. An earlier version advanced the
+/// cycling cursor here, which meant any of those could swap the banner out
+/// from under someone mid-sentence.
+const Announcement* announcementFor(const CardSpec& card);
+
+/// Moves the cycling cursor on by one, so the next card to carry a banner
+/// starts looking from the following announcement.
+///
+/// Called from the rotation step only - see CardManager::advance(). Cycling
+/// when several announcements target the same card was the explicit product
+/// decision for overlapping ones ("cycle through them like a list card"), and
+/// tying it to the rotation rather than to the draw is what makes each one
+/// readable for a full dwell instead of for however long until the next
+/// incidental redraw.
+///
+/// One device-wide cursor rather than one per card: a household reads one
+/// screen at a time, and a per-card cursor would mean a card revisited after
+/// twenty others resumes mid-list rather than showing what is most current.
+void advanceAnnouncementCursor();
+
+/// Marks the announcement a press just satisfied as dismissed on this device,
+/// so it stops drawing at once instead of lingering until the server has
+/// heard. Returns false when the id names nothing currently held.
+bool dismissAnnouncement(const char* announcementId);
 
 /// Re-asserts every active card's current fetch status to the debug log, in
 /// one consolidated line, whether or not anything changed since last time.

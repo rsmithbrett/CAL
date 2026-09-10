@@ -138,11 +138,12 @@ void parseCardPolicy(JsonVariantConst source, Cards::Policy& policy) {
     // same tolerance already given to a stray assetId/text/qrData landing on
     // a card that draws none of those.
     entry.location = String(card["location"] | "");
-    // Optional again, for which of the three display themes this card uses -
-    // "banner"/"bannerbutton", absent (or anything else) meaning Full Screen.
-    // See Cards::Theme's own remarks; CardManager::applyPolicy() is what
-    // actually interprets this string, not here.
-    entry.theme = String(card["theme"] | "");
+    // Optional again: whether this card may be overlaid by a banner
+    // announcement. Absent means false, which is every policy saved before the
+    // feature existed. See Cards::CardSpec::allowBanner for why this is
+    // eligibility rather than a promise, and for the per-card `theme` string it
+    // replaced.
+    entry.allowBanner = card["allowBanner"] | false;
     // These two arrive as ISO-8601 UTC instants, same shape as the ISS
     // next-pass fields below - parsed straight to epoch seconds here rather
     // than carried as strings, since nothing downstream needs the unparsed
@@ -168,6 +169,107 @@ void parseCardActions(JsonVariantConst source, Result& result) {
     definition.cardId = String(action["cardId"] | "");
     definition.actionId = String(action["actionId"] | "");
     definition.label = String(action["label"] | "");
+  }
+}
+
+/// Copies a JSON string into a fixed char buffer, truncating rather than
+/// dropping. Announcement text and ids are display/matching values with no
+/// "well-formed but wrong" failure mode - unlike an asset id, where a
+/// truncated value is a perfectly valid id for some *other* asset and so has
+/// to be dropped instead.
+void copyBounded(const char* source, char* destination, size_t capacity) {
+  if (source == nullptr || capacity == 0) {
+    destination[0] = '\0';
+    return;
+  }
+  strncpy(destination, source, capacity - 1);
+  destination[capacity - 1] = '\0';
+}
+
+/// Where parsed announcements actually live - see CheckIn::Result's own
+/// remarks on why this is file-static rather than an inline array on that
+/// struct. Overwritten by every perform() call, which is safe because the one
+/// consumer (App.ino's performCheckIn) reads it immediately and this firmware
+/// is single-threaded.
+Cards::Announcement gAnnouncementBuffer[Cards::kMaxAnnouncements];
+
+void parseAnnouncements(JsonVariantConst source, Result& result) {
+  result.announcements = gAnnouncementBuffer;
+  result.announcementCount = 0;
+
+  // Cleared even when the response carries no announcements array at all, so
+  // a stale set from the previous check-in can never be re-applied.
+  for (uint8_t i = 0; i < Cards::kMaxAnnouncements; ++i) {
+    gAnnouncementBuffer[i] = Cards::Announcement{};
+  }
+
+  JsonArrayConst announcements = source.as<JsonArrayConst>();
+  if (announcements.isNull()) {
+    return;
+  }
+  uint8_t offered = 0;
+  for (JsonVariantConst item : announcements) {
+    offered++;
+    if (result.announcementCount >= Cards::kMaxAnnouncements) {
+      // Counted and reported below rather than dropped in silence. This
+      // codebase's rule is that a card which quietly never appears is close to
+      // undiagnosable on firmware with no tests (see registerCard's own
+      // remarks), and a banner nobody can explain the absence of is the same
+      // failure. The bound itself is deliberate - see Cards::kMaxAnnouncements
+      // on why it is sized against DRAM.
+      continue;
+    }
+
+    Cards::Announcement& announcement = gAnnouncementBuffer[result.announcementCount];
+
+    copyBounded(item["id"] | "", announcement.id, sizeof(announcement.id));
+    copyBounded(item["text"] | "", announcement.text, sizeof(announcement.text));
+    announcement.isAction = item["isAction"] | false;
+    copyBounded(item["actionId"] | "", announcement.actionId, sizeof(announcement.actionId));
+
+    // Empty or absent stays empty, which is the wildcard - "every card whose
+    // policy allows banners" - not "no cards". See
+    // Cards::Announcement::targetCardIds.
+    announcement.targetCount = 0;
+    JsonArrayConst targets = item["targetCardIds"].as<JsonArrayConst>();
+    if (!targets.isNull()) {
+      for (JsonVariantConst target : targets) {
+        if (announcement.targetCount >= Cards::kMaxAnnouncementTargets) {
+          break;
+        }
+        const char* cardId = target.as<const char*>();
+        if (cardId == nullptr || strlen(cardId) == 0) {
+          continue;
+        }
+        copyBounded(cardId, announcement.targetCardIds[announcement.targetCount],
+                    Cards::kMaxAnnouncementCardIdLength + 1);
+        announcement.targetCount++;
+      }
+    }
+
+    // An announcement with no id cannot be told apart from another one across
+    // check-ins, and one with no text has nothing to draw - neither is worth
+    // carrying, and both would occupy a slot a usable announcement could have
+    // had. Dropped rather than repaired: this device cannot invent either
+    // field, and a silent drop with the count left short is exactly what the
+    // "hold the first N" bound below already does.
+    if (strlen(announcement.id) == 0 || strlen(announcement.text) == 0) {
+      Log::line("[banner] dropped an announcement with no id or no text");
+      announcement = Cards::Announcement{};
+      continue;
+    }
+
+    // Local dismissal is never taken from the wire - the server has no idea
+    // what this device has shown - so it always starts false here and is
+    // carried across by Cards::setAnnouncements() matching on id.
+    announcement.dismissedLocally = false;
+    result.announcementCount++;
+  }
+
+  if (offered > result.announcementCount) {
+    Log::printf("[banner] server offered %u announcement(s), holding %u",
+                static_cast<unsigned>(offered),
+                static_cast<unsigned>(result.announcementCount));
   }
 }
 
@@ -373,6 +475,7 @@ Result perform() {
   parseCardPolicy(responseDoc["cardPolicy"], result.cardPolicy);
   parseCardActions(responseDoc["cardActions"], result);
   parseAcceptedActionIds(responseDoc["acceptedActionIds"], result);
+  parseAnnouncements(responseDoc["announcements"], result);
 
   Log::printf(
       "[checkin] ok (acknowledged=%d updateAvailable=%d debugStream=%d sdReformat=%d "

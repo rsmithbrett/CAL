@@ -214,6 +214,34 @@ struct Result {
   /// design gets none and waits for nothing. See Actions.h.
   String acceptedActionIds[Actions::kMaxPending];
   uint8_t acceptedActionCount = 0;
+
+  /// The announcements the server says should be overlaying this device's
+  /// banner-eligible cards right now.
+  ///
+  /// A complete statement, not a delta: whatever is absent has stopped being
+  /// effective, been dismissed, or been deleted, and all three mean stop
+  /// drawing it - see Cards::setAnnouncements(), which rewrites the store
+  /// wholesale for exactly that reason. An empty set is meaningful and
+  /// ordinary; it is what most check-ins carry.
+  ///
+  /// Effectivity does not appear here at all, deliberately: the server filters
+  /// on it (and on dismissal) before serialising, so this device does no date
+  /// arithmetic of its own. See Cards::Announcement.
+  ///
+  /// **A pointer into a file-static buffer rather than an inline array, and
+  /// this is not a style choice.** This whole struct is a stack local, twice
+  /// over - `Result result;` in CheckIn::perform() and the `const
+  /// CheckIn::Result result = CheckIn::perform();` that receives it in
+  /// App.ino's performCheckIn(). It is already roughly 4KB, dominated by
+  /// cardPolicy's 28 PolicyEntry slots and their six Strings apiece, against
+  /// an 8KB Arduino loop-task stack. Eight inline Announcements would add
+  /// another ~4KB and take the total past that ceiling - a stack overflow,
+  /// which on this chip is a reboot with a corrupted backtrace rather than a
+  /// diagnosable error. The buffer lives in CheckIn.cpp instead and this
+  /// points at it. Valid until the next perform() call, which is the only
+  /// thing that writes it, and the only consumer reads it immediately.
+  const Cards::Announcement* announcements = nullptr;
+  uint8_t announcementCount = 0;
 };
 
 /// This board has no battery (ELEGOO/CYD is USB-powered) - batteryPercent/charging are

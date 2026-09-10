@@ -852,6 +852,22 @@ picture, and empty is an ordinary state and not a fault — see *A picture as a
 card*, below. The server side of it is being built in parallel with this
 firmware, so nothing has ever sent one.
 
+**Corrected later: the `cards` array listed above has grown, and one field that
+was briefly on it has been taken back off again.** Each entry also carries
+`text` (the announcement card's content), `qrData` (the QR card's), `location`
+(which of two places a forecast instance is for), and `allowBanner` — all of
+them content or eligibility rather than scheduling, all optional, all absent
+from every card that has no use for them. `allowBanner` in particular replaced
+a `theme` string ("banner"/"bannerbutton"/absent) that a superseded first draft
+of the banner feature put here, along with an `effectiveFromUtc`/
+`effectiveToUtc` pair the same draft added and the server has since dropped —
+see *Banners: a per-card theme replaced by the announcement queue the server
+actually speaks* at the end of this file for the whole story, including why a
+per-card field could never express what that feature needed. The three rules
+above are unaffected by any of it: every one of these fields is optional and
+additive in both directions, which is the same backward-compatibility mandate
+they exist to serve.
+
 ### Card buttons and the pending-action queue
 
 `App/Actions.h`/`.cpp` adds buttons a card can draw and a queue of presses
@@ -1177,6 +1193,12 @@ ever runs after `ensureCached()` has already failed.
 above: the server picks an image for `graphic`, and picks *words* for
 `announcement`. It registers a `CardSpec` with id `announcement` the same way
 every other card module does, and needed no scheduler change either.
+
+**Not to be confused with `Cards::Announcement`**, added much later: that is a
+banner message from the server's Announcements domain, which overlays some
+*other* card's draw with a header strip, and has nothing to do with this card
+beyond the shared word. See *Banners: a per-card theme replaced by the
+announcement queue the server actually speaks* at the end of this file.
 
 **No fetch at all, unlike every other card in this build.** A picture is an
 id that has to be resolved through the `Assets` cache — an SD stat, maybe an
@@ -2353,6 +2375,15 @@ disposable tag can no longer cost the permanent one.
   designed.** See *Provisioning: how a device gets its secret*, above - what
   exists today (the server's public `/cal` page) covers a fresh unit that
   only needs generic firmware, not bulk provisioning with per-device secrets.
+- **Banner announcements have never been drawn on a panel.** The whole path -
+  parsing `announcements` off a check-in, matching one against an
+  `allowBanner` card, drawing the strip, cycling between two of them, and a
+  press clearing one - is compile-verified only; the test devices were powered
+  off when it was written. See *Banners: a per-card theme replaced by the
+  announcement queue the server actually speaks* at the end of this file. It
+  also rides the pending-action queue listed above, which nothing has
+  exercised either, so its dismissal half cannot be more verified than that
+  is.
 
 ## A decode failure now retries and self-heals, instead of being a life sentence
 
@@ -3329,3 +3360,377 @@ the CelesTrak element set and the SGP4 propagator already are. The contract to
 hold onto is that a `issNextPass*` field arriving on a check-in response means
 "visible pass", full stop, and the correct place to fix a wrong answer is the
 server's filter rather than a second opinion added here.
+
+## Banners: a per-card theme replaced by the announcement queue the server actually speaks
+
+A banner is a header strip across the top of the panel. `Display::showBannerCard()`
+fills `kBannerStripHeight` (100px) with a loud amber-red - `kBannerStripFill`,
+0xC2410C, deliberately louder than every `drawCardBanner()` label colour, because
+those are a small corner tag on an otherwise ordinary card where this strip *is* the
+card's entire reason for existing - and wraps up to three lines of the strip's own
+12pt bold into it. Everything below the strip stays empty apart from the ordinary
+chrome, the button row and the corner clock, and the emptiness is the whole visual
+point: 100px against a `kButtonRowY` of 160 leaves a deliberate band of nothing, so
+the strip reads as a notice stuck onto the glass rather than as one more card. None
+of that drawing code changed in this pass and none of it is what this section is
+about. What changed is everything upstream of it: *who* decides a banner should be
+showing, and *what* it says.
+
+**The first draft put both of those decisions on the card, and that is what has now
+been taken out.** `Cards::CardSpec` carried a `Theme` enum -
+`FullScreen`/`Banner`/`BannerButton` - which `CardManager::applyPolicy()` set from a
+`theme` string on the card-policy entry ("banner", "bannerbutton", anything else
+including absent meaning full screen, the same tolerant default `kind` already gets).
+A `Banner` card drew that same policy entry's own `text` field in the strip instead of
+calling its `draw()`; there was no second content field, `text` was reused as-is, and
+a card with the theme set but no text fell through to its ordinary `draw()` so that
+Full Screen needed no code path of its own. A `BannerButton` card did all of that and
+additionally let its own button press - drawn and wired through `Actions.h` exactly
+like any other card's - set a RAM-only `dismissedByButton` flag on the descriptor,
+which `showable()` read as "take this card out of the rotation entirely". In that
+model the reminder's schedule *was* the card's schedule: the
+`effectiveFromUtc`/`effectiveToUtc` pair on the policy entry gated the whole card
+through `isEffectiveNow()`, because "the reminder" and "the card" were the same
+object.
+
+**The hardest part of that design was knowing when a dismissal had gone stale, and it
+was never better than a guess.** The server re-sends the entire `cardPolicy` on every
+check-in, so `applyPolicy()` could not simply clear `dismissedByButton` when a policy
+arrived - that would have made a press clear the reminder for exactly one check-in
+interval and no longer. So it saved the descriptor's *old* `text` and *old*
+`effectiveFromUtc` before overwriting them, compared both against what had just
+arrived, and un-dismissed the card if either had changed, logging
+`"[cards] '%s' un-dismissed - the server sent a new reminder for this entry"`. The
+inference being drawn there is "different words, therefore a different reminder", and
+it is wrong in both directions: an admin fixing a typo in a reminder somebody had
+already acknowledged silently put it back on their wall, and a genuinely new reminder
+that happened to read identically to the old one stayed suppressed forever. There was
+no third option available, because nothing in the payload identified a reminder
+except the words it was made of.
+
+**The deeper problem is that the shape can hold exactly one fixed message per card.**
+There is nowhere in a `Theme` enum plus a reused `text` field to put a *queue* of
+announcements, nothing to say about which of several currently-effective messages a
+card should show, and no way to dismiss one of them independently of the others. The
+request this feature exists to serve - a household seeing short-lived messages, some
+of which have to be pressed before they stop appearing, overlaid on cards that are
+already in rotation - is a queue-shaped request, and the draft was a single-slot
+answer to it.
+
+**And there was a conceptual error sitting underneath, which is the more interesting
+half.** `BannerButton` made "does this need acknowledging?" a property of the *card*.
+It is not. Whether a reminder wants a press belongs to the reminder: the same message
+may want acknowledging whichever card it happens to land on, and a card has no
+opinion about it at all. Everything a card can honestly say on this subject is
+"banners are allowed here". Getting that boundary in the right place is what most of
+the rest of this section is downstream of.
+
+**The two halves had also stopped meeting.** The server side was redesigned around
+this - `CheckInResponse.Announcements`, a plain `CardPolicyEntry.AllowBanner`, and a
+whole `DiscoverAroundMe.Announcements` module with `CardAnnouncement` and
+`CardAnnouncementDismissal` entities behind it - while this firmware was still
+implementing the draft. Checked against the server's `CheckInModels.cs` as this was
+written: `CardPolicyEntry` today ends at `AllowBanner` and carries neither a `Theme`
+string nor an `EffectiveFromUtc`/`EffectiveToUtc` pair. So `CheckIn.cpp` was parsing
+three wire fields nothing has ever sent, and `Display.h`'s `showBannerCard()` was
+documented against a `CardPolicyEntry.Text` that no longer feeds it. A clean compile
+proved none of that, because none of it is a type error - it is two codebases quietly
+describing different features.
+
+### What replaced it
+
+- **`CardSpec::allowBanner`, a bool, replaces `Theme`.** Set from the policy's
+  `allowBanner`, absent meaning false - which is every policy saved before the field
+  existed. It is **eligibility, not a promise**: true only means this card is a
+  candidate to carry whichever announcements are currently effective and targeting
+  it. A card with it set and nothing due draws exactly as it would with it false, its
+  own ordinary full-screen content - never a blank space, never a stuck "waiting for a
+  banner" state. `drawCurrent()` asks for an announcement and falls straight through
+  to `card.draw()` when there is not one, so there is no separate "nothing to show"
+  branch to get wrong.
+- **Banner versus Banner Button is now a property of the announcement**,
+  `Cards::Announcement::isAction`, not of the card. This is the conceptual correction
+  above, expressed in one field.
+- **A new `Cards::Announcement` struct holds what arrives on the wire**: `id`, `text`,
+  `isAction`, `actionId`, `targetCardIds[8]` with a `targetCount`, and
+  `dismissedLocally`. Fixed char buffers rather than `String`s, for exactly the reason
+  `assetId`/`text`/`qrData` on `CardSpec` already are: the registry has to stay
+  constant-initialisable, and a `String` member would make it dynamically initialised
+  instead, racing the guarantee that the registry exists before any card module's
+  static initialiser runs. `id` is 37 bytes because the server's `AnnouncementEntry.Id`
+  is a `Guid`. `text` is bounded at 160 rather than `kMaxTextLength`'s 280, and the
+  reason is the panel: this is a header strip with room for about three wrapped lines,
+  not a full-screen card, so the extra capacity would only ever hold characters that
+  cannot be drawn. `kMaxAnnouncements` and `kMaxAnnouncementTargets` are both 8.
+
+### Effectivity is deliberately absent from this firmware
+
+The server sends only the announcements that are effective *right now* for this
+device and not already dismissed by whoever owns it -
+`AnnouncementsService.GetEffectiveForDeviceAsync` filters on the
+`EffectiveFromUtc`/`EffectiveToUtc` window and on the `CardAnnouncementDismissal`
+rows for the device's resolved owner key before anything is serialised. So this
+device does no date arithmetic, makes no clock comparison, and keeps no dismissal
+history beyond the current session. **An announcement's presence in the array is
+itself the statement that it should be showing**, and there is no second opinion to
+form.
+
+That is worth drawing out, because the rule "is this message live?" is the one rule in
+this feature that two separate codebases would otherwise both have to implement and
+keep in agreement - and it now lives in exactly one of them. It is the same shape as
+the ISS section immediately above: an `issNextPass*` field on a response means
+"visible pass, full stop", and a `issFlyover`-side second guess would only ever be a
+way for the two answers to diverge. A firmware that re-checked an announcement's dates
+would need the dates on the wire, would need a trustworthy clock to compare them
+against, and would need the dismissal table too - three dependencies bought in
+exchange for the ability to disagree with the server.
+
+**The card's own `effectiveFromUtc`/`effectiveToUtc` survive this change untouched,
+and are a different thing.** They answer "should this card appear in the rotation at
+all", evaluated by `isEffectiveNow()` inside `showable()` on every scheduling decision
+rather than once when a policy lands, with 0 meaning no bound and a half-open
+`[from, to)` window. That is card scheduling, not message scheduling, and the two were
+only ever confused because the draft used one pair of fields for both jobs.
+
+**A gap to record honestly while these fields are being described:** the server's
+`CardPolicyEntry` dropped `EffectiveFromUtc`/`EffectiveToUtc` when effectivity moved
+onto the announcement, so nothing currently sends the card's pair either.
+`CheckIn.cpp` still parses them and `isEffectiveNow()` still honours them, and the
+absent-means-0-means-always-effective tolerance makes that harmless rather than
+broken - but per-card scheduling windows are, as of this change, firmware machinery
+with no server-side way to reach them. That is a server-side gap, not a reason to
+remove working firmware.
+
+### The store is replaced wholesale, not merged
+
+`Cards::setAnnouncements()` is called from `performCheckIn()` on every successful
+check-in and rewrites the whole array. Unlike `cardPolicy`, where an empty policy
+explicitly means "keep the one you have" so a server that cannot resolve a policy can
+never blank a working screen, **an empty announcement array is meaningful and is
+applied** - it is what most check-ins carry.
+
+The reasoning is that the response is a complete statement rather than a delta.
+Anything absent from it has stopped being effective, been dismissed by someone else
+under the same owner key, or been deleted outright, and all three of those mean the
+same thing to a device: stop drawing it. A merge would have no way to distinguish
+those from "not mentioned this time" and would leave a withdrawn announcement on the
+wall forever - the exact failure the draft's dismissal guessing was also trying, and
+failing, to avoid.
+
+**Exactly one thing is carried across the replacement: a local dismissal, matched on
+`id`.** The server cannot know about a press until that press reaches it on the next
+check-in, so it will legitimately still be listing an announcement this device
+already had pressed. Without the carry-across, the very next response would put the
+banner straight back up and the press would read as having done nothing. With it, the
+flag survives until the server stops sending the announcement of its own accord. Note
+that this is a match on identity, not on content - which is the whole thing the draft
+could not do.
+
+`setAnnouncements()` emits `"[banner] %u announcement(s) in force"` on every check-in
+that has any, not only when the number changes - the same reasoning as *Re-asserting
+every provider's status once per check-in* above, since a debug stream is joined
+mid-flight and an admin who connects during a steady state would otherwise see no
+evidence this feature exists at all. A steady state of zero stays silent, because zero
+is the ordinary case and would otherwise be the most-repeated line in the stream.
+
+**One bound is stated twice and only enforced once, which is worth flagging rather
+than admiring.** `setAnnouncements()` clamps its `count` to `kMaxAnnouncements` and
+logs `"[banner] server sent %u announcements, holding the first %u"` when it has to.
+But `parseAnnouncements()` has already stopped filling `Result::announcements` at the
+eighth, so the count reaching `setAnnouncements()` from its only caller can never
+exceed the bound and that line can never fire. The practical consequence is the
+opposite of what the pair of guards looks like it does: a server sending nine
+announcements loses the ninth **silently**, in the parser, and the log line written to
+announce exactly that is unreachable. Whichever half is meant to own the bound, only
+one of them should be claiming to report it - and this firmware's whole convention is
+that a silent drop is the failure mode worth spending a line of output to avoid.
+
+### Which announcement a card shows, and why it cycles
+
+`Cards::announcementFor(card)` answers that, and it **cycles** rather than picking:
+when several effective announcements target the same card, successive draws hand back
+successive ones instead of the first pinning the slot. That was the explicit product
+decision for overlapping announcements - cycle through them the way a list card's items
+cycle - and it matters because the alternative starves every announcement after the
+first for as long as the first stays effective. The server sends them in one stable
+order (`CreatedAtUtc` ascending) and the array's own order is the cycle order; there is
+no priority field to interpret.
+
+**One device-wide cursor, `gAnnouncementCursor`, rather than one per card.** A
+household reads one screen at a time, so what should be advancing is "which
+announcement has been seen most recently", not "where in its own private list is each
+of twenty-eight cards". A per-card cursor would mean a card revisited after twenty
+others resumes mid-list and shows something older than what the card before it just
+showed. The lookup walks the whole array starting at the cursor and advances past
+whatever it hands out, which keeps cycling fair across however many happen to match
+this particular card without needing a per-card index at all. Skipping happens inside
+that walk: a locally-dismissed announcement, one with empty text, and one whose target
+list does not name this card are all passed over, and the cursor only moves when
+something is actually handed out - so draws of banner-ineligible cards do not burn
+positions in the cycle.
+
+**An empty `targetCardIds` is a wildcard, not an empty set** - every card whose policy
+allows banners, matching the server's own contract, where a calendar-sourced
+announcement never authors a specific card list. `targetsCard()` returns true
+immediately on `targetCount == 0`, which is the one place in this firmware where
+"absent" means "all" rather than "none"; everywhere else absent means unrestricted in
+the sense of *no additional restriction*, so the two are consistent even though this
+one reads differently at the call site.
+
+**A sharp edge worth stating rather than discovering:** the cursor advances per
+*draw*, and `drawCurrent()` runs on more than a rotation advance - an in-place refresh
+of the card on screen, the redraw after a non-dismissing button press, and the redraw
+at the end of `applyPolicy()` all call it. With two or more announcements matching the
+card on screen, any of those can swap the strip's contents under somebody who is
+mid-sentence. With one match, and with none, nothing observable happens, so this only
+bites on the overlapping case. It has not been seen on hardware (see below) and no
+attempt has been made to suppress it.
+
+### Dismissal keys on the announcement, and needed no new wire path
+
+Pressing a banner button dismisses **the announcement**, not the card:
+`Cards::dismissAnnouncement()` takes an id and sets `dismissedLocally` on whichever
+held announcement matches. The reason to key it that way is that the same reminder can
+be showing on several banner-eligible cards, and pressing it once means it is done
+everywhere - which keying on the announcement gets for free and keying on the card
+could not express at all.
+
+`CardManager` records which announcement the current draw actually put up, in
+`gBannerOnScreen`, because the press arrives from the touch handler long after the
+draw decided. It holds a pointer into the announcement store rather than a copy, which
+is safe for one specific reason worth writing down rather than leaving to be
+rediscovered: the store is only ever rewritten by `setAnnouncements()` on a check-in, a
+check-in cannot interleave with a draw on this single-threaded firmware, and
+`drawCurrent()` re-reads it on every draw regardless, so a stale pointer cannot survive
+one.
+
+**The press itself needed no new route.** It rides the existing
+`Actions::recordPress()`/`pendingActions` path exactly like any other card button - a
+press recorded in NVS, carried on the next ordinary `/api/checkin`, dropped only when
+`acceptedActionIds` names its `instanceId` - and the server maps it back to its
+announcement and writes the durable `CardAnnouncementDismissal` row. That is why the
+`isAction` half of this feature cost no new endpoint, no new handshake, and no new
+retry logic: the one already in place was already the right shape. The
+`dismissedLocally` flag only covers the gap until the press arrives, and it is RAM-only
+on purpose - a press a reboot erases is the honest limit of a fire-and-forget button on
+firmware with no automated hardware tests, not a guarantee this firmware claims to
+make. The durable record is the server's, and after that record exists the server
+simply stops sending the announcement.
+
+`applyPolicy()`'s entire stale-dismissal comparison is gone with it - the saved
+previous `text`, the saved previous `effectiveFromUtc`, the diff, and the
+un-dismissal log line. Announcements have ids, so "is this a new reminder or the old
+one still being shown?" is no longer a question anybody has to answer by inspecting
+display text. A new announcement is a different id. That is the whole answer, and it
+is the clearest single measure of what moving this off the card bought.
+
+**One behaviour left as it was, with a comment that no longer describes it.** After a
+dismissing press, `handleTap()` advances to the next card rather than redrawing the
+one on screen, and the comment there still explains that as "the card just became
+unshowable". Under the draft that was literally true, because `dismissedByButton` took
+the card out of `showable()`. It is not true now: dismissing an announcement never
+makes a card unshowable, it only means the card would draw its own content instead.
+Advancing is still defensible - a card that visibly reverts to its ordinary self a
+half-second after the checkmark is a reasonable thing to move past - but the stated
+reason is stale, and the code comment is the thing to fix, not this paragraph.
+
+### One word, two meanings
+
+`announcement` is now the name of two unrelated things in this firmware, and both are
+staying. `Announcement.h`/`.cpp` is a **card** - one of five instances of an
+admin-typed text card that takes its turn in the rotation and draws through
+`Display::showAnnouncementCard()`, described in *An announcement card* far above.
+`Cards::Announcement` is a **banner message** from the server's Announcements domain,
+which overlays some *other* card and draws through `Display::showBannerCard()`. They
+share a word because both are "words an admin typed that a household should read", and
+nothing else. An announcement card is itself banner-eligible if its policy says so, at
+which point it can be overlaid by a banner announcement, which is confusing to read
+about and entirely ordinary to run.
+
+## Parsing an announcement: truncate the text, drop the nameless, and what a clean compile does not prove
+
+`CheckIn.cpp` gained `parseAnnouncements()`, walking `responseDoc["announcements"]`
+alongside the existing `cardPolicy`/`cardActions`/`acceptedActionIds` parsers, plus a
+small `copyBounded()` helper that copies a JSON string into a fixed char buffer and
+**truncates rather than drops** what does not fit.
+
+**That truncation is the opposite of the rule `assetId` follows, deliberately.** An
+over-long asset id is dropped rather than cut short because a truncated id is a
+perfectly valid id for some *other* asset - the failure mode is drawing the wrong
+picture, silently and convincingly. Display text has no equivalent: a truncated
+reminder is a shorter reminder, visibly so, and most of a reminder beats none of one
+on a strip whose job is to make somebody look. Worth noting that `CardSpec::text` -
+the announcement *card*'s content, a different field - drops instead, on the grounds
+that a notice cut off mid-sentence is worse than one that does not appear. The two
+rules genuinely differ, and the difference is defensible in each direction rather than
+being a single principle applied consistently: a 280-character full-screen notice
+losing its ending loses its meaning, while a 160-character strip is a nudge toward
+something else. If either rule should change it is this pair of paragraphs that should
+be argued with, not one of the two call sites quietly aligned to the other.
+
+**Two fields are load-bearing enough that an announcement missing either is dropped
+outright**, with `"[banner] dropped an announcement with no id or no text"`. Without an
+`id`, an announcement cannot be told apart from any other across check-ins, which
+breaks the dismissal carry-across that the whole design rests on. Without `text` there
+is nothing to draw. Neither is repairable from this end - a device cannot invent
+either field - and both would otherwise occupy one of only eight slots that a usable
+announcement could have had. `dismissedLocally` is never read from the wire at all: the
+server has no idea what this device has shown, so it starts false on every parse and is
+re-applied afterwards by `setAnnouncements()` matching on id.
+
+Targets are parsed into the fixed `targetCardIds` array up to
+`kMaxAnnouncementTargets`, with null and empty entries skipped rather than stored -
+an empty string could never match a card id, so keeping one would only consume a slot
+a real target could have used. An absent or empty array stays empty, which is the
+wildcard - see the section above. `kMaxAnnouncementCardIdLength` is 32, generous
+headroom rather than a derived number: card ids here are short, fixed,
+firmware-defined strings (`issflyover` is the longest today at 10), and an id too long
+to fit is one this firmware does not implement, so the target simply never matches.
+
+One edge follows from combining the skip rule with the wildcard rule: a target list
+consisting *entirely* of empty strings parses to a `targetCount` of 0 and is therefore
+treated as a wildcard rather than as a list matching nothing. Nothing on the server can
+currently author such a list, and inventing a "had targets, all of them junk" state
+would be more machinery than the case is worth - but it is the one input where this
+parser's answer is arguably the reverse of what was meant.
+
+**`CheckIn::Result::announcements` is a pointer into a file-static buffer, not an
+inline array, and that is a stack measurement rather than a style preference.**
+`Result` is a stack local twice over - once as `Result result;` inside
+`CheckIn::perform()` and again as the `const CheckIn::Result` that receives it in
+`performCheckIn()` - and it is already roughly 4KB, dominated by `cardPolicy`'s 28
+`PolicyEntry` slots at six `String`s apiece, against an 8KB Arduino loop-task stack.
+Eight inline `Announcement`s are another ~4KB (each slot is just under 500 bytes,
+most of it the 8x33 target-id matrix), which puts the total past that ceiling. A stack
+overflow on this chip is a reboot with a corrupted backtrace, not a diagnosable error
+- the least debuggable failure this firmware has, and the one *Contiguity, not free
+bytes* and the heap-watchdog sections above were both written in the aftermath of. So
+the buffer lives in `CheckIn.cpp` and `Result` points at it, valid until the next
+`perform()` call, which is the only writer, with the only consumer reading it
+immediately. A shared buffer needs one habit that an inline array would not:
+`parseAnnouncements()` zeroes every slot on entry, before it has even looked at
+whether the response *has* an `announcements` array, so a stale set from the previous
+check-in cannot survive into this one. The count already keeps those slots from being
+read, so today this is belt-and-braces; it stops being belt-and-braces the moment
+anything else reads that buffer.
+
+**Worth flagging in the same breath, because it is the same 4KB:**
+`CardManager::setAnnouncements()` builds its merged set in a local
+`Cards::Announcement next[kMaxAnnouncements]` before committing it, which is that same
+~4KB temporary on that same loop-task stack, taken while `performCheckIn()`'s own
+`Result` is still live. The measurement above argues that 4KB of announcements is what
+does not fit there; a copy of it appears a few lines later anyway. Neither has been
+observed to overflow anything - nothing has run on hardware - and the honest reading is
+that one of the two rationales is not yet as measured as it sounds.
+
+**UNVERIFIED ON HARDWARE, and more pointedly than the standing caveat usually means.**
+This change is compile-verified only - a clean build, nothing more. The test devices
+were powered off when it was written, so no banner has yet been drawn on a real panel
+from a real announcement: not the strip's three-line wrap against a 160-character
+message, not the cycle advancing between two announcements on one card, not a press
+clearing a banner and the dismissal reaching the server, not the empty band below the
+strip reading the way it is supposed to. A clean compile proves the new logic
+type-checks. It proves nothing about behaviour on glass, and this codebase's habit of
+saying so in the header of every unverified file (`IssFlyover.h`, `Actions.h`,
+`Touch.h`, and a dozen others) exists precisely so that nobody later mistakes "it
+built" for "it worked".
