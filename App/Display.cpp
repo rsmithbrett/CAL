@@ -1944,6 +1944,37 @@ size_t gFileBufferCapacity = 0;
 /// after a check-in while the draws between check-ins succeed. Freeing first
 /// makes the peak requirement `needed` alone, which is what the numbers do
 /// allow.
+/// One line describing the heap by capability class, for comparing across a
+/// specific moment - see logHeapSnapshot()'s callers.
+///
+/// **Both the free size and the largest block, per class, is the whole point.**
+/// A large free total with a small largest block is fragmentation; a small free
+/// total is genuine exhaustion; and the two differing BETWEEN capability
+/// classes is the case this exists to catch - memory that is free but stranded
+/// in regions no byte-addressable allocation can use. MALLOC_CAP_32BIT is
+/// included for exactly that comparison and for no other reason: gFileBuffer
+/// never needs it, but a large 32BIT block sitting beside a small 8BIT one says
+/// the "free" memory is in word-addressable-only regions and was never
+/// available to malloc() at all.
+void logHeapSnapshot(const char* when) {
+  const size_t free8 = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  const size_t largest8 = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  const size_t freeInternal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const size_t largestInternal =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const size_t freeDma = heap_caps_get_free_size(MALLOC_CAP_DMA);
+  const size_t largestDma = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+  const size_t largest32 = heap_caps_get_largest_free_block(MALLOC_CAP_32BIT);
+
+  Log::printf(
+      "[heapdiag] %s | 8BIT free=%u largest=%u | INT|8BIT free=%u largest=%u | "
+      "DMA free=%u largest=%u | 32BIT largest=%u | ESP.maxAlloc=%u",
+      when, static_cast<unsigned>(free8), static_cast<unsigned>(largest8),
+      static_cast<unsigned>(freeInternal), static_cast<unsigned>(largestInternal),
+      static_cast<unsigned>(freeDma), static_cast<unsigned>(largestDma),
+      static_cast<unsigned>(largest32), static_cast<unsigned>(ESP.getMaxAllocHeap()));
+}
+
 bool ensureFileBufferCapacity(size_t needed) {
   if (needed <= gFileBufferCapacity) {
     return true;
@@ -1955,6 +1986,27 @@ bool ensureFileBufferCapacity(size_t needed) {
   free(gFileBuffer);
   gFileBuffer = nullptr;
   gFileBufferCapacity = 0;
+
+  // Captured BEFORE the call, not only after it fails. Logging only on failure
+  // describes the heap once malloc has already given up, which cannot answer
+  // the question that matters: was there a big enough 8BIT block sitting there
+  // at the moment of the request or not? That single comparison splits the
+  // remaining hypotheses:
+  //
+  //   largest8 > needed and malloc still returns null
+  //     -> corruption, or malloc is not drawing from the pool this reports.
+  //   largest8 < needed
+  //     -> the 32,756 figure this investigation has been quoting was simply
+  //        never describing the heap malloc uses, and there is no paradox to
+  //        explain - just a shortage nobody had measured.
+  //   largest8 and largestDma both collapse around a decode
+  //     -> graphics/SPI allocations are consuming or fragmenting the internal
+  //        DRAM that plain malloc depends on, and the interaction is the bug.
+  //
+  // Log::printf rather than verbose: this fires at most once per draw, only
+  // while an investigation is live, and a snapshot missing from the one draw
+  // that failed would defeat the purpose.
+  logHeapSnapshot("before malloc");
 
   uint8_t* grown = static_cast<uint8_t*>(malloc(needed));
 
@@ -1986,31 +2038,33 @@ bool ensureFileBufferCapacity(size_t needed) {
     // getMaxAllocHeap() reports MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT, while
     // malloc() takes MALLOC_CAP_DEFAULT. If those diverge, the log has been
     // quoting a number that was never the constraint.
+    Log::printf("[heapdiag] malloc(%u) FAILED", static_cast<unsigned>(needed));
+    logHeapSnapshot("after failed malloc");
+
+    // Low-water marks, per capability. 8BIT matters most: gFileBuffer is a
+    // byte buffer, so that is the pool it comes out of, and a watermark far
+    // below the current free size says the shortage is a transient peak -
+    // something large taken and released around this call - rather than a
+    // steady state. Those are different bugs with different fixes.
     Log::printf(
-        "[heapdiag] malloc(%u) FAILED. largest free block by cap: 8BIT=%u "
-        "INTERNAL|8BIT=%u DMA=%u DEFAULT=%u",
-        static_cast<unsigned>(needed),
-        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+        "[heapdiag] minimum-ever-free: 8BIT=%u INT|8BIT=%u DMA=%u",
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)),
         static_cast<unsigned>(
-            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_DMA)),
-        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)));
-    Log::printf(
-        "[heapdiag] total free by cap: 8BIT=%u INTERNAL|8BIT=%u DMA=%u DEFAULT=%u "
-        "minimum-ever-free=%u",
-        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
-        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_DMA)),
-        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_DEFAULT)),
-        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT)));
+            heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_DMA)));
 
     // Corruption would explain an impossible failure completely: a trashed
-    // free-list makes allocations fail unpredictably regardless of how much
-    // room the totals claim. Cheap to rule in or out, and worth knowing
-    // before anybody theorises further. Passing `false` so it reports rather
-    // than aborting - this runs on a household's wall display.
-    Log::printf("[heapdiag] heap integrity check: %s",
-                heap_caps_check_integrity_all(false) ? "OK" : "CORRUPT");
+    // free-list makes allocations fail regardless of what the totals claim.
+    // Cheap to rule in or out, and worth knowing before anybody theorises
+    // further.
+    //
+    // print_errors = true, deliberately. It does not abort - it walks every
+    // region and prints which block failed its check, and that detail is the
+    // difference between "corrupt" and knowing WHERE. It goes to serial rather
+    // than the remote stream, so it is there for whoever has a cable attached
+    // and costs a device with no cable nothing but the walk.
+    Log::printf("[heapdiag] heap integrity: %s",
+                heap_caps_check_integrity_all(true) ? "OK" : "CORRUPT");
 
     // Retry against explicit capabilities. This is diagnosis that doubles as
     // a possible fix: if any of these succeeds where malloc() did not, then
@@ -2207,7 +2261,17 @@ bool drawPngFromSd(const String& path) {
   if (!file.data) {
     Log::printf("[display] could not read %s", path.c_str());
   } else {
+    // Straddling the decode, because this is where the suspected interaction
+    // would show. LovyanGFX takes its pngle scratch here and the SPI panel
+    // driver holds DMA-capable buffers, and DMA-capable memory on this chip is
+    // a subset of internal DRAM - the same DRAM plain malloc draws from. If
+    // 8BIT and DMA largest-block both collapse across these two lines, the
+    // graphics stack is fragmenting the pool the file buffer needs, and that
+    // interaction is the bug rather than anything in this file's own
+    // allocation strategy.
+    logHeapSnapshot("before drawPng");
     ok = lcd.drawPng(file.data, file.size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
+    logHeapSnapshot("after drawPng");
     if (!ok) {
       Log::printf("[display] failed to draw %s (freeHeap=%u maxAllocHeap=%u)", path.c_str(),
                   static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));

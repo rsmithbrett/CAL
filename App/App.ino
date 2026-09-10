@@ -312,28 +312,55 @@ void checkHeapHealth() {
     return;
   }
 
+  // ---- OBSERVE ONLY, DELIBERATELY. This does not restart the device. ----
+  //
+  // The threshold above is suspended rather than tuned, because the metric it
+  // reads is under suspicion and a restart is too blunt a thing to trigger on
+  // a number nobody can currently explain.
+  //
+  // What is wrong with it: this value is reported as *exactly* 32,756 on every
+  // device, every boot, in every log line, while freeHeap moves around it. A
+  // real largest-free-block measurement would not sit that still, and 32,756
+  // is 0x7FF4 - twelve bytes short of 32KiB - which looks like a region
+  // boundary or a cap. Worse, a plain malloc of 5,686 bytes is observed
+  // failing on device 17 while this same call reports 32,756 free in one
+  // block, which cannot both be true of the allocation malloc actually
+  // performs. ESP.getMaxAllocHeap() reports MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT
+  // while malloc() takes MALLOC_CAP_DEFAULT, so the two may simply not be
+  // answering the same question - see Display.cpp's per-capability diagnostics
+  // in ensureFileBufferCapacity(), which exist to settle exactly this.
+  //
+  // The honest position: the previous threshold of 60,000 was criticised here
+  // for having no defensible relationship to allocation risk, and 28,000 was
+  // then derived from the very same suspect metric. That criticism applies to
+  // both numbers equally. Restarting a household's display on a proxy nobody
+  // trusts is worse than not restarting it at all - especially since device 17
+  // was restarting every four minutes under the old threshold and its graphics
+  // never recovered, so the restart was not buying anything.
+  //
+  // It keeps logging, because the reading is still the data this investigation
+  // needs and a device that goes quiet tells us nothing.
+  //
+  // **When the diagnostics come back, replace this with something tied to
+  // observed harm rather than a proxy** - a run of consecutive allocation or
+  // decode failures is a direct measurement of "this device can no longer draw
+  // its cards", needs no theory about which pool is short, and cannot be
+  // fooled by a metric that means something other than it appears to.
   Log::printf(
-      "[health] maxAllocHeap=%u below %u byte threshold after %lu ms uptime - restarting to "
-      "clear fragmentation",
+      "[health] maxAllocHeap=%u is below the %u byte reference after %lu ms uptime - "
+      "NOT restarting: this metric is under investigation, see Display.cpp's heapdiag",
       static_cast<unsigned>(maxAllocHeap), static_cast<unsigned>(kMinMaxAllocHeapBytes),
       static_cast<unsigned long>(now));
-  // So the line above actually reaches the server instead of being lost with
-  // everything else in RAM at restart - same reasoning as every other
-  // pre-esp_restart() call site in this codebase (see Loader.cpp).
-  Log::flushNow();
-  // The clock right now is already correct - this restart is deliberate and
-  // self-inflicted, not a power loss, so there is a real reading worth
-  // carrying into the next boot. See AppService::trySkipSyncAfterFastReboot()
-  // for what this buys: skipping the blocking SNTP wait entirely on the very
-  // next setup(), which is what most of this restart's own visible outage
-  // window was actually spent on.
-  AppService::stashTimeForFastReboot();
-  Display::showStatus("Refreshing", "Reclaiming memory - back in a moment");
-  // Long enough for both the status message and the flushed log line to be
-  // visibly sent before the restart cuts everything off.
-  delay(1500);
-  esp_restart();
-  // Unreachable: the call above never returns.
+
+  // The restart this function used to perform is deleted rather than commented
+  // out or guarded behind a flag. A disabled branch left in place invites
+  // someone to re-enable it without re-reading why it was suspended, and the
+  // replacement is not "the same restart with a better number" - it is a
+  // different trigger entirely, keyed to observed allocation failures. Nothing
+  // here is worth preserving for that. The machinery it used to call
+  // (AppService::stashTimeForFastReboot, which lets the next boot skip the
+  // blocking SNTP wait) is still there and still used by Loader.cpp's own
+  // restart paths, so nothing is lost by removing this caller.
 }
 
 // The server can shorten or lengthen this on every check-in response
