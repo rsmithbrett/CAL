@@ -73,6 +73,24 @@ enum class RestartCause : uint32_t {
   Reprovision = 3,
   /// A self-test build was requested for this device.
   SelfTest = 4,
+  /// The server became unreachable and stayed that way, so the App restarted
+  /// itself to get a working connection back.
+  ///
+  /// Specifically: repeated check-in failures where WiFi was associated and a
+  /// plain TCP connect to the service succeeded, but the TLS handshake did not.
+  /// mbedTLS needs roughly 32KB contiguous for a new session and the largest
+  /// 8-bit block settles far below that once cards have been rendering, so the
+  /// handshake fails and nothing in the firmware resets the shared client - one
+  /// failure is permanent for the life of the process. A restart is the only
+  /// thing observed to recover it, on every occasion across two devices.
+  ///
+  /// A device in that state renders its cards perfectly and is invisible to the
+  /// server: no telemetry, no check-in, no debug stream, and no way to receive
+  /// a card policy or a firmware update. It looks healthy on the wall and is
+  /// unmanageable. Naming this cause separately from LowHeap matters because
+  /// the two want opposite investigations - one is "this device cannot draw",
+  /// the other is "this device cannot be reached".
+  Unreachable = 5,
 };
 
 /// Records what this restart is FOR, immediately before calling
@@ -106,6 +124,22 @@ void recordRestartIntent(RestartCause cause);
 /// NVS this matters more than it did with RTC, not less: the stored value now
 /// outlives a power cycle, so nothing else would ever remove it.
 void logResetReason();
+
+/// What logResetReason() found, available after it has run.
+///
+/// Exists so a restart can influence the boot that follows it, which is the
+/// only way a self-restarting watchdog can back off across reboots: the
+/// variable holding "when did I last restart for this" does not survive the
+/// restart, so without this the device would be eligible to restart again five
+/// minutes into every boot forever. App.ino uses it to start the
+/// unreachability watchdog's clock already running when the previous restart
+/// was RestartCause::Unreachable.
+///
+/// Returns None before logResetReason() has been called, and None on a
+/// power-on boot regardless of what was stored - see logResetReason() for why
+/// a pending intent interrupted by a power cut is not the reason the device
+/// came back up.
+RestartCause lastRestartCause();
 
 /// True when the last restart was one this firmware did not ask for - a panic,
 /// a watchdog, a brownout - as opposed to a power-on or a deliberate restart.

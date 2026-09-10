@@ -394,6 +394,53 @@ constexpr uint32_t kHeapCheckGraceMs = 3UL * 60UL * 1000UL;
 // rather than much later.
 constexpr uint32_t kMaxConsecutiveBufferAllocFailures = 6;
 
+/// How many check-ins in a row may fail before this device restarts itself to
+/// get its connection back.
+///
+/// **Why a restart is the fix and not a workaround.** mbedTLS needs roughly
+/// 32KB contiguous for a new TLS session. Once cards have been rendering, the
+/// largest 8-bit block settles far below that - 13,812 bytes, measured
+/// repeatedly on device 17 - and every handshake then fails with
+/// MBEDTLS_ERR_SSL_ALLOC_FAILED. Nothing in this firmware resets the shared
+/// client, so the first failure is permanent for the life of the process: the
+/// device keeps drawing its cards, and is simultaneously invisible to the
+/// server. No telemetry, no check-in, no debug stream, and - the part that
+/// matters most - no way to receive a card policy or a firmware update. A
+/// device in that state cannot be fixed remotely by anything, including the
+/// update that would fix it.
+///
+/// Across a full evening of this on two devices, a restart recovered it every
+/// single time and nothing else ever did. So the honest response is to do
+/// deliberately what a person was otherwise doing by hand: reboot.
+///
+/// Five, because check-in runs on the server's own cadence (60s by default),
+/// making this about five minutes of confirmed unreachability. Long enough
+/// that an ordinary server deploy, a Kestrel restart or a brief AP glitch
+/// passes underneath it - the counter clears on the first success - and short
+/// enough that a stuck device is back inside the window where a policy or
+/// firmware change can actually reach it.
+constexpr uint32_t kMaxConsecutiveCheckInFailures = 5;
+
+/// Consecutive failed check-ins. Cleared by the first success, so this only
+/// ever climbs while the device is genuinely unable to reach the server.
+uint32_t gConsecutiveCheckInFailures = 0;
+
+/// When this device last restarted itself for unreachability, so it cannot do
+/// it again immediately. 0 means "not since boot".
+uint32_t gLastUnreachableRestartMs = 0;
+
+/// The minimum gap between two unreachability restarts.
+///
+/// This is the guard against the failure mode this whole mechanism could
+/// otherwise become: if the service is genuinely down - or this device's WiFi
+/// credentials still work but the server is gone - a restart cannot fix
+/// anything, and without a floor here the device would reboot every five
+/// minutes forever, which is worse than sitting quietly and retrying. Twenty
+/// minutes means a device that is wrong about the cause costs the household
+/// three reboots an hour rather than twelve, while a device that is right is
+/// back within five minutes.
+constexpr uint32_t kMinMsBetweenUnreachableRestarts = 20UL * 60UL * 1000UL;
+
 /// Checked once per loop() iteration, but only actually looks at anything once
 /// every kHeapCheckIntervalMs - see the block comments above for the grace
 /// period and for why this counts failures rather than free bytes.
@@ -469,6 +516,86 @@ void checkHeapHealth() {
   Display::showStatus("Refreshing", "Reclaiming memory - back in a moment");
   // Long enough for both the status message and the flushed log line to be
   // visibly sent before the restart cuts everything off.
+  delay(1500);
+  esp_restart();
+  // Unreachable: the call above never returns.
+}
+
+/// Restarts this device when it has demonstrably lost the ability to reach the
+/// server, which is the only recovery this firmware has for a poisoned TLS
+/// client. See kMaxConsecutiveCheckInFailures for the measurement behind that
+/// claim and why it is a fix rather than a workaround.
+///
+/// Deliberately separate from checkHeapHealth() above even though the two are
+/// shaped identically: one fires on a device that cannot draw, the other on a
+/// device that cannot be reached, and a device can be in either state while
+/// perfectly healthy in the other. Merging them would mean one threshold
+/// standing in for two unrelated diagnoses.
+void checkUnreachableWatchdog() {
+  if (gConsecutiveCheckInFailures < kMaxConsecutiveCheckInFailures) {
+    return;
+  }
+
+  // WiFi first. If this device is not associated then the server being
+  // unreachable is a network fact, not a TLS one, and a restart fixes nothing
+  // - it would just reboot repeatedly through an outage that has nothing to do
+  // with this firmware. WifiJoin's own reconnect handling owns that case.
+  if (WiFi.status() != WL_CONNECTED) {
+    Log::printf("[health] %lu check-ins have failed, but WiFi is not associated (status=%d) - "
+                "this is a network outage, not a stuck TLS client, so NOT restarting",
+                static_cast<unsigned long>(gConsecutiveCheckInFailures),
+                static_cast<int>(WiFi.status()));
+    return;
+  }
+
+  const uint32_t now = millis();
+
+  // Subtraction, not addition, so this stays correct across millis()' 49-day
+  // rollover - the same reasoning StackWatch's heartbeat documents. A device
+  // that has never restarted for this reason has gLastUnreachableRestartMs 0,
+  // and `now - 0` is simply uptime, which is what we want to compare.
+  if (gLastUnreachableRestartMs != 0 &&
+      (now - gLastUnreachableRestartMs) < kMinMsBetweenUnreachableRestarts) {
+    Log::printf("[health] %lu check-ins have failed, but this device already restarted for that "
+                "%lu ms ago - holding off (minimum gap %lu ms) rather than entering a reboot loop",
+                static_cast<unsigned long>(gConsecutiveCheckInFailures),
+                static_cast<unsigned long>(now - gLastUnreachableRestartMs),
+                static_cast<unsigned long>(kMinMsBetweenUnreachableRestarts));
+    return;
+  }
+
+  Log::printf(
+      "[health] %lu consecutive check-in failures (limit %lu) after %lu ms uptime with WiFi "
+      "associated - this device can render but cannot be reached, managed or updated, so it is "
+      "restarting to get a working TLS session (largest 8BIT block=%u, mbedTLS needs ~32KB "
+      "contiguous for a new one)",
+      static_cast<unsigned long>(gConsecutiveCheckInFailures),
+      static_cast<unsigned long>(kMaxConsecutiveCheckInFailures),
+      static_cast<unsigned long>(now),
+      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+
+  // The line above has to survive the restart, and the remote stream is the
+  // only channel a deployed device has - except that this is the one restart
+  // where that channel is exactly what is broken. Flushed anyway: it costs
+  // nothing on a device that cannot send, and on a device whose failure was
+  // asset fetches rather than the log stream it is the whole explanation.
+  Log::flushNow();
+  AppService::stashTimeForFastReboot();
+  BootDiag::recordRestartIntent(BootDiag::RestartCause::Unreachable);
+  Display::showStatus("Reconnecting", "Restoring the connection - back in a moment");
+
+  // Set before the restart even though this variable does not survive one,
+  // because it is what stops a SECOND restart inside this boot if the device
+  // somehow reaches the threshold again before restarting.
+  //
+  // Backing off across reboots is handled elsewhere and has to be: setup()
+  // seeds this from BootDiag::lastRestartCause(), so a device that restarts
+  // for unreachability and comes back still unreachable starts its next boot
+  // with the clock already running rather than at zero. Without that half, this
+  // line would be decoration - the restart clears it, and the device would be
+  // eligible again five minutes later, forever.
+  gLastUnreachableRestartMs = now;
+
   delay(1500);
   esp_restart();
   // Unreachable: the call above never returns.
@@ -615,7 +742,24 @@ void performCheckIn() {
       Loader::returnToLoaderForReprovisioning();
       // Unreachable: the call above never returns.
     }
+    // Counted, not acted on here - see checkUnreachableWatchdog() for what
+    // happens when this keeps happening, and why a restart is the only
+    // recovery this firmware has for it.
+    ++gConsecutiveCheckInFailures;
+    Log::printf("[checkin] failure %lu of %lu before this device restarts to recover its "
+                "connection",
+                static_cast<unsigned long>(gConsecutiveCheckInFailures),
+                static_cast<unsigned long>(kMaxConsecutiveCheckInFailures));
     return;
+  }
+
+  // Cleared on the first success, so a device that recovers on its own - or
+  // that was only ever seeing a brief server blip - never restarts. Same
+  // shape as the draw-failure counter the heap watchdog uses.
+  if (gConsecutiveCheckInFailures > 0) {
+    Log::printf("[checkin] recovered after %lu consecutive failure(s) - restart no longer needed",
+                static_cast<unsigned long>(gConsecutiveCheckInFailures));
+    gConsecutiveCheckInFailures = 0;
   }
 
   if (result.intervalMs > 0) {
@@ -804,6 +948,22 @@ void setup() {
   // the only evidence was the boot counter going up. See BootDiag.h.
   BootDiag::logResetReason();
 
+  // If the previous restart was this device restarting itself for
+  // unreachability, start the backoff clock already running rather than at
+  // zero. Without this the guard is ineffective across reboots - the variable
+  // holding "when did I last restart" does not survive a restart, so a device
+  // facing something a reboot cannot fix (the service genuinely down, DNS
+  // moved, credentials valid but the host gone) would restart every five
+  // minutes indefinitely. Seeded this way it gets one restart, then waits
+  // kMinMsBetweenUnreachableRestarts before trying that again, whether or not
+  // a reboot happened in between.
+  if (BootDiag::lastRestartCause() == BootDiag::RestartCause::Unreachable) {
+    gLastUnreachableRestartMs = millis();
+    Log::printf("[health] last restart was for unreachability - the connection watchdog will hold "
+                "off for %lu ms rather than restart again immediately",
+                static_cast<unsigned long>(kMinMsBetweenUnreachableRestarts));
+  }
+
   Display::begin();
   Display::showStatus("Starting", "");
 
@@ -969,6 +1129,13 @@ void loop() {
   // checkHeapHealth()'s own remarks for why this restarts the App directly
   // rather than routing through Loader.cpp.
   checkHeapHealth();
+
+  // Checked here rather than inside performCheckIn() so the decision to
+  // restart is never taken while a request is part-way through, and so it is
+  // visible in the same place as the heap watchdog it is a sibling of. It
+  // costs a comparison on every iteration and does nothing until five
+  // check-ins in a row have failed.
+  checkUnreachableWatchdog();
 
   if (forceUpdateCheckRequested()) {
     forceUpdateCheck();

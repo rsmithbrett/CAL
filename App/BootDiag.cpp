@@ -21,6 +21,11 @@ namespace {
 constexpr const char* kNvsNamespace = "bootdiag";
 constexpr const char* kKeyCause = "cause";
 
+/// What logResetReason() concluded, kept so lastRestartCause() can answer
+/// after the fact. Not read from NVS on demand: the key is cleared during
+/// logResetReason(), so this is the only surviving record within this boot.
+RestartCause gLastCause = RestartCause::None;
+
 /// The reason, in words, plus what it actually implies. The second half is the
 /// point: `ESP_RST_TASK_WDT` means nothing to someone who has not just been
 /// reading ESP-IDF headers, and a diagnostic that needs a second lookup to
@@ -88,6 +93,8 @@ const char* describeCause(RestartCause cause) {
       return "REPROVISION";
     case RestartCause::SelfTest:
       return "SELF_TEST";
+    case RestartCause::Unreachable:
+      return "UNREACHABLE";
   }
   return "UNRECOGNISED";
 }
@@ -119,6 +126,7 @@ RestartCause takeRecordedCause() {
     case RestartCause::Ota:
     case RestartCause::Reprovision:
     case RestartCause::SelfTest:
+    case RestartCause::Unreachable:
       return static_cast<RestartCause>(stored);
   }
   // A value this build does not recognise - most likely an older or newer
@@ -140,6 +148,8 @@ void recordRestartIntent(RestartCause cause) {
   prefs.end();
 }
 
+RestartCause lastRestartCause() { return gLastCause; }
+
 bool lastResetWasUnexpected() { return describe(esp_reset_reason()).unexpected; }
 
 void logResetReason() {
@@ -156,6 +166,7 @@ void logResetReason() {
   // was applied, the reason the device came back up is that power was applied -
   // whatever it had been meaning to do beforehand did not cause this boot.
   const RestartCause cause = (reason == ESP_RST_POWERON) ? RestartCause::None : recorded;
+  gLastCause = cause;
 
   if (reason == ESP_RST_POWERON && recorded != RestartCause::None) {
     // Worth saying rather than swallowing: it means a deliberate restart was
