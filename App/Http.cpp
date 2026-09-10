@@ -1,6 +1,7 @@
 ﻿#include "Http.h"
 
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 
 #include "Config.h"
 #include "Log.h"
@@ -55,11 +56,21 @@ void diagnoseFailure(const char* tag) {
   // it costs a DNS lookup and one TCP connect, which is free compared to
   // continuing to not know.
   const wl_status_t wifi = WiFi.status();
-  Log::printf("[http] %s failed - wifi=%d rssi=%d dBm ip=%s freeHeap=%lu maxAlloc=%lu", tag,
+
+  // heap_caps_*, NOT ESP.getFreeHeap()/ESP.getMaxAllocHeap(). This line used
+  // the wrappers and actively misled: a real capture of a failed check-in
+  // reported maxAlloc=32756 while the [heapdiag] line beside it measured the
+  // true largest 8-bit block at 22,516. A reader seeing 32,756 concludes there
+  // is ample room for a TLS handshake and rules memory out - which is exactly
+  // the wrong conclusion to hand someone at the start of an investigation.
+  // Both figures are printed because they answer different questions: free8 is
+  // "how much is there" and largest8 is "how much can actually be handed to one
+  // allocation", and mbedTLS needs the second.
+  Log::printf("[http] %s failed - wifi=%d rssi=%d dBm ip=%s free8=%lu largest8=%lu", tag,
               static_cast<int>(wifi), static_cast<int>(WiFi.RSSI()),
               WiFi.localIP().toString().c_str(),
-              static_cast<unsigned long>(ESP.getFreeHeap()),
-              static_cast<unsigned long>(ESP.getMaxAllocHeap()));
+              static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+              static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 
   if (wifi != WL_CONNECTED) {
     Log::printf("[http] %s: not associated with an access point - nothing above this can work",
@@ -96,6 +107,36 @@ void diagnoseFailure(const char* tag) {
   Log::printf("[http] %s: plain TCP to %s:443 SUCCEEDED - so DNS and routing are fine and the "
               "failure is in the TLS handshake itself",
               tag, resolved.toString().c_str());
+
+  // Layer 3: stop inferring and ask mbedTLS. Everything above narrows the
+  // failure down to "the handshake", which is still a category rather than a
+  // cause - a certificate that will not validate, a clock too far off for the
+  // validity window, an out-of-memory on the ~32KB of session buffers, and a
+  // peer that closed the connection are all "the handshake" and want four
+  // different fixes.
+  //
+  // NetworkClientSecure::lastError() is the mbedTLS error from the actual
+  // failed attempt on gClient, already rendered to text by the library. It was
+  // available all along and never read, which is why a real handshake failure
+  // could be narrowed to this line and no further.
+  //
+  // Read AFTER the probes above rather than first: they only touch `plain` and
+  // WiFi, never gClient, so its error state is still the one from the request
+  // that actually failed.
+  char tlsError[128] = {0};
+  const int tlsCode = gClient.lastError(tlsError, sizeof(tlsError));
+  if (tlsCode != 0) {
+    Log::printf("[http] %s: mbedTLS error %d: %s", tag, tlsCode,
+                tlsError[0] != '\0' ? tlsError : "(no description available)");
+  } else {
+    // Worth stating rather than staying silent. A handshake that failed while
+    // mbedTLS holds no error usually means the failure was above it - the
+    // session was reused and the peer dropped it, or HTTPClient gave up on its
+    // own timeout before TLS ever reported anything.
+    Log::printf("[http] %s: mbedTLS reports NO error, so the handshake itself did not fail - "
+                "suspect a dropped reused session or an HTTPClient timeout above it",
+                tag);
+  }
 }
 
 }  // namespace Http

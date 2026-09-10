@@ -22,6 +22,29 @@ constexpr size_t kConfiguredLoopStackBytes = 16384;
 /// matters and it is easy to miss if it happened between two log calls.
 size_t gWorstSeen = SIZE_MAX;
 
+/// What was last actually printed, and when. Both exist to stop this from
+/// flooding the log, which it did: a real capture from device 17 carried
+/// several hundred consecutive identical "[stack] after render | min-free=6812"
+/// lines, because the after-render call site runs on every loop iteration and
+/// this logged unconditionally. That is worse than useless - it buries the
+/// [heapdiag] and [checkin] lines someone is actually reading, and on a device
+/// with streaming on it spends the remote channel, which is the only
+/// diagnostic channel a deployed device has, on saying nothing changed.
+///
+/// Note what makes "log only on change" sufficient here rather than lossy:
+/// uxTaskGetStackHighWaterMark returns the MINIMUM free the task has ever
+/// seen, so it is monotonically non-increasing for the life of the task. It can
+/// only ever move one way. Suppressing repeats therefore hides nothing - every
+/// distinct value this figure will ever take still gets printed exactly once,
+/// at the moment it first happens.
+size_t gLastLogged = SIZE_MAX;
+uint32_t gLastLogMs = 0;
+
+/// A heartbeat so a steady figure still proves the instrumentation is alive.
+/// Without it, "the stack has been fine for an hour" and "this stopped being
+/// called an hour ago" produce identical logs, and those are not the same fact.
+constexpr uint32_t kHeartbeatMs = 300000;  // 5 minutes
+
 }  // namespace
 
 size_t highWaterMark() { return uxTaskGetStackHighWaterMark(nullptr); }
@@ -79,14 +102,34 @@ void logHighWaterMark(const char* when) {
 
   reportUnitsOnce(remaining);
 
-  // Log::verbose, not printf: this is investigation instrumentation on a path
-  // that runs every loop iteration, and it costs a device with streaming off
-  // nothing at all (see Log.h's own remarks on the const char* overload and
-  // the early return). A device someone is actually watching gets the full
-  // trace.
-  Log::verbose("[stack] %s | loopTask min-free=%u (worst-ever=%u) of %u configured", when,
+  // Silence when nothing has changed. The after-render call site runs on every
+  // loop iteration, so logging unconditionally produced hundreds of identical
+  // consecutive lines on a real device - see gLastLogged's own remarks for why
+  // suppressing them loses no information at all, given this figure can only
+  // ever move one way.
+  const uint32_t now = millis();
+  const bool changed = (remaining != gLastLogged);
+  // Subtraction, not `now > gLastLogMs + kHeartbeatMs`: millis() wraps at ~49
+  // days and this firmware is meant to run for months. Unsigned wrap-around
+  // makes the difference correct across the rollover; the comparison form is
+  // not, and would go quiet for 49 days the first time it happened.
+  const bool heartbeatDue = (now - gLastLogMs) >= kHeartbeatMs;
+
+  if (!changed && !heartbeatDue) {
+    return;
+  }
+
+  gLastLogged = remaining;
+  gLastLogMs = now;
+
+  // Log::verbose, not printf: this is investigation instrumentation, and it
+  // costs a device with streaming off nothing at all (see Log.h's own remarks
+  // on the const char* overload and the early return). A device someone is
+  // actually watching gets the full trace.
+  Log::verbose("[stack] %s | loopTask min-free=%u (worst-ever=%u) of %u configured%s", when,
                static_cast<unsigned>(remaining), static_cast<unsigned>(gWorstSeen),
-               static_cast<unsigned>(kConfiguredLoopStackBytes));
+               static_cast<unsigned>(kConfiguredLoopStackBytes),
+               changed ? "" : " (unchanged - heartbeat)");
 }
 
 }  // namespace StackWatch

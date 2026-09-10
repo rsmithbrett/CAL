@@ -557,7 +557,9 @@ bool forceUpdateCheckRequested() {
 void forceUpdateCheck() {
   Log::line("[update] manual check requested (BOOT press)");
   Display::showStatus("Checking for update", "");
-  if (AppUpdater::newerVersionAvailable()) {
+  const AppUpdater::UpdateCheck result = AppUpdater::checkForUpdate();
+
+  if (result == AppUpdater::UpdateCheck::Newer) {
     Log::line("[update] manual check found a newer version");
     Display::showStatus("Updating", "A new version is available");
     // Recorded before handing off, so the next boot can say SOFTWARE_RESET + OTA
@@ -568,6 +570,21 @@ void forceUpdateCheck() {
 
     Loader::requestUpdate();
     // Unreachable: the call above never returns.
+  }
+
+  // A check that could not happen must not be reported as a check that found
+  // nothing. Someone is standing at this device having just pressed the button
+  // precisely because they want an update; telling them "Already up to date"
+  // when the server was never reached sends them away believing the opposite
+  // of the truth. Device 7 did exactly this - it showed "up to date" while
+  // running a build four versions behind the fleet, having last reached the
+  // server four hours earlier.
+  if (result == AppUpdater::UpdateCheck::CheckFailed) {
+    Log::line("[update] manual check FAILED - could not reach the server, update state unknown");
+    Display::showStatus("Could not check", "The service could not be reached");
+    delay(2500);  // Longer than the up-to-date case: this one asks to be read.
+    CardManager::redraw();
+    return;
   }
 
   Log::line("[update] manual check: already up to date");
@@ -989,7 +1006,13 @@ void loop() {
   // check-in itself were ever broken.
   if (now - lastUpdateCheckMs >= Config::kUpdateCheckIntervalMs) {
     lastUpdateCheckMs = now;
-    if (AppUpdater::newerVersionAvailable()) {
+    // Only Newer acts. CheckFailed deliberately does nothing beyond what
+    // checkForUpdate() already logged: this is an unattended background timer,
+    // so a transient network failure should quietly wait for the next tick
+    // rather than put an error on a wall display nobody asked. That is the
+    // opposite of the BOOT-button path above, where a person is waiting for an
+    // answer and silence is the wrong response.
+    if (AppUpdater::checkForUpdate() == AppUpdater::UpdateCheck::Newer) {
       Log::line("[update] fallback timer found a newer version - rebooting into CAL");
       Display::showStatus("Updating", "A new version is available");
       // Recorded before handing off, so the next boot can say SOFTWARE_RESET + OTA
