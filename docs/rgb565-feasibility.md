@@ -279,6 +279,14 @@ also the more literal reading of the quoted sentence: the manual names three
 **Recommendation for the README:** that section should be marked superseded
 rather than deleted — the project's own convention, and the right one here,
 because the section's reasoning was careful and the sources it cites are real.
+
+> **Carried out on 2026-09-10.** The section now opens with a SUPERSEDED note
+> and the pin split, the README's Hardware section states the two buses up
+> front, and the correction — including the one wrong inferential step and the
+> arbitration point below — is written up in "The shared SPI bus was never
+> there" at the end of the README. `SdStorage.cpp` also logs the bus pins in
+> force on every boot, so the claim is checkable on a device rather than only
+> in prose.
 What it got wrong is a single inferential step: "the only other real hardware
 SPI peripheral in this build is the display itself, [...] leaving the display as
 the only plausible co-tenant." The co-tenant is a header with nothing plugged
@@ -591,6 +599,17 @@ bracketing touch reads with transactions, which is moot here.)
 **3,900 bytes is under the measured 6,132-byte largest free block.** That single
 number is why [§6](#6-recommendation-with-confidence-levels) rates JPEG higher
 than the plan does.
+
+**Update, 2026-09-10 — the PNG row's "~44KB" is now measured on hardware, and
+it is 45,056 bytes exactly** (largest free 8BIT block 110,580 -> 65,524 across
+the first draw of a boot). Per-draw `largest8` is flat after that, confirming
+the "allocated once and deliberately retained" reading above from the other
+direction. What this revises is the *argument*, not the number: with streaming
+in place there is no per-draw contiguity cost left to remove, so the case for
+JPEG is now specifically that it does not hold a 45KB block for the whole
+uptime — and the thing that block is measurably in the way of is a new TLS
+session, which needs ~32KB contiguous and cannot find it once cards have been
+rendering. See the README's "The numbers tonight rests on" section.
 
 One more capability worth recording, because it solves a problem this firmware
 currently solves badly: `drawJpg(Stream*, ...)` exists

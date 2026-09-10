@@ -435,6 +435,14 @@ uint32_t gConsecutiveCheckInFailures = 0;
 /// it again immediately. 0 means "not since boot".
 uint32_t gLastUnreachableRestartMs = 0;
 
+/// Whether the "holding off rather than rebooting" explanation has already been
+/// said for the current episode. checkUnreachableWatchdog() runs every loop
+/// iteration, so without this the message repeats forever - it did, hundreds of
+/// times in two minutes on a real device, burying every other line in the remote
+/// stream. Cleared on the first successful check-in so a later episode is
+/// announced again rather than silently held off.
+bool gHoldOffLogged = false;
+
 /// The minimum gap between two unreachability restarts.
 ///
 /// This is the guard against the failure mode this whole mechanism could
@@ -562,11 +570,26 @@ void checkUnreachableWatchdog() {
   // and `now - 0` is simply uptime, which is what we want to compare.
   if (gLastUnreachableRestartMs != 0 &&
       (now - gLastUnreachableRestartMs) < kMinMsBetweenUnreachableRestarts) {
-    Log::printf("[health] %lu check-ins have failed, but this device already restarted for that "
-                "%lu ms ago - holding off (minimum gap %lu ms) rather than entering a reboot loop",
-                static_cast<unsigned long>(gConsecutiveCheckInFailures),
-                static_cast<unsigned long>(now - gLastUnreachableRestartMs),
-                static_cast<unsigned long>(kMinMsBetweenUnreachableRestarts));
+    // Logged once per hold-off, not once per loop iteration. This function runs
+    // every iteration, so an unconditional line here put hundreds of identical
+    // entries into the remote debug stream in a couple of minutes on a real
+    // device - the same flood StackWatch::logHighWaterMark was fixed for
+    // earlier, reintroduced here by writing the log line without asking how
+    // often the surrounding code runs. The stream is the only diagnostic
+    // channel a deployed device has, and this was spending all of it saying
+    // nothing had changed.
+    //
+    // Reset when the counter clears on a successful check-in, so the next
+    // distinct episode announces itself once.
+    if (!gHoldOffLogged) {
+      gHoldOffLogged = true;
+      Log::printf("[health] %lu check-ins have failed, but this device already restarted for that "
+                  "%lu ms ago - holding off (minimum gap %lu ms) rather than entering a reboot "
+                  "loop. Silent from here until this clears.",
+                  static_cast<unsigned long>(gConsecutiveCheckInFailures),
+                  static_cast<unsigned long>(now - gLastUnreachableRestartMs),
+                  static_cast<unsigned long>(kMinMsBetweenUnreachableRestarts));
+    }
     return;
   }
 
@@ -783,6 +806,9 @@ void performCheckIn() {
     Log::printf("[checkin] recovered after %lu consecutive failure(s) - restart no longer needed",
                 static_cast<unsigned long>(gConsecutiveCheckInFailures));
     gConsecutiveCheckInFailures = 0;
+    // So a later episode explains itself once rather than being held off in
+    // silence - see gHoldOffLogged.
+    gHoldOffLogged = false;
   }
 
   if (result.intervalMs > 0) {

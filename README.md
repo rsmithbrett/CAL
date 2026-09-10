@@ -64,6 +64,14 @@ senses the board correctly. If autodetect is ever replaced with an explicit
 configuration, it must be measured against this specific board and not against
 the family name.
 
+For the record, since a mistaken belief about this board's buses cost this
+project several weeks: **the panel is on SPI2/HSPI (SCLK 14, MISO 12, MOSI 13,
+CS 15) and the SD card is on SPI3/VSPI (18/19/23, CS 5). They are separate
+buses and do not contend.** The section further down titled "The likely root
+cause: the SD card's SPI lines are shared with the display's" is superseded and
+kept only as a record of the wrong turn; "The shared SPI bus was never there"
+at the end of this file has the evidence.
+
 ## Partition layout
 
 `partitions.csv`, at the repo root. Asymmetric on purpose, and this is the
@@ -1549,14 +1557,23 @@ which sets the `updreq` flag and reboots into CAL, as described above:
    "the secret-rejected path forced a WiFi reset it didn't need" for why a
    rejected secret and a wrong network are different problems that got
    conflated for a while.
-2. **`AppUpdater::newerVersionAvailable()` — kept, explicitly as a slower
-   fallback.** This is the same plain yes/no manifest check it always was,
-   still run independently on `Config::kUpdateCheckIntervalMs` (1 hour).
-   `App.ino` comments the call site to say so directly: check-in above is the
-   fast path that actually reaches an admin's "Force update" button or a
-   newly-current build; this hourly timer is belt-and-braces only, kept so an
-   update can never be permanently missed if check-in itself were ever
-   broken.
+2. **`AppUpdater::checkForUpdate()` — kept, explicitly as a slower
+   fallback.** This is the same manifest check it always was, still run
+   independently on `Config::kUpdateCheckIntervalMs` (1 hour). `App.ino`
+   comments the call site to say so directly: check-in above is the fast path
+   that actually reaches an admin's "Force update" button or a newly-current
+   build; this hourly timer is belt-and-braces only, kept so an update can
+   never be permanently missed if check-in itself were ever broken.
+
+   It was called `newerVersionAvailable()` and returned a plain yes/no, and
+   **"plain yes/no" was a bug rather than a simplification** — every failure
+   path returned "no", which the BOOT-button path below rendered as "Already up
+   to date" to someone standing at a device that could not reach the server at
+   all. It now returns a three-state `UpdateCheck`; see "An update check that
+   could not happen, reported as 'already up to date'" near the end of this
+   file. This hourly timer deliberately still acts only on `Newer` and does
+   nothing at all on `CheckFailed`, which is the opposite of what the button
+   does and the right answer for both.
 3. **A single BOOT-button press**, covered next.
 
 ### Two BOOT-button gestures, distinguished only by hold time
@@ -1575,12 +1592,20 @@ never needs to know which binary is running to know how to fix a problem:
   iteration's reading (a static `wasPressed`), so it fires exactly once per
   physical press rather than repeatedly while held; a plain press during
   normal operation was otherwise unused and is free to mean this.
-  `forceUpdateCheck()` shows "Checking for update," then either reboots into
-  the updater with "Updating" or reports "Already up to date" and falls
-  through to a normal weather refresh. Saying so explicitly on screen either
-  way matters: a press that silently does nothing reads as a dead button, and
-  without an explicit answer, "nothing happened" and "already checked,
-  nothing new" look identical.
+  `forceUpdateCheck()` shows "Checking for update," then reboots into the
+  updater with "Updating", or reports "Already up to date" and falls through to
+  a normal weather refresh. Saying so explicitly on screen either way matters:
+  a press that silently does nothing reads as a dead button, and without an
+  explicit answer, "nothing happened" and "already checked, nothing new" look
+  identical.
+
+  **There is a third outcome now, and its absence was the bug.** "Could not
+  check — The service could not be reached" is shown when the check itself
+  could not happen, held on screen longer than the up-to-date case because it
+  is the one that asks to be read. The reasoning above is right and stopped one
+  case short: two answers were not enough, because the third state was being
+  reported as the reassuring one. See "An update check that could not happen,
+  reported as 'already up to date'" near the end of this file.
 
 ### Bug fix: the WiFi-reset hold only worked at boot, not when actually stuck
 
@@ -2361,17 +2386,32 @@ disposable tag can no longer cost the permanent one.
   submitting credentials (`Config::kProvisioningAbandonTimeoutMs`), matching
   its documented contract - but "nothing has run on hardware" below applies
   to this exactly as much as everything else.
-- **The cannot-draw watchdog's restart has never fired on a device.** Neither
-  has the increment it counts: `Display::consecutiveBufferAllocFailures()` rises
-  only on the branch where a file-buffer allocation still fails *after* the TLS
-  release, and no log yet shows a device reaching it — the releases measured so
-  far all recovered the memory. So both halves of this trigger are verified by
-  a clean compile and by reading them. That matters more
-  than usual here, because the three thresholds this replaces each looked
-  correct when read and were wrong when run — see "What the watchdog restarts
-  on now" near the end of this file. The observable to watch for in the field
-  is the per-check `[health]` line, which now prints on every check whether or
-  not anything is wrong.
+- **The cannot-draw watchdog's restart has fired on a device, and probably
+  should not have.** This entry previously read "has never fired", and that is
+  no longer true: device 7 — which has **no SD card** — was observed rebooting
+  every ~11 minutes at 620-660 s uptime with `consecutive file-buffer alloc
+  failures=6/6`. The suspected mechanism is a false positive rather than
+  memory exhaustion, and a reboot cannot fix a missing card. **Not confirmed**,
+  and the two things needed to confirm it are in "Still open after tonight" at
+  the end of this file. The counter is also no longer what this entry once
+  described: it is `Display::consecutiveDrawFailures()`, incremented on any
+  failed draw, and the `[health]` line's "file-buffer alloc failures" wording
+  is stale — read it as "failed draws". That the three thresholds this replaces
+  each looked correct when read and were wrong when run is still the reason to
+  treat this trigger with suspicion; see "What the watchdog restarts on now"
+  near the end of this file.
+- **The unreachability watchdog has never fired, and it self-restarts.** New
+  tonight, and the most dangerous shape of thing in this firmware: it reboots
+  the device on its own judgement. Its three guards are verified by reading
+  them. The one to watch is the 20-minute floor, because half of it lives in
+  `setup()` seeding the clock from `BootDiag::lastRestartCause()` and a device
+  that restarts every five minutes forever is what a failure of that half looks
+  like. `SOFTWARE_RESET + UNREACHABLE` in the boot log is the observable.
+- **No automated test covers any of this, and one specific consequence is
+  worth naming.** Six builds went out tonight on reading and reasoning alone
+  (see the last section of this file); the measurements behind them are real
+  and the responses to them are unproven. There is no TEST_PLAN in this
+  repository.
 - **No automated tests, at all.** There is no test harness in this repository
   and no obvious one to reach for: the code is inseparable from ESP32
   peripherals, NVS, WiFi and TLS, none of which have a usable stub here. The
@@ -2527,6 +2567,16 @@ not merely logged" treatment `CardPolicyMismatch` already gets on
 
 ## The likely root cause: the SD card's SPI lines are shared with the display's, by hardware design
 
+**SUPERSEDED - this premise was measured and is false.** The panel is on
+HSPI_HOST at 14/12/13, SD is on VSPI at 18/19/23 with CS 5, `pin_tfcard_cs` is
+`-1`, and the two buses never contend. Kept in full, per this file's convention,
+because the sources it cites are real, the reasoning is careful, and exactly one
+inferential step in it is wrong - and because it is the reason the entire
+read-whole-file-into-RAM detour in the next section existed. See "The shared SPI
+bus was never there" near the end of this file for the correction, the pin table
+and the two things this section is owed, and `docs/rgb565-feasibility.md` §1 for
+the full chain of evidence.
+
 Found while chasing the decode failures above, and confirmed against this
 board's own manufacturer documentation rather than generic "Cheap Yellow
 Display" community pages - this board (an LCDWIKI E32R28T, see *The
@@ -2585,6 +2635,17 @@ with a shared mutex - real surgery, and not something to attempt correctly
 without a physical device in hand to verify against.
 
 ## Reading the whole file before decoding it, instead of streaming and decoding at once
+
+**SUPERSEDED, and by two separate findings.** This section is built on the
+shared-bus premise corrected above, which was false - so the interleaving it
+sets out to avoid was never happening. And the buffer it introduces is the
+10-24KB contiguous allocation that later turned out to be *the* allocation
+failing in the field. `Display` streams from SD again (`drawImageFromSd()`) and
+holds no file copy at all. Kept because the measurements in it are real and
+because the mistake is instructive: the fix worked well enough to look right,
+which is what kept the premise unexamined for weeks. `SelfTest/` still keeps a
+buffered read on purpose, as a worst-case contiguous-allocation probe - see
+`SelfTest/Display.h`.
 
 The retry-and-invalidate mitigation above shipped first and helped, but
 live testing after it (`v2026.09.07.0005`) still showed occasional decode
@@ -2992,6 +3053,14 @@ boundary, not of a measurement. The section above built a whole theory of heap
 was reasonable given the number; the number was not a measurement of the shape
 of anything.
 
+A later evening of paired readings settles what is left of the charitable
+reading of that wrapper. Across many `[health]` lines the real largest 8-bit
+block ranges **7,668 to 36,852** while `ESP.getMaxAllocHeap()` reads 32,756
+throughout — so it is not merely inflated, and it is not conservative either:
+the real figure sometimes *exceeds* it. It is a ceiling, unrelated to the
+quantity it appears to report. See "The numbers tonight rests on, and the one
+wrapper that caused several wrong diagnoses" at the end of this file.
+
 `heap_caps_get_free_size()` and `heap_caps_get_largest_free_block()`, against
 `MALLOC_CAP_8BIT` specifically - 8BIT because that is the pool a byte buffer
 comes from - are what this firmware measures with now. `Display.cpp`'s
@@ -3095,7 +3164,12 @@ the other stops working entirely.
 once, by the boot splash, at a point in `setup()` where `maxAllocHeap` is
 still 110,580 bytes, and because LovyanGFX keeps it unless asked not to, every
 later card draw reuses it and never needs a large contiguous block to decode
-again. Releasing it was tried, and it broke every graphic card on the device
+again. (The "~44KB" is now measured exactly: **45,056 bytes**, as largest
+110,580 -> 65,524 across the first draw of a boot, with per-draw `largest8`
+flat after that. Both halves of this paragraph's claim therefore hold on
+hardware — and that one held block is now the *remaining* argument for JPEG,
+which is not the argument JPEG was originally justified on. See the end of this
+file.) Releasing it was tried, and it broke every graphic card on the device
 while fixing nothing:
 
 ```
@@ -3359,6 +3433,17 @@ what sent the investigation to mbedTLS's buffer requirements, and from there to
 the file-copy buffer being held across check-ins. It costs one DNS lookup and
 one TCP connect, only ever on a path that has already failed, which is free
 compared with continuing not to know.
+
+**Two things about this facility were wrong and are fixed.** The heap figures it
+logged at each step were `freeHeap`/`maxAllocHeap` - the discredited wrappers -
+and a captured failure printed `maxAlloc=32756` beside a real largest block of
+22,516, which is how a reader gets handed "memory is not the problem" as the
+first line of a memory problem. It prints `free8`/`largest8` now. And it stopped
+at "the failure is in the TLS handshake itself", which is a category rather than
+a cause: `NetworkClientSecure::lastError()` had mbedTLS's own answer all along
+and was never read. Every mbedTLS error code recorded in this file came from
+adding that one line. See "A diagnostic that ruled out the actual cause" at the
+end of this file.
 
 The habit is worth recording alongside the facility, because it is what this
 episode actually demonstrated. Three plausible hypotheses were live at once -
@@ -4246,3 +4331,653 @@ before/after delta for JPEG is not dramatically smaller than PNG's, the reading
 of the decoder source above is wrong somewhere and everything in this section
 follows from it. The second is a check-in immediately after a graphic card
 draws, which is the failure this whole section exists to remove.
+
+## Six builds in one evening, and the one subject they nearly all turned out to be about
+
+Everything from here to the end of this file was written on 2026-09-10 and went
+out as six builds, in this order:
+
+| Build | Commit | Subject |
+| --- | --- | --- |
+| `0011` | `b1d1626` | SelfTest's heap figures, and a shared bus that was never there |
+| `0012` | `c445836` | The restart cause moved from RTC memory to NVS |
+| `0013` | `5922f48` | An update check that lied, a diagnostic that misled, and a log that buried both |
+| `0014` | `745b623` | Two ISRG roots pinned instead of the core's ~150-certificate bundle |
+| `0015` | `303e234` | A 15-second cap on the TLS handshake |
+| `0016` | `888225b` | A restart when the server has become unreachable |
+
+`v2026.09.10.0016` is fleet-current and installed on devices 7, 12 and 17.
+
+They were not planned as a set and they are one story in retrospect. Five of the
+six are about HTTPS - a subject this document had barely touched before tonight,
+because until the graphics work above stopped consuming contiguous heap it was
+never the thing that broke first. The sixth (`0012`) is about being able to tell
+afterwards why a device restarted, and it is described second rather than last
+because without it the other five could not have been diagnosed at all: every
+software reset in the evening's captures reported its cause as `NONE`, so a
+device that restarted itself was indistinguishable from a device somebody
+unplugged.
+
+**None of the six has been compiled.** `arduino-cli` was not run in this
+session, so every claim below about behaviour is a claim about code that has
+been read and reasoned about, not code that has been built - the same standing
+caveat the JPEG section above carries. The *measurements* are a different
+matter: they come off real devices, and they are the part of tonight worth
+keeping even if some of the code below needs another pass.
+
+## The numbers tonight rests on, and the one wrapper that caused several wrong diagnoses
+
+"Both of these numbers were wrong" above established that Arduino's heap
+wrappers overstate this board by roughly 4x. Tonight added the detail that makes
+one of them worse than merely inaccurate, and it deserves saying as bluntly as
+the evidence allows.
+
+**`ESP.getMaxAllocHeap()` is a ceiling, not a measurement.** It reads a constant
+**32,756** on this board while the true largest free 8-bit block, measured at
+the same instants, ranges from **7,668 to 36,852**. The `[health]` line in
+`App.ino` now captures both at the same instant precisely so nobody has to take
+that on trust:
+
+```
+[health] largest 8BIT block=13812 (ESP.getMaxAllocHeap says 32756 at the same instant)
+```
+
+Note that the real figure *exceeds* the wrapper's in part of that range, which
+is the detail that kills the last charitable reading of it. It is not a
+conservative estimate and it is not a lagging one; it is unrelated. This single
+wrapper is directly responsible for several wrong diagnoses in this project -
+two watchdog thresholds derived from it (60000, then 28000), the "that is not
+decay, it is a shape" theory built on its constancy, and at least one
+investigation that ruled memory out of a TLS failure because 32,756 looked like
+ample room for a handshake. Nothing in this firmware reads it for a decision any
+more, and it is still printed everywhere, beside the real figure, for exactly
+one reason: a fleet whose whole recorded history was taken through it needs the
+gap to stay visible rather than become a claim in a commit message.
+
+**mbedTLS needs roughly 32KB contiguous to stand up a new TLS session.** That is
+the figure the rest of tonight orbits. Set it against what this device's largest
+8-bit block actually does over a boot:
+
+| | Largest free 8BIT block |
+| --- | --- |
+| Early in `setup()`, before Display, WiFi and TLS | 110,580 |
+| Once WiFi is up | hard-capped near **34,804** |
+| Settled, while cards are rendering | as low as **4,596** |
+
+So a new handshake is comfortable in the first window, marginal in the second
+and impossible in the third. **That margin is the whole explanation for why TLS
+on this device works in some windows and not others**, and it is why the first
+check-in after a boot almost always succeeds: a *reused* session needs no new
+buffers at all, so once one is established the device keeps working on it
+indefinitely - right up until something makes it establish another.
+
+**There are two different shortages inside one handshake, and reading either one
+alone sends you the wrong way.** Untangling that took most of the evening:
+
+- Standing up the session's buffers needs one **contiguous** ~32KB block. That
+  is `largest8`, and it is what fails with `MBEDTLS_ERR_SSL_ALLOC_FAILED`.
+- Verifying a four-level ECDSA P-384 certificate chain needs a great many
+  *small* MPI allocations, so what decides it is **total** free 8-bit heap. That
+  is `free8`, and it is what failed with `MBEDTLS_ERR_MPI_ALLOC_FAILED` in the
+  certificate section below - on the device with the *larger* contiguous block.
+
+Every mbedTLS failure observed tonight, with the real heap figures beside it,
+since a mbedTLS code without them is what made the first two ambiguous:
+
+| Error | Meaning | Heap at failure | Reading |
+| --- | --- | --- | --- |
+| `-32512` | `MBEDTLS_ERR_SSL_ALLOC_FAILED` | `largest8` well below 32KB (13,812 repeatedly on device 17) | Session buffers. Fails fast, and this is the common case. |
+| `-1` | generic error | `free8=45,236` `largest8=34,804` | Arrived only after the 120-second handshake timeout below. Memory is definitively ruled out; the cause is still open. |
+| `-9984` | `MBEDTLS_ERR_X509_CERT_VERIFY_FAILED` | `free8=47,200` `largest8=34,804` | **Unexplained.** Ample memory of both kinds, so not the allocation story, and the chain verifies against the pinned roots off-device. Nothing here accounts for it. |
+
+That last row is recorded rather than resolved on purpose. It is the one
+handshake failure tonight that the memory account cannot absorb, and the honest
+position is that a fourth explanation is missing rather than that three
+explanations covered everything.
+
+**One measurement that partly settles the JPEG argument above and partly revises
+it.** `drawPngFile` retains approximately 44KB - **45,056 bytes exactly,
+measured as largest 110,580 -> 65,524 across the first draw of a boot** - and
+then reuses it. Per-draw `largest8` after that is **flat**. So the streaming
+change did what it was supposed to: the per-draw collapse that build `0006`
+showed, where a single 5,686-byte draw took the largest block from 12,276 down
+to 5,876, is gone, and picture cards no longer carve the heap on every rotation.
+
+The case for JPEG is therefore narrower than the section above argues, and it
+still stands. What remains is not per-draw churn but that one-time 45,056-byte
+block, held for the whole uptime, which is one of the long-lived allocations
+dividing the heap that a new TLS session then cannot find 32KB in. `draw_jpg`'s
+entire workspace is one ~3,900-byte `malloc` freed on every exit path, so
+converting assets removes that block rather than shrinking it. That makes asset
+conversion a **pending lever on the TLS problem**, which is not how it was
+originally justified - it was justified on per-draw contiguity, and per-draw
+contiguity has since been fixed by other means. Worth being explicit that the
+two figures in this section which invite a connection - the post-WiFi cap on
+`largest8` at 34,804, and a 45,056-byte block sitting just under 44KB - are
+suggestive of each other and that nothing here establishes any relationship
+between them.
+
+## The shared SPI bus was never there: "The likely root cause" above is superseded
+
+`b1d1626` went into `SelfTest/` to correct its heap figures, found the same stale
+premise asserted in three of its headers, and that makes this the right place to
+say plainly that the section titled **"The likely root cause: the SD card's SPI
+lines are shared with the display's, by hardware design"** is wrong - and to
+leave it standing.
+
+The pins, checked against LovyanGFX's own board profile and against this
+firmware's own runtime log:
+
+| | SPI host | SCLK | MISO | MOSI | CS |
+| --- | --- | --- | --- | --- | --- |
+| Panel (ILI9341) | SPI2 / HSPI | 14 | 12 | 13 | 15 |
+| SD card | SPI3 / VSPI | 18 | 19 | 23 | 5 |
+
+They do not contend. There is a second, independent statement of it inside the
+library: the detector base has a slot for a TF card on the panel's own host
+(`pin_tfcard_cs`) and calls `_set_sd_spimode()` to bring such a card up when it
+is set - and the Sunton 2432S028 profiles this board matches pass `-1` for it.
+That is the library's own data asserting there is no card on the panel's bus.
+
+What that section got wrong is one inferential step, and only one: "the only
+other real hardware SPI peripheral in this build is the display itself [...]
+leaving the display as the only plausible co-tenant." The co-tenant is the
+board's general-purpose SPI expansion header, with nothing plugged into it. That
+reading is also the more literal one - the manual names three *board pins* and
+says the card is on them; it does not mention the display - and it is the only
+one consistent with both subsystems having worked all along.
+`CYD-Dickey/SdCard.h` had said exactly this, independently, the whole time, and
+CYD-Dickey streaming from SD without ever hitting this problem was a curiosity
+sitting in this codebase's own comments for weeks.
+`docs/rgb565-feasibility.md` §1 carries the full chain of reasoning including
+the corroboration above, and it is also where the second correction owed to that
+section lives: the arbitration it describes as needing "real surgery" - patching
+LovyanGFX, or a project-wide mutex - already exists in the library, unpatched, as
+one config line.
+
+The section is marked superseded rather than deleted because its sources are
+real, its reasoning was careful, and it is the reason the whole
+read-whole-file-into-RAM detour existed. That detour cost a 10-24KB contiguous
+allocation on every draw and was the allocation failing in the field, which is a
+useful thing to be able to trace back to its actual origin.
+
+Rather than restate the argument, `SdStorage.cpp` now logs the runtime truth on
+every boot - the bus pins actually in force - and says what would put the premise
+back on the table:
+
+```
+[sd] bus pins in force: sclk=18 miso=19 mosi=23 cs=5 (panel is on HSPI at 14/12/13 - if these match, the shared-bus premise is back on the table)
+```
+
+That is deliberately a measurement rather than a comment, because the inference
+it replaces ("`SD.begin()` with no `SPIClass` takes Arduino's default SPI object,
+which is VSPI") is still an inference, and a future reader should not have to
+trust anyone's reading of a datasheet - including this file's.
+
+**The SelfTest half of the same commit** is documented up in the SelfTest
+reporting section: `MemoryTest` and `Display`'s failure logs now read
+`heap_caps_get_free_size`/`heap_caps_get_largest_free_block` instead of the
+wrappers, while `AllocResult`'s field names and their JSON keys keep the old
+wrapper names because they are a wire contract with the server's
+`SelfTestReportRequest` under the six-month firmware compatibility mandate. A
+memory test off by 4x in the *optimistic* direction would have passed this unit
+on the same night its 5,686-byte decode could not allocate, which is the whole
+reason a diagnostic's own instrumentation is worth auditing before trusting what
+it says about anything else. And `drawPngFromSdTest()` keeps its buffered
+whole-file read now that App streams: it is deliberately the divergent worst
+case, the one path still demanding a single contiguous file-sized block, so it
+fails first and loudest on a fragmented heap. That is what a self-test wants,
+and it is now labelled not-to-be-fixed, because it had started to read as an
+oversight.
+
+## Why a device restarted, in two parts - and why that answer had to leave RTC memory
+
+`BootDiag` (`App/BootDiag.h`/`.cpp`) answers "why did this device restart" as a
+pair, because neither half is enough alone. `esp_reset_reason()` answers *how* -
+power-on, software, panic, brownout - which already separates four diagnoses that
+were previously indistinguishable from the server, where the only evidence was
+`totalBoots` going up. But it flattens every deliberate restart into one
+`SOFTWARE_RESET`, and this firmware has several of those for unrelated reasons.
+So the reason reads as a pair:
+
+```
+POWERON_RESET   + NONE          power was applied; nothing to explain
+SOFTWARE_RESET  + LOW_HEAP      the cannot-draw watchdog restarted us
+SOFTWARE_RESET  + OTA           restarting to install an update
+SOFTWARE_RESET  + REPROVISION   returning to CAL for new WiFi or a new owner
+SOFTWARE_RESET  + UNREACHABLE   the connection watchdog restarted us (new tonight)
+PANIC_RESET     + NONE          we crashed; no intent was recorded, by definition
+BROWNOUT_RESET  + NONE          the supply sagged; not a software fault
+```
+
+The obvious cheaper design - "read the log line the firmware printed just before
+it restarted" - was the first version of this and is exactly wrong: the remote
+stream is flushed on a timer, so a restart is precisely the moment a log line is
+most likely to be lost, and a crash-adjacent one certainly is. The intent has to
+be *recorded* somewhere that survives the reboot, not narrated into a buffer
+that may not survive it.
+
+A `NONE` beside a `SOFTWARE_RESET` is itself a finding worth acting on: it means
+something restarted the device deliberately without recording why, which is a
+gap in this instrumentation rather than a property of the device.
+
+**That finding fired against this file's own first implementation, and it is why
+the storage changed tonight.** The intent was held in RTC memory
+(`RTC_NOINIT_ATTR`), on reasoning that is true in every part and still did not
+work: it survives a software reset and a panic, costs no flash write, and
+correctly does not survive a power cycle. What it missed is this device's boot
+architecture, which is the thing that makes this project unlike an ordinary
+ESP32 sketch. **The App never restarts into itself.** Every restart is
+App -> CAL -> App, because CAL is the permanent factory-partition loader and runs
+on every boot - two software resets, with a different binary executing in
+between. The recorded value did not come out the other side. Measured on device
+17: the check-in update branch calls `recordRestartIntent(Ota)`, and the very
+next App boot reports `SOFTWARE_RESET + NONE` - twice consecutively in one
+serial capture.
+
+NVS replaced it for one specific reason rather than as the obvious alternative:
+it is the one mechanism already *proven* across that exact hop, because it is how
+CAL's own `Identity::updateRequested` flag gets from the App to CAL in the first
+place. Reaching for the storage the boot ladder already depends on is a smaller
+bet than reasoning again from first principles about which memory survives what.
+
+The flash write this costs is bounded rather than free. A write happens only on a
+deliberate restart, and the clear on the read side happens only when something
+was actually recorded, so an ordinary power-on boot writes nothing at all.
+
+**NVS does outlive a power cycle, which RTC did not, and that is now handled on
+the read side rather than left to the storage.** A `POWERON_RESET` reports `NONE`
+whatever is stored, because a recorded intent that a power cut interrupted is not
+the reason the device came back up - and it says separately that it discarded a
+pending intent, because an interrupted deliberate restart is worth knowing about
+even though it explains nothing about this boot. The clear itself is correctness
+and not tidying: without it a deliberate OTA restart would leave `OTA` sitting in
+storage, and the next unrelated panic would report `PANIC_RESET + OTA`, inventing
+a causal link that does not exist and sending whoever reads it after the wrong
+bug. With NVS that matters *more* than it did with RTC, because nothing else
+would ever remove the value.
+
+One smaller correction rode along, and it is the kind worth noticing. While the
+cause lived in RTC, the stale-diagnosis warning read "some restart path is not
+calling `recordRestartIntent()`" - which accused call sites of a fault that was
+actually in `BootDiag` itself. With the cause in NVS the storage is no longer a
+suspect, and the message now means what it says.
+
+The enum's values are explicit and are never renumbered, for a reason specific to
+what this is: they are written to NVS by one boot and read by the next, so a
+build that renumbered them mid-upgrade would misreport the reason for exactly the
+restart that installed it. `Unreachable` is appended as `5` accordingly.
+
+## Three fixes out of one serial capture
+
+One capture of devices 7 and 17 produced three unrelated problems, which is worth
+recording as a pattern rather than three items: none of them was what anyone sat
+down to look for, and all three were visible in the same few hundred lines.
+
+### An update check that could not happen, reported as "already up to date"
+
+`AppUpdater::newerVersionAvailable()` returned a `bool`, and **every** failure
+path returned `false`: TLS setup, a request that would not begin, a non-200, a
+response that would not parse. `App.ino`'s BOOT-button handler renders `false` as
+"Already up to date" on screen and in the log. So a device that could not reach
+the server at all told whoever walked over and pressed the button that everything
+was fine. Device 7 did exactly that - reported up to date while running a build
+four versions behind the fleet, having last reached the server four hours
+earlier.
+
+That is the worst available answer at the worst possible moment. The button
+exists for a person standing at the device who wants an update, and a confident
+"all good" sends them away believing the opposite of the truth - and because the
+device looks like it answered, it removes the one signal that would have made
+them try something else.
+
+The return is now a three-state `AppUpdater::UpdateCheck` - `Newer`, `UpToDate`,
+`CheckFailed` - the function is renamed `checkForUpdate()` to match, and the
+button path shows "Could not check / The service could not be reached", held on
+screen for 2.5 seconds rather than the up-to-date case's 1.5 because this is the
+one that asks to be read. Every failing return also says "update state UNKNOWN"
+in the log, so a capture reads as an unanswered question rather than a clean bill
+of health.
+
+**The unattended hourly fallback timer deliberately still does nothing on
+`CheckFailed`**, and the asymmetry is the point. No person is standing there, so
+a transient network failure should wait quietly for the next tick rather than put
+an error on a wall display nobody asked. The BOOT-button path is the opposite
+case: somebody is waiting for an answer, and silence is the wrong response. Same
+three states, two different right answers.
+
+### A diagnostic that ruled out the actual cause
+
+`Http::diagnoseFailure()` logged `ESP.getFreeHeap()`/`ESP.getMaxAllocHeap()`, and
+misled because of it. A captured check-in failure reported `maxAlloc=32756` while
+the `[heapdiag]` line beside it measured the true largest 8-bit block at
+**22,516**. A reader who sees 32,756 concludes there is ample room for a TLS
+handshake and rules memory out - which is precisely the wrong conclusion to hand
+someone in the first line of an investigation. It now prints `free8`/`largest8`
+from `heap_caps`, both of them, because they answer different questions: `free8`
+is "how much is there" and `largest8` is "how much can be handed to one
+allocation", and a new session needs the second.
+
+The same diagnostic narrowed a real failure to "the TLS handshake itself" and
+stopped there, which is a category and not a cause - a certificate that will not
+validate, a clock outside the validity window, an out-of-memory on the ~32KB of
+session buffers, and a peer that hung up are all "the handshake" and want four
+different fixes. `NetworkClientSecure::lastError()` carries mbedTLS's own answer,
+already rendered to text by the library. **It was available all along and was
+never read.** It is now logged, deliberately *after* the DNS and TCP probes
+rather than before them, because those touch only a separate plain client and
+never `gClient`, so its error state is still the one from the request that
+actually failed.
+
+The negative case is logged too rather than passed over in silence: a handshake
+that failed while mbedTLS holds no error usually means the failure was *above*
+it - a reused session the peer dropped, or HTTPClient giving up on its own timeout
+before TLS ever reported anything. Every mbedTLS code in the table further up
+this file exists because this one line started being read.
+
+### A log that buried both of them
+
+`StackWatch::logHighWaterMark()`'s after-render call site runs every loop
+iteration and logged unconditionally, producing **several hundred consecutive
+identical lines** in the capture and burying the `[heapdiag]` and `[checkin]`
+lines someone was reading. On a device with streaming on, that spends the only
+diagnostic channel a deployed device has on saying nothing changed.
+
+It now logs on change, plus a five-minute heartbeat. What makes that lossless is
+a property of the underlying call rather than a judgement about how much detail
+is enough: `uxTaskGetStackHighWaterMark()` returns the *minimum* free the task has
+ever seen, so it is monotonically non-increasing and can only move one way. Every
+distinct value it will ever take is still printed exactly once, at the moment it
+first happens. The heartbeat exists because "the stack has been fine for an hour"
+and "this stopped being called an hour ago" would otherwise produce identical
+logs, and those are not the same fact. Its interval arithmetic is subtraction
+rather than addition so it stays correct across `millis()`' 49-day rollover - the
+comparison form would go quiet for 49 days the first time it wrapped.
+
+## Pinning two roots instead of a hundred and fifty, because verification was running out of heap
+
+Devices were intermittently unable to reach the server at all - check-in,
+telemetry, debug streaming and the OTA path all ride the same HTTPS - with:
+
+```
+E esp-x509-crt-bundle: PK verify failed with error 0x10
+E esp-x509-crt-bundle: Certificate matched but signature verification failed
+E esp-x509-crt-bundle: Failed to verify certificate
+```
+
+`0x10` is `MBEDTLS_ERR_MPI_ALLOC_FAILED` (`-0x0010`, `bignum.h`), so **this was
+never a trust problem.** Verification ran out of heap part way through the bignum
+arithmetic, and the bundle layer reported that as a signature that would not
+verify - which reads as the certificate being wrong, and sent the investigation
+at the certificate rather than at the memory. The service's chain is
+`api.discoveraroundme.com <- YE2 <- Root YE <- ISRG Root X2`: four levels,
+ECDSA P-384 at every link, which in software on this chip means a great many
+small MPI allocations.
+
+**The deciding figure is total free 8-bit heap, not the largest contiguous
+block**, and the two devices measured at the same moment make that unambiguous in
+the most useful possible way - by disagreeing with the intuition this project had
+spent weeks building:
+
+```
+device 7:  free8=10,948  largest8=34,804  -> verification FAILS
+device 17: free8=20,764  largest8=14,324  -> verification SUCCEEDS
+```
+
+The device with the far *larger* contiguous block is the one that fails. That is
+what identifies this as a working-set problem rather than a fragmentation one,
+and it is why the symptom is intermittent: `free8` is plentiful just after boot
+and falls as cards render, so the first check-in after a restart succeeds and
+later ones stop. It also cost three wrong diagnoses on the way, each of them from
+reading `largest8` - the contiguity figure the graphics bug above had trained
+everyone to watch - instead of `free8`. Having been right about which number
+mattered for one problem turns out not to be a qualification for the next one.
+
+`Tls.cpp` now calls `setCACert()` with the two ISRG roots from the new
+`App/TlsRoots.h` instead of `setCACertBundle()` with the core's ~150-certificate
+Mozilla snapshot. Two certificates cost dramatically less to hold and search than
+a hundred and fifty, so verification stops depending on how fragmented the heap
+happens to be when a check-in lands.
+
+**The certificate bytes were not transcribed by hand**, and how they were checked
+is the part worth copying next time anything gets embedded in this firmware. They
+were exported from the host's own trust store, and the chain the server actually
+sends - captured with `openssl s_client -showcerts` - was then proven to validate
+against exactly those two anchors and nothing else:
+
+```
+openssl verify -CAfile isrg_roots.pem -untrusted inter.pem leaf.pem
+leaf.pem: OK
+```
+
+Then the C string literal as it appears in `TlsRoots.h` was expanded the same way
+the compiler will - `printf '%b'` over the concatenated payloads - and
+re-verified, so what was checked is the bytes the firmware will hand mbedTLS
+rather than the bytes someone intended to paste. Both parse as the expected
+self-signed roots, and `leaf.pem: OK` again. Fingerprints are recorded in the
+header for anyone comparing them against ISRG's published values.
+
+X1 is included alongside X2 although only X2 is on the current chain. X2 is the
+ECDSA root the live chain terminates at; X1 is the older RSA root, and it is there
+so a reissue onto Let's Encrypt's RSA hierarchy - which needs no device change and
+could happen without warning - still validates.
+
+**The trade is real and is accepted rather than argued away.** The core bundle
+trusts essentially every public CA, so the service could move to any issuer and
+devices would follow. This does not: if the service ever stops chaining to an ISRG
+root, every pinned device loses its connection to the server, *including the OTA
+path that would deliver the fix*. That is the same shape of failure as the
+watchdog section below - a device unable to receive the update that repairs it -
+and it is accepted because the measured alternative is a fleet that intermittently
+cannot talk to the server at all. X1 and X2 expire in 2035 and 2040, so neither is
+a near-term maintenance concern, but both are now dates this firmware has an
+opinion about and the bundle version never did.
+
+`Tls.h`'s reasoning about validating against roots rather than pinning the leaf is
+untouched by this, and now says why: **roots are not the thing that rotates every
+ninety days.** Leaf certificates are, CAL cannot be updated over the air, and a
+device trusting exactly one leaf would stop working the day it was replaced -
+taking every unit in the field with it simultaneously. Narrowing the trust store
+from 150 roots to two leaves that argument completely intact, which is the
+distinction worth keeping straight: this change is about how much trust material
+the device holds, not about how specific the trust is.
+
+One thing genuinely disappeared. `Tls::configure()` no longer has a failure path,
+and that is worth noticing rather than glossing: the bundle version could really
+fail, because it computed a size from two linker symbols and `setCACertBundle()`
+treats a null pointer or a zero size as "detach the bundle" - **disabling
+certificate validation outright instead of erroring**, which made it the most
+dangerous call in this codebase to get wrong and the one most worth checking. A
+string literal in `.rodata` can be neither absent nor zero-length, so a
+conditional there would be unreachable code implying a risk that no longer
+exists. The `bool` return and `Http::ready()` stay anyway, so a future trust
+source that *can* fail - a certificate loaded from SD or NVS - does not require
+rebuilding that contract and every call site's error handling with it.
+
+## A failed handshake froze the whole device for two minutes, and it was a default nobody had set
+
+A device was measured blocking its entire loop for **121,019 ms** on one failed
+check-in handshake. The core defaults `NetworkClientSecure`'s `handshake_timeout`
+to 120,000 ms (`NetworkClientSecure.cpp:41`), so that is the default firing
+almost to the millisecond.
+
+`http.setTimeout(Config::kHttpTimeoutMs)` does not cover this and never did -
+that is HTTPClient's *read* timeout, a separate clock. Nothing bounded the
+handshake, and nothing in this document had noticed that the two timeouts are
+different things.
+
+For those two minutes the App renders nothing, samples no touches and sends no
+telemetry. **That is the "frozen on the clock" report from the field**, and the
+missed telemetry cycles visible in the fleet table are the same event seen from
+the server. Both had been filed as separate mysteries; they were this. A device
+whose panel is showing a clock drawn from local state, while its single thread
+sits inside a TLS handshake, is indistinguishable to a household from a device
+that has crashed.
+
+`Http::begin()` now calls `gClient.setHandshakeTimeout(15)`. Fifteen seconds
+because it has to sit above the worst *successful* handshake and below anything a
+person would call frozen: good handshakes complete inside a second on this
+hardware, per the `[assets]` fetch traces at 241-787 ms including connection
+setup, and the slowest full loop iteration containing a successful check-in was
+about 8 s. Fifteen clears that with room and turns a two-minute freeze into a
+hiccup.
+
+**Note the unit trap, documented at the call site because it is exactly the kind
+of thing that looks like a change that did nothing:** `setHandshakeTimeout()`
+takes **seconds** and multiplies by 1000 internally
+(`NetworkClientSecure.cpp:450`). Passing a millisecond figure asks for a timeout a
+thousand times too long, and the symptom is a device that still freezes for two
+minutes underneath a line of code that says it should not.
+
+This bounds the damage rather than fixing the cause, and the cause is still open.
+Why a handshake stalls for the full two minutes at all is unexplained: the newly
+added diagnostic reports only `mbedTLS error -1: ERROR - Generic error`, with
+`free8=45,236` and `largest8=34,804` at the moment of failure - so memory is
+definitively ruled out **for this failure mode**, which is a separate finding
+worth having on its own and one that exists only because the diagnostic above
+started reading `lastError()`.
+
+## Restarting a device that can draw but cannot be reached
+
+A device that loses its TLS session cannot get it back. mbedTLS needs roughly
+32KB contiguous for a new one; once cards have been rendering the largest 8-bit
+block settles well below that - 13,812 bytes, measured repeatedly on device 17 -
+and every handshake then fails with `MBEDTLS_ERR_SSL_ALLOC_FAILED` (`-32512`).
+**`gClient` is a process-lifetime global and nothing in this firmware resets it,
+so the first failure is permanent for the life of the process.**
+
+The state that produces is the worst one available, and worth describing
+carefully because it is invisible from every direction someone would normally
+look. The device draws its cards perfectly. It is simultaneously invisible: no
+telemetry, no check-in, no debug stream, and no way to receive a card policy or a
+firmware update. It looks healthy on the wall and cannot be managed by anything -
+including the update that would fix it. A card-policy edit saved at 21:11:39 sat
+undelivered for **18 minutes** for exactly this reason, and was delivered only by
+a power cycle.
+
+Across an evening of this on two devices, a restart recovered it every single time
+and nothing else ever did. So `checkUnreachableWatchdog()` in `App.ino` now does
+deliberately what a person was otherwise doing by hand: **five consecutive failed
+check-ins with WiFi associated, and the App restarts itself.** Five is about five
+minutes at the default 60-second cadence - long enough to sit under any ordinary
+blip, short enough that a stuck device is back inside the window where a policy or
+firmware change can reach it.
+
+Three guards, because a self-restarting device is dangerous if it is wrong about
+the cause:
+
+- **WiFi must be associated.** If it is not, the server being unreachable is a
+  network fact rather than a TLS one, a restart fixes nothing, and the device
+  would simply reboot repeatedly through an outage that has nothing to do with
+  this firmware. It declines and logs that it declined, which matters: a guard
+  that silently does nothing is indistinguishable from a guard that is broken.
+- **Twenty minutes minimum between restarts, and this needs two halves to work at
+  all.** The in-boot variable is the obvious half. The half that makes it real is
+  `setup()` seeding it from the new `BootDiag::lastRestartCause()` when the
+  previous restart was `Unreachable`. Without that, a restart clears the variable
+  and the device is eligible again five minutes later, forever - so the guard
+  would be decoration. **Backing off across the very reboot it guards is the
+  entire point**, because a service that is genuinely down cannot be fixed by
+  rebooting, and three reboots an hour is a far better wrong answer than twelve.
+  This is the first thing in this firmware to use `lastRestartCause()` for a
+  decision rather than for a log line, and it is why `0012` had to land before
+  `0016` could mean anything.
+- **The counter clears on the first success**, so a server deploy, a Kestrel
+  restart or a brief AP glitch passes underneath it and never triggers anything.
+
+`RestartCause::Unreachable` is kept distinct from `LowHeap` on purpose, and not
+merely for tidiness: "cannot draw" and "cannot be reached" want opposite
+investigations, and a device can be in either state while perfectly healthy in the
+other. Merging them would put one threshold in front of two unrelated diagnoses,
+which is the mistake the three watchdog thresholds above already demonstrated in
+another form.
+
+The watchdog is checked from `loop()` rather than from inside `performCheckIn()`,
+so the decision to restart is never taken while a request is part way through, and
+so it sits in the same place as the heap watchdog it is a sibling of. The restart
+path itself reuses everything the cannot-draw watchdog established -
+`Log::flushNow()`, `AppService::stashTimeForFastReboot()` so the next boot skips
+the blocking SNTP wait, an on-screen "Reconnecting / Restoring the connection -
+back in a moment", and a 1500 ms delay before `esp_restart()`. The flush is close
+to futile here and is done anyway: this is the one restart where the channel that
+would carry the explanation is exactly what is broken, so it costs nothing on a
+device that cannot send, and on a device whose failure was asset fetches rather
+than the log stream it is the whole explanation.
+
+**This does not stop the handshakes failing. It stops a failure being
+permanent**, which is what made OTA unreliable. The real fix is a short-lived
+per-request TLS client, and it is still open.
+
+## Still open after tonight
+
+Three things are unresolved, and two of them matter more than anything that
+shipped.
+
+**The real TLS fix is a short-lived per-request client, and nothing has been
+built.** `Http.h` already documents why the obvious version of this is not it: an
+earlier `releaseTlsSession()` did exactly `gHttp.end(); gClient.stop();`, and it
+*worked* as a measurement - on device 17 it returned 41,312 bytes and moved the
+largest contiguous 8-bit block from 6,132 to 36,852, after which an identical
+10,568-byte allocation that had just failed succeeded. That is what established
+peak concurrent use rather than fragmentation as the constraint. It was removed in
+`b49a93e` for a reason that still holds: `gClient` is shared with telemetry and
+the debug log stream, and a client left unusable after `stop()` takes the device's
+own diagnostic channel down with it, so the failure hides its own evidence -
+which is precisely what happened to two devices. What went unnoticed at the time
+is that **removing it also removed the only recovery path this firmware had**, and
+tonight's unreachability watchdog works around that absence rather than filling
+it. A per-request client for content fetches, leaving the shared one to telemetry
+and logging, is the change that would let a failed request be discarded without
+taking the diagnostics with it.
+
+**Device 7 appears to be rebooting on a false positive, and the log line that
+would say so is misnamed.** It has **no SD card**, and it was observed rebooting
+every ~11 minutes all evening - at 620-660 s uptime each time - with the health
+line reading `consecutive file-buffer alloc failures=6/6`. The suspicion is that
+this is not a memory problem at all: its graphic cards can never cache an image,
+so their draws fail, the cannot-draw watchdog reads a run of failed draws as the
+device having lost the ability to draw, and **a reboot cannot fix a missing SD
+card.** If that is right, it is the failure mode the watchdog section above
+explicitly worried about - "if a restart does not fix it, this becomes a restart
+every four minutes" - arriving by a route nobody predicted, on a device that is
+not short of memory at all. **This is not confirmed.**
+
+Two things make it hard to be sure, and both are worth having in place before the
+next capture:
+
+- **`BootDiag` on build `0010` reported `NONE` for every software reset**, which
+  is exactly the blindness `c445836` fixes. On `0012` and later, a device
+  rebooting for this reason will say `SOFTWARE_RESET + LOW_HEAP` and one rebooting
+  for any other reason will say something else. That single distinction is what
+  turns this from a suspicion into a finding, and it is the first thing to look
+  for.
+- **The log line is misdescribing its own subject.** `App.ino` prints
+  "consecutive file-buffer alloc failures" and its constant is still
+  `kMaxConsecutiveBufferAllocFailures`, but what it reads is
+  `Display::consecutiveDrawFailures()`, which `noteDrawOutcome()` increments on
+  **any** failed draw - a missing file, an unrecognised header, a decode that
+  returned false - and not, as the surrounding comment still claims, "only when a
+  file-buffer allocation has exhausted plain malloc, all three explicit capability
+  sets, and the TLS release". That file buffer does not exist any more; streaming
+  removed it. So the counter is right, the watchdog is behaving as designed, and
+  the *label* is what points every reader who sees `6/6` at memory exhaustion.
+  Renaming it is a code change and is not made here; until then, read a `[health]`
+  line's failure count as "failed draws".
+
+  Worth noting alongside it: `a10c686` deliberately closed the gap where
+  `drawImageFromBuffer` - the RAM path a device with no usable card uses - never
+  fed `noteDrawOutcome()` at all. That was the right change on its own terms, and
+  it also means a no-SD device's failing draws became visible to this watchdog for
+  the first time. Whether device 7's loop begins at that build is the obvious
+  thing to check and has not been checked.
+
+**One mbedTLS failure is unexplained.** `-9984`
+(`MBEDTLS_ERR_X509_CERT_VERIFY_FAILED`) was observed at `free8=47,200` and
+`largest8=34,804` - ample memory of both kinds - so it is not the allocation story
+that accounts for the other two, and the chain verifies against the pinned roots
+off-device. It is recorded in the table above with no explanation attached rather
+than folded into an account it does not fit.
+
+And, so that tonight's six builds are not mistaken for verification: **none of
+this has been compiled or run.** The measurements are real; the code written in
+response to them has been read, not built.
