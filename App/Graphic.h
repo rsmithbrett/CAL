@@ -97,4 +97,25 @@ extern const char* const kCardId4;
 /// The fifth instance's registered id, on the same terms as `kCardId2`.
 extern const char* const kCardId5;
 
+/// Frees every instance's direct-to-RAM asset buffer and forgets the pictures
+/// they held, so the next refresh re-fetches them.
+///
+/// **Called when a check-in has failed, to buy back contiguous heap for the
+/// TLS handshake.** On a device with no SD card every graphic falls back to
+/// holding its bytes in RAM for the process lifetime (see Assets.h's
+/// fetchToRam and RamAssetBuffer), and two such buffers are enough that no
+/// 32KB contiguous hole remains anywhere for a new TLS session. Measured: the
+/// two card-less devices in this fleet sit at largest8 21,000-26,000 while
+/// drawing nothing at all, and their handshakes fail with SSL_ALLOC_FAILED
+/// (-32512). A device in that state cannot check in, cannot be sent a card
+/// policy and cannot be given a firmware update, so trading the pictures for
+/// the connection is the right way round - and the pictures come back on the
+/// next successful fetch.
+///
+/// Costs nothing on a device with a working SD card: those instances hold no
+/// RAM buffer, so this is five null checks and no log output. Safe to call at
+/// any time; it is NOT safe to call it and then assume a card still has its
+/// picture.
+void releaseRamBuffers();
+
 }  // namespace Graphic

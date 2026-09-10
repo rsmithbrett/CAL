@@ -275,6 +275,35 @@ struct Instance {
     drawNoContent("This card's image could not be displayed.");
   }
 
+  /// Gives this instance's RAM buffer back and forgets the picture it held.
+  ///
+  /// Clearing gReady/gFromRam/gCachedId is not tidying, it is the whole
+  /// safety requirement - see Assets.h's releaseRamBuffer() remarks. gReady
+  /// left true beside a freed pointer would send draw() to
+  /// Assets::drawRam() with data that is no longer ours, and gCachedId left
+  /// set would make the next fetch() believe the wanted asset was already
+  /// held and skip the re-fetch, so the card would stay silent forever
+  /// rather than for one refresh interval.
+  ///
+  /// Reporting zero items until the next successful fetch is the correct
+  /// behaviour and not a regression: an instance with no picture is silent
+  /// by design (see Graphic.h), and this is only ever reached on a device
+  /// whose check-ins are already failing - which is also a device that
+  /// cannot re-fetch anything until its connection comes back.
+  static void releaseRamBuffer() {
+    if (!gFromRam && gRamBuffer.data == nullptr) {
+      return;
+    }
+    Assets::releaseRamBuffer(gRamBuffer);
+    gReady = false;
+    gFromRam = false;
+    gCachedId = "";
+    // Left deliberately untouched: gLastLoggedId/gLastLoggedReady/
+    // gLastLoggedFromRam are the dedup state for noteState(), so clearing
+    // them would make the next fetch log a "changed" line for a state that
+    // had not changed. Their whole job is to survive across this.
+  }
+
   /// Builds and registers this instance's descriptor. Called once per
   /// instantiation from the static-init block at the bottom of this file -
   /// see that block for why `order`/`interleaveEvery` are the same across
@@ -375,5 +404,19 @@ const char* Instance<5>::id() {
 [[maybe_unused]] const bool kRegistered5 = Instance<5>::registerSelf(3, 8);
 
 }  // namespace
+
+void releaseRamBuffers() {
+  // Only an instance actually holding a RAM buffer has anything to give back;
+  // an SD-backed or unconfigured one has a null pointer and
+  // Assets::releaseRamBuffer() returns immediately. So on a device with a
+  // working SD card this whole function is five null checks and produces no
+  // log output at all, which is why the caller does not have to know whether
+  // this device is in fallback mode.
+  Instance<1>::releaseRamBuffer();
+  Instance<2>::releaseRamBuffer();
+  Instance<3>::releaseRamBuffer();
+  Instance<4>::releaseRamBuffer();
+  Instance<5>::releaseRamBuffer();
+}
 
 }  // namespace Graphic

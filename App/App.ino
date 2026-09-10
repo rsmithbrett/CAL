@@ -71,6 +71,12 @@ size_t getArduinoLoopTaskStackSize(void) {
 #include "CheckIn.h"
 #include "Config.h"
 #include "Display.h"
+// For Graphic::releaseRamBuffers() on the check-in failure path. This is the
+// only reason App.ino knows about a specific card module at all - every other
+// card registers itself and is reached solely through CardManager - and it is
+// here because the RAM asset buffers are the largest thing a card-less device
+// holds, and freeing them is a recovery action rather than a card concern.
+#include "Graphic.h"
 #include "HomeValue.h"
 #include "Http.h"
 #include "Identity.h"
@@ -750,6 +756,23 @@ void performCheckIn() {
                 "connection",
                 static_cast<unsigned long>(gConsecutiveCheckInFailures),
                 static_cast<unsigned long>(kMaxConsecutiveCheckInFailures));
+
+    // Buy back contiguous heap before the next attempt, in case that is what
+    // the handshake was short of. A new TLS session needs roughly 32KB
+    // contiguous; on a device with no SD card each graphic holds its picture
+    // in a RAM buffer for the process lifetime, and two of those leave no
+    // such hole anywhere. See Graphic::releaseRamBuffers().
+    //
+    // Tried here, on the failure path, rather than before every request:
+    // pre-emptively freeing would make a healthy card-less device re-fetch
+    // its pictures over the network every single check-in, which is the
+    // opposite of what it needs. A device that has just failed a check-in is
+    // already not fetching anything.
+    //
+    // It costs nothing at all on a device with a working SD card - those
+    // instances hold no RAM buffer - so this is not gated on detecting
+    // fallback mode, and does not need to be.
+    Graphic::releaseRamBuffers();
     return;
   }
 

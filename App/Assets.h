@@ -163,6 +163,35 @@ struct RamAssetBuffer {
 /// should trust; `buffer.size` is only valid after a true return.
 bool fetchToRam(const String& id, RamAssetBuffer& buffer);
 
+/// Hands a RamAssetBuffer's memory back, against the "static, grow-only,
+/// never freed" discipline every other buffer in this codebase follows.
+///
+/// **Why this one gets an exception.** Never-freeing is right when a buffer's
+/// only competition is other allocations of its own kind. It is wrong here
+/// because of what a RamAssetBuffer competes with: a new TLS session needs
+/// roughly 32KB CONTIGUOUS, the largest 8-bit block on this board is capped
+/// near 34,804 bytes once WiFi is up, and each graphic instance in RAM-
+/// fallback mode holds its own ten-to-twenty-thousand-byte buffer for the
+/// process lifetime. Two of those and there is no 32KB hole left anywhere.
+///
+/// That is measured, not inferred: the two devices with no SD card sit at
+/// largest8 21,000-26,000 while drawing nothing at all, and their handshakes
+/// fail with MBEDTLS_ERR_SSL_ALLOC_FAILED (-32512). A device in that state
+/// cannot check in, cannot be sent a card policy, and cannot be given a
+/// firmware update - so it is holding a picture at the price of being
+/// manageable at all. Freeing the picture is the better trade.
+///
+/// Only ever called after a check-in has already failed, never speculatively:
+/// on a healthy device the buffer is doing its job and costs nothing worth
+/// reclaiming.
+///
+/// **A caller must also forget what it believed about the contents.** `size`
+/// and `capacity` are zeroed here, but a caller holding its own "this id is
+/// ready in RAM" flag has to clear that itself or it will hand a freed
+/// pointer to the decoder. Graphic.cpp's releaseRamBuffers() is the worked
+/// example.
+void releaseRamBuffer(RamAssetBuffer& buffer);
+
 /// Draws a buffer previously filled by fetchToRam(), with the same retry
 /// count, decode-failure reporting and dedup as drawFullScreen()/drawCached()
 /// give an SD-backed asset (see kMaxDrawAttempts in Assets.cpp) - a transient

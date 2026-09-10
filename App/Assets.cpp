@@ -1,6 +1,7 @@
 #include "Assets.h"
 
 #include <SD.h>
+#include <esp_heap_caps.h>  // releaseRamBuffer()'s largest-block figure
 #include <mbedtls/sha256.h>
 
 #include "Config.h"
@@ -782,6 +783,27 @@ bool fetchToRam(const String& id, RamAssetBuffer& buffer) {
     return false;
   }
   return fetchToRamImpl(id, buffer);
+}
+
+void releaseRamBuffer(RamAssetBuffer& buffer) {
+  if (buffer.data == nullptr) {
+    return;
+  }
+  const size_t released = buffer.capacity;
+
+  free(buffer.data);
+  // All three cleared together, deliberately: a null pointer beside a non-zero
+  // size is exactly the shape drawRam() and every caller-side readiness check
+  // would read as "usable", and this is the only function in the codebase that
+  // could create it.
+  buffer.data = nullptr;
+  buffer.capacity = 0;
+  buffer.size = 0;
+
+  Log::printf("[assets] released a %u-byte RAM asset buffer - largest 8BIT block now %u "
+              "(a new TLS session needs ~32KB contiguous)",
+              static_cast<unsigned>(released),
+              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 }
 
 bool drawRam(const String& id, const RamAssetBuffer& buffer) {
