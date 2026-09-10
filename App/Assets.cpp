@@ -195,14 +195,63 @@ bool ensureRamBufferCapacity(RamAssetBuffer& buffer, size_t needed) {
 /// no way to know at boot which asset id last won. Every other line of this
 /// function - TLS, auth, streamed sha256, temp-file-then-rename, SD
 /// readback-verify - stays identical for both callers.
+/// One line per fetch, on every exit path, whatever the outcome.
+///
+/// **Why a permanent metric and not just failure logging.** Three failure
+/// modes were indistinguishable in the field, and one of them hid a real bug
+/// for weeks:
+///
+///   slow but complete    - high elapsedMs, LOW maxIdleMs, bytes == length
+///   stalled              - maxIdleMs at the timeout, bytes < length
+///   complete but corrupt - bytes == length, shaResult=MISMATCH
+///
+/// All three previously surfaced as some variant of "the asset would not
+/// decode", which is why a fetch that truncated on a stall and one that
+/// arrived intact but hashed wrong got chased as the same problem. maxIdleMs
+/// is the discriminator: it reports the WORST silence observed during the
+/// transfer, so a reader can see how close a fetch came to the idle timeout
+/// even when it succeeded - which is the early warning that the previous
+/// fixed-deadline bug gave nobody.
+///
+/// Logged from a destructor so no exit path can omit it. This function has
+/// eight or so early returns and more will be added; a summary that has to be
+/// remembered at each one is a summary that will be missing from exactly the
+/// path someone needs it on. `cacheAction` defaults to a value that names its
+/// own absence, so a return path that forgets to set it is visible in the log
+/// rather than silently reported as something plausible.
+struct FetchTrace {
+  const String& id;
+  int bytesReceived = 0;
+  int contentLength = -1;
+  uint32_t startMs = millis();
+  uint32_t maxIdleMs = 0;
+  const char* shaResult = "not-reached";
+  const char* cacheAction = "UNSET-a return path did not record its outcome";
+
+  explicit FetchTrace(const String& fetchId) : id(fetchId) {}
+
+  ~FetchTrace() {
+    Log::printf(
+        "[assets] fetch '%s' bytesReceived=%d contentLength=%d elapsedMs=%lu maxIdleMs=%lu "
+        "sha=%s action=%s",
+        id.c_str(), bytesReceived, contentLength,
+        static_cast<unsigned long>(millis() - startMs), static_cast<unsigned long>(maxIdleMs),
+        shaResult, cacheAction);
+  }
+};
+
 bool fetchToCard(const String& fetchId, const String& cacheId) {
+  FetchTrace trace(fetchId);
+
   if (!Http::ready()) {
+    trace.cacheAction = "aborted-no-tls";
     Log::line("[assets] TLS setup failed");
     return false;
   }
 
   const String url = String("https://") + Config::kServiceHost + kFetchPathPrefix + fetchId + kFetchPathSuffix;
   if (!Http::beginRequest(url)) {
+    trace.cacheAction = "aborted-no-request";
     Log::printf("[assets] could not begin request for '%s'", fetchId.c_str());
     return false;
   }
@@ -221,6 +270,7 @@ bool fetchToCard(const String& fetchId, const String& cacheId) {
   Log::verbose("[assets] fetch of '%s' response status=%d", fetchId.c_str(), status);
   if (status != 200) {
     http.end();
+    trace.cacheAction = "aborted-http-status";
     Log::printf("[assets] fetch of '%s' failed, http status=%d", fetchId.c_str(), status);
     return false;
   }
@@ -233,6 +283,7 @@ bool fetchToCard(const String& fetchId, const String& cacheId) {
   // response carries.
   const int expectedSize = http.getSize();
   const String expectedHash = http.header("X-Asset-Sha256");
+  trace.contentLength = expectedSize;
 
   // Written to a temporary name and renamed on success, so an interrupted
   // download (power loss, WiFi drop mid-body) can never leave a truncated
@@ -245,6 +296,7 @@ bool fetchToCard(const String& fetchId, const String& cacheId) {
   File out = SD.open(tempPath, FILE_WRITE);
   if (!out) {
     http.end();
+    trace.cacheAction = "aborted-no-temp-file";
     Log::printf("[assets] could not open %s for writing", tempPath.c_str());
     return false;
   }
@@ -266,12 +318,47 @@ bool fetchToCard(const String& fetchId, const String& cacheId) {
   uint8_t buffer[512];
   int written = 0;
   bool writeFailed = false;
-  const uint32_t deadline = millis() + Config::kHttpTimeoutMs;
+  // An IDLE timeout, refreshed on every byte that arrives - not a wall-clock
+  // budget for the whole transfer.
+  //
+  // It used to be computed once before this loop and never refreshed, which
+  // made kHttpTimeoutMs a hard ceiling on total body time rather than on
+  // silence. Because the check below only runs when nothing is available, the
+  // failure needed two things to coincide: a transfer lasting longer than the
+  // timeout, and any momentary stall after that point. Then it would break out
+  // mid-body while the connection was perfectly healthy and making progress.
+  //
+  // What that costs is out of all proportion to the bug: a truncated body
+  // fails its SHA-256 check below, which invalidates the cache entry and
+  // schedules a re-fetch, which truncates again. That is a permanent silent
+  // loop on marginal WiFi, and it looks exactly like the "would not decode
+  // after 3 attempt(s) - invalidating the cache" pattern seen in the field.
+  //
+  // The arithmetic on why this was mostly dormant, and why it must be fixed
+  // before any larger asset format lands: a 12KB asset only needs 0.6 KB/s to
+  // beat a 20-second ceiling, so it effectively never fired. A 320x240 RGB565
+  // frame is 153,600 bytes and would need 7.5 KB/s SUSTAINED with no stall -
+  // comfortably reachable as a failure on a weak signal. Refreshing on
+  // progress removes the size dependence entirely: what matters is whether the
+  // stream has gone quiet, which is the only thing this timeout was ever
+  // trying to detect.
+  uint32_t idleDeadline = millis() + Config::kHttpTimeoutMs;
+  // When data last arrived, so the longest silence can be measured rather than
+  // only acted on at the timeout - see FetchTrace on why maxIdleMs is the
+  // metric that tells a slow transfer apart from a stalling one.
+  uint32_t lastProgressMs = millis();
 
   while (http.connected() && (expectedSize < 0 || written < expectedSize)) {
     const size_t available = stream->available();
     if (available == 0) {
-      if (millis() > deadline) {
+      const uint32_t idleFor = millis() - lastProgressMs;
+      if (idleFor > trace.maxIdleMs) {
+        trace.maxIdleMs = idleFor;
+      }
+      if (millis() > idleDeadline) {
+        trace.cacheAction = "rejected-stalled";
+        Log::printf("[assets] '%s' stalled with no data for %u ms after %d byte(s) - giving up",
+                    fetchId.c_str(), static_cast<unsigned>(Config::kHttpTimeoutMs), written);
         break;
       }
       delay(1);
@@ -288,6 +375,13 @@ bool fetchToCard(const String& fetchId, const String& cacheId) {
     }
     mbedtls_sha256_update(&sha, buffer, read);
     written += read;
+    trace.bytesReceived = written;
+
+    // Progress resets the clock. This one line is the whole fix: the timeout
+    // now measures silence rather than duration, so a slow-but-steady transfer
+    // completes however long it legitimately takes.
+    idleDeadline = millis() + Config::kHttpTimeoutMs;
+    lastProgressMs = millis();
   }
   out.close();
   http.end();
@@ -295,6 +389,7 @@ bool fetchToCard(const String& fetchId, const String& cacheId) {
   if (writeFailed) {
     mbedtls_sha256_free(&sha);
     SD.remove(tempPath);
+    trace.cacheAction = "rejected-sd-write-failed";
     Log::printf("[assets] fetch of '%s' - SD write failed after %d bytes", fetchId.c_str(), written);
     return false;
   }
@@ -302,6 +397,7 @@ bool fetchToCard(const String& fetchId, const String& cacheId) {
   if (written <= 0) {
     mbedtls_sha256_free(&sha);
     SD.remove(tempPath);
+    trace.cacheAction = "rejected-empty";
     Log::printf("[assets] fetch of '%s' wrote nothing (%d)", fetchId.c_str(), written);
     return false;
   }
@@ -314,6 +410,7 @@ bool fetchToCard(const String& fetchId, const String& cacheId) {
   if (expectedSize >= 0 && written != expectedSize) {
     mbedtls_sha256_free(&sha);
     SD.remove(tempPath);
+    trace.cacheAction = "rejected-truncated";
     Log::printf("[assets] fetch of '%s' was truncated (wrote %d of %d bytes)", fetchId.c_str(),
                 written, expectedSize);
     return false;
@@ -331,10 +428,20 @@ bool fetchToCard(const String& fetchId, const String& cacheId) {
   // hardware. expectedHash is only checked when the server actually sent it
   // (an older server without X-Asset-Sha256 skips this check, same
   // backward-compatibility posture as expectedSize above).
-  if (expectedHash.length() > 0 && !toHex(digest, sizeof(digest)).equalsIgnoreCase(expectedHash)) {
+  if (expectedHash.length() == 0) {
+    // An older server without X-Asset-Sha256. Recorded as skipped rather than
+    // passed - "we did not check" and "we checked and it was fine" must not
+    // read the same in a log used to judge whether storage is corrupting
+    // files.
+    trace.shaResult = "skipped-no-header";
+  } else if (!toHex(digest, sizeof(digest)).equalsIgnoreCase(expectedHash)) {
     SD.remove(tempPath);
+    trace.shaResult = "MISMATCH";
+    trace.cacheAction = "rejected-hash-mismatch";
     Log::printf("[assets] fetch of '%s' failed integrity check (hash mismatch)", fetchId.c_str());
     return false;
+  } else {
+    trace.shaResult = "ok";
   }
 
   // A second, independent check: re-read the bytes actually sitting in flash
@@ -349,6 +456,7 @@ bool fetchToCard(const String& fetchId, const String& cacheId) {
     File readBack = SD.open(tempPath, FILE_READ);
     if (!readBack) {
       SD.remove(tempPath);
+      trace.cacheAction = "rejected-readback-unopenable";
       Log::printf("[assets] fetch of '%s' - could not reopen %s to verify what was actually "
                   "written",
                   fetchId.c_str(), tempPath.c_str());
@@ -374,6 +482,11 @@ bool fetchToCard(const String& fetchId, const String& cacheId) {
     if (readBackTotal != written ||
         !toHex(verifyDigest, sizeof(verifyDigest)).equalsIgnoreCase(expectedHash)) {
       SD.remove(tempPath);
+      // Distinguished from the network-side mismatch above on purpose: the
+      // bytes arrived intact and the CARD changed them. Same hash comparison,
+      // completely different hardware to suspect.
+      trace.shaResult = "MISMATCH-on-readback";
+      trace.cacheAction = "rejected-storage-corrupted";
       Log::printf(
           "[assets] fetch of '%s' - storage corrupted what was written (network side verified "
           "fine, re-read from SD did not) - this card may be failing",
@@ -385,9 +498,12 @@ bool fetchToCard(const String& fetchId, const String& cacheId) {
   SD.remove(finalPath);
   if (!SD.rename(tempPath, finalPath)) {
     SD.remove(tempPath);
+    trace.cacheAction = "rejected-rename-failed";
     Log::printf("[assets] could not move %s into place", tempPath.c_str());
     return false;
   }
+
+  trace.cacheAction = "stored";
 
   // Names both ids when they differ (ensureSplashCached()'s case) so the log
   // reads "fetched X, stored as splash" rather than leaving which asset is

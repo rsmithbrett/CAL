@@ -1,4 +1,4 @@
-// SD.h MUST come before LovyanGFX.hpp, not after. LovyanGFX auto-detects
+﻿// SD.h MUST come before LovyanGFX.hpp, not after. LovyanGFX auto-detects
 // SD-card image support by checking whether the SD library's own include
 // guard is already defined (see its esp32/common.hpp); include it afterwards
 // and drawPngFile(SD, ...) fails to compile with "abstract type
@@ -6,9 +6,10 @@
 // note at the top of its .ino.
 #include <SD.h>
 #include <cstdlib>
-// For the per-capability heap queries in ensureFileBufferCapacity's failure
-// path - ESP.getMaxAllocHeap() reports only one capability set, and the whole
-// point of that diagnostic is to find out whether the others disagree.
+// For the per-capability heap figures logHeapSnapshot() reports. ESP's own
+// wrappers are not usable for this: at one measured instant ESP.getFreeHeap()
+// said 49,960 and ESP.getMaxAllocHeap() said 32,756 while the real 8BIT free
+// size was 11,340 with a largest block of 6,132.
 #include <esp_heap_caps.h>
 
 #define LGFX_AUTODETECT
@@ -28,11 +29,6 @@
 #include "CalQr.h"
 
 #include "Display.h"
-// Provisional, for the TLS-release retry experiment in
-// ensureFileBufferCapacity() - see that block's own remarks. A display module
-// has no business knowing about the network stack; this include goes when the
-// experiment does.
-#include "Http.h"
 #include "Log.h"
 
 namespace Display {
@@ -1889,315 +1885,66 @@ void flashNavEdge(bool isForward, bool canReverse) {
 
 namespace {
 
-/// The whole file's bytes, read from SD in one pass - a non-owning view onto
-/// gFileBuffer below, not a per-call allocation. `data` null means any
-/// failure (open, zero-length, short read, out of memory).
-struct FileBuffer {
-  uint8_t* data = nullptr;
-  size_t size = 0;
-};
+/// How many card draws in a row have failed, for App.ino's heap watchdog.
+///
+/// **This counts observed harm, not a heap metric, and that distinction is the
+/// point.** Every earlier version of that watchdog compared a heap figure
+/// against a threshold, and every one of those thresholds turned out to be
+/// indefensible: 60,000 and then 28,000 were both derived from
+/// ESP.getMaxAllocHeap(), which reports a value pinned at exactly 32,756 on
+/// every device and every boot while the real largest 8BIT block was measured
+/// at 6,132. A device restarted on that basis every four minutes for a
+/// fragmentation it could never clear.
+///
+/// "This device could not draw its card" needs no theory about which pool is
+/// short and cannot be fooled by a metric that means something other than it
+/// appears to. Reset to zero by any successful draw.
+///
+/// Read through consecutiveDrawFailures() rather than exported directly, so
+/// nothing outside this file can write it: the count is only meaningful if
+/// exactly one place decides what counts as a failure.
+uint32_t gConsecutiveDrawFailures = 0;
 
-/// One persistent, grow-only buffer shared by every readFileToBuffer() call,
-/// instead of a fresh `new`/free every single draw. Found live: the original
-/// per-call allocation was sized against "the largest asset in the catalog
-/// today" (a comment that already read under-34KB at the time, and was
-/// wrong again within the same night once an 80KB splash was uploaded) -
-/// but the real problem was never the size of any one allocation, it was
-/// doing one at all, every few seconds, for however many hours a device
-/// stays up. Two different asset sizes (a 34KB graphic, an 80KB splash)
-/// interleaved over a long uptime is close to a textbook heap-fragmentation
-/// generator on an allocator with no compaction, and it got measurably
-/// worse the same night a different fix (see drawPngFromSd()'s own comment
-/// on releasePngMemory()) started leaving LovyanGFX's ~44KB decode scratch
-/// buffer permanently allocated alongside it - two large, differently-sized
-/// blocks competing for the same fragmenting heap. A buffer that only ever
-/// grows to whatever the largest file actually seen so far needed, and is
-/// then reused as-is by every smaller file after that, allocates at most
-/// once per distinct size ever encountered - in the ordinary case (a fleet
-/// running the same asset catalog for weeks) that means zero further
-/// allocations at all after the first draw of the current largest asset,
-/// for the rest of the device's uptime.
-uint8_t* gFileBuffer = nullptr;
-size_t gFileBufferCapacity = 0;
+void noteDrawOutcome(bool ok) {
+  if (ok) {
+    gConsecutiveDrawFailures = 0;
+  } else {
+    ++gConsecutiveDrawFailures;
+  }
+}
 
-/// Grows gFileBuffer to at least `needed` bytes if it is not already that
-/// large, and never shrinks it - handing back a smaller buffer later would
-/// reintroduce the exact alloc/free churn this whole mechanism exists to
-/// avoid, for a memory saving that only matters on a device already tight
-/// enough that it wouldn't help anyway.
+/// The heap by capability class, for comparing across a specific moment.
 ///
-/// This used to call realloc(), reasoning that a grow might extend the block
-/// in place and save a copy. That was wrong in the one way that matters here.
-/// realloc() PRESERVES CONTENTS, so on any grow it cannot satisfy in place it
-/// holds the old block and the new one simultaneously and copies between them
-/// - and the sole caller, readFileToBuffer() below, overwrites every byte
-/// immediately with a fresh file read. That preservation was pure cost, paid
-/// in the one currency this device has none of: simultaneous contiguous
-/// blocks.
+/// **Both the free size and the largest block, per class.** A large free total
+/// with a small largest block is fragmentation; a small free total is genuine
+/// exhaustion; and the two differing BETWEEN classes would mean memory that is
+/// free but stranded in regions no byte-addressable allocation can use.
+/// MALLOC_CAP_32BIT is included only for that last comparison - a large 32BIT
+/// block beside a small 8BIT one would say the "free" memory was never
+/// available to malloc at all.
 ///
-/// Measured live on device 17, rotating two picture cards through the
-/// re-encoded assets the server now guarantees are under 24KB:
-///
-///   [display] read /assets/758b....png into memory (5686 bytes)       <- ok
-///   [display] out of memory growing the shared read buffer to 11676
-///             bytes (freeHeap=51944 maxAllocHeap=32756)               <- fails
-///
-/// An 11,676-byte request failing against a 32,756-byte hole is impossible as
-/// a single allocation - and it never was one. It was 5,686 still held plus
-/// 11,676 wanted plus the allocator's bookkeeping, inside a heap already
-/// carved down by mbedTLS: note that the failures cluster in the seconds
-/// after a check-in while the draws between check-ins succeed. Freeing first
-/// makes the peak requirement `needed` alone, which is what the numbers do
-/// allow.
-/// One line describing the heap by capability class, for comparing across a
-/// specific moment - see logHeapSnapshot()'s callers.
-///
-/// **Both the free size and the largest block, per class, is the whole point.**
-/// A large free total with a small largest block is fragmentation; a small free
-/// total is genuine exhaustion; and the two differing BETWEEN capability
-/// classes is the case this exists to catch - memory that is free but stranded
-/// in regions no byte-addressable allocation can use. MALLOC_CAP_32BIT is
-/// included for exactly that comparison and for no other reason: gFileBuffer
-/// never needs it, but a large 32BIT block sitting beside a small 8BIT one says
-/// the "free" memory is in word-addressable-only regions and was never
-/// available to malloc() at all.
+/// Measured once already, and the answer was none of the exotic cases: at a
+/// failing 10,568-byte allocation, all four classes reported an identical
+/// 11,340 free with a 6,132 largest block and integrity OK. No DMA starvation,
+/// no stranding, no corruption - just less room than the ESP wrappers claimed.
 void logHeapSnapshot(const char* when) {
-  const size_t free8 = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-  const size_t largest8 = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  const size_t freeInternal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  const size_t largestInternal =
-      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  const size_t freeDma = heap_caps_get_free_size(MALLOC_CAP_DMA);
-  const size_t largestDma = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
-  const size_t largest32 = heap_caps_get_largest_free_block(MALLOC_CAP_32BIT);
-
   Log::printf(
       "[heapdiag] %s | 8BIT free=%u largest=%u | INT|8BIT free=%u largest=%u | "
       "DMA free=%u largest=%u | 32BIT largest=%u | ESP.maxAlloc=%u",
-      when, static_cast<unsigned>(free8), static_cast<unsigned>(largest8),
-      static_cast<unsigned>(freeInternal), static_cast<unsigned>(largestInternal),
-      static_cast<unsigned>(freeDma), static_cast<unsigned>(largestDma),
-      static_cast<unsigned>(largest32), static_cast<unsigned>(ESP.getMaxAllocHeap()));
-}
-
-bool ensureFileBufferCapacity(size_t needed) {
-  if (needed <= gFileBufferCapacity) {
-    return true;
-  }
-
-  // Freed BEFORE the new allocation rather than after. Nothing in the old
-  // block is worth carrying across, and releasing it first is the whole point:
-  // it keeps peak demand at one block instead of two overlapping ones.
-  free(gFileBuffer);
-  gFileBuffer = nullptr;
-  gFileBufferCapacity = 0;
-
-  // Captured BEFORE the call, not only after it fails. Logging only on failure
-  // describes the heap once malloc has already given up, which cannot answer
-  // the question that matters: was there a big enough 8BIT block sitting there
-  // at the moment of the request or not? That single comparison splits the
-  // remaining hypotheses:
-  //
-  //   largest8 > needed and malloc still returns null
-  //     -> corruption, or malloc is not drawing from the pool this reports.
-  //   largest8 < needed
-  //     -> the 32,756 figure this investigation has been quoting was simply
-  //        never describing the heap malloc uses, and there is no paradox to
-  //        explain - just a shortage nobody had measured.
-  //   largest8 and largestDma both collapse around a decode
-  //     -> graphics/SPI allocations are consuming or fragmenting the internal
-  //        DRAM that plain malloc depends on, and the interaction is the bug.
-  //
-  // Log::printf rather than verbose: this fires at most once per draw, only
-  // while an investigation is live, and a snapshot missing from the one draw
-  // that failed would defeat the purpose.
-  logHeapSnapshot("before malloc");
-
-  uint8_t* grown = static_cast<uint8_t*>(malloc(needed));
-
-  if (grown == nullptr) {
-    // ---------------------------------------------------------------------
-    // A malloc this small should not be failing, so find out what is true
-    // rather than guessing again.
-    //
-    // The observed contradiction: malloc(5686) returns null while
-    // ESP.getMaxAllocHeap() reports 32,756 bytes free in one block. That is
-    // impossible for a plain malloc, which means one of the two numbers does
-    // not mean what it appears to. Note also that 32,756 is reported
-    // *identically* on every device, every boot, in every log line, while
-    // freeHeap moves around it - a real largest-free-block measurement would
-    // not sit that still. 32,756 is 0x7FF4, twelve bytes short of 32KiB,
-    // which looks far more like a region boundary or a cap than a
-    // measurement.
-    //
-    // An earlier fix in this same function (realloc to free-then-malloc) was
-    // justified by arithmetic that fit the numbers at the time - old block
-    // held plus new block wanted - and it is a real improvement. But it
-    // cannot be the cause of THIS, because after it there is only ever one
-    // block in flight and the failure persists at a smaller size than
-    // before. The explanation did not survive its own fix, so it is retired
-    // rather than defended.
-    //
-    // Each cap is queried separately because malloc() and
-    // ESP.getMaxAllocHeap() do not necessarily ask the same question:
-    // getMaxAllocHeap() reports MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT, while
-    // malloc() takes MALLOC_CAP_DEFAULT. If those diverge, the log has been
-    // quoting a number that was never the constraint.
-    Log::printf("[heapdiag] malloc(%u) FAILED", static_cast<unsigned>(needed));
-    logHeapSnapshot("after failed malloc");
-
-    // Low-water marks, per capability. 8BIT matters most: gFileBuffer is a
-    // byte buffer, so that is the pool it comes out of, and a watermark far
-    // below the current free size says the shortage is a transient peak -
-    // something large taken and released around this call - rather than a
-    // steady state. Those are different bugs with different fixes.
-    Log::printf(
-        "[heapdiag] minimum-ever-free: 8BIT=%u INT|8BIT=%u DMA=%u",
-        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)),
-        static_cast<unsigned>(
-            heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_DMA)));
-
-    // Corruption would explain an impossible failure completely: a trashed
-    // free-list makes allocations fail regardless of what the totals claim.
-    // Cheap to rule in or out, and worth knowing before anybody theorises
-    // further.
-    //
-    // print_errors = true, deliberately. It does not abort - it walks every
-    // region and prints which block failed its check, and that detail is the
-    // difference between "corrupt" and knowing WHERE. It goes to serial rather
-    // than the remote stream, so it is there for whoever has a cable attached
-    // and costs a device with no cable nothing but the walk.
-    Log::printf("[heapdiag] heap integrity: %s",
-                heap_caps_check_integrity_all(true) ? "OK" : "CORRUPT");
-
-    // Retry against explicit capabilities. This is diagnosis that doubles as
-    // a possible fix: if any of these succeeds where malloc() did not, then
-    // the constraint was the capability set all along, the answer is to keep
-    // asking this way, and the log above says exactly which one worked.
-    struct CapAttempt {
-      const char* name;
-      uint32_t caps;
-    };
-    static const CapAttempt kAttempts[] = {
-        {"8BIT", MALLOC_CAP_8BIT},
-        {"INTERNAL|8BIT", MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT},
-        {"DMA", MALLOC_CAP_DMA},
-    };
-
-    for (const CapAttempt& attempt : kAttempts) {
-      grown = static_cast<uint8_t*>(heap_caps_malloc(needed, attempt.caps));
-      if (grown != nullptr) {
-        Log::printf("[heapdiag] heap_caps_malloc(%u, %s) SUCCEEDED where malloc() failed",
-                    static_cast<unsigned>(needed), attempt.name);
-        break;
-      }
-    }
-
-    if (grown == nullptr) {
-      Log::printf("[heapdiag] every capability refused %u bytes - the shortage is real",
-                  static_cast<unsigned>(needed));
-
-      // ---- THE CONTROLLED EXPERIMENT, at the exact point of failure ----
-      //
-      // Release the TLS session and immediately retry the same allocation.
-      // Nothing about the request is different; the only thing that changed is
-      // that ~32KB of mbedTLS buffers went back to the heap. So the retry is a
-      // clean test of one hypothesis:
-      //
-      //   retry SUCCEEDS -> peak concurrent use was the whole problem. A live
-      //     TLS session and a graphics draw cannot both fit on this board, the
-      //     heap was never unhealthy, and the case is closed.
-      //   retry FAILS    -> something else holds the memory, and the TLS
-      //     session was a red herring however large it looks.
-      //
-      // releaseTlsSession() logs the 8BIT free size and largest block either
-      // side of the release, so the log says how much it actually returned
-      // rather than how much it was supposed to.
-      //
-      // Deliberately placed here, not merely before the draw: bracketing the
-      // failing allocation itself is what makes this causal rather than
-      // circumstantial.
-      //
-      // **This coupling of Display to Http is provisional.** A display module
-      // reaching into the network stack to free memory is the wrong shape to
-      // keep - it is here to settle the question on real hardware. Once the
-      // answer is in, the fix belongs upstream: release around draws from the
-      // scheduler, and stop needing 10KB contiguous at all by moving fixed
-      // screens to streamed RGB565 (which removes the PNG decoder's ~44KB
-      // scratch as well). Delete this block then.
-      Log::line("[heapdiag] retrying after releasing the TLS session");
-      Http::releaseTlsSession();
-
-      grown = static_cast<uint8_t*>(malloc(needed));
-      if (grown != nullptr) {
-        Log::printf(
-            "[heapdiag] RETRY SUCCEEDED for %u bytes after the TLS release - peak concurrent "
-            "use was the constraint, not heap health",
-            static_cast<unsigned>(needed));
-      } else {
-        logHeapSnapshot("after TLS release, still failing");
-        Log::printf(
-            "[heapdiag] retry still failed for %u bytes - the TLS session was not what was "
-            "holding the memory",
-            static_cast<unsigned>(needed));
-        return false;
-      }
-    }
-  }
-
-  gFileBuffer = grown;
-  gFileBufferCapacity = needed;
-  return true;
-}
-
-/// Reads `path` entirely into gFileBuffer before either PNG draw function
-/// below ever calls into LovyanGFX's decoder - see README.md's "The likely
-/// root cause" section: this board's SD card shares its SPI wiring with the
-/// display, by the manufacturer's own documentation, and `drawPngFile()`'s
-/// own file-streaming decode interleaves an SD read with every display
-/// write for the entire length of the image, landing squarely on that
-/// shared bus for as long as the decode runs. Reading the whole file first
-/// means the SD read and every one of the display writes that follow are
-/// separated in time - the SD card is never touched again once this
-/// returns - even though they still share the same physical wire.
-FileBuffer readFileToBuffer(const String& path) {
-  FileBuffer result;
-  File file = SD.open(path, FILE_READ);
-  if (!file) {
-    Log::printf("[display] could not open %s to read into memory", path.c_str());
-    return result;
-  }
-  const size_t fileSize = file.size();
-  if (fileSize == 0) {
-    file.close();
-    Log::printf("[display] %s is empty on SD - nothing to read into memory", path.c_str());
-    return result;
-  }
-  if (!ensureFileBufferCapacity(fileSize)) {
-    file.close();
-    Log::printf(
-        "[display] out of memory growing the shared read buffer to %u bytes for %s "
-        "(freeHeap=%u maxAllocHeap=%u)",
-        static_cast<unsigned>(fileSize), path.c_str(), static_cast<unsigned>(ESP.getFreeHeap()),
-        static_cast<unsigned>(ESP.getMaxAllocHeap()));
-    return result;
-  }
-  const size_t bytesRead = file.read(gFileBuffer, fileSize);
-  file.close();
-  if (bytesRead != fileSize) {
-    Log::printf("[display] short read on %s (%u of %u bytes)", path.c_str(),
-                static_cast<unsigned>(bytesRead), static_cast<unsigned>(fileSize));
-    return result;
-  }
-  result.data = gFileBuffer;
-  result.size = fileSize;
-  Log::printf("[display] read %s into memory (%u bytes) - SD access done, decoding from RAM now",
-              path.c_str(), static_cast<unsigned>(fileSize));
-  return result;
+      when, static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+      static_cast<unsigned>(
+          heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_DMA)),
+      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_DMA)),
+      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_32BIT)),
+      static_cast<unsigned>(ESP.getMaxAllocHeap()));
 }
 
 }  // namespace
+
+uint32_t consecutiveDrawFailures() { return gConsecutiveDrawFailures; }
 
 /// Declared ahead of its definition below purely so the in-rect draw, which
 /// comes first in this file, can call it too - see its own remarks further
@@ -2206,26 +1953,21 @@ void releaseDecodeMemory();
 
 bool drawPngFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, int32_t h) {
   // No fillScreen() here, deliberately - see this function's own header
-  // comment. Same decode call as drawPngFromSd() below, just bounded to
-  // (w, h) at (x, y) instead of the whole panel; scaleX/scaleY left at 0
-  // is what makes LovyanGFX auto-fit the image within that box rather than
-  // drawing it at native size.
-  const FileBuffer file = readFileToBuffer(path);
-  if (!file.data) {
-    Log::printf("[display] could not read %s for a %dx%d rect at (%d,%d)", path.c_str(),
-                (int)w, (int)h, (int)x, (int)y);
-    return false;
-  }
-  const bool ok =
-      lcd.drawPng(file.data, file.size, x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
-  // Released here too - see releaseDecodeMemory() below for the measured
-  // reason this reverses the earlier "hold it" decision. An in-rect draw (the
-  // aircraft card's airline logo) is smaller but takes the same two blocks.
+  // comment. Streamed straight from SD, bounded to (w, h) at (x, y) instead of
+  // the whole panel; scaleX/scaleY left at 0 is what makes LovyanGFX auto-fit
+  // the image within that box rather than drawing it at native size.
+  //
+  // See drawPngFromSd() below for why this no longer reads the file into RAM
+  // first. The in-rect case (the aircraft card's airline logo) is the smaller
+  // of the two but was subject to exactly the same allocation.
+  const bool ok = lcd.drawPngFile(SD, path.c_str(), x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
+  noteDrawOutcome(ok);
   releaseDecodeMemory();
   if (!ok) {
-    Log::printf("[display] failed to draw %s in %dx%d rect at (%d,%d) (freeHeap=%u maxAllocHeap=%u)",
+    Log::printf("[display] failed to draw %s in %dx%d rect at (%d,%d) (8BIT largest=%u free=%u)",
                 path.c_str(), (int)w, (int)h, (int)x, (int)y,
-                static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
+                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
   }
   return ok;
 }
@@ -2287,46 +2029,66 @@ void releaseDecodeMemory() {
   //   That 32,756 is what was LEFT after the 54,693-byte file copy. The hole
   //   was big enough for one of them, never both.
   //
-  //   gFileBuffer is the opposite case: a 31-54KB copy of the file, needed
-  //   only for the duration of one drawPng() call, and previously kept
-  //   grow-only for the whole uptime. Holding it is what left mbedTLS unable
-  //   to complete a handshake (16KB in + 16KB out plus certificate parsing) -
-  //   every HTTPS request on the device failed, check-in and firmware
-  //   manifest alike, so it could not even be updated out of the state
-  //   remotely.
+  //   gFileBuffer WAS the opposite case: a 31-54KB copy of the whole file,
+  //   needed only for one drawPng() call. It is gone entirely - the draws
+  //   stream from SD now, so there is no file copy to hold or release. See
+  //   drawPngFromSd() for why the premise that required it (a shared SD and
+  //   display SPI bus) did not survive checking the pin assignments.
   //
-  // So: keep the one that is allocated while memory is plentiful and reused
-  // forever; give back the one that is re-taken on every single draw.
-  if (gFileBuffer != nullptr) {
-    free(gFileBuffer);
-    gFileBuffer = nullptr;
-    gFileBufferCapacity = 0;
-  }
+  // So what remains here is only the pngle scratch, and only the argument for
+  // keeping it. There is no second block left to give back.
 }
 
+/// Streams the PNG straight off SD instead of reading it into RAM first.
+///
+/// **This reverts the whole-file-buffer design, and the reason it existed
+/// turned out not to be true.** readFileToBuffer() was introduced because this
+/// board's SD card was believed to share its SPI bus with the display: on that
+/// premise, LovyanGFX's own drawPngFile() was unusable, since its streaming
+/// decode interleaves an SD read with a panel write for the whole length of the
+/// image and would land on a contended bus for the duration. Reading the file
+/// first separated the two in time.
+///
+/// The premise does not survive checking the pin assignments. The panel is on
+/// HSPI_HOST at SCLK 14 / MISO 12 / MOSI 13 - see LovyanGFX's
+/// _detector_Sunton_2432S028_9341_t, which also passes pin_tfcard_cs = -1, the
+/// library's own assertion that no card sits on the panel's host - while
+/// SdStorage.cpp's SD.begin() is handed no SPIClass and so takes Arduino's
+/// default SPI object on VSPI. The board documentation's "shares SPI pins"
+/// means the general SPI expansion header, which is both the more literal
+/// reading and the only one consistent with both subsystems having worked all
+/// along. SdStorage.cpp logs the pins in force at every mount so this
+/// conclusion is checkable on any device rather than taken on trust.
+///
+/// What that premise cost: the buffer it justified is a 10-24KB CONTIGUOUS
+/// allocation on every single draw, and that is the allocation that was
+/// failing in the field. Measured at one such failure, the largest free 8BIT
+/// block was 6,132 bytes against a 10,568-byte request, with 11,340 free in
+/// total - so even a perfectly compacted heap would barely have served it.
+/// Streaming takes peak NEW heap per draw to approximately zero: the decoder
+/// works from the file a chunk at a time and needs no copy of it.
+///
+/// This is also what CYD-Dickey has always done, which is why its graphics
+/// never had this problem - a fact that sat in this codebase's own comments as
+/// an unexplained curiosity for some time.
 bool drawPngFromSd(const String& path) {
   lcd.fillScreen(bg());
-  const FileBuffer file = readFileToBuffer(path);
-  bool ok = false;
-  if (!file.data) {
-    Log::printf("[display] could not read %s", path.c_str());
-  } else {
-    // Straddling the decode, because this is where the suspected interaction
-    // would show. LovyanGFX takes its pngle scratch here and the SPI panel
-    // driver holds DMA-capable buffers, and DMA-capable memory on this chip is
-    // a subset of internal DRAM - the same DRAM plain malloc draws from. If
-    // 8BIT and DMA largest-block both collapse across these two lines, the
-    // graphics stack is fragmenting the pool the file buffer needs, and that
-    // interaction is the bug rather than anything in this file's own
-    // allocation strategy.
-    logHeapSnapshot("before drawPng");
-    ok = lcd.drawPng(file.data, file.size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
-    logHeapSnapshot("after drawPng");
-    if (!ok) {
-      Log::printf("[display] failed to draw %s (freeHeap=%u maxAllocHeap=%u)", path.c_str(),
-                  static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
-    }
+
+  // Kept across the streamed decode for now, not because a shared bus is
+  // suspected any more but because these are the figures that will show
+  // whether streaming actually removed the pressure. Worth deleting once a
+  // few devices have run clean.
+  logHeapSnapshot("before drawPngFile");
+  const bool ok = lcd.drawPngFile(SD, path.c_str(), 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
+  logHeapSnapshot("after drawPngFile");
+  noteDrawOutcome(ok);
+
+  if (!ok) {
+    Log::printf("[display] failed to draw %s (8BIT largest=%u free=%u)", path.c_str(),
+                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
   }
+
   // Unconditional, including after a failed decode - a decode that ran out of
   // memory still leaves LovyanGFX's partial allocation behind, and that is
   // exactly the case where the memory is most needed back.

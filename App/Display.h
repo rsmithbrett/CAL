@@ -399,6 +399,26 @@ void drawNavAffordances(bool canReverse);
 /// have.
 void flashNavEdge(bool isForward, bool canReverse);
 
+/// How many draws in a row have been unable to get the file buffer they asked
+/// for - zero on a device drawing its cards normally, and reset to zero by the
+/// very next success.
+///
+/// Exists for App.ino's heap watchdog, which restarts the device on a RUN of
+/// these rather than on any heap threshold. That is the whole point: this
+/// number is a direct measurement of "this device can no longer draw its
+/// cards", where every heap figure available on this board is at best a proxy
+/// for it and at worst (ESP.getFreeHeap(), ESP.getMaxAllocHeap()) a proxy that
+/// has been measured overstating the truth by roughly 4x. See checkHeapHealth()
+/// in App.ino for the threshold this feeds and how it was derived.
+///
+/// Counts failed DRAWS, not failed allocations. It used to count the latter,
+/// against a whole-file read buffer that no longer exists - the draws stream
+/// from SD now, so there is no per-draw allocation left to fail (see
+/// drawPngFromSd's remarks on the shared-bus premise that turned out not to
+/// hold). Counting the draw is strictly better anyway: it is the outcome that
+/// matters, and it stays meaningful whatever the decode path does underneath.
+uint32_t consecutiveDrawFailures();
+
 /// Draws a PNG from the SD card, scaled to fit and centred on the whole
 /// panel. Clears to the theme background first, so a failed decode leaves a
 /// clean screen rather than a half-painted one; returns false in that case so

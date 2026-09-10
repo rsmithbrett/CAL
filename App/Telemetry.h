@@ -25,6 +25,21 @@
 /// zero on a device with no card in the slot, which is an ordinary supported
 /// state rather than a fault (see SdStorage.h).
 ///
+/// THREE heap fields are sent, not one, and that is not redundancy.
+/// `freeHeapBytes` is ESP.getFreeHeap(), which was measured overstating the
+/// memory an allocation can actually reach by roughly 4x on this board (49,960
+/// against a real 11,340 at the same instant on device 17, while a 10,568-byte
+/// malloc was failing). `free8BitBytes` and `largestFreeBlock8BitBytes` are
+/// heap_caps_get_free_size/heap_caps_get_largest_free_block against
+/// MALLOC_CAP_8BIT - the pool a byte buffer genuinely comes from. The old field
+/// keeps its old meaning because the server must keep working with firmware up
+/// to six months old and because two columns side by side are what make the
+/// discrepancy checkable in the fleet's own history; see report()'s own
+/// comments for the full argument. The largest block is reported as well as the
+/// free size because a free total alone cannot tell "plenty of room" from
+/// "plenty of room in unusable fragments", which is precisely the state that
+/// went unnoticed.
+///
 /// Deliberately has no timer of its own. It piggybacks on CheckIn's existing
 /// cadence instead - see performCheckIn() in App.ino, which calls report()
 /// once per successful check-in, immediately after. Telemetry data (signal

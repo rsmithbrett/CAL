@@ -2,6 +2,11 @@
 
 #include <ArduinoJson.h>
 #include <WiFi.h>
+// For the per-capability heap figures reported alongside ESP.getFreeHeap()
+// below. See the block above free8Bit for why the Arduino wrappers are not
+// enough on their own, and Http.cpp/Display.cpp for the same include with the
+// same justification.
+#include <esp_heap_caps.h>
 
 #include "Assets.h"
 #include "Config.h"
@@ -46,6 +51,45 @@ void report(const char* lastCheckInOutcome) {
   const uint32_t uptimeSeconds = millis() / 1000UL;
   const int rssi = WiFi.RSSI();
   const uint32_t freeHeap = ESP.getFreeHeap();
+
+  // The two figures that are actually true, sent BESIDE freeHeap rather than
+  // instead of it.
+  //
+  // ESP.getFreeHeap() overstates the memory an allocation can reach by roughly
+  // 4x on this board. Measured on device 17 at one instant, while a
+  // 10,568-byte allocation was failing:
+  //
+  //   ESP.getFreeHeap()                        = 49,960
+  //   ESP.getMaxAllocHeap()                    = 32,756
+  //   heap_caps_get_free_size(8BIT)            = 11,340
+  //   heap_caps_get_largest_free_block(8BIT)   =  6,132
+  //   heap_caps_get_minimum_free_size          =  5,156
+  //   heap_caps_check_integrity_all            = OK
+  //
+  // All four capability classes (8BIT, INTERNAL|8BIT, DMA, DEFAULT) reported
+  // identical figures, so there is no DMA starvation, no memory stranded in
+  // word-addressable-only regions, and no corruption - the shortage was simply
+  // never being measured. ESP.getMaxAllocHeap() sits pinned at exactly 32,756
+  // (0x7FF4) on every device and every boot while freeHeap moves around it,
+  // which is the signature of a cap or a region boundary rather than of a
+  // largest-free-block measurement; it is not reading the pool malloc draws
+  // from. Every judgement this fleet's heap history has ever supported was
+  // therefore made from a number about four times too kind.
+  //
+  // 8BIT specifically because that is the pool a byte buffer comes from - see
+  // Display.cpp's ensureFileBufferCapacity(), whose failures are the harm the
+  // whole heap story is ultimately about.
+  //
+  // **Both the free size and the largest block, not just the free size.** The
+  // entire reason this went unnoticed for so long is that a free-size figure
+  // alone cannot distinguish "plenty of room" from "plenty of room in
+  // fragments too small to use" - 11,340 free with a 6,132 largest block is
+  // exactly the second case, and a single free-size column on /diag/telemetry
+  // would have shown a device in that state as merely low rather than as
+  // unable to draw a card at all.
+  const uint32_t free8Bit = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  const uint32_t largestFreeBlock8Bit = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+
   // Cleared by App.ino's setup() the moment WiFi first connects (see
   // Identity.h's own remarks on bootAttempts), so this reads 0 for every
   // device healthy enough to ever reach performCheckIn() at all - expected,
@@ -81,7 +125,32 @@ void report(const char* lastCheckInOutcome) {
   JsonDocument requestDoc;
   requestDoc["uptimeSeconds"] = uptimeSeconds;
   requestDoc["wifiRssiDbm"] = rssi;
+  // freeHeapBytes keeps sending ESP.getFreeHeap(), unchanged, despite the block
+  // above establishing that it is the wrong number. Two reasons, both
+  // deliberate:
+  //
+  //   1. This project has a standing mandate that the server keeps working
+  //      with device firmware up to six months old. A server that has not been
+  //      updated yet still reads this field and still stores it in
+  //      device_telemetry; if the meaning changed underneath it, that server
+  //      would silently start recording a different quantity in a column
+  //      labelled for the old one - which is a worse failure than an inflated
+  //      number, because it is undetectable from the data. Giving a new
+  //      quantity a new field name is backward compatible; redefining an
+  //      existing field never is.
+  //
+  //   2. Keeping both side by side is what makes the discrepancy AUDITABLE
+  //      rather than a story told in a commit message. Once /diag/telemetry
+  //      shows 49,960 next to 11,340 for the same device at the same instant,
+  //      the 4x gap is a fact anyone can see in the fleet's own history, and
+  //      the historical rows recorded before this change stay interpretable
+  //      because the field they were recorded in still means what it meant.
+  //
+  // So this field is now best read as "what the Arduino wrapper claims", and
+  // free8BitBytes/largestFreeBlock8BitBytes as what is actually available.
   requestDoc["freeHeapBytes"] = freeHeap;
+  requestDoc["free8BitBytes"] = free8Bit;
+  requestDoc["largestFreeBlock8BitBytes"] = largestFreeBlock8Bit;
   requestDoc["bootCount"] = bootCount;
   requestDoc["lastCheckInOutcome"] = lastCheckInOutcome;
   requestDoc["sdTotalBytes"] = sdTotalBytes;
@@ -116,10 +185,16 @@ void report(const char* lastCheckInOutcome) {
     return;
   }
 
+  // freeHeap and free8Bit are both printed, in that order, for the same reason
+  // both are sent: a log line that quoted only one of them would be the thing
+  // that hid this for months all over again. Whoever reads this line should see
+  // the gap without having to know it exists.
   Log::printf(
-      "[telemetry] ok (uptimeSeconds=%lu rssi=%d freeHeap=%lu bootCount=%u totalBoots=%lu "
+      "[telemetry] ok (uptimeSeconds=%lu rssi=%d freeHeap=%lu free8BIT=%lu largest8BIT=%lu "
+      "bootCount=%u totalBoots=%lu "
       "version=%s outcome=%s sdUsedMB=%lu sdTotalMB=%lu assets=%u)",
       static_cast<unsigned long>(uptimeSeconds), rssi, static_cast<unsigned long>(freeHeap),
+      static_cast<unsigned long>(free8Bit), static_cast<unsigned long>(largestFreeBlock8Bit),
       bootCount, static_cast<unsigned long>(totalBoots),
       firmwareVersion.length() > 0 ? firmwareVersion.c_str() : "(none)", lastCheckInOutcome,
       static_cast<unsigned long>(sdUsedBytes / (1024ULL * 1024ULL)),

@@ -22,6 +22,12 @@
 #include <WiFi.h>
 #include <esp_bt.h>      // esp_bt_mem_release() - see releaseBluetoothMemory() below
 #include <esp_system.h>  // esp_restart() - see checkHeapHealth() below
+// heap_caps_get_largest_free_block() - the only heap figure in this file worth
+// printing, and stated explicitly rather than relied on transitively through
+// Arduino.h. Same include, for the same reason, as Http.cpp, Display.cpp and
+// Telemetry.cpp: ESP's own wrappers overstate free memory by roughly 4x on this
+// board, so nothing here should be able to reach them without also having this.
+#include <esp_heap_caps.h>
 
 // Overrides the ESP32 Arduino core's weak getArduinoLoopTaskStackSize() (see
 // cores/esp32/main.cpp), which otherwise sizes loopTask's stack at a fixed
@@ -60,6 +66,7 @@ size_t getArduinoLoopTaskStackSize(void) {
 #include "AppService.h"
 #include "AppUpdater.h"
 #include "Assets.h"
+#include "BootDiag.h"
 #include "CardManager.h"
 #include "CheckIn.h"
 #include "Config.h"
@@ -71,6 +78,7 @@ size_t getArduinoLoopTaskStackSize(void) {
 #include "Loader.h"
 #include "Log.h"
 #include "SdStorage.h"
+#include "StackWatch.h"
 // Included for setPhase()/setTimes()/setPosition()/setValue() only, not to
 // register any of these five cards - cards still register themselves at
 // static-init time and App.ino names none of them. All five need a push
@@ -199,6 +207,10 @@ void ensureWifiConnected() {
     while (millis() < waitDeadline) {
       if (digitalRead(kBootButtonPin) == LOW) {
         if (wifiResetRequested()) {
+          // So the next boot reads SOFTWARE_RESET + REPROVISION - see BootDiag.h.
+
+          BootDiag::recordRestartIntent(BootDiag::RestartCause::Reprovision);
+
           Loader::returnToLoaderForReprovisioning();
           // Unreachable: the call above never returns.
         }
@@ -220,26 +232,39 @@ uint32_t lastCheckInMs = 0;
 uint32_t lastHeapCheckMs = 0;
 
 // ---------------------------------------------------------------------------
-// Heap fragmentation watchdog.
+// Cannot-draw watchdog. (It was the "heap fragmentation watchdog" for most of
+// its life; the name changed because what it watches did.)
 //
-// ESP.getFreeHeap() can stay generous (device 7 held ~85-140KB free all
-// night) while ESP.getMaxAllocHeap() - the largest still-*contiguous* free
-// block - keeps shrinking underneath it: enough small, long-lived
-// allocations (TLS session state, JSON documents, the PNG decoder's own
-// scratch buffer) scattered across an uptime eventually leave no single
-// block big enough for the next large one, even though the sum of free
-// memory looks fine. Observed live on device 7 tonight: maxAllocHeap fell
-// from 42996 to 34804 bytes within about a minute of uptime. Once it drops
-// below what a given asset's read buffer needs, that asset's card silently
-// stops decoding (see Graphic.cpp's "would not decode" line and Assets.cpp's
-// own out-of-memory logging) - the suspected, not yet proven, cause of this
-// device's periodic reboot pattern. Nothing else in this firmware reads this
-// value proactively today; Display.cpp and Assets.cpp only log it after an
-// allocation has already failed. This check acts before that point,
-// restarting deliberately - on this firmware's own terms, with a friendly
-// on-screen message and time for the log line explaining why to actually
-// reach the server - rather than waiting for a card to mysteriously vanish
-// or an allocation to fail somewhere less recoverable.
+// The original reasoning, kept because it is where this started and because
+// half of it is still true: ESP.getFreeHeap() can stay generous (device 7 held
+// ~85-140KB free all night) while ESP.getMaxAllocHeap() - the largest
+// still-*contiguous* free block - keeps shrinking underneath it, since enough
+// small, long-lived allocations (TLS session state, JSON documents, the PNG
+// decoder's own scratch buffer) scattered across an uptime eventually leave no
+// single block big enough for the next large one even though the sum of free
+// memory looks fine. Observed live on device 7: maxAllocHeap fell from 42996 to
+// 34804 bytes within about a minute of uptime. Once the largest block drops
+// below what an asset's read buffer needs, that asset's card silently stops
+// decoding (see Graphic.cpp's "would not decode" line and Assets.cpp's own
+// out-of-memory logging).
+//
+// What survives from that: free bytes and contiguous bytes really are different
+// quantities on this board, and the second is the one that decides whether a
+// card draws. What does not survive: the belief that ESP.getMaxAllocHeap()
+// measures it. It does not - see kMaxConsecutiveBufferAllocFailures below for
+// the measurements that settled that, and for why this now acts on real
+// allocation failures instead of on any reading at all.
+//
+// Nor does the ambition of acting BEFORE the first failure, which is what the
+// old thresholds were for. That is given up deliberately. Predicting the
+// failure needs a trustworthy prediction, this board offers none, and three
+// attempts at one produced a watchdog that rebooted healthy devices. Acting on
+// the first few real failures instead costs a handful of missed card draws -
+// which Assets.cpp already retries and recovers from - and in exchange the
+// trigger cannot fire on a device that is working. Restarting deliberately, on
+// this firmware's own terms with a friendly on-screen message and time for the
+// log line explaining why to reach the server, is still much better than
+// waiting for an allocation to fail somewhere less recoverable.
 //
 // This is independent of Loader.cpp's restart paths (requestUpdate(),
 // returnToLoaderForReprovisioning()): those hand control back to CAL in the
@@ -249,54 +274,129 @@ uint32_t lastHeapCheckMs = 0;
 // than routing through Loader.cpp.
 constexpr uint32_t kHeapCheckIntervalMs = 60000;  // once a minute
 
-// TLS handshakes and the rest of setup()'s own startup allocations
-// legitimately dip maxAllocHeap during the first stretch of a boot, before
-// the device has ever reached steady state - checking during that window
-// risks restarting a perfectly healthy device before it gets there at all,
-// which would turn this into the cause of a reboot loop rather than the fix
-// for one. 3 minutes is comfortably past every boot-time allocation this
-// firmware makes (WiFi join, SNTP, the first check-in, the first card
-// fetches) - this is not a hypothetical margin: it is exactly the kind of
-// mistake this codebase's own firmware-recovery procedure was caught making
-// earlier tonight, restarting before the device had ever settled.
+// Kept at 3 minutes, but for a different reason than it was chosen for.
+//
+// The original justification was that TLS handshakes and the rest of setup()'s
+// startup allocations legitimately dip maxAllocHeap during the first stretch of
+// a boot, before the device has ever reached steady state, so checking inside
+// that window risked restarting a perfectly healthy device - which is exactly
+// the mistake this codebase's own firmware-recovery procedure was caught making,
+// restarting before the device had ever settled. That argument is now moot: the
+// trigger is a run of real allocation failures, and a transient dip that no
+// draw ever tripped over produces no failures to count.
+//
+// It stays because it does something else that is still needed. Together with
+// kHeapCheckIntervalMs it bounds how often this can restart a device to roughly
+// once every four minutes, which is the whole protection against a device that
+// cannot draw even on a fresh heap turning into a tight reboot loop - and it
+// guarantees that whatever failures a boot's first draws produce, the boot gets
+// a full 3 minutes to also produce a success and clear them. 3 minutes is
+// comfortably past every boot-time allocation this firmware makes (WiFi join,
+// SNTP, the first check-in, the first card fetches).
 constexpr uint32_t kHeapCheckGraceMs = 3UL * 60UL * 1000UL;
 
-// What "too fragmented to work" actually means, and why this is not 60000.
+// Why this watchdog counts FAILURES and not free bytes, and the whole history
+// of getting that wrong.
 //
-// It WAS 60000, chosen from a range (34804-42996) this was observed failing in
-// before anyone knew what the steady state of a healthy device looked like.
-// That number turned out to be unreachable by design, which made this
-// watchdog the reboot loop it was written to prevent - device 17, healthy and
-// drawing cards, restarting every three minutes to the tick:
+// Three thresholds have stood here, and all three were the same mistake:
 //
-//   [health] maxAllocHeap=32756 below 60000 byte threshold after 180011 ms
-//            uptime - restarting to clear fragmentation
+//   60000  - taken from the range (34804-42996) the device was first seen
+//            failing in, before anyone knew a healthy device's steady state.
+//            ESP.getMaxAllocHeap() reports exactly 32,756 from the first card
+//            draw onward, on every boot, so this threshold was unreachable and
+//            the watchdog became an unconditional restart timer. Device 17 -
+//            healthy, drawing cards - killed itself at 180 seconds to the tick:
 //
-// maxAllocHeap sits pinned at exactly 32,756 from the first card draw onward,
-// on every boot, and that is CORRECT: Display.cpp deliberately keeps
-// LovyanGFX's ~44KB decode scratch for the whole uptime (see its
-// releaseDecodeMemory() remarks for why releasing it breaks every graphic
-// card), and a permanently-held block that size necessarily splits the heap.
-// A threshold above the intended steady state is not a safety margin, it is
-// an unconditional restart timer.
+//              [health] maxAllocHeap=32756 below 60000 byte threshold after
+//                       180011 ms uptime - restarting to clear fragmentation
 //
-// So the threshold is derived from what a draw actually has to allocate
-// instead of from one bad night's observations. The server normalizes every
-// asset to at most 24KB precisely because of this device's contiguity ceiling
-// (DiscoverAroundMe's AssetSizeTarget.MaxBytes documents the same 32,756
-// figure from the other side), and a draw needs one block that size for the
-// file copy. Below 28KB the largest permitted asset genuinely cannot be read
-// and a card really would drop out silently - which is the condition worth
-// restarting for. Above it, the device is doing exactly what it should.
+//            The explanation offered at the time was that 32,756 was CORRECT
+//            and unavoidable, since Display.cpp deliberately keeps LovyanGFX's
+//            ~44KB decode scratch for the whole uptime (see its
+//            releaseDecodeMemory() remarks for why releasing it breaks every
+//            graphic card) and a permanently-held block that size necessarily
+//            splits the heap. That story fit, and it was wrong - see below. The
+//            conclusion drawn from it, that a threshold above the intended
+//            steady state is not a safety margin, survives its own reasoning.
 //
-// Keep this in step with AssetSizeTarget.MaxBytes on the server: this must
-// stay above it, with room for the allocator's own overhead.
-constexpr size_t kMinMaxAllocHeapBytes = 28000;
+//   28000  - derived from what a draw must allocate rather than from one bad
+//            night, which sounded better: the server normalizes every asset to
+//            at most 24KB for this exact ceiling (DiscoverAroundMe's
+//            AssetSizeTarget.MaxBytes documents the same 32,756 figure from the
+//            other side), so below 28KB the largest asset it may send cannot be
+//            read. Sound arithmetic, wrong input - it was derived from
+//            ESP.getMaxAllocHeap(), the same discredited metric as before.
+//
+//   28000, observe-only - the honest interim state while the metric itself was
+//            under investigation. It logged and refused to act, because
+//            restarting a household's display on a number nobody could explain
+//            is worse than not restarting it at all.
+//
+// The investigation is now closed and this is what it found. Arduino's heap
+// wrappers overstate the memory an allocation can reach by roughly 4x on this
+// board. Measured on device 17 at one instant, while a 10,568-byte allocation
+// was failing:
+//
+//   ESP.getFreeHeap()                        = 49,960
+//   ESP.getMaxAllocHeap()                    = 32,756
+//   heap_caps_get_free_size(8BIT)            = 11,340
+//   heap_caps_get_largest_free_block(8BIT)   =  6,132
+//   heap_caps_get_minimum_free_size          =  5,156
+//   heap_caps_check_integrity_all            = OK
+//
+// All four capability classes (8BIT, INTERNAL|8BIT, DMA, DEFAULT) reported
+// identical figures: no DMA starvation, no memory stranded in
+// word-addressable-only regions, no corruption. And ESP.getMaxAllocHeap()'s
+// 32,756 is 0x7FF4, twelve bytes short of 32KiB, reported identically on every
+// device and every boot while freeHeap moves around it - the signature of a cap
+// or a region boundary, not of a measurement. It is not reading the pool malloc
+// draws from, so no threshold against it could ever have predicted a draw.
+//
+// **So this no longer thresholds anything.** It restarts on a run of
+// consecutive failed DRAWS - Display::consecutiveDrawFailures(),
+// incremented only when a file-buffer allocation has exhausted plain malloc,
+// all three explicit capability sets, and the TLS release, and the draw is
+// genuinely lost. That is better than any threshold for three reasons worth
+// stating plainly:
+//
+//   - It measures the harm itself. "This device can no longer draw its cards"
+//     is the condition worth restarting for, and this counts exactly that
+//     rather than a quantity believed to correlate with it.
+//   - It needs no theory about which pool is short, which capability class
+//     matters, or how much overhead the allocator adds. Those questions cost
+//     this project three wrong thresholds and several device-nights.
+//   - It cannot be fooled by a metric that means something other than it
+//     appears to. A wrapper reporting 4x the truth changes nothing about
+//     whether malloc returned null.
+//
+// The largest-8BIT-block figure is still logged on every check, beside
+// ESP.getMaxAllocHeap(), so the discrepancy stays visible in the field instead
+// of becoming a claim in this comment - but neither number decides anything.
 
-/// Checked once per loop() iteration, but only actually reads
-/// ESP.getMaxAllocHeap() at most once every kHeapCheckIntervalMs - see the
-/// block comment above for the grace period and threshold this compares
-/// against.
+// The longest run of failures tolerated without restarting - so the 7th
+// consecutive failure is the one that acts. Above one card's worth of retries,
+// and deliberately so.
+//
+// Assets.cpp retries a failed decode kMaxDrawAttempts (3) times before giving
+// up on an asset, invalidating its cache entry and re-fetching it - and each of
+// those attempts runs the full read path, so one genuinely unlucky asset
+// produces a run of 3. A limit of 3 or lower would let a single bad file reboot
+// the device, which is both the wrong response (Assets.cpp's own
+// invalidate-and-refetch is the right one) and a reboot loop waiting to happen
+// if that asset is the one every rotation reaches.
+//
+// 6 is two full cards' worth. Exceeding it means every attempt on more than two
+// assets failed with no success anywhere in between - the counter resets on ANY
+// success, including the case where the buffer was already big enough - which
+// is the difference between "this asset is bad" and "this device cannot draw".
+// Draws are seconds apart while a check runs once a minute, so a device in that
+// state passes 6 well inside one interval and restarts on the very next check
+// rather than much later.
+constexpr uint32_t kMaxConsecutiveBufferAllocFailures = 6;
+
+/// Checked once per loop() iteration, but only actually looks at anything once
+/// every kHeapCheckIntervalMs - see the block comments above for the grace
+/// period and for why this counts failures rather than free bytes.
 void checkHeapHealth() {
   const uint32_t now = millis();
   if (now < kHeapCheckGraceMs) {
@@ -307,72 +407,71 @@ void checkHeapHealth() {
   }
   lastHeapCheckMs = now;
 
-  // heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), not
-  // ESP.getMaxAllocHeap(). The Arduino wrapper is not measuring the pool that
-  // allocations actually come from: at one instant on device 17 it reported
-  // 32,756 while the real largest 8BIT block was 6,132, and ESP.getFreeHeap()
-  // claimed 49,960 against a real 11,340. Every earlier threshold in this
-  // function was chosen against those inflated figures, which is why none of
-  // them bore any relationship to whether a draw would succeed.
-  //
-  // 8BIT specifically because that is what a byte buffer needs - see
-  // Display.cpp's ensureFileBufferCapacity, whose failures are the harm this
-  // watchdog is trying to anticipate.
+  // Logged on every check whether or not anything is wrong, and both numbers
+  // together on purpose. heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) is
+  // the real figure - 8BIT because that is the pool a byte buffer comes from,
+  // see Display.cpp's ensureFileBufferCapacity() - and ESP.getMaxAllocHeap() is
+  // the one three thresholds were wrongly derived from. Keeping them side by
+  // side in the fleet's logs is what makes the gap between them (6,132 against
+  // 32,756 at the one instant both were captured on device 17) an observable
+  // fact on real hardware rather than a finding that has to be taken on trust,
+  // and it is the same reasoning Telemetry.cpp uses for sending freeHeapBytes
+  // alongside free8BitBytes instead of replacing it.
   const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  if (largestBlock >= kMinMaxAllocHeapBytes) {
+  const uint32_t failures = Display::consecutiveDrawFailures();
+  Log::printf(
+      "[health] largest 8BIT block=%u (ESP.getMaxAllocHeap says %u at the same instant), "
+      "consecutive file-buffer alloc failures=%lu/%lu after %lu ms uptime",
+      static_cast<unsigned>(largestBlock), static_cast<unsigned>(ESP.getMaxAllocHeap()),
+      static_cast<unsigned long>(failures),
+      static_cast<unsigned long>(kMaxConsecutiveBufferAllocFailures),
+      static_cast<unsigned long>(now));
+
+  if (failures <= kMaxConsecutiveBufferAllocFailures) {
     return;
   }
 
-  // ---- OBSERVE ONLY, DELIBERATELY. This does not restart the device. ----
+  // Past this point the device has demonstrably stopped being able to draw, so
+  // the restart is back - the same restart, with the same care, on a trigger
+  // that means something this time.
   //
-  // The threshold above is suspended rather than tuned, because the metric it
-  // reads is under suspicion and a restart is too blunt a thing to trigger on
-  // a number nobody can currently explain.
-  //
-  // What is wrong with it: this value is reported as *exactly* 32,756 on every
-  // device, every boot, in every log line, while freeHeap moves around it. A
-  // real largest-free-block measurement would not sit that still, and 32,756
-  // is 0x7FF4 - twelve bytes short of 32KiB - which looks like a region
-  // boundary or a cap. Worse, a plain malloc of 5,686 bytes is observed
-  // failing on device 17 while this same call reports 32,756 free in one
-  // block, which cannot both be true of the allocation malloc actually
-  // performs. ESP.getMaxAllocHeap() reports MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT
-  // while malloc() takes MALLOC_CAP_DEFAULT, so the two may simply not be
-  // answering the same question - see Display.cpp's per-capability diagnostics
-  // in ensureFileBufferCapacity(), which exist to settle exactly this.
-  //
-  // The honest position: the previous threshold of 60,000 was criticised here
-  // for having no defensible relationship to allocation risk, and 28,000 was
-  // then derived from the very same suspect metric. That criticism applies to
-  // both numbers equally. Restarting a household's display on a proxy nobody
-  // trusts is worse than not restarting it at all - especially since device 17
-  // was restarting every four minutes under the old threshold and its graphics
-  // never recovered, so the restart was not buying anything.
-  //
-  // It keeps logging, because the reading is still the data this investigation
-  // needs and a device that goes quiet tells us nothing.
-  //
-  // **When the diagnostics come back, replace this with something tied to
-  // observed harm rather than a proxy** - a run of consecutive allocation or
-  // decode failures is a direct measurement of "this device can no longer draw
-  // its cards", needs no theory about which pool is short, and cannot be
-  // fooled by a metric that means something other than it appears to.
+  // The risk being accepted, said out loud: if a restart does not fix it, this
+  // becomes a restart every kHeapCheckGraceMs + one interval (about four
+  // minutes), which is exactly what the 60,000 threshold did. The difference is
+  // what it takes to get there. That loop fired on devices that were drawing
+  // their cards perfectly; this one can only fire on a device that has failed
+  // more than two cards outright, and such a device is already showing a
+  // household nothing. A rebooting device at least retries against a fresh heap
+  // and keeps reporting telemetry; and because the counter clears on the first
+  // success after the reboot, one that recovers stops restarting immediately.
   Log::printf(
-      "[health] largest 8BIT block=%u is below the %u byte reference after %lu ms uptime - "
-      "NOT restarting: threshold not yet re-derived against real figures (ESP.getMaxAllocHeap "
-      "reported %u at the same instant)",
-      static_cast<unsigned>(largestBlock), static_cast<unsigned>(kMinMaxAllocHeapBytes),
-      static_cast<unsigned long>(now), static_cast<unsigned>(ESP.getMaxAllocHeap()));
-
-  // The restart this function used to perform is deleted rather than commented
-  // out or guarded behind a flag. A disabled branch left in place invites
-  // someone to re-enable it without re-reading why it was suspended, and the
-  // replacement is not "the same restart with a better number" - it is a
-  // different trigger entirely, keyed to observed allocation failures. Nothing
-  // here is worth preserving for that. The machinery it used to call
-  // (AppService::stashTimeForFastReboot, which lets the next boot skip the
-  // blocking SNTP wait) is still there and still used by Loader.cpp's own
-  // restart paths, so nothing is lost by removing this caller.
+      "[health] %lu consecutive file-buffer allocation failures (limit %lu) after %lu ms "
+      "uptime - this device can no longer draw its cards, restarting to reclaim memory "
+      "(largest 8BIT block=%u)",
+      static_cast<unsigned long>(failures),
+      static_cast<unsigned long>(kMaxConsecutiveBufferAllocFailures),
+      static_cast<unsigned long>(now), static_cast<unsigned>(largestBlock));
+  // So the line above actually reaches the server instead of being lost with
+  // everything else in RAM at restart - same reasoning as every other
+  // pre-esp_restart() call site in this codebase (see Loader.cpp).
+  Log::flushNow();
+  // The clock right now is already correct - this restart is deliberate and
+  // self-inflicted, not a power loss, so there is a real reading worth
+  // carrying into the next boot. See AppService::trySkipSyncAfterFastReboot()
+  // for what this buys: skipping the blocking SNTP wait entirely on the very
+  // next setup(), which is what most of this restart's own visible outage
+  // window was actually spent on.
+  AppService::stashTimeForFastReboot();
+  // So the next boot reports SOFTWARE_RESET + LOW_HEAP rather than an
+  // unexplained software reset. This is the restart that spent a night looking
+  // like a crash loop, which is exactly why it should name itself.
+  BootDiag::recordRestartIntent(BootDiag::RestartCause::LowHeap);
+  Display::showStatus("Refreshing", "Reclaiming memory - back in a moment");
+  // Long enough for both the status message and the flushed log line to be
+  // visibly sent before the restart cuts everything off.
+  delay(1500);
+  esp_restart();
+  // Unreachable: the call above never returns.
 }
 
 // The server can shorten or lengthen this on every check-in response
@@ -461,6 +560,12 @@ void forceUpdateCheck() {
   if (AppUpdater::newerVersionAvailable()) {
     Log::line("[update] manual check found a newer version");
     Display::showStatus("Updating", "A new version is available");
+    // Recorded before handing off, so the next boot can say SOFTWARE_RESET + OTA
+
+    // rather than just "something restarted us" - see BootDiag.h.
+
+    BootDiag::recordRestartIntent(BootDiag::RestartCause::Ota);
+
     Loader::requestUpdate();
     // Unreachable: the call above never returns.
   }
@@ -486,6 +591,10 @@ void performCheckIn() {
   if (!result.ok) {
     if (result.secretRejected) {
       Log::line("[checkin] secret rejected - device needs reprovisioning");
+      // So the next boot reads SOFTWARE_RESET + REPROVISION - see BootDiag.h.
+
+      BootDiag::recordRestartIntent(BootDiag::RestartCause::Reprovision);
+
       Loader::returnToLoaderForReprovisioning();
       // Unreachable: the call above never returns.
     }
@@ -626,6 +735,12 @@ void performCheckIn() {
   if (result.updateAvailable) {
     Log::line("[checkin] server requested an update - rebooting into CAL");
     Display::showStatus("Updating", "The server requested an update");
+    // Recorded before handing off, so the next boot can say SOFTWARE_RESET + OTA
+
+    // rather than just "something restarted us" - see BootDiag.h.
+
+    BootDiag::recordRestartIntent(BootDiag::RestartCause::Ota);
+
     Loader::requestUpdate();
     // Unreachable: the call above never returns.
   }
@@ -654,6 +769,13 @@ void setup() {
   // decoder needs, and it has to happen before Display/WiFi/TLS carve up
   // what is left.
   releaseBluetoothMemory();
+
+  // Right here, before anything else can obscure it: why the last restart
+  // happened, in two parts - how the chip reset, and what this firmware was
+  // trying to achieve when it asked for it. Until this existed, an unexpected
+  // reboot and a deliberate one were indistinguishable from the server, where
+  // the only evidence was the boot counter going up. See BootDiag.h.
+  BootDiag::logResetReason();
 
   Display::begin();
   Display::showStatus("Starting", "");
@@ -754,6 +876,10 @@ void setup() {
               static_cast<unsigned long>(checkInIntervalMs));
 
   if (wifiResetRequested()) {
+    // So the next boot reads SOFTWARE_RESET + REPROVISION - see BootDiag.h.
+
+    BootDiag::recordRestartIntent(BootDiag::RestartCause::Reprovision);
+
     Loader::returnToLoaderForReprovisioning();
     // Unreachable: the call above never returns.
   }
@@ -828,12 +954,22 @@ void loop() {
   // in here. There is no content-refresh timer in this file any more; the
   // scheduler owns its own, per card.
   CardManager::poll();
+  // After the render path, which is the other candidate for the deepest frame
+  // in this loop - a card draw goes down into LovyanGFX's decoder.
+  StackWatch::logHighWaterMark("after render");
 
   const uint32_t now = millis();
 
   if (now - lastCheckInMs >= checkInIntervalMs) {
     lastCheckInMs = now;
     performCheckIn();
+    // The suspected deepest path: a TLS handshake, a JSON parse, and a ~4KB
+    // CheckIn::Result, all in one call chain. StackWatch keeps the worst-ever
+    // figure, so this is where it is most likely to be set - and measuring it
+    // is the whole point, since every previous claim about stack headroom in
+    // this file was arithmetic on the size of local objects rather than an
+    // observation. See StackWatch.h.
+    StackWatch::logHighWaterMark("after check-in");
   }
 
   // Belt-and-braces fallback only: performCheckIn() above is the fast path
@@ -846,6 +982,12 @@ void loop() {
     if (AppUpdater::newerVersionAvailable()) {
       Log::line("[update] fallback timer found a newer version - rebooting into CAL");
       Display::showStatus("Updating", "A new version is available");
+      // Recorded before handing off, so the next boot can say SOFTWARE_RESET + OTA
+
+      // rather than just "something restarted us" - see BootDiag.h.
+
+      BootDiag::recordRestartIntent(BootDiag::RestartCause::Ota);
+
       Loader::requestUpdate();
       // Unreachable: the call above never returns.
     }

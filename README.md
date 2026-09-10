@@ -1941,8 +1941,9 @@ against giving it any new remote-facing surface lightly.
 
 ### Telemetry: a heartbeat riding check-in's own clock
 
-`App/Telemetry.h`/`.cpp` reports device health — uptime, WiFi RSSI, free
-heap, CAL's own boot-attempt counter, and this device's own last check-in
+`App/Telemetry.h`/`.cpp` reports device health — uptime, WiFi RSSI, three
+separate heap figures (see below), CAL's own boot-attempt counter, and this
+device's own last check-in
 outcome — to the server's `POST /api/telemetry` (see the DiscoverAroundMe
 repo's README, "Telemetry: device health/diagnostics," for the canonical
 wire contract this firmware implements; this section only covers the
@@ -1958,6 +1959,18 @@ that alarm on its own. Best-effort and fire-and-forget — a failed report is
 logged and dropped, not retried before the next check-in comes around; this
 is diagnostics, not a control channel, and nothing downstream depends on it
 succeeding.
+
+**Three heap fields, not one, and that is not redundancy.** `freeHeapBytes` is
+`ESP.getFreeHeap()`, which was measured overstating the memory an allocation can
+actually reach by roughly 4x on this board; `free8BitBytes` and
+`largestFreeBlock8BitBytes` are `heap_caps_get_free_size()` and
+`heap_caps_get_largest_free_block()` against `MALLOC_CAP_8BIT`, the pool a byte
+buffer genuinely comes from. The old field deliberately keeps its old meaning
+and its old source, both because the server must keep working with firmware up
+to six months old and because two columns side by side are what make the
+discrepancy checkable in the fleet's own history. See "The fleet's whole heap
+history was ~4x too kind" near the end of this file for the measurements and the
+full argument.
 
 ### The ISS flyover card: a live position, and now a next-pass prediction
 
@@ -2326,6 +2339,17 @@ disposable tag can no longer cost the permanent one.
   submitting credentials (`Config::kProvisioningAbandonTimeoutMs`), matching
   its documented contract - but "nothing has run on hardware" below applies
   to this exactly as much as everything else.
+- **The cannot-draw watchdog's restart has never fired on a device.** Neither
+  has the increment it counts: `Display::consecutiveBufferAllocFailures()` rises
+  only on the branch where a file-buffer allocation still fails *after* the TLS
+  release, and no log yet shows a device reaching it — the releases measured so
+  far all recovered the memory. So both halves of this trigger are verified by
+  a clean compile and by reading them. That matters more
+  than usual here, because the three thresholds this replaces each looked
+  correct when read and were wrong when run — see "What the watchdog restarts
+  on now" near the end of this file. The observable to watch for in the field
+  is the per-check `[health]` line, which now prints on every check whether or
+  not anything is wrong.
 - **No automated tests, at all.** There is no test harness in this repository
   and no obvious one to reach for: the code is inseparable from ESP32
   peripherals, NVS, WiFi and TLS, none of which have a usable stub here. The
@@ -2659,6 +2683,19 @@ this fleet's own `/diag/telemetry` (asset sizes) and live check-in reports
 reading real device state over estimating it (see `SdStorage.h`'s "measured,
 not assumed" framing for SD capacity, which this mirrors for heap).
 
+**And measuring the wrong thing is not the same as measuring.** That last
+paragraph is the single most instructive mistake in this document, so it is
+corrected rather than quietly rewritten: `freeHeapBytes` is
+`ESP.getFreeHeap()`, which was later measured overstating the reachable heap by
+roughly 4x, so the "~250KB" it is compared against was never available and the
+headroom this rule believed it had verified did not exist. The preference for
+reading real device state over estimating it is right and stands. What it
+needed, and did not have, was any check that the thing being read means what it
+says - which is what "Both of these numbers were wrong" and "The fleet's whole
+heap history was ~4x too kind", near the end of this file, are about.
+`free8BitBytes` and `largestFreeBlock8BitBytes` are the figures to use for this
+comparison now.
+
 ## Why the PNG decoder's scratch buffer is never released
 
 The RAM-buffer approach above shipped, and then a live device found a
@@ -2843,14 +2880,16 @@ very failure mode it exists to detect.
 
 ## Contiguity, not free bytes: the one number behind nearly all of this
 
-Everything in the three sections above, and everything in the four below, is
-the same distinction seen from a different angle, so it is worth stating once
-on its own. `ESP.getFreeHeap()` on this board stays healthy all day - 50-58KB
+Everything in the three sections above, and everything in the sections below
+through to the watchdog, is the same distinction seen from a different angle,
+so it is worth stating once on its own. `ESP.getFreeHeap()` on this board stays healthy all day - 50-58KB
 in ordinary operation, and this document's earlier "roughly 250-274KB" figures
 are the same measurement taken earlier in a boot. `ESP.getMaxAllocHeap()` -
-the largest block still *contiguous*, and therefore the largest single
-`malloc()` that can possibly succeed - is a completely different story.
-Measured on hardware:
+described here as the largest block still *contiguous*, and therefore the
+largest single `malloc()` that can possibly succeed, **which it turned out not
+to be at all**; see "Both of these numbers were wrong" below, and read that
+before deriving anything from the figures in this section - is a completely
+different story. Measured on hardware:
 
 - **110,580 bytes** early in `setup()`, before Display, WiFi and TLS have
   allocated anything.
@@ -2873,10 +2912,150 @@ Two consequences run through the sections below. Anything that needs a large
 contiguous block should take it *early*, while 110,580 is still available, and
 keep it if it will need it again (the decoder's scratch). Anything that needs
 one *repeatedly* must hold it for as little time as possible and must never
-overlap two of them (the file copy). And any threshold, budget or watchdog
-written against this device has to be derived from the 32,756 steady state
-rather than from a number that looked comfortable in total-free terms - which
-is exactly the mistake the heap watchdog made, below.
+overlap two of them (the file copy). Both of those still hold. The third
+consequence this section drew - "any threshold, budget or watchdog written
+against this device has to be derived from the 32,756 steady state rather than
+from a number that looked comfortable in total-free terms" - is the one that
+does not, and it is left standing here because it is *nearly* right in a way
+that cost this project a third wrong threshold before anybody caught it. The
+correction is the next section.
+
+## Both of these numbers were wrong: Arduino's heap wrappers overstate free memory by ~4x
+
+Every figure in the section above, and in the watchdog section below, came out
+of `ESP.getFreeHeap()` and `ESP.getMaxAllocHeap()`. Neither reports the pool
+`malloc()` actually draws from. Measured on device 17 at a single instant,
+while a 10,568-byte allocation was failing:
+
+```
+ESP.getFreeHeap()                             = 49,960
+ESP.getMaxAllocHeap()                         = 32,756
+heap_caps_get_free_size(MALLOC_CAP_8BIT)      = 11,340
+heap_caps_get_largest_free_block(8BIT)        =  6,132
+heap_caps_get_minimum_free_size               =  5,156
+heap_caps_check_integrity_all                 = OK
+```
+
+That is roughly **4x** on the free-size figure - 49,960 claimed against 11,340
+real - and the largest-block figure is worse than wrong, it is inverted: 32,756
+claimed against a real 6,132, i.e. the number this project had been treating as
+"the largest `malloc()` that can succeed" was five times larger than the
+largest `malloc()` that could actually succeed. The 10,568-byte request failing
+is not the paradox this document spent several sections trying to explain. It
+was simply a shortage nobody had measured.
+
+Three things that had been live hypotheses died in the same measurement, and
+all three are worth recording as closed:
+
+- **DMA starvation.** All four capability classes queried (`8BIT`,
+  `INTERNAL|8BIT`, `DMA`, `DEFAULT`) reported *identical* figures. The SPI
+  panel driver is not eating the DMA-capable subset out from under plain
+  `malloc()`.
+- **Memory stranded in word-addressable-only regions.** Also no: there is no
+  32-bit-only pool of "free" memory sitting beside a starved `8BIT` one, which
+  is what a large `32BIT` largest block against a small `8BIT` one would have
+  meant. `logHeapSnapshot()` reports `32BIT`'s largest block for exactly this
+  comparison and no other reason.
+- **Heap corruption.** `heap_caps_check_integrity_all` walks every region and
+  returns OK. A trashed free list would have explained an impossible failure
+  completely, and it is not what is happening.
+
+The tell on `ESP.getMaxAllocHeap()` was in plain sight the whole time and was
+read as a finding instead of as a bug: it reports **exactly** 32,756 on every
+device, on every boot, in every log line, while `freeHeap` moves around it. A
+real largest-free-block measurement does not sit that still. 32,756 is `0x7FF4`
+- twelve bytes short of 32KiB - which is the shape of a cap or a region
+boundary, not of a measurement. The section above built a whole theory of heap
+*shape* on that constancy ("that is not decay, it is a shape"), and the theory
+was reasonable given the number; the number was not a measurement of the shape
+of anything.
+
+`heap_caps_get_free_size()` and `heap_caps_get_largest_free_block()`, against
+`MALLOC_CAP_8BIT` specifically - 8BIT because that is the pool a byte buffer
+comes from - are what this firmware measures with now. `Display.cpp`'s
+`logHeapSnapshot()` puts `8BIT`, `INTERNAL|8BIT` and `DMA` (free size *and*
+largest block for each), `32BIT`'s largest block, and `ESP.maxAlloc` on one line
+for comparison. Reporting the free size and the largest block together is the
+deliberate part, because a free total on its own cannot tell "plenty of room"
+from "plenty of room in fragments too small to use" - and 11,340 free with a
+6,132 largest block is exactly the second case. That single ambiguity is why
+this went unnoticed for as long as it did.
+
+One thing the corrected numbers immediately explained, rather than deepened.
+`Http::releaseTlsSession()` hands mbedTLS's per-session memory back between
+requests, and it logs the real figures either side of the release. On device 7:
+
+```
+[http] released TLS session: 8BIT free 97224 -> 138492 (+41268), largest block 77812 -> 110580 (+32768)
+```
+
+`+32,768` exactly - mbedTLS's 16KB inbound plus 16KB outbound content buffers,
+to the byte - and the largest block goes back to **110,580**, which is precisely
+the pre-network boot figure the contiguity section above already documents from
+the other direction (and which `releaseBluetoothMemory()` in `App.ino` has been
+logging all along). Two measurements taken from different calls, on different
+devices, several wrong theories apart, landing on the same number is the
+strongest confirmation in this investigation that the corrected metric is
+measuring something real: the release gives back exactly the buffers mbedTLS is
+documented to take, and what is left is exactly the heap a boot has before the
+network touches it.
+
+Worth being precise about what that does *not* say, since precision is the whole
+subject of this section. It does not vindicate `ESP.getMaxAllocHeap()`. That
+call agrees at 110,580 early in a boot, before anything has carved the heap, and
+then reports 32,756 against a real 6,132 once things have. Whatever it is
+computing, the two readings coincide only while the heap is untouched, and no
+mechanism for that has been established here - "region boundary or a cap" is a
+guess about `0x7FF4`, flagged as one in `App.ino` too, and nothing in this
+firmware needs the answer now that nothing reads the value for a decision.
+
+## The fleet's whole heap history was ~4x too kind, and both numbers are now reported
+
+`App/Telemetry.cpp` sent `ESP.getFreeHeap()` as `freeHeapBytes`, and that field
+is what populates the server's `device_telemetry` table and its
+`/diag/telemetry` page. So the correction above is not confined to one
+investigation on two devices: every heap figure this fleet has ever recorded is
+inflated by roughly 4x, and every judgement made from that history - "this
+device has plenty of headroom", "memory is not the problem here" - was made
+from a too-kind number.
+
+Two fields are added to the telemetry request body:
+
+| Field | Source |
+| --- | --- |
+| `free8BitBytes` | `heap_caps_get_free_size(MALLOC_CAP_8BIT)` |
+| `largestFreeBlock8BitBytes` | `heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)` |
+
+**`freeHeapBytes` is unchanged and still sends `ESP.getFreeHeap()`.** It is
+neither repurposed nor removed, for two reasons that are both in the code:
+
+- This project has a standing mandate that the server keeps working with device
+  firmware up to six months old. A server that has not been updated yet still
+  reads `freeHeapBytes` and still stores it; changing what it *means* underneath
+  that server would have it silently recording a different quantity in a column
+  labelled for the old one, which is a worse failure than an inflated number
+  because it is undetectable from the data afterwards. Giving a new quantity a
+  new field name is backward compatible. Redefining an existing field never is.
+- Keeping both visible side by side is what makes the discrepancy **auditable**
+  rather than a story told in a commit message. Once `/diag/telemetry` shows
+  49,960 next to 11,340 for the same device at the same instant, the 4x gap is
+  a fact anyone can check against the fleet's own history - and the rows
+  recorded before this change stay interpretable, because the field they were
+  recorded in still means exactly what it meant when they were written.
+
+Both new figures are reported, not just the free size, for the reason the
+section above gives: a free-size column alone would show a device with 11,340
+free and a 6,132 largest block as merely low on memory, rather than as a device
+that cannot read the largest asset the server is permitted to send it. The
+`[telemetry] ok (...)` log line prints `freeHeap`, `free8BIT` and
+`largest8BIT` together for the same reason - a line quoting only one of them is
+how this stayed hidden the first time.
+
+The server side of this (a migration, and the `/diag/telemetry` columns) is not
+in this repo and is tracked separately; a server that has not caught up yet
+simply ignores two fields it does not know, which is the same
+missing-field-means-firmware-does-not-report-it convention `firmwareVersion`
+already relies on.
 
 ## Reversing "never released" — halfway, and the split is the load-bearing part
 
@@ -2981,9 +3160,13 @@ so.
 
 ## The heap-fragmentation watchdog had become the reboot loop it was written to prevent
 
-`App.ino`'s `checkHeapHealth()` reads `ESP.getMaxAllocHeap()` once a minute
-after a three-minute grace period and restarts the device deliberately if it
-has fallen below `kMinMaxAllocHeapBytes`, on the theory that a controlled
+(Historical, and kept because the arc matters more than any one of its states -
+`checkHeapHealth()` no longer works this way at all; see "What the watchdog
+restarts on now" below for what it does today.)
+
+`App.ino`'s `checkHeapHealth()` read `ESP.getMaxAllocHeap()` once a minute
+after a three-minute grace period and restarted the device deliberately if it
+had fallen below `kMinMaxAllocHeapBytes`, on the theory that a controlled
 restart - with an on-screen message and a flushed log line saying why - beats
 a card silently vanishing when an allocation fails somewhere less recoverable.
 The mechanism is sound. The threshold was not: `kMinMaxAllocHeapBytes` was
@@ -3017,22 +3200,113 @@ in the wrong direction for a while, because a device restarting every three
 minutes with the word "fragmentation" in its log reads as a memory leak rather
 than as a misconfigured constant.
 
-The new value, 28000, is derived from what a draw actually has to allocate
-instead of from one bad night's observations. The DiscoverAroundMe server
-normalizes every asset down to at most 24KB for exactly this device's
+The replacement value was 28000, derived from what a draw actually has to
+allocate instead of from one bad night's observations. The DiscoverAroundMe
+server normalizes every asset down to at most 24KB for exactly this device's
 contiguity ceiling - its `AssetSizeTarget.MaxBytes` documents the same 32,756
 figure from the server side - and a draw needs one contiguous block that size
 for the file copy. Below 28KB the largest asset the server is permitted to
 send genuinely cannot be read into memory and a card really would drop out
 silently, which is the condition worth spending a restart on. Above it, the
-device is doing precisely what it is supposed to be doing.
+device is doing precisely what it is supposed to be doing. That argument was
+also declared, here, to make `kMinMaxAllocHeapBytes` half of a maintained pair
+with the server's `AssetSizeTarget.MaxBytes`.
 
-**This constant is half of a pair and has to be maintained as one.**
-`kMinMaxAllocHeapBytes` must stay in step with, and above, the server's
-`AssetSizeTarget.MaxBytes`, with room for the allocator's own overhead. Raise
-the server's asset ceiling without raising this and the watchdog stops
-catching the condition it exists for; raise this without checking it against
-the measured steady state above and it becomes a restart timer again.
+**Every word of that was sound arithmetic on a bad input, and the constant is
+now gone.** It was derived from `ESP.getMaxAllocHeap()` - the same discredited
+metric as the 60000 before it, just used more carefully. `kMinMaxAllocHeapBytes`
+is deleted rather than left in place unused, and there is no server-side pair to
+maintain any more; `AssetSizeTarget.MaxBytes` still matters to the server for
+its own reasons, but nothing in this firmware is keyed to it. What the watchdog
+does instead is the next section.
+
+## What the watchdog restarts on now: a run of real failures, not a number
+
+Three thresholds stood in `checkHeapHealth()`, and all three were the same
+mistake in different clothing:
+
+| Value | Derived from | Outcome |
+| --- | --- | --- |
+| 60000 | the range the device was first seen failing in (34804-42996), before anyone knew a healthy steady state | unreachable, since the reading it tested never moves off 32,756; rebooted healthy devices every ~4 minutes |
+| 28000 | what a draw must allocate, via `ESP.getMaxAllocHeap()` | right arithmetic, discredited input |
+| 28000, observe-only | the same, with the restart suspended | honest, but a watchdog that does not act |
+
+The observe-only state was the correct interim position - restarting a
+household's display on a number nobody can explain is worse than not
+restarting it - and it said what should replace it: something keyed to observed
+harm rather than to a proxy. That is now implemented.
+
+`Display::consecutiveBufferAllocFailures()` counts how many file-buffer
+allocations have failed **in a row**, incremented in
+`ensureFileBufferCapacity()` only at the point where plain `malloc()`, all three
+explicit capability sets, *and* the TLS release have each been tried and the
+bytes still are not available - i.e. only when the draw is genuinely lost. Any
+success clears it, including the early return where the buffer was already large
+enough. `checkHeapHealth()` restarts when that run exceeds
+`kMaxConsecutiveBufferAllocFailures`, which is **6**.
+
+6 is chosen against `Assets.cpp`'s own retry behaviour, not picked for feel.
+`kMaxDrawAttempts` there is 3: a failed decode is retried three times before the
+asset is given up on, its cache entry invalidated and the bytes re-fetched, and
+each attempt runs the full read path. So one genuinely unlucky asset produces a
+run of 3, and any limit at or below that would let a single bad file reboot the
+device - the wrong response (invalidate-and-refetch is the right one) and a
+reboot loop waiting to happen if that asset is the one every rotation reaches.
+6 is two full cards' worth; exceeding it means every attempt on more than two
+assets failed with no success anywhere in between. Draws are seconds apart while
+the check runs once a minute, so a device in that state passes 6 well inside one
+interval and restarts on the very next check.
+
+Why failure-counting beats any threshold, stated plainly because this project
+paid for the lesson three times:
+
+- **It measures the harm itself.** "This device can no longer draw its cards" is
+  the condition worth restarting for. The counter counts exactly that, rather
+  than a quantity believed to correlate with it.
+- **It needs no theory about which pool is short**, which capability class
+  matters, or how much overhead the allocator adds. Those questions produced
+  three wrong thresholds and several device-nights.
+- **It cannot be fooled by a metric that means something other than it appears
+  to.** A wrapper reporting four times the truth changes nothing about whether
+  `malloc()` returned null.
+
+The price is giving up the original ambition of acting *before* the first
+failure, and that is deliberate. Prediction needs a trustworthy predictor, this
+board offers none, and three attempts at one produced a watchdog that rebooted
+working devices. Acting on the first few real failures instead costs a handful
+of missed card draws - which `Assets.cpp` already retries and recovers from -
+and in exchange the trigger cannot fire on a device that is working.
+
+Everything the old restart path did is preserved: `Log::flushNow()` so the line
+explaining why actually reaches the server rather than dying in RAM,
+`AppService::stashTimeForFastReboot()` so the next boot skips the blocking SNTP
+wait (which is where most of the visible outage went), the on-screen
+"Refreshing / Reclaiming memory - back in a moment", and a 1500ms delay before
+`esp_restart()` so both the message and the flushed log line get out. The
+largest-8BIT-block figure is logged on **every** check, whether or not anything
+is wrong, beside `ESP.getMaxAllocHeap()` - neither number decides anything now,
+and printing them together is what keeps the gap between the two (6,132 against
+32,756 at the one instant both were captured) an observable fact in the field
+rather than a finding that has to be taken on trust.
+
+`kHeapCheckGraceMs` stays at 3 minutes, for a new reason. Its original
+justification - boot-time allocations legitimately dip `maxAllocHeap` before a
+device reaches steady state - is moot now, since a transient dip that no draw
+ever tripped over produces no failures to count. It stays because together with
+the once-a-minute interval it bounds restarts to roughly one per four minutes,
+which is the only protection against a device that cannot draw even on a fresh
+heap turning into a tight reboot loop, and because it guarantees every boot a
+full three minutes in which to produce a success and clear whatever its first
+draws failed at.
+
+The risk being accepted, said out loud: if a restart does not fix it, this
+becomes a restart every four minutes, which is exactly what 60000 did. The
+difference is what it takes to get there. That loop fired on devices drawing
+their cards perfectly; this one can only fire on a device that has failed more
+than two cards outright, and such a device is already showing a household
+nothing. A rebooting device at least retries against a fresh heap and keeps
+reporting telemetry - and because the counter clears on the first success after
+the reboot, one that recovers stops restarting immediately.
 
 ## Locating an HTTPS failure by layer instead of arguing about it
 
@@ -3117,8 +3391,13 @@ trips the health watchdog at ~180s". That framing was wrong. The watchdog was
 not detecting fragmentation at all - it was firing on a threshold set above the
 steady state of a correctly working device, as "The heap-fragmentation watchdog
 had become the reboot loop it was written to prevent" above sets out in full,
-and `maxAllocHeap` on this board is pinned at 32,756 bytes from the first card
-draw onward rather than drifting downwards over an uptime. So nothing below
+and `ESP.getMaxAllocHeap()` on this board reports 32,756 bytes from the first
+card draw onward rather than drifting downwards over an uptime. (Later
+correction, since this paragraph is about not teaching the wrong lesson: that
+constancy is not evidence about heap shape either - the wrapper is not measuring
+the pool `malloc()` draws from, and the watchdog no longer reads it or any other
+threshold. See "Both of these numbers were wrong" and "What the watchdog
+restarts on now" above.) So nothing below
 fixed the 180-second restarts; a constant did. The three changes were kept
 anyway, on their own smaller merits: an allocator with no compaction is better
 off doing less allocating, and the churn each of them removes was paid for
