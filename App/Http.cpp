@@ -1,11 +1,6 @@
-#include "Http.h"
+﻿#include "Http.h"
 
 #include <WiFi.h>
-// For the per-capability heap figures releaseTlsSession() reports - ESP's own
-// wrappers overstate free memory by roughly 4x on this board (49,960 against
-// heap_caps' 11,340 at the same instant), so they are not usable for measuring
-// whether a release actually bought anything.
-#include <esp_heap_caps.h>
 
 #include "Config.h"
 #include "Log.h"
@@ -41,55 +36,6 @@ bool beginRequest(const String& url) { return gHttp.begin(gClient, url); }
 
 HTTPClient& client() { return gHttp; }
 
-void releaseTlsSession() {
-  // Hands mbedTLS's per-session memory back between requests.
-  //
-  // **This is the largest thing alive during a graphics draw, and it has
-  // nothing to do with graphics.** mbedTLS defaults to a 16KB inbound plus a
-  // 16KB outbound content buffer, on top of session and certificate state, and
-  // gClient above is deliberately a process-lifetime global so its TLS session
-  // can outlive a single request. That was a sound trade while nobody had
-  // measured what else needed the room - session resumption saves a full
-  // handshake, and a handshake on this chip is expensive.
-  //
-  // Then it was measured. On device 17, at the instant a 10,568-byte
-  // file-buffer allocation failed:
-  //
-  //   largest free block, every capability class =  6,132
-  //   total free,         every capability class = 11,340
-  //
-  // Roughly 32KB of TLS buffers were resident while the draw had 11,340 bytes
-  // to work with - and note that even a perfectly compacted heap would only
-  // barely have satisfied that single allocation. That is what makes reducing
-  // PEAK CONCURRENT use the actual fix, and chasing fragmentation a
-  // distraction. This is the biggest single overlap available to remove.
-  //
-  // The cost is real and should not be glossed: the next request pays a full
-  // handshake instead of resuming one. Check-ins are 60 seconds apart, so that
-  // is comfortably affordable; an asset-fetch burst pays it per asset, which is
-  // slower. A device that cannot draw its cards at all is the worse outcome. If
-  // the handshake cost turns out to hurt, the refinement is to release around
-  // draws specifically rather than after every request - not to go back to
-  // holding it forever.
-  //
-  // Logs the delta rather than asserting a saving, so the next person reads
-  // what it bought on real hardware instead of taking this comment's word.
-  const size_t freeBefore = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-  const size_t largestBefore = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-
-  gHttp.end();
-  gClient.stop();
-
-  const size_t freeAfter = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-  const size_t largestAfter = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-
-  Log::printf(
-      "[http] released TLS session: 8BIT free %u -> %u (%+d), largest block %u -> %u (%+d)",
-      static_cast<unsigned>(freeBefore), static_cast<unsigned>(freeAfter),
-      static_cast<int>(freeAfter) - static_cast<int>(freeBefore),
-      static_cast<unsigned>(largestBefore), static_cast<unsigned>(largestAfter),
-      static_cast<int>(largestAfter) - static_cast<int>(largestBefore));
-}
 
 void diagnoseFailure(const char* tag) {
   // HTTPClient collapses every pre-response failure into a single negative

@@ -745,17 +745,27 @@ void performCheckIn() {
     // Unreachable: the call above never returns.
   }
 
-  // Last thing, once every request this cycle has been made: give the TLS
-  // session's memory back before the card rotation starts needing contiguous
-  // blocks again.
+  // There used to be an Http::releaseTlsSession() call here, and removing it is
+  // deliberate.
   //
-  // Placed here rather than inside Http itself so it happens once per check-in
-  // cycle instead of once per request - the asset fetches above are a burst,
-  // and tearing the session down between each of them would pay a handshake
-  // per asset for no benefit, since nothing draws in between. See
-  // Http::releaseTlsSession() for the measured reason this exists: ~32KB of
-  // mbedTLS buffers were resident while a draw had 11,340 bytes to work with.
-  Http::releaseTlsSession();
+  // The measurement behind it was real: releasing the session returned 41,312
+  // bytes and moved the largest contiguous 8BIT block from 6,132 to 36,852, and
+  // an identical 10,568-byte allocation that had just failed then succeeded. It
+  // proved that peak concurrent use, not fragmentation, was the constraint.
+  //
+  // But it was the wrong end of the problem, and shipping it took two devices
+  // off the network. It attacked the symptom - too little contiguous memory at
+  // draw time - by evicting mbedTLS, when the cause was the draw path taking
+  // the memory in the first place. Now that draws stream from SD and take no
+  // per-draw block at all (see Display.cpp's drawPngFromSd), there is nothing
+  // to make room for, and tearing down a working TLS session every cycle buys
+  // nothing while costing a full handshake.
+  //
+  // If TLS lifetime is ever worth revisiting, calling stop() on the shared
+  // process-lifetime NetworkClientSecure is not the way: the debug log stream
+  // and telemetry ride the same client, so a client left unusable takes the
+  // device's own diagnostic channel down with it. A short-lived per-request
+  // client would be the safe shape.
 }
 
 }  // namespace
