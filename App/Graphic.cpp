@@ -222,7 +222,7 @@ struct Instance {
   /// and a rewind that reaches for the network is exactly what Cards.h's
   /// fetch/draw split exists to prevent.
   ///
-  /// Display::drawPngFromSd() clears the panel to the day/night theme
+  /// Display::drawImageFromSd() clears the panel to the day/night theme
   /// background before decoding and centres the image on it, so the theme
   /// and the centring are already handled and are the same ones every other
   /// screen in this build uses. The corner clock and the action buttons are

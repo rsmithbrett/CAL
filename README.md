@@ -4013,3 +4013,214 @@ type-checks. It proves nothing about behaviour on glass, and this codebase's hab
 saying so in the header of every unverified file (`IssFlyover.h`, `Actions.h`,
 `Touch.h`, and a dozen others) exists precisely so that nobody later mistakes "it
 built" for "it worked".
+
+## JPEG, because streaming was not enough: the decoder itself was the allocation
+
+"Reading the whole file before decoding it", "Contiguity, not free bytes" and
+"Three allocation-churn fixes" above are all one argument seen from different
+sides: this device has plenty of free heap and almost no large contiguous
+holes, so the thing to fix is anything that asks for a big block. Streaming the
+file off SD instead of copying it into RAM took the per-draw file copy from
+10,568-24,576 bytes to zero, which was the largest single win available and is
+still the right change.
+
+**It was not enough, and the numbers that say so were measured after it
+shipped.** At draw time the largest contiguous 8BIT block fell to **5,876
+bytes**, and a **10,568-byte** allocation failed outright against a **6,132-byte**
+block. The figure that settles the argument is what one small draw costs: a
+single **5,686-byte** draw took the largest block from **12,276 down to 5,876**.
+Set that beside what mbedTLS needs for a handshake - roughly 16KB in plus 16KB
+out - and the failure mode follows arithmetically rather than as a theory.
+After one graphic draw, the device could no longer check in *or* report why it
+could not, while still drawing its clock perfectly well from local state.
+Silence, presenting to a household as a freeze. And the control was already in
+the fleet: device 7 has no SD card, no picture cards and never enters this path
+at all, and it stayed stable throughout on the same builds.
+
+So the remaining cost is not the file, it is the PNG decoder. `pngle` is kept
+deliberately rather than released - "Reversing 'never released' - halfway, and
+the split is the load-bearing part" above is the whole argument for that, and
+it still holds - but keeping it is what makes it one of the large long-lived
+blocks that carve the heap into pieces, and standing it up in the first place
+wants far more room than what is left by the time a card is being drawn.
+
+### The arithmetic that made this an easy decision
+
+LovyanGFX's JPEG decoder is not a marginal improvement over its PNG decoder on
+this device; it is a different order of thing. `draw_jpg`'s entire workspace is
+**one 3,900-byte `malloc`**, and it is freed on every exit path the function
+has - `LGFXBase.cpp:3051` allocates, `:3063`, `:3079` and `:3106` free, one per
+way out. Inside that 3,900 lives a 512-byte stream buffer, which is how it
+reads a file it never holds a copy of. Nothing is retained between draws.
+
+| | Peak *new* contiguous heap per draw |
+| --- | --- |
+| Whole-file copy + retained `pngle` (before streaming) | 10,568-24,576 bytes, against a measured 6,132-byte largest block |
+| `drawPngFile(SD, ...)`, retained `pngle` | 0 per draw, but the retained scratch is one of the blocks fragmenting the heap, and setting it up wants ~44KB |
+| `drawJpgFile(SD, ...)` | **3,900 bytes, freed before the function returns** |
+
+**3,900 fits under 5,876** - the worst contiguous figure this project has ever
+measured on hardware - with room left over. It also fits under 6,132, the block
+that could not serve the 10,568-byte request. There is no retained scratch to
+account for, and there is no `releaseJpgMemory()` for some future change to
+forget to call, which matters more than it sounds: this codebase has already
+spent two sections above getting the release/retain split right for PNG and one
+of the failure modes was forgetting a path.
+
+### What is changing, and what deliberately is not
+
+Settled with the product owner, and narrower than "switch to JPEG":
+
+- **Photographs become JPEG.** They are the assets that fill the panel, they
+  are the ones being drawn when the numbers above were taken, and they lose
+  nothing that matters to a lossy encode at 320x240.
+- **Logos that genuinely need transparency stay PNG.** The in-rect draw exists
+  for airline logos layered onto a composed card; alpha is the entire reason
+  that path is different from the others, and JPEG has none.
+- **Fixed screens become RGB565 later, and are not part of this change.** See
+  `docs/rgb565-feasibility.md` for the plan and the experiment it depends on.
+- **PNG support does not go anywhere.** It stops being the *default*. Every
+  PNG already on every card in the fleet still draws, on this firmware, with no
+  migration and no re-fetch.
+
+That last point is the one that shaped the implementation.
+
+### The format is sniffed from the file, never carried on the wire
+
+`Display.cpp` gained `sniffImageFormat()`: it opens the cached file, reads the
+first eight bytes, closes it, and answers Png, Jpeg or Unknown. The two draw
+functions dispatch on that answer - `lcd.drawJpgFile(SD, ...)` or
+`lcd.drawPngFile(SD, ...)`, whose parameter lists are identical because
+LovyanGFX generates both from the same macro (`LGFXBase.hpp:922`).
+
+**Nothing in the check-in response says what format an asset is, and nothing
+should.** The obvious alternative is a `format` field beside the asset id, and
+it fails on this project's own six-month firmware compatibility rule (see
+"Shipping" above): a field only new firmware reads is a field the server cannot
+depend on, and a field old firmware ignores cannot change what an old device
+does with bytes it already has on its card.
+
+But the deeper reason is that the wire field answers the wrong question. What
+matters at draw time is not "what does the catalog say this asset is" but "what
+is in the file on this card, right now" - and during any rollout those two
+diverge by design. `/assets` holds whatever each entry happened to be when it
+was fetched, so a single device's cache will carry PNGs pulled last month
+beside JPEGs pulled this morning, and re-fetching the lot to make the cache
+uniform is precisely the network traffic the cache exists to avoid. A
+self-describing file needs no wire field, no new device state, and no agreement
+between a server version and a firmware version. Its answer also cannot be
+stale, because the thing being asked is the thing about to be decoded.
+
+Eight bytes are read rather than the four that would settle PNG-vs-JPEG on
+their own. The read costs the same either way - the card hands up a whole
+sector to answer any of this - and the four bytes past `\x89PNG` are the ones
+the PNG specification put there on purpose: `0D 0A 1A 0A` is a tripwire for a
+transport that mangled CR/LF or stopped at an EOF byte. These files arrive over
+HTTPS and are written to a FAT card by this firmware, which is exactly the class
+of path that can damage a file while leaving its first four bytes intact, so
+keeping the cheap half of the signature and discarding the diagnostic half
+would be giving up the only part that says something we could not already
+guess. JPEG is matched on `FF D8 FF`.
+
+**An unrecognised header draws nothing and counts a failure.** It does not
+guess. Guessing cannot succeed - neither decoder will find a header it
+understands - and it costs the one useful thing in the log, because the failure
+would then be reported against a decoder rather than against the file. Instead
+the header bytes themselves go into the log, all eight of them, because they
+name the cause where "unrecognised" would not: a cached HTML error page starts
+`3C 21`, a truncated write shows a short read, and a PNG mangled in transport
+shows the first four bytes right and the tail wrong. Three different bugs in
+three different subsystems, told apart by one line.
+
+A file in that state is not a life sentence, and un-sticking it needed no new
+machinery: `Assets.cpp`'s existing retry-then-`giveUpOnDecodeFailure()` path
+already treats "would not decode" as grounds to delete the cache entry and
+re-fetch it on the next pass (see "A decode failure now retries and
+self-heals, instead of being a life sentence" above), and an unrecognised
+signature is simply another way of not decoding.
+
+Counting it as a draw failure is deliberate and consistent with "What the
+watchdog restarts on now: a run of real failures, not a number" above.
+`consecutiveDrawFailures()` has always meant "this device could not put its
+card on the glass", not "a decoder returned false", and a device whose cache
+has filled with unreadable files is exactly the state that watchdog exists to
+end.
+
+### Three smaller decisions, each of which had an obvious wrong answer
+
+**The functions were renamed.** `drawPngFromSd`, `drawPngFromSdInRect` and
+`drawPngFromBuffer` are now `drawImageFromSd`, `drawImageFromSdInRect` and
+`drawImageFromBuffer`, with every call site in `Assets.cpp` updated and the
+comment references in `Assets.h`, `Graphic.cpp` and `App.ino` along with them.
+Nothing about the parameters or the contract changed. The alternative -
+leaving the names and noting that they are historical - was rejected because
+the next person debugging a JPEG failure will grep for the JPEG path, and a
+function called `drawPngFromSd` is where they will not look. (`Http.h:99`
+still refers to the old name in a comment. That file was settled minutes before
+this change and deliberately not touched; the reference is stale prose, not
+code. `SelfTest/` has its own separate `drawPngFromSdTest()`, which is a
+different sketch and a different function.)
+
+**The cache extension stays `.png`, and a cached `.png` may now hold a JPEG.**
+This looks like a bug and is a considered choice, so `Assets.cpp`'s
+`kExtension` now carries the reasoning. `pathFor()` is a cache-key function:
+it turns an asset id into the one place that asset's bytes live, and nothing
+reads the extension - `isCached()`, `invalidate()`, `ensureCached()`,
+`wipeCache()` and the splash slot all address a file built from the id, and the
+draw path identifies the format by reading the file. Making the name truthful
+would mean choosing it from the response's content type at download time, at
+which point `isCached()` becomes two `SD.exists()` calls because the caller
+asking "do I have asset X" no longer knows which name to look under - and a
+fleet mid-rollout would hold both names for the same id, so every one of those
+paths would have to handle finding both. The prize is a filename that reads
+correctly to a person with the card in a reader. That is a real benefit and a
+small one, and a comment serves it.
+
+**`drawImageFromBuffer` was brought into both changes, though it was not part
+of the brief.** A device with no usable card never writes to `/assets` at all -
+it fetches straight to RAM (`Assets::fetchToRam()`) - so leaving that path
+PNG-only would have blanked the picture cards on precisely the devices with no
+cache to fall back on, the moment the server started serving JPEG. It now
+classifies the front of the buffer through the same shared `classifyHeader()`
+the SD path uses, so the two cannot drift apart on what a JPEG looks like.
+
+While in there: **that path never fed `noteDrawOutcome()`**, which was a gap
+rather than a decision - it was the only one of the three draw entry points
+invisible to the heap watchdog, and a no-SD device whose RAM draws all fail is
+as unable to show a card as one whose SD draws all fail. It does now. This
+cannot make the watchdog fire on a network problem: `Assets.cpp` does not reach
+that function unless the fetch produced bytes, so getting there and failing is
+a decode failure and nothing else.
+
+### Instrumentation
+
+The `logHeapSnapshot("before ...")` / `("after ...")` pair still brackets the
+decode, and the label now names the decoder that ran - `before drawJpgFile` or
+`before drawPngFile` - because which decoder ran is the first thing anyone
+reading a draw failure needs to know and the last thing they can infer from a
+heap figure. The PNG strings are byte-identical to what they were before this
+change, so a grep over previously captured logs still lines up. The failure
+lines in all three draw functions gained the detected format for the same
+reason.
+
+There is deliberately no snapshot pair around a decode that did not happen. Two
+identical heap lines with nothing between them would read as a decode that
+consumed nothing, which is a much more interesting and completely different
+finding from "the file was not an image".
+
+### UNVERIFIED ON HARDWARE
+
+Nothing here has been compiled, let alone run. No JPEG has been drawn on a real
+panel by this firmware, the 3,900-byte figure is read out of the library source
+rather than measured through `logHeapSnapshot()` on a device, and the claim that
+a JPEG draw leaves the largest contiguous block roughly where it found it is a
+prediction from that source reading and not an observation. The measured numbers
+in this section are all from the PNG path, before the change - they are why the
+change exists, not evidence that it worked.
+
+The first thing worth checking on hardware is the pair of heap lines around a
+JPEG draw, against the same pair around a PNG draw of the same picture. If the
+before/after delta for JPEG is not dramatically smaller than PNG's, the reading
+of the decoder source above is wrong somewhere and everything in this section
+follows from it. The second is a check-in immediately after a graphic card
+draws, which is the failure this whole section exists to remove.

@@ -4,6 +4,16 @@
 // and drawPngFile(SD, ...) fails to compile with "abstract type
 // DataWrapperT<fs::SDFS>". CYD-Dickey hit exactly this and records the same
 // note at the top of its .ino.
+//
+// This one include order covers drawJpgFile(SD, ...) as well, which is worth
+// stating since the JPEG path was added later and the constraint looks like it
+// might need checking twice. It does not: the gate is a single `#if defined
+// (_SD_H_)` in the library's esp32/common.hpp, which defines
+// LGFX_FILESYSTEM_SD and with it the one DataWrapperT<fs::SDFS> specialisation
+// that every drawXxxFile(SD, ...) overload instantiates. PNG, JPEG, BMP and QOI
+// are generated from the same LGFX_FUNCTION_GENERATOR macro (LGFXBase.hpp:922)
+// and are gated identically - there is no separate per-format JPEG switch to
+// find, and nothing to do here beyond what this include already does.
 #include <SD.h>
 #include <cstdlib>
 // For the per-capability heap figures logHeapSnapshot() reports. ESP's own
@@ -1942,6 +1952,148 @@ void logHeapSnapshot(const char* when) {
       static_cast<unsigned>(ESP.getMaxAllocHeap()));
 }
 
+/// Which decoder a cached file needs, decided by reading the file's own first
+/// bytes rather than by being told.
+///
+/// **Nothing on the wire carries a format, and nothing should.** The obvious
+/// alternative - a `format` field beside the asset id in the check-in response
+/// - fails on this project's own compatibility rule: the server keeps working
+/// with device firmware up to six months old, so a field only new firmware
+/// reads is a field the server cannot depend on, and a field old firmware
+/// ignores cannot change what an old device does with the bytes it already
+/// has. It would also be answering the wrong question. What matters at draw
+/// time is not "what does the catalog say this asset is" but "what is in the
+/// file on this card, right now" - and during any rollout those two diverge,
+/// because /assets holds whatever each entry happened to be when it was
+/// fetched. One device's cache will carry PNGs pulled last month beside JPEGs
+/// pulled this morning, and re-fetching everything to make the cache uniform
+/// is precisely the network traffic the cache exists to avoid.
+///
+/// A self-describing file needs no wire field, no new device state, and no
+/// agreement between a server version and a firmware version. It is also the
+/// only scheme whose answer cannot be stale, because the thing being asked is
+/// the thing about to be decoded.
+enum class ImageFormat { Png, Jpeg, Unknown };
+
+const char* formatName(ImageFormat format) {
+  switch (format) {
+    case ImageFormat::Png:
+      return "png";
+    case ImageFormat::Jpeg:
+      return "jpeg";
+    default:
+      return "unknown";
+  }
+}
+
+// The two signatures this firmware recognises. JPEG's is the SOI marker
+// followed by the first byte of the next marker (FF D8 FF); PNG's is the full
+// eight-byte signature from the specification.
+constexpr uint8_t kJpegSignature[] = {0xFF, 0xD8, 0xFF};
+constexpr uint8_t kPngSignature[] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
+constexpr size_t kHeaderBytes = sizeof(kPngSignature);
+
+/// Classifies the bytes at the front of an image, wherever they came from.
+///
+/// Split out from sniffImageFormat() below so the SD path and the
+/// straight-from-RAM path cannot drift apart on what counts as a JPEG. Two
+/// copies of a magic-byte test is exactly the kind of duplication that stays
+/// correct until one of them is updated.
+ImageFormat classifyHeader(const uint8_t* header, size_t length) {
+  if (header == nullptr) {
+    return ImageFormat::Unknown;
+  }
+  if (length >= sizeof(kJpegSignature)) {
+    bool jpeg = true;
+    for (size_t i = 0; i < sizeof(kJpegSignature); ++i) {
+      if (header[i] != kJpegSignature[i]) {
+        jpeg = false;
+        break;
+      }
+    }
+    if (jpeg) {
+      return ImageFormat::Jpeg;
+    }
+  }
+  if (length >= sizeof(kPngSignature)) {
+    bool png = true;
+    for (size_t i = 0; i < sizeof(kPngSignature); ++i) {
+      if (header[i] != kPngSignature[i]) {
+        png = false;
+        break;
+      }
+    }
+    if (png) {
+      return ImageFormat::Png;
+    }
+  }
+  return ImageFormat::Unknown;
+}
+
+/// Reads the first eight bytes of `path`, and nothing else.
+///
+/// Eight rather than the four that would settle PNG-vs-JPEG on their own,
+/// because the read costs the same either way - the card hands up a whole
+/// sector to answer any of this - and the four bytes past "\x89PNG" are the
+/// ones the PNG specification put there deliberately: 0D 0A 1A 0A is a
+/// tripwire for a transport that mangled CR/LF or stopped at an EOF byte.
+/// These files arrive over HTTPS and are written to a FAT card by this
+/// firmware, which is exactly the class of path that can damage a file while
+/// leaving its first four bytes perfectly intact, so keeping the cheap half of
+/// the signature and discarding the diagnostic half would be giving up the
+/// only part that says something we could not already guess.
+///
+/// Opened and closed here, rather than handing a live handle to the decode.
+/// The decoder opens the same path again a moment later, which is one extra
+/// directory lookup and worth it: keeping a handle across the dispatch would
+/// mean either threading it through two different LovyanGFX overloads or
+/// remembering to close it on every early return, and this file has already
+/// paid for forgetting a release path once (see releaseDecodeMemory()).
+ImageFormat sniffImageFormat(const String& path) {
+  File file = SD.open(path.c_str());
+  if (!file) {
+    // Distinct from "opened but unrecognised" on purpose: this is a missing
+    // card, a missing file or a filesystem that did not mount, none of which
+    // are a question about image formats.
+    Log::printf("[display] cannot open %s to identify it", path.c_str());
+    return ImageFormat::Unknown;
+  }
+  uint8_t header[kHeaderBytes] = {0};
+  const size_t got = file.read(header, sizeof(header));
+  file.close();
+
+  const ImageFormat format = classifyHeader(header, got);
+  if (format == ImageFormat::Unknown) {
+    // All eight bytes go in the line, because they identify the cause where a
+    // bare "unrecognised" would not: a cached HTML error page starts 3C 21
+    // ("<!"), a truncated or zero-length write shows up as a short read, and a
+    // PNG whose 0D 0A 1A 0A tail was mangled in transport has its first four
+    // bytes right and its tail wrong. Those are three different bugs in three
+    // different subsystems, and this is the line that tells them apart -
+    // printing only the leading four would put the reader straight back to
+    // guessing. Bytes past a short read read as 00, because header[] was
+    // zeroed before the read.
+    //
+    // Hand-rolled rather than snprintf("%02X ") because a fixed-width nibble
+    // table cannot be made to truncate or to disagree with its format string,
+    // and this runs on the diagnostic path of a device whose only diagnostic
+    // channel is the log line itself.
+    static const char kHexDigits[] = "0123456789ABCDEF";
+    char hex[kHeaderBytes * 3] = {0};
+    for (size_t i = 0; i < kHeaderBytes; ++i) {
+      hex[i * 3] = kHexDigits[(header[i] >> 4) & 0x0F];
+      hex[i * 3 + 1] = kHexDigits[header[i] & 0x0F];
+      hex[i * 3 + 2] = ' ';
+    }
+    // Replaces the trailing space with the terminator, so the buffer is exactly
+    // "89 50 4E 47 0D 0A 1A 0A" and no wider than it needs to be.
+    hex[sizeof(hex) - 1] = '\0';
+    Log::printf("[display] %s has no recognised image signature (read %u bytes, header %s)",
+                path.c_str(), static_cast<unsigned>(got), hex);
+  }
+  return format;
+}
+
 }  // namespace
 
 uint32_t consecutiveDrawFailures() { return gConsecutiveDrawFailures; }
@@ -1951,23 +2103,46 @@ uint32_t consecutiveDrawFailures() { return gConsecutiveDrawFailures; }
 /// down for why both PNG blocks are now handed back after every draw.
 void releaseDecodeMemory();
 
-bool drawPngFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, int32_t h) {
+bool drawImageFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, int32_t h) {
   // No fillScreen() here, deliberately - see this function's own header
   // comment. Streamed straight from SD, bounded to (w, h) at (x, y) instead of
   // the whole panel; scaleX/scaleY left at 0 is what makes LovyanGFX auto-fit
   // the image within that box rather than drawing it at native size.
   //
-  // See drawPngFromSd() below for why this no longer reads the file into RAM
+  // See drawImageFromSd() below for why this no longer reads the file into RAM
   // first. The in-rect case (the aircraft card's airline logo) is the smaller
   // of the two but was subject to exactly the same allocation.
-  const bool ok = lcd.drawPngFile(SD, path.c_str(), x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
+  const ImageFormat format = sniffImageFormat(path);
+
+  bool ok = false;
+  if (format == ImageFormat::Jpeg) {
+    ok = lcd.drawJpgFile(SD, path.c_str(), x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
+  } else if (format == ImageFormat::Png) {
+    ok = lcd.drawPngFile(SD, path.c_str(), x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
+  } else {
+    // Nothing drawn, and nothing guessed. Handing unrecognised bytes to a
+    // decoder chosen by coin-flip cannot succeed - neither decoder will find a
+    // header it understands - and it costs the one useful thing in the log,
+    // because the failure would then be reported against a decoder instead of
+    // against the file. Unlike the full-screen path this one has not cleared
+    // the panel, so drawing nothing leaves the card underneath exactly as the
+    // caller composed it, which is the right outcome for a missing logo.
+    //
+    // Counted as a failure all the same. consecutiveDrawFailures() means "this
+    // device could not draw its card", not "a decoder returned false", and a
+    // device whose cache has filled up with unreadable files is in exactly the
+    // state the watchdog exists to end. sniffImageFormat() has already logged
+    // the header bytes.
+  }
+
   noteDrawOutcome(ok);
   releaseDecodeMemory();
   if (!ok) {
-    Log::printf("[display] failed to draw %s in %dx%d rect at (%d,%d) (8BIT largest=%u free=%u)",
-                path.c_str(), (int)w, (int)h, (int)x, (int)y,
-                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
-                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
+    Log::printf(
+        "[display] failed to draw %s (%s) in %dx%d rect at (%d,%d) (8BIT largest=%u free=%u)",
+        path.c_str(), formatName(format), (int)w, (int)h, (int)x, (int)y,
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
   }
   return ok;
 }
@@ -2032,14 +2207,61 @@ void releaseDecodeMemory() {
   //   gFileBuffer WAS the opposite case: a 31-54KB copy of the whole file,
   //   needed only for one drawPng() call. It is gone entirely - the draws
   //   stream from SD now, so there is no file copy to hold or release. See
-  //   drawPngFromSd() for why the premise that required it (a shared SD and
+  //   drawImageFromSd() for why the premise that required it (a shared SD and
   //   display SPI bus) did not survive checking the pin assignments.
   //
   // So what remains here is only the pngle scratch, and only the argument for
   // keeping it. There is no second block left to give back.
+  //
+  // Nothing was added here when the JPEG path arrived, and that is the point of
+  // JPEG rather than an omission. draw_jpg() takes its whole 3,900-byte
+  // workspace with malloc() and frees it on every exit path of its own
+  // (LGFXBase.cpp:3051 against :3063, :3079 and :3106), retaining nothing
+  // between draws - so there is no releaseJpgMemory() in the library and no
+  // decision for this function to make. The asymmetry is worth naming because
+  // it is easy to read as an oversight: a JPEG draw leaves this function
+  // nothing to do, while a PNG draw leaves it something it deliberately
+  // declines to do.
 }
 
-/// Streams the PNG straight off SD instead of reading it into RAM first.
+/// Streams the image straight off SD instead of reading it into RAM first,
+/// through whichever decoder its own first bytes call for.
+///
+/// **Why there are now two decoders here at all.** Streaming (below) took the
+/// per-draw file copy to approximately zero, and that was still not enough,
+/// because LovyanGFX's PNG decoder is itself the expensive party. Measured on
+/// hardware after the streaming change: at draw time the largest contiguous
+/// 8BIT block fell to 5,876 bytes, and a 10,568-byte allocation failed outright
+/// against a 6,132-byte block. The number that settles it is what a single
+/// small draw costs - one 5,686-byte draw took the largest block from 12,276
+/// down to 5,876. mbedTLS wants roughly 16KB in plus 16KB out for a handshake,
+/// so after one graphic draw the device could no longer check in *or* report
+/// why it could not, while still drawing the clock locally: silence that
+/// presents to a household as a freeze. Device 7 - no SD card, no picture
+/// cards, so this path never runs - stayed stable throughout on the same
+/// builds, which is what says the graphics path and not the network stack is
+/// where the memory went.
+///
+/// LovyanGFX's JPEG decoder is the way out, and the arithmetic is not close.
+/// Its entire workspace is one 3,900-byte malloc, freed on every exit path,
+/// with a 512-byte stream buffer inside it and nothing retained afterwards
+/// (LGFXBase.cpp's draw_jpg: the malloc at :3051, the free at :3063, :3079 and
+/// :3106). 3,900 fits under even the worst figure observed here - the 5,876
+/// low-water mark - with room left over, there is no retained scratch, and
+/// there is no releaseJpgMemory() for a future change to forget. The PNG
+/// decoder by contrast keeps its pngle deliberately (see releaseDecodeMemory()
+/// above for why that retention is load-bearing rather than an oversight) and
+/// wants far more to set it up.
+///
+/// So the settled architecture is: photos become JPEG, logos that genuinely
+/// need transparency stay PNG, and PNG support does not go anywhere - it stops
+/// being the default. Which of the two runs is decided per file by
+/// sniffImageFormat(), never by a wire field; that function's own comment has
+/// the reasoning, and it is the part of this change most worth reading before
+/// changing anything here.
+///
+/// What follows is the streaming decision this function was written for, kept
+/// because it is still why neither decoder gets a file copy:
 ///
 /// **This reverts the whole-file-buffer design, and the reason it existed
 /// turned out not to be true.** readFileToBuffer() was introduced because this
@@ -2071,20 +2293,56 @@ void releaseDecodeMemory() {
 /// This is also what CYD-Dickey has always done, which is why its graphics
 /// never had this problem - a fact that sat in this codebase's own comments as
 /// an unexplained curiosity for some time.
-bool drawPngFromSd(const String& path) {
+bool drawImageFromSd(const String& path) {
+  // Sniffed before the panel is cleared, so the log reads in the order things
+  // happened: what the file is, then what the heap looked like going in.
+  const ImageFormat format = sniffImageFormat(path);
+
   lcd.fillScreen(bg());
 
   // Kept across the streamed decode for now, not because a shared bus is
   // suspected any more but because these are the figures that will show
-  // whether streaming actually removed the pressure. Worth deleting once a
-  // few devices have run clean.
-  logHeapSnapshot("before drawPngFile");
-  const bool ok = lcd.drawPngFile(SD, path.c_str(), 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
-  logHeapSnapshot("after drawPngFile");
+  // whether streaming actually removed the pressure - and now, separately,
+  // whether JPEG's 3,900 bytes behave the way the source says they should on
+  // a real heap. Worth deleting once a few devices have run clean.
+  //
+  // The decoder's name goes in the label rather than a generic "decode",
+  // because which decoder ran is the first thing anyone reading a draw failure
+  // needs to know and the last thing they can infer from a heap figure. The
+  // PNG strings are unchanged from before this file learned about JPEG at all,
+  // so a grep over older captured logs still lines up.
+  const char* const beforeLabel =
+      (format == ImageFormat::Jpeg) ? "before drawJpgFile" : "before drawPngFile";
+  const char* const afterLabel =
+      (format == ImageFormat::Jpeg) ? "after drawJpgFile" : "after drawPngFile";
+
+  bool ok = false;
+  if (format == ImageFormat::Unknown) {
+    // Deliberately no snapshot pair around a decode that is not going to
+    // happen: two identical heap lines with nothing between them would read
+    // like a decode that consumed nothing, which is a different and much more
+    // interesting finding than "the file was not an image". The screen has
+    // already been cleared, which is this function's standing contract on
+    // failure (see the declaration in Display.h): the caller gets false and
+    // puts its own content back over a clean panel rather than a half-painted
+    // one. sniffImageFormat() has already logged the offending bytes.
+    //
+    // Counted as a failure below, like any other draw this device could not
+    // perform - see drawImageFromSdInRect() for why that is the right reading
+    // of the counter rather than an over-eager one.
+  } else {
+    logHeapSnapshot(beforeLabel);
+    ok = (format == ImageFormat::Jpeg)
+             ? lcd.drawJpgFile(SD, path.c_str(), 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center)
+             : lcd.drawPngFile(SD, path.c_str(), 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
+    logHeapSnapshot(afterLabel);
+  }
+
   noteDrawOutcome(ok);
 
   if (!ok) {
-    Log::printf("[display] failed to draw %s (8BIT largest=%u free=%u)", path.c_str(),
+    Log::printf("[display] failed to draw %s (%s) (8BIT largest=%u free=%u)", path.c_str(),
+                formatName(format),
                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
   }
@@ -2097,23 +2355,47 @@ bool drawPngFromSd(const String& path) {
   return ok;
 }
 
-bool drawPngFromBuffer(const uint8_t* data, size_t size) {
+bool drawImageFromBuffer(const uint8_t* data, size_t size) {
   lcd.fillScreen(bg());
   bool ok = false;
+  ImageFormat format = ImageFormat::Unknown;
   if (data == nullptr || size == 0) {
-    Log::line("[display] drawPngFromBuffer called with no data");
+    Log::line("[display] drawImageFromBuffer called with no data");
   } else {
-    ok = lcd.drawPng(data, size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
+    // Sniffed exactly like the SD paths, and for a reason that is easy to miss:
+    // a device with no usable card never writes to /assets at all, it fetches
+    // straight to RAM (Assets::fetchToRam()). If this path stayed PNG-only,
+    // adopting JPEG would silently blank the picture cards on precisely the
+    // devices that have no cache to fall back on. classifyHeader() is shared
+    // with sniffImageFormat() so the two paths cannot disagree about what a
+    // JPEG looks like; there is no file to open here, the bytes are already in
+    // front of us.
+    format = classifyHeader(data, size);
+    if (format == ImageFormat::Jpeg) {
+      ok = lcd.drawJpg(data, size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
+    } else if (format == ImageFormat::Png) {
+      ok = lcd.drawPng(data, size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
+    }
     // Nothing to release here: this path's caller owns the image bytes (a
     // RamAssetBuffer, see Assets.h) and it never fills gFileBuffer, while the
     // decoder's own scratch is deliberately kept for reuse - see
     // releaseDecodeMemory() for why that split is the load-bearing part.
     if (!ok) {
-      Log::printf("[display] failed to draw a %u-byte RAM buffer (freeHeap=%u maxAllocHeap=%u)",
-                  static_cast<unsigned>(size), static_cast<unsigned>(ESP.getFreeHeap()),
-                  static_cast<unsigned>(ESP.getMaxAllocHeap()));
+      Log::printf(
+          "[display] failed to draw a %u-byte RAM buffer (%s) (freeHeap=%u maxAllocHeap=%u)",
+          static_cast<unsigned>(size), formatName(format),
+          static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
     }
   }
+  // NEW HERE, and worth flagging rather than slipping in: this path never fed
+  // the counter before. That was a gap, not a decision - a no-SD device whose
+  // RAM draws all fail is as unable to show a card as one whose SD draws all
+  // fail, and it is the only one of the three draw entry points that was
+  // invisible to App.ino's watchdog. It cannot make the watchdog trigger on a
+  // network problem: Assets.cpp does not reach this function at all unless the
+  // fetch produced bytes, so getting here and failing really is a decode
+  // failure and nothing else.
+  noteDrawOutcome(ok);
   restoreDefaultFont();
   return ok;
 }

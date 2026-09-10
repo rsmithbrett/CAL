@@ -100,7 +100,7 @@ bool drawFullScreen(const String& id);
 
 /// Draws an asset that is already cached, and never fetches. False means
 /// either "not on the card" (nothing was drawn) or "the decode failed", in
-/// which case Display::drawPngFromSd() has already cleared the panel to the
+/// which case Display::drawImageFromSd() has already cleared the panel to the
 /// theme background and the caller is expected to put its own no-content
 /// state there. This is what a card's draw() calls.
 bool drawCached(const String& id);
@@ -183,7 +183,7 @@ uint16_t cachedCount();
 /// present on the card, downloaded and SHA-256 verified fine, but LovyanGFX
 /// still refused it (a corrupted PNG at the source, an encoding this
 /// decoder cannot read). Recorded by drawCached()/drawCachedInRect()/
-/// drawFullScreen() themselves whenever Display::drawPngFromSd*() returns
+/// drawFullScreen() themselves whenever Display::drawImageFromSd*() returns
 /// false for an id that was genuinely cached - so this can never fire for
 /// the ordinary "hasn't fetched yet" case. Same "report what silently
 /// failed on the next check-in" reasoning as CardManager's own

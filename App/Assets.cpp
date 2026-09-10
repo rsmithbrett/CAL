@@ -50,7 +50,7 @@ void recordDecodeFailure(const String& assetId) {
 /// caller (a full-screen picture, an in-rect overlay like the aircraft
 /// card's airline logo, ...) hit it - found live that logging this only
 /// from Graphic.cpp's own draw() left the aircraft logo's own decode
-/// failures silent past the generic Display::drawPngFromSd*() line, the
+/// failures silent past the generic Display::drawImageFromSd*() line, the
 /// same "loud, not silent" gap this whole mechanism exists to close.
 void giveUpOnDecodeFailure(const String& id) {
   recordDecodeFailure(id);
@@ -90,11 +90,39 @@ constexpr const char* kFetchPathSuffix = "/content";
 /// with the card in a reader can see exactly what a device has pulled down.
 constexpr const char* kCacheDir = "/assets";
 
-/// Everything is stored as PNG. The server normalises and re-encodes at
-/// upload time (see Assets.h), so it decides the format and there is no
-/// reason for a device to carry a decoder for every format someone might
-/// upload. LovyanGFX's PNG support is what CYD-Dickey already relies on for
-/// its own SD-hosted splash.
+/// The cache filename suffix, and **as of the JPEG change this is a suffix
+/// rather than a format claim - a cached file ending .png may well hold a
+/// JPEG.** Kept anyway, deliberately, and the reasoning is worth having
+/// because "the extension is wrong, fix the extension" is the obvious first
+/// instinct and it is the wrong one here.
+///
+/// pathFor() is a cache-key function: it turns an asset id into the one place
+/// on the card that asset's bytes live. Nothing in this file or in Display
+/// ever reads the extension - isCached(), invalidate(), ensureCached() and
+/// wipeCache() all address a file they build from the id, and the draw path
+/// identifies the format by reading the file's first bytes
+/// (Display.cpp's sniffImageFormat()). So the extension carries no
+/// information that anything consumes.
+///
+/// Making it truthful would mean choosing it from the response's content type
+/// at download time, and that immediately costs the properties this scheme has
+/// for free. isCached() becomes two SD.exists() calls instead of one, because
+/// the caller asking "do I have asset X" does not know which name to look
+/// under. invalidate() and the splash slot have the same problem. And a fleet
+/// mid-rollout would hold both names for the same id, so every one of those
+/// paths would need to handle finding both at once, on a device where the
+/// scarce resources are contiguous memory and code that nobody has to reason
+/// about twice. The prize for all of that is a filename that reads correctly
+/// to a person who has put the card in a reader - which is a real but small
+/// benefit, and one this comment serves just as well.
+///
+/// The historical claim, kept because it explains why the name was ever this:
+/// everything used to be stored as PNG, because the server normalised and
+/// re-encoded every upload to PNG (see Assets.h) and a device therefore needed
+/// exactly one decoder. That is no longer true - photographs are JPEG now, for
+/// the memory reasons Display.cpp's drawImageFromSd() sets out - but the
+/// server is still the party that decides the format, and a device still
+/// carries only the decoders LovyanGFX already gives it.
 constexpr const char* kExtension = ".png";
 
 /// The fixed cache-slot name showBootSplash() always reads from, regardless
@@ -761,7 +789,7 @@ bool drawRam(const String& id, const RamAssetBuffer& buffer) {
     return false;
   }
   for (uint8_t attempt = 0; attempt < kMaxDrawAttempts; ++attempt) {
-    if (Display::drawPngFromBuffer(buffer.data, buffer.size)) {
+    if (Display::drawImageFromBuffer(buffer.data, buffer.size)) {
       return true;
     }
     if (attempt + 1 < kMaxDrawAttempts) {
@@ -784,7 +812,7 @@ bool drawFullScreen(const String& id) {
     return false;
   }
   for (uint8_t attempt = 0; attempt < kMaxDrawAttempts; ++attempt) {
-    if (Display::drawPngFromSd(pathFor(id))) {
+    if (Display::drawImageFromSd(pathFor(id))) {
       return true;
     }
     if (attempt + 1 < kMaxDrawAttempts) {
@@ -800,7 +828,7 @@ bool drawCachedInRect(const String& id, int32_t x, int32_t y, int32_t w, int32_t
     return false;
   }
   for (uint8_t attempt = 0; attempt < kMaxDrawAttempts; ++attempt) {
-    if (Display::drawPngFromSdInRect(pathFor(id), x, y, w, h)) {
+    if (Display::drawImageFromSdInRect(pathFor(id), x, y, w, h)) {
       return true;
     }
     if (attempt + 1 < kMaxDrawAttempts) {
@@ -816,7 +844,7 @@ bool drawCached(const String& id) {
     return false;
   }
   for (uint8_t attempt = 0; attempt < kMaxDrawAttempts; ++attempt) {
-    if (Display::drawPngFromSd(pathFor(id))) {
+    if (Display::drawImageFromSd(pathFor(id))) {
       return true;
     }
     if (attempt + 1 < kMaxDrawAttempts) {
@@ -874,7 +902,7 @@ bool showBootSplash() {
   // - see App.ino's own remarks at the call site. A failed decode returns
   // false so those status screens still appear on a device that has no
   // working splash to show, rather than leaving it on a blank panel.
-  return Display::drawPngFromSd(path);
+  return Display::drawImageFromSd(path);
 }
 
 uint16_t wipeCache() {

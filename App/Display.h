@@ -414,43 +414,68 @@ void flashNavEdge(bool isForward, bool canReverse);
 /// Counts failed DRAWS, not failed allocations. It used to count the latter,
 /// against a whole-file read buffer that no longer exists - the draws stream
 /// from SD now, so there is no per-draw allocation left to fail (see
-/// drawPngFromSd's remarks on the shared-bus premise that turned out not to
+/// drawImageFromSd's remarks on the shared-bus premise that turned out not to
 /// hold). Counting the draw is strictly better anyway: it is the outcome that
 /// matters, and it stays meaningful whatever the decode path does underneath.
+///
+/// A file with no recognisable image signature counts here too, and so does a
+/// failed RAM draw - see the three draw functions below. Both are cases of
+/// "this device could not put its card on the glass", which is the only thing
+/// this number has ever claimed to mean.
 uint32_t consecutiveDrawFailures();
 
-/// Draws a PNG from the SD card, scaled to fit and centred on the whole
-/// panel. Clears to the theme background first, so a failed decode leaves a
-/// clean screen rather than a half-painted one; returns false in that case so
-/// the caller can put its own content back. Assets.cpp is the only caller -
-/// the SD read lives behind this function because this file owns the one
-/// LGFX instance for this panel, the same reason readTouchRaw() is here.
-bool drawPngFromSd(const String& path);
+/// Draws a cached image from the SD card, scaled to fit and centred on the
+/// whole panel. Clears to the theme background first, so a failed decode
+/// leaves a clean screen rather than a half-painted one; returns false in that
+/// case so the caller can put its own content back. Assets.cpp is the only
+/// caller - the SD read lives behind this function because this file owns the
+/// one LGFX instance for this panel, the same reason readTouchRaw() is here.
+///
+/// **PNG or JPEG, decided by the file rather than by the caller.** This was
+/// drawPngFromSd() until JPEG became the default encoding for photographs, and
+/// it has been renamed rather than left alone: a name that says PNG on a
+/// function that dispatches on a sniffed signature would send the next person
+/// debugging a JPEG failure looking for a JPEG code path that does not exist
+/// under that name. Nothing in the parameters or the contract changed. See the
+/// implementation for the memory arithmetic that forced the format change, and
+/// sniffImageFormat() there for why the format travels in the file's own first
+/// bytes instead of on the wire.
+bool drawImageFromSd(const String& path);
 
 /// Same decode, bounded to a caller-given rectangle instead of the whole
 /// panel - for a small logo layered onto a card another draw call has
 /// already composed, rather than the picture being the whole card. Does NOT
-/// clear the screen first, unlike drawPngFromSd(): clearing here would erase
+/// clear the screen first, unlike drawImageFromSd(): clearing here would erase
 /// the content it is being layered onto. Scaled to fit within (w, h) and
 /// centred there.
 ///
+/// This is the one draw where PNG is still expected to be the common case
+/// rather than the legacy one - it exists for airline logos, and a logo is
+/// exactly the kind of asset that needs real transparency over an already
+/// composed card. The format is still sniffed, not assumed: an operator who
+/// uploads a JPEG logo gets it drawn (opaque box and all) rather than getting
+/// nothing.
+///
 /// UNVERIFIED ON HARDWARE more pointedly than most of this file: every other
-/// PNG draw here fills the whole panel, and this is the first one that
+/// image draw here fills the whole panel, and this is the first one that
 /// doesn't. The bounded-rect behaviour is read from LovyanGFX's own
-/// drawPngFile parameters (maxWidth/maxHeight plus a centred datum), not
-/// confirmed against an actual decode of an actual logo on this actual panel.
-bool drawPngFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, int32_t h);
+/// drawPngFile/drawJpgFile parameters (maxWidth/maxHeight plus a centred
+/// datum), not confirmed against an actual decode of an actual logo on this
+/// actual panel.
+bool drawImageFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, int32_t h);
 
-/// Draws a PNG already sitting in RAM, scaled to fit and centred on the
-/// whole panel - the no-SD-card counterpart to drawPngFromSd() above, for
+/// Draws an image already sitting in RAM, scaled to fit and centred on the
+/// whole panel - the no-SD-card counterpart to drawImageFromSd() above, for
 /// Assets::fetchToRam()'s direct-to-RAM fallback. Same fillScreen()-first
 /// (a failed decode leaves a clean screen, not a half-painted one), same
 /// deliberate non-release of the PNG decoder's scratch buffer afterwards
-/// (see drawPngFromSd()'s own comment for the fragmentation reasoning this
-/// shares), same false-means-drew-nothing contract. The only difference
-/// from drawPngFromSd() is that there is no SD read to do first: the caller
-/// already has the bytes, from the network rather than from a file.
-bool drawPngFromBuffer(const uint8_t* data, size_t size);
+/// (see drawImageFromSd()'s own comment for the fragmentation reasoning this
+/// shares), same false-means-drew-nothing contract, and the same signature
+/// sniff. The only difference from drawImageFromSd() is that there is no SD
+/// read to do first: the caller already has the bytes, from the network rather
+/// than from a file - so there is no file to open in order to identify it
+/// either, just the front of the buffer.
+bool drawImageFromBuffer(const uint8_t* data, size_t size);
 
 }  // namespace Display
 

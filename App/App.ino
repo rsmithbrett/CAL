@@ -757,7 +757,7 @@ void performCheckIn() {
   // off the network. It attacked the symptom - too little contiguous memory at
   // draw time - by evicting mbedTLS, when the cause was the draw path taking
   // the memory in the first place. Now that draws stream from SD and take no
-  // per-draw block at all (see Display.cpp's drawPngFromSd), there is nothing
+  // per-draw block at all (see Display.cpp's drawImageFromSd), there is nothing
   // to make room for, and tearing down a working TLS session every cycle buys
   // nothing while costing a full handshake.
   //
