@@ -698,17 +698,22 @@ void clearDecodeFailures() {
   gDecodeFailureCount = 0;
 }
 
-void showBootSplash() {
+bool showBootSplash() {
   if (!Sd::isReady()) {
-    return;
+    return false;
   }
   const String path = pathFor(kSplashCacheId);
   if (!SD.exists(path)) {
     // Silently skipped, exactly like CYD-Dickey's own splash: a decoration
     // whose absence is the ordinary case for a device with no card.
-    return;
+    return false;
   }
-  Display::drawPngFromSd(path);
+  // The return value is what lets setup() leave the logo up through WiFi and
+  // time sync instead of painting "Checking the time" over it a moment later
+  // - see App.ino's own remarks at the call site. A failed decode returns
+  // false so those status screens still appear on a device that has no
+  // working splash to show, rather than leaving it on a blank panel.
+  return Display::drawPngFromSd(path);
 }
 
 uint16_t wipeCache() {

@@ -81,4 +81,15 @@ bool beginRequest(const String& url);
 /// close the underlying socket (that is the entire point).
 HTTPClient& client();
 
+/// Says which layer an HTTPS failure actually happened at, for a call site
+/// that just got a negative status back. HTTPClient reports a DNS failure, a
+/// refused TCP connect and a rejected TLS handshake all as -1, which is not
+/// enough to act on; this walks name resolution, then a plain TCP connect to
+/// 443, and logs which one broke.
+///
+/// Only worth calling on the failure path - it costs a DNS lookup and a TCP
+/// connect. `tag` is the caller's own name ("checkin", "manifest", ...) so a
+/// device with several failing subsystems stays readable in one stream.
+void diagnoseFailure(const char* tag);
+
 }  // namespace Http

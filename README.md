@@ -973,6 +973,18 @@ the decoder's buffers allocated on purpose for cheap repeat-draws, and
 CYD-Dickey found that starving the memory its Bluetooth init needed
 immediately afterwards.
 
+**The second of those two is no longer true of this firmware, and the whole
+argument about it is further down.** `lcd.releasePngMemory()` is *not* called
+after a draw here: the decoder's ~44KB scratch is deliberately allocated once,
+by the boot splash, while a large contiguous block is still available, and
+kept for the rest of the uptime — see "Why the PNG decoder's scratch buffer is
+never released" below for why, and "Reversing 'never released' — halfway, and
+the split is the load-bearing part" for the half of that decision that was
+later reversed and the half that was not. What *is* handed back after every
+draw is `Display.cpp`'s own file-copy buffer, which is a different block with
+a different lifetime; the two are easy to confuse and the difference is the
+entire fix.
+
 **Storage is treated as effectively unlimited but measured.** The card is
 user-upgradeable, and a cache that has to reason about eviction is a great
 deal of machinery for a problem a larger card solves. "Unlimited" is only a
@@ -2557,7 +2569,12 @@ on *every* return path - success, a short read, an out-of-memory check
 failing outright - so a failure partway through can never leak. Plain
 `new`/`delete` pairs that rely on remembering every return statement are
 exactly the bug class this avoids, on a device with no heap fragmentation
-tooling to catch the leak later.
+tooling to catch the leak later. (No longer literally true of *this* buffer,
+as the two sections below record: the read buffer is now the file-static
+`gFileBuffer`, grown and released by an explicit `free()`/`malloc()` pair.
+The exception is defensible only because that buffer has exactly one owner,
+one growth path and one release point, all inside `Display.cpp` - the rule
+above still stands for everything else.)
 
 **The budget is the largest plausible single item, not the fleet or the
 catalog.** A hundred assets in the catalog costs nothing extra in RAM,
@@ -2729,3 +2746,295 @@ now only half true of this buffer - it is still heap-allocated because its
 size is not knowable at compile time, but it is no longer transient or
 one-shot by design, the same static-once-grown shape `gFileBuffer` shares
 with `lgfx_pngle_new()`'s own scratch buffer one section up.
+
+**Correction, measured later on device 17: the `realloc()` half of that
+paragraph was wrong, and `ensureFileBufferCapacity()` now frees before it
+allocates.** The reasoning above is kept because its first half still holds -
+a buffer that is already big enough should cost nothing, and
+`ensureFileBufferCapacity()` still returns immediately in that case without
+touching the allocator at all. What it missed is what `realloc()` does on the
+path where the buffer is *not* big enough: `realloc()` preserves contents, so
+any grow it cannot satisfy in place holds the old block and the new one
+simultaneously and copies between them. The sole caller,
+`readFileToBuffer()`, then overwrites every one of those bytes immediately
+from SD. The preservation was pure cost, paid in the one currency this device
+has none of - simultaneous contiguous blocks. Measured live, rotating two
+picture cards through the server's re-encoded assets:
+
+```
+[display] read /assets/758b....png into memory (5686 bytes)          <- ok
+[display] out of memory growing the shared read buffer to 11676 bytes
+          (freeHeap=51944 maxAllocHeap=32756)                        <- fails
+```
+
+An 11,676-byte request failing against a 32,756-byte hole is impossible as a
+single allocation, and it never was one: it was 5,686 bytes still held, plus
+11,676 wanted, plus the allocator's own bookkeeping, in a heap already carved
+up by mbedTLS - which is why the failures cluster in the seconds right after a
+check-in while the draws between check-ins succeed. Freeing first makes the
+peak requirement `needed` alone, which the numbers do allow.
+`SelfTest/Display.cpp` carries its own copy of this buffer and got the same
+change, for the obvious reason: a diagnostic sketch must not reproduce the
+very failure mode it exists to detect.
+
+## Contiguity, not free bytes: the one number behind nearly all of this
+
+Everything in the three sections above, and everything in the four below, is
+the same distinction seen from a different angle, so it is worth stating once
+on its own. `ESP.getFreeHeap()` on this board stays healthy all day - 50-58KB
+in ordinary operation, and this document's earlier "roughly 250-274KB" figures
+are the same measurement taken earlier in a boot. `ESP.getMaxAllocHeap()` -
+the largest block still *contiguous*, and therefore the largest single
+`malloc()` that can possibly succeed - is a completely different story.
+Measured on hardware:
+
+- **110,580 bytes** early in `setup()`, before Display, WiFi and TLS have
+  allocated anything.
+- **exactly 32,756 bytes** for the rest of every boot, once they have. Not
+  drifting downwards over an uptime, which is the fragmentation story this
+  project told itself for weeks - pinned, at that same figure, from the first
+  card draw onward, on every boot.
+
+That is not decay, it is a shape: a handful of large, long-lived blocks (TLS
+state, the display's own buffers, the PNG decoder's deliberately-retained
+scratch) split the heap into pieces, and 32,756 is simply the biggest piece
+left over. Which means the honest question about any allocation on this device
+is never "is there enough memory free" - there almost always is - but "does a
+single hole this big exist right now, given what else is being held". Total
+free heap cannot answer that, and every diagnosis in this project that read
+`freeHeap`, saw plenty, and concluded memory was not the problem was reading
+the wrong number. The failures were real and memory-caused every time.
+
+Two consequences run through the sections below. Anything that needs a large
+contiguous block should take it *early*, while 110,580 is still available, and
+keep it if it will need it again (the decoder's scratch). Anything that needs
+one *repeatedly* must hold it for as little time as possible and must never
+overlap two of them (the file copy). And any threshold, budget or watchdog
+written against this device has to be derived from the 32,756 steady state
+rather than from a number that looked comfortable in total-free terms - which
+is exactly the mistake the heap watchdog made, below.
+
+## Reversing "never released" — halfway, and the split is the load-bearing part
+
+"Why the PNG decoder's scratch buffer is never released" above, and the read-
+buffer section after it, argued that this device should stop handing large
+blocks back: a ~44KB malloc/free cycle on every draw, plus a second 31-54KB
+one for the file copy, is textbook large-block churn on an allocator with no
+compaction, and holding both instead turns a per-draw gamble into a one-time
+bounded cost. `Display.cpp`'s new `releaseDecodeMemory()` reverses that - but
+for only one of the two blocks, and that split is not a compromise between the
+two positions, it is the whole finding. Get it backwards and one subsystem or
+the other stops working entirely.
+
+**The decoder's ~44KB scratch is still deliberately kept.** It is allocated
+once, by the boot splash, at a point in `setup()` where `maxAllocHeap` is
+still 110,580 bytes, and because LovyanGFX keeps it unless asked not to, every
+later card draw reuses it and never needs a large contiguous block to decode
+again. Releasing it was tried, and it broke every graphic card on the device
+while fixing nothing:
+
+```
+[display] read ...4342155a.png into memory (54693 bytes)
+[display] failed to draw ... (freeHeap=46548 maxAllocHeap=32756)
+```
+
+A post-WiFi heap has no 44KB hole in it - that 32,756 is what was *left* after
+the 54,693-byte file copy - so a decoder that has to re-acquire its scratch on
+each draw simply never draws again. The earlier section's conclusion was
+right; it was right for a reason it had not identified, which is that the
+first decode happens while memory is still plentiful.
+
+**`gFileBuffer` is now freed after every draw.** This is the block the read-
+buffer section above made grow-only for the whole uptime, and holding it is
+what took the network down. mbedTLS needs roughly 16KB in plus 16KB out plus
+certificate-parsing workspace to complete a handshake, and it could not get
+that out of what was left. Every HTTPS request on device 17 failed - check-in
+*and* the firmware manifest alike, which is the part that made it serious: a
+device in this state cannot be updated out of it remotely, because the
+mechanism for updating it is one of the things that has stopped working. What
+isolated it was a second device on the same account, the same firmware and the
+same server, but with no SD card and therefore no picture cards and none of
+these buffers, checking in perfectly throughout the same window.
+
+**So the trade was never "churn vs. no churn", it is "churn vs. no
+network".** Fragmentation over a long uptime is a real risk and the earlier
+sections were not wrong to weigh it; a device that cannot complete a TLS
+handshake at all is a present, total, not-fixable-in-the-field failure, and it
+wins that comparison without much argument. Releasing after each draw also
+means the file copy is only resident *during* a draw, and check-ins happen
+between draws, so a handshake sees an uncarved heap. `releaseDecodeMemory()`
+is called on every draw path, including after a *failed* decode - a decode
+that ran out of memory still leaves LovyanGFX's partial allocation behind, and
+that is precisely the moment the memory is most needed back. The in-rect draw
+(the aircraft card's airline logo) releases too: a smaller image, the same two
+blocks.
+
+Worth recording how this was cracked, because it was not by reading the code.
+CYD-Dickey releases the decoder unconditionally on every draw, and this
+project had already decided that was a mistake ported from a Bluetooth
+requirement CAL does not have. Its author's plain observation that CYD-
+Dickey's graphics never had any of these problems is what forced a second look
+at a decision this document had spent a whole section defending. The reference
+project had been doing the right thing for a reason that did not apply here,
+and CAL had stopped doing it for a well-argued reason that was measuring the
+wrong number.
+
+## Where the boot splash has to happen, and why it now stays on screen
+
+The splash is not a cosmetic concern that happens to sit near the memory
+story - it is the same finding again, and it had been failing silently on
+every single boot. `Assets::showBootSplash()` used to run after
+`Http::begin()` and the WiFi join, which is to say it asked for the decoder's
+~44KB out of a `maxAllocHeap` of 32,756 and got nothing, every time. Nobody
+saw it because `showBootSplash()` ignored its own result and because boot-time
+logs never reach the remote debug stream at all: streaming is only enabled by
+a check-in response, long afterwards. A feature can be broken on every device
+in the fleet for as long as it is only observable somewhere nothing is
+looking.
+
+`Sd::begin()`, `Assets::begin()` and `Assets::showBootSplash()` therefore now
+run *ahead* of `Http::begin()` in `App.ino`'s `setup()`, where 110,580 bytes
+are still contiguous and a 44KB decoder scratch is unremarkable. That also
+puts the one allocation the rest of the uptime depends on at the only point in
+a boot where it is cheap, which is what makes the "keep the decoder's scratch"
+half of the section above work at all.
+
+The second half is `showBootSplash()` returning `bool` rather than `void`
+(`Assets.h`/`Assets.cpp`), which `setup()` uses to decide what happens next.
+When the logo actually reached the screen, the "Checking the time" and
+"Loading" status screens are skipped, so it stays up through the WiFi join,
+the SNTP sync, and right until the first real card replaces it -
+`CardManager::poll()` holds whatever is on screen until a real policy arrives,
+so nothing has to be redrawn to keep it there. That is what a branded boot was
+always supposed to look like: the logo first, the network connecting
+underneath it, rather than the brand flashing once and being painted over a
+moment later. When there is no splash - no card, nothing configured, or a
+decode that failed anyway - `false` comes back and both status screens appear
+exactly as before, because silence on a blank panel while WiFi retries is a
+worse boot than a plain status line. Failure screens are never suppressed
+either way: a household that has to hold BOOT to fix its WiFi has to be told
+so.
+
+## The heap-fragmentation watchdog had become the reboot loop it was written to prevent
+
+`App.ino`'s `checkHeapHealth()` reads `ESP.getMaxAllocHeap()` once a minute
+after a three-minute grace period and restarts the device deliberately if it
+has fallen below `kMinMaxAllocHeapBytes`, on the theory that a controlled
+restart - with an on-screen message and a flushed log line saying why - beats
+a card silently vanishing when an allocation fails somewhere less recoverable.
+The mechanism is sound. The threshold was not: `kMinMaxAllocHeapBytes` was
+60000, and device 17 - healthy, drawing cards, doing nothing wrong - killed
+itself at 180 seconds of uptime on every single boot:
+
+```
+[health] maxAllocHeap=32756 below 60000 byte threshold after 180011 ms uptime - restarting to clear fragmentation
+```
+
+Twelve times in the 49 minutes before it was found (00:52 to 01:40 UTC on
+2026-09-10, counted in `device_debug_log_entries`) - a restart roughly every
+four minutes: the three-minute grace period, plus the minute or so a boot
+spends mounting SD, joining WiFi, syncing time and checking in before the
+grace expires again. The `180011 ms` is the tell. The grace period ends at
+180,000 ms and `lastHeapCheckMs` starts at zero, so the very first check a
+boot ever makes fires eleven milliseconds later and finds the steady state
+already below the threshold. It was never going to find anything else.
+
+60000 was picked from the range this was first observed failing in
+(34804-42996) plus headroom, at a time when nobody knew what a healthy
+device's steady state actually was. Now that it is measured, the number turns
+out to be unreachable **by design**: `maxAllocHeap` sits pinned at 32,756 from
+the first card draw onward precisely *because* `Display.cpp` deliberately
+holds the decoder's ~44KB scratch for the whole uptime, and a permanently-held
+block that size necessarily splits the heap. The watchdog was firing on the
+intended steady state of a correctly working device. A threshold above the
+steady state is not a safety margin, it is an unconditional restart timer -
+and it is what produced the symptom picture that sent this investigation off
+in the wrong direction for a while, because a device restarting every three
+minutes with the word "fragmentation" in its log reads as a memory leak rather
+than as a misconfigured constant.
+
+The new value, 28000, is derived from what a draw actually has to allocate
+instead of from one bad night's observations. The DiscoverAroundMe server
+normalizes every asset down to at most 24KB for exactly this device's
+contiguity ceiling - its `AssetSizeTarget.MaxBytes` documents the same 32,756
+figure from the server side - and a draw needs one contiguous block that size
+for the file copy. Below 28KB the largest asset the server is permitted to
+send genuinely cannot be read into memory and a card really would drop out
+silently, which is the condition worth spending a restart on. Above it, the
+device is doing precisely what it is supposed to be doing.
+
+**This constant is half of a pair and has to be maintained as one.**
+`kMinMaxAllocHeapBytes` must stay in step with, and above, the server's
+`AssetSizeTarget.MaxBytes`, with room for the allocator's own overhead. Raise
+the server's asset ceiling without raising this and the watchdog stops
+catching the condition it exists for; raise this without checking it against
+the measured steady state above and it becomes a restart timer again.
+
+## Locating an HTTPS failure by layer instead of arguing about it
+
+`HTTPClient` collapses every pre-response failure into a single negative
+status - a DNS failure, a refused TCP connect and a rejected TLS handshake all
+surface as `-1` - which is not enough to act on, and "the device cannot reach
+the server" is a symptom broad enough to support whichever hypothesis somebody
+already prefers. `Http::diagnoseFailure(const char* tag)` (`Http.h`/`.cpp`)
+exists to turn that one symptom into a specific one. It is called from
+`CheckIn.cpp` and `AppUpdater.cpp` only when `status < 0` - a real HTTP status
+(401, 500, ...) means the server was reached and answered, which needs no
+archaeology - and it walks the stack in order: WiFi association state, then
+name resolution via `WiFi.hostByName()`, then a plain `NetworkClient` TCP
+connect to port 443 with no TLS at all, logging RSSI, `freeHeap` and
+`maxAllocHeap` at each step and stopping at the first layer that fails. The
+`tag` is the caller's own name ("checkin", "manifest", ...) so a device with
+several failing subsystems stays readable in one stream.
+
+On the failure it was written for, it produced the answer in two lines:
+
+```
+[http] checkin: DNS ok, api.discoveraroundme.com -> 32.192.231.29
+[http] checkin: plain TCP to :443 SUCCEEDED - the failure is the TLS handshake itself
+```
+
+The name resolves, a socket opens, the handshake does not complete - which is
+what sent the investigation to mbedTLS's buffer requirements, and from there to
+the file-copy buffer being held across check-ins. It costs one DNS lookup and
+one TCP connect, only ever on a path that has already failed, which is free
+compared with continuing not to know.
+
+The habit is worth recording alongside the facility, because it is what this
+episode actually demonstrated. Three plausible hypotheses were live at once -
+a Bluetooth controller memory reservation, a phone hotspot's MTU, and weak
+WiFi signal - and each was killed cheaply by instrumentation rather than
+argued about. The Bluetooth one is the cleanest example: giving the unused
+controller's DRAM back measured `maxAllocHeap 110580 -> 110580`, no change at
+all, which ended that line of enquiry in a single boot. Signal strength became
+a number in every failure log rather than a suspicion. None of the three was
+the cause, none of them cost more than a build to eliminate, and the actual
+cause was found by the one measurement that could distinguish between layers.
+
+## Known gap: the splash cache notices a new splash asset, never new bytes for the same one
+
+`Assets.cpp`'s `ensureSplashCached()` skips the fetch when the fixed `"splash"`
+slot already exists on SD *and* the `splash.id` sidecar records the same asset
+id. That sidecar exists because the cached filename is always `"splash"` and so
+cannot, by itself, tell two accounts' splash assets apart. The guard is right
+about the case it was written for and blind to the other one: the splash
+refreshes when *which asset is the splash* changes, and never when *that
+asset's bytes* change.
+
+Observed after the server re-encoded its whole catalog on 2026-09-10. Device
+17 re-fetched all three of its graphic cards (`sha256 verified`), because
+those are cached under their own asset ids and the re-encode changed their
+content - but it kept booting the stale pre-re-encode 51,751-byte splash
+indefinitely, because the configured splash asset *id* had not changed. Not
+currently fatal: the splash now draws before WiFi, where ~110,580 bytes are
+still contiguous, so even an oversized pre-re-encode file decodes there
+without complaint. That is why this is a documented gap rather than one of
+tonight's bugs.
+
+The fix is to carry the splash asset's content hash in `CheckInResponse`
+beside `SplashAssetId`, record it in the `splash.id` sidecar next to the id,
+and make the skip condition "same id **and** same hash". That is how every
+other cached asset already behaves, via the `X-Asset-Sha256` header
+`fetchToCard()` verifies against; the splash is the one asset whose cache key
+is a slot name rather than its own id, so it is the one asset that had to have
+this checked separately - and did not.

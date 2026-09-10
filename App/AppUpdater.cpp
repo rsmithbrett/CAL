@@ -30,6 +30,10 @@ bool newerVersionAvailable() {
   if (status != 200) {
     http.end();
     Log::printf("[update] manifest check failed, http status=%d", status);
+    // See CheckIn.cpp's identical call for why only negatives get this.
+    if (status < 0) {
+      Http::diagnoseFailure("manifest");
+    }
     return false;
   }
 

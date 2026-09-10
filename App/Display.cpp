@@ -1915,16 +1915,44 @@ size_t gFileBufferCapacity = 0;
 /// large, and never shrinks it - handing back a smaller buffer later would
 /// reintroduce the exact alloc/free churn this whole mechanism exists to
 /// avoid, for a memory saving that only matters on a device already tight
-/// enough that it wouldn't help anyway. realloc() over free()-then-new():
-/// on the (ordinary) path where this is already big enough, realloc() is a
-/// no-op rather than any work at all, and on a genuine growth it can reuse
-/// the existing block in place when the heap allows it instead of a forced
-/// pair of separate calls.
+/// enough that it wouldn't help anyway.
+///
+/// This used to call realloc(), reasoning that a grow might extend the block
+/// in place and save a copy. That was wrong in the one way that matters here.
+/// realloc() PRESERVES CONTENTS, so on any grow it cannot satisfy in place it
+/// holds the old block and the new one simultaneously and copies between them
+/// - and the sole caller, readFileToBuffer() below, overwrites every byte
+/// immediately with a fresh file read. That preservation was pure cost, paid
+/// in the one currency this device has none of: simultaneous contiguous
+/// blocks.
+///
+/// Measured live on device 17, rotating two picture cards through the
+/// re-encoded assets the server now guarantees are under 24KB:
+///
+///   [display] read /assets/758b....png into memory (5686 bytes)       <- ok
+///   [display] out of memory growing the shared read buffer to 11676
+///             bytes (freeHeap=51944 maxAllocHeap=32756)               <- fails
+///
+/// An 11,676-byte request failing against a 32,756-byte hole is impossible as
+/// a single allocation - and it never was one. It was 5,686 still held plus
+/// 11,676 wanted plus the allocator's bookkeeping, inside a heap already
+/// carved down by mbedTLS: note that the failures cluster in the seconds
+/// after a check-in while the draws between check-ins succeed. Freeing first
+/// makes the peak requirement `needed` alone, which is what the numbers do
+/// allow.
 bool ensureFileBufferCapacity(size_t needed) {
   if (needed <= gFileBufferCapacity) {
     return true;
   }
-  uint8_t* grown = static_cast<uint8_t*>(realloc(gFileBuffer, needed));
+
+  // Freed BEFORE the new allocation rather than after. Nothing in the old
+  // block is worth carrying across, and releasing it first is the whole point:
+  // it keeps peak demand at one block instead of two overlapping ones.
+  free(gFileBuffer);
+  gFileBuffer = nullptr;
+  gFileBufferCapacity = 0;
+
+  uint8_t* grown = static_cast<uint8_t*>(malloc(needed));
   if (grown == nullptr) {
     return false;
   }
@@ -1981,6 +2009,11 @@ FileBuffer readFileToBuffer(const String& path) {
 
 }  // namespace
 
+/// Declared ahead of its definition below purely so the in-rect draw, which
+/// comes first in this file, can call it too - see its own remarks further
+/// down for why both PNG blocks are now handed back after every draw.
+void releaseDecodeMemory();
+
 bool drawPngFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, int32_t h) {
   // No fillScreen() here, deliberately - see this function's own header
   // comment. Same decode call as drawPngFromSd() below, just bounded to
@@ -1995,14 +2028,90 @@ bool drawPngFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, in
   }
   const bool ok =
       lcd.drawPng(file.data, file.size, x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
-  // No releasePngMemory() here - see drawPngFromSd()'s comment below for why
-  // freeing it every call is the wrong tradeoff for this device.
+  // Released here too - see releaseDecodeMemory() below for the measured
+  // reason this reverses the earlier "hold it" decision. An in-rect draw (the
+  // aircraft card's airline logo) is smaller but takes the same two blocks.
+  releaseDecodeMemory();
   if (!ok) {
     Log::printf("[display] failed to draw %s in %dx%d rect at (%d,%d) (freeHeap=%u maxAllocHeap=%u)",
                 path.c_str(), (int)w, (int)h, (int)x, (int)y,
                 static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
   }
   return ok;
+}
+
+/// Hands back both large blocks a PNG draw needs - LovyanGFX's ~44KB decode
+/// scratch and gFileBuffer's ~52KB copy of the file - the moment the draw is
+/// finished with them.
+///
+/// THIS REVERSES AN EARLIER DELIBERATE DECISION, and the reasoning it reverses
+/// is worth keeping rather than deleting, because it was sound as far as it
+/// went. That decision (ported away from CYD-Dickey, which releases the
+/// decoder unconditionally on every draw) argued: a ~44KB malloc/free cycle
+/// per draw is repeated large-block churn, which fragments an ESP32 heap over
+/// a long uptime; holding the buffer instead makes it a one-time bounded cost.
+/// It also noted CAL has no Bluetooth stack to feed, which was CYD-Dickey's
+/// stated reason for releasing.
+///
+/// What that reasoning missed is what those two blocks are taken *from*.
+/// Measured on hardware, on a device with a splash and four picture cards:
+///
+///   [http] checkin failed - freeHeap=47072 maxAlloc=32756
+///   [http] checkin: DNS ok, api.discoveraroundme.com -> 32.192.231.29
+///   [http] checkin: plain TCP to :443 SUCCEEDED - the failure is the TLS
+///                   handshake itself
+///
+/// mbedTLS needs roughly 16KB in + 16KB out plus certificate-parsing
+/// workspace to complete a handshake. Holding ~96KB of decode buffers for the
+/// whole uptime left 47KB free and 32,756 contiguous - enough to open a
+/// socket, not enough to finish a handshake. Every HTTPS request on that
+/// device failed: check-in AND the firmware manifest alike, so it could not
+/// even be updated out of the state remotely. A second device on the same
+/// account, firmware and server - but with no SD card and no picture cards,
+/// so none of these buffers - checked in perfectly throughout.
+///
+/// So the trade is not "churn vs. no churn", it is "churn vs. no network".
+/// Fragmentation over a long uptime is a real risk; a device that cannot
+/// complete a TLS handshake at all is a present, total failure. Releasing
+/// also means the buffers are only held during a draw, and check-ins happen
+/// between draws, so the handshake sees an uncarved heap.
+///
+/// This is what CYD-Dickey has always done - the project whose graphics, as
+/// its author points out, never had any of these problems.
+void releaseDecodeMemory() {
+  // Deliberately NOT releasePngMemory(). The two blocks look alike and are
+  // not, and getting this split wrong breaks one subsystem or the other:
+  //
+  //   The decoder's ~44KB scratch is allocated ONCE, by the boot splash, at a
+  //   point in setup() where maxAllocHeap is still 110,580 bytes - before
+  //   WiFi and TLS carve the heap down. Because LovyanGFX keeps it unless
+  //   asked not to, every later card draw REUSES it and never needs a large
+  //   contiguous block again. Releasing it means the next draw must find 44KB
+  //   in a post-WiFi heap whose largest hole is ~87KB minus whatever the file
+  //   copy below just took - which is why releasing both made every graphic
+  //   card fail even though check-ins started working:
+  //
+  //     [display] read ...4342155a.png into memory (54693 bytes)
+  //     [display] failed to draw ... (freeHeap=46548 maxAllocHeap=32756)
+  //
+  //   That 32,756 is what was LEFT after the 54,693-byte file copy. The hole
+  //   was big enough for one of them, never both.
+  //
+  //   gFileBuffer is the opposite case: a 31-54KB copy of the file, needed
+  //   only for the duration of one drawPng() call, and previously kept
+  //   grow-only for the whole uptime. Holding it is what left mbedTLS unable
+  //   to complete a handshake (16KB in + 16KB out plus certificate parsing) -
+  //   every HTTPS request on the device failed, check-in and firmware
+  //   manifest alike, so it could not even be updated out of the state
+  //   remotely.
+  //
+  // So: keep the one that is allocated while memory is plentiful and reused
+  // forever; give back the one that is re-taken on every single draw.
+  if (gFileBuffer != nullptr) {
+    free(gFileBuffer);
+    gFileBuffer = nullptr;
+    gFileBufferCapacity = 0;
+  }
 }
 
 bool drawPngFromSd(const String& path) {
@@ -2013,28 +2122,15 @@ bool drawPngFromSd(const String& path) {
     Log::printf("[display] could not read %s", path.c_str());
   } else {
     ok = lcd.drawPng(file.data, file.size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
-    // Deliberately NOT calling lcd.releasePngMemory() here - see README.md's
-    // "Why the PNG decoder's scratch buffer is never released" section. This
-    // was ported from CYD-Dickey (which releases it unconditionally, every
-    // draw, to free the ~44KB back for a Bluetooth init immediately
-    // afterwards) without checking whether that reason applied here - it
-    // doesn't, CAL has no Bluetooth stack to feed. What it cost instead: a
-    // ~44KB malloc+free cycle on every single PNG draw is exactly the kind
-    // of repeated large-block churn that fragments an ESP32 heap over a long
-    // uptime. Leaving the decoder's buffer allocated after the first
-    // successful draw - which is exactly what LovyanGFX does by default when
-    // nobody calls releasePngMemory() - turns that into a one-time, bounded
-    // cost instead of a per-draw fragmentation gamble. readFileToBuffer()'s
-    // own gFileBuffer, above, is the other half of the same fix: this device
-    // used to pay for a *second* large, differently-sized allocation on top
-    // of this one, every single draw, which is what actually exhausted a
-    // fragmented heap on real hardware after enough uptime - see that
-    // function's own remarks for the full incident.
     if (!ok) {
       Log::printf("[display] failed to draw %s (freeHeap=%u maxAllocHeap=%u)", path.c_str(),
                   static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
     }
   }
+  // Unconditional, including after a failed decode - a decode that ran out of
+  // memory still leaves LovyanGFX's partial allocation behind, and that is
+  // exactly the case where the memory is most needed back.
+  releaseDecodeMemory();
   restoreDefaultFont();
   return ok;
 }
@@ -2046,10 +2142,10 @@ bool drawPngFromBuffer(const uint8_t* data, size_t size) {
     Log::line("[display] drawPngFromBuffer called with no data");
   } else {
     ok = lcd.drawPng(data, size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
-    // Deliberately NOT calling lcd.releasePngMemory() here either - same
-    // fragmentation reasoning as drawPngFromSd() above. This path exists to
-    // save a device whose SD card will not mount at all, not to reintroduce
-    // the exact per-draw allocation churn that reasoning already ruled out.
+    // Nothing to release here: this path's caller owns the image bytes (a
+    // RamAssetBuffer, see Assets.h) and it never fills gFileBuffer, while the
+    // decoder's own scratch is deliberately kept for reuse - see
+    // releaseDecodeMemory() for why that split is the load-bearing part.
     if (!ok) {
       Log::printf("[display] failed to draw a %u-byte RAM buffer (freeHeap=%u maxAllocHeap=%u)",
                   static_cast<unsigned>(size), static_cast<unsigned>(ESP.getFreeHeap()),

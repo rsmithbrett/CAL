@@ -80,11 +80,22 @@ int wrappedCenteredText(const String& text, int topY, uint32_t colour, uint8_t t
 uint8_t* gFileBuffer = nullptr;
 size_t gFileBufferCapacity = 0;
 
+// Frees before allocating rather than calling realloc(), matching
+// App/Display.cpp - and for the reason given at length there: realloc()
+// preserves contents, so a grow it cannot satisfy in place holds the old block
+// and the new one at once, and the caller overwrites every byte from SD
+// immediately anyway. Doubling the peak contiguous demand is exactly the
+// failure mode this sketch is meant to detect, so it must not reproduce it.
 bool ensureFileBufferCapacity(size_t needed) {
   if (needed <= gFileBufferCapacity) {
     return true;
   }
-  uint8_t* grown = static_cast<uint8_t*>(realloc(gFileBuffer, needed));
+
+  free(gFileBuffer);
+  gFileBuffer = nullptr;
+  gFileBufferCapacity = 0;
+
+  uint8_t* grown = static_cast<uint8_t*>(malloc(needed));
   if (grown == nullptr) {
     return false;
   }

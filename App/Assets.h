@@ -213,7 +213,13 @@ void clearDecodeFailures();
 /// the boot after. Not a bug to fix by triggering a redraw mid-session - see
 /// ensureSplashCached()'s own remarks on why that is out of scope for what
 /// this feature is actually for.
-void showBootSplash();
+///
+/// Returns whether a splash actually reached the screen. App.ino's setup()
+/// uses that to decide whether to leave the logo up through WiFi join and
+/// time sync, or to fall back to the ordinary "Checking the time"/"Loading"
+/// status screens - a device with no splash must not be left staring at a
+/// blank panel while the network comes up.
+bool showBootSplash();
 
 /// Deletes just this one asset's cached file, so the next ensureCached()
 /// call for the same id re-fetches and re-verifies it from scratch. For a

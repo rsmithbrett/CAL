@@ -263,6 +263,14 @@ Result perform() {
   if (status != 200) {
     http.end();
     Log::printf("[checkin] failed, http status=%d", status);
+    // A negative status is HTTPClient's catch-all for everything that failed
+    // before a response existed - DNS, TCP connect and the TLS handshake all
+    // report as -1. Http::diagnoseFailure() walks those layers and says which
+    // one actually broke. Only for negatives: a real status (401, 500, ...)
+    // means the server was reached and answered, which needs no archaeology.
+    if (status < 0) {
+      Http::diagnoseFailure("checkin");
+    }
     return result;
   }
 

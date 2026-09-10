@@ -261,11 +261,37 @@ constexpr uint32_t kHeapCheckIntervalMs = 60000;  // once a minute
 // earlier tonight, restarting before the device had ever settled.
 constexpr uint32_t kHeapCheckGraceMs = 3UL * 60UL * 1000UL;
 
-// 34804-42996 bytes is the range this was actually observed failing in
-// tonight (see the comment above) - 60000 leaves real headroom above that
-// range, so the device restarts on its own, controlled terms before a card
-// actually has to drop out for lack of a contiguous block.
-constexpr size_t kMinMaxAllocHeapBytes = 60000;
+// What "too fragmented to work" actually means, and why this is not 60000.
+//
+// It WAS 60000, chosen from a range (34804-42996) this was observed failing in
+// before anyone knew what the steady state of a healthy device looked like.
+// That number turned out to be unreachable by design, which made this
+// watchdog the reboot loop it was written to prevent - device 17, healthy and
+// drawing cards, restarting every three minutes to the tick:
+//
+//   [health] maxAllocHeap=32756 below 60000 byte threshold after 180011 ms
+//            uptime - restarting to clear fragmentation
+//
+// maxAllocHeap sits pinned at exactly 32,756 from the first card draw onward,
+// on every boot, and that is CORRECT: Display.cpp deliberately keeps
+// LovyanGFX's ~44KB decode scratch for the whole uptime (see its
+// releaseDecodeMemory() remarks for why releasing it breaks every graphic
+// card), and a permanently-held block that size necessarily splits the heap.
+// A threshold above the intended steady state is not a safety margin, it is
+// an unconditional restart timer.
+//
+// So the threshold is derived from what a draw actually has to allocate
+// instead of from one bad night's observations. The server normalizes every
+// asset to at most 24KB precisely because of this device's contiguity ceiling
+// (DiscoverAroundMe's AssetSizeTarget.MaxBytes documents the same 32,756
+// figure from the other side), and a draw needs one block that size for the
+// file copy. Below 28KB the largest permitted asset genuinely cannot be read
+// and a card really would drop out silently - which is the condition worth
+// restarting for. Above it, the device is doing exactly what it should.
+//
+// Keep this in step with AssetSizeTarget.MaxBytes on the server: this must
+// stay above it, with room for the allocator's own overhead.
+constexpr size_t kMinMaxAllocHeapBytes = 28000;
 
 /// Checked once per loop() iteration, but only actually reads
 /// ESP.getMaxAllocHeap() at most once every kHeapCheckIntervalMs - see the
@@ -604,7 +630,21 @@ void setup() {
   // unaffected.
   Sd::begin();
   Assets::begin();
-  Assets::showBootSplash();
+
+  // Whether the logo actually reached the screen. When it did, the status
+  // screens below ("Checking the time", "Loading") are skipped so it stays up
+  // for the whole of WiFi join and time sync, rather than being painted over
+  // a moment after appearing - the branded boot this feature exists for, and
+  // what the splash was always meant to do: the logo first, the network
+  // connecting underneath it.
+  //
+  // A device with no splash - no card, nothing configured, or a decode that
+  // failed - falls back to those status screens exactly as before. Silence on
+  // a blank panel while WiFi retries is a worse boot than a plain status line,
+  // so this only ever suppresses them when there is genuinely something better
+  // on screen. Failure screens (see ensureWifiConnected) are never suppressed:
+  // a household that needs to hold BOOT to fix its WiFi has to be told so.
+  const bool splashOnScreen = Assets::showBootSplash();
 
   // Configures the one shared HTTPS connection's TLS trust bundle exactly
   // once for this boot - see Http.h's own remarks for why every HTTP call
@@ -665,7 +705,9 @@ void setup() {
   // handing back from CAL after an OTA install - none of which have
   // anything to restore).
   if (!AppService::trySkipSyncAfterFastReboot()) {
-    Display::showStatus("Checking the time", "Needed before a secure connection");
+    if (!splashOnScreen) {
+      Display::showStatus("Checking the time", "Needed before a secure connection");
+    }
     while (!AppService::synchroniseTime()) {
       Display::showFailure("Cannot reach the internet", "Retrying...");
       delay(10000);
@@ -680,7 +722,15 @@ void setup() {
 
   // Hands the screen over. Every card registered itself before setup() was
   // ever called; this is where the rotation starts running.
-  Display::showStatus("Loading", "");
+  //
+  // "Loading" is skipped while the logo is up, for the same reason the time
+  // screen above is: CardManager::poll() holds whatever is on screen until a
+  // real policy arrives (see its own gPolicyEverApplied remarks), so leaving
+  // the splash there means the logo stays put right up until the first real
+  // card replaces it - instead of a blank "Loading" filling that gap.
+  if (!splashOnScreen) {
+    Display::showStatus("Loading", "");
+  }
   CardManager::begin();
 }
 
