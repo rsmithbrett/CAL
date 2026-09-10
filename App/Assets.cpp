@@ -558,10 +558,15 @@ bool ensureCached(const String& id) {
   return fetchToCard(id, id);
 }
 
+/// False until this boot has re-validated the splash slot once - see
+/// ensureSplashCached() for what that buys and what it costs.
+bool gSplashRevalidatedThisBoot = false;
+
 bool ensureSplashCached(const String& assetId) {
   if (!Sd::isReady() || !isSafeId(assetId)) {
     return false;
   }
+
   // Unlike ensureCached() above, a hit is not "the file exists" - the
   // filename can't tell two different accounts' splash assets apart, since
   // it is always "splash", never the asset's own id. It has to be "the file
@@ -569,13 +574,53 @@ bool ensureSplashCached(const String& assetId) {
   // otherwise a device that switched from asset A to asset B would see
   // splash.png already on disk, assume it was up to date, and keep showing A
   // forever.
-  if (SD.exists(pathFor(kSplashCacheId)) && readSplashSourceId() == assetId) {
+  //
+  // **And that is still not enough on its own.** Matching on the id alone
+  // notices a NEW splash asset but never new BYTES for the same one, so when
+  // the server re-encoded its whole asset catalog on 2026-09-10, device 17
+  // re-fetched all three of its graphic cards correctly (they verify
+  // X-Asset-Sha256 on every fetch) while booting the stale 51,751-byte
+  // pre-re-encode splash indefinitely. Nothing short of wiping the SD card or
+  // reassigning the splash would ever have cleared it.
+  //
+  // Every other cached asset avoids this by comparing content hashes, which
+  // this slot cannot do from the check-in response: SplashAssetId arrives
+  // without a hash beside it, and CheckInGateway deliberately references the
+  // Assets module nowhere (see ResolveSplashAssetIdAsync's own remarks and
+  // the module-graph reasoning next to it) so it has no way to look one up.
+  // Adding that edge to carry one string would be a poor trade.
+  //
+  // So the slot re-validates itself exactly once per boot instead. The first
+  // call after a restart always goes to the network; every later call in the
+  // same session takes the id check above. That costs one asset-sized
+  // download per boot - a splash is 6-15KB after normalization - and in
+  // exchange no re-encode, replacement or partial write can outlive a reboot.
+  // It fits what this cache is for: showBootSplash() only ever reads this
+  // file at startup, and ensureSplashCached()'s whole job is preparing the
+  // slot for the NEXT boot rather than the current screen, so a refresh
+  // landing mid-session was never going to be visible anyway.
+  const bool cacheLooksCurrent =
+      SD.exists(pathFor(kSplashCacheId)) && readSplashSourceId() == assetId;
+
+  if (cacheLooksCurrent && gSplashRevalidatedThisBoot) {
     return true;
   }
+
+  if (cacheLooksCurrent) {
+    Log::printf("[assets] re-validating the splash slot once for this boot (asset '%s')",
+                assetId.c_str());
+  }
+
   if (!fetchToCard(assetId, kSplashCacheId)) {
+    // Deliberately NOT setting the revalidated flag: a failed fetch has
+    // settled nothing, and the next check-in should try again rather than
+    // treating one network error as a clean bill of health for the session.
+    // The previously cached splash is left alone and still draws next boot.
     return false;
   }
+
   writeSplashSourceId(assetId);
+  gSplashRevalidatedThisBoot = true;
   return true;
 }
 
