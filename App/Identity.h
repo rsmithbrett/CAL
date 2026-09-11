@@ -133,6 +133,56 @@ void recordBoot();
 int lastUtcOffsetMinutes();
 void setLastUtcOffsetMinutes(int minutes);
 
+/// How many times in a row this App has restarted ITSELF to recover - the
+/// heap watchdog and the unreachability watchdog, and nothing else. Not
+/// bootAttempts() (CAL's "is the installed app bootable at all" counter,
+/// cleared the moment WiFi comes up) and not totalBoots() (every start ever,
+/// including power cuts, OTAs and reprovisions, never cleared).
+///
+/// **Exists so the App can stay quiet about a self-heal without being able to
+/// hide a device that is not healing.** App.ino suppresses the boot-progress
+/// screens on a restart the firmware asked for - nobody plugged anything in,
+/// so narrating the WiFi/time ladder turns an invisible recovery into a
+/// visible fault, repeatedly. That is right for the first few and wrong
+/// forever: a device restarting every 13-27 minutes (measured across the
+/// fleet on 2026-09-11, one unit 24 times in five hours) would then never
+/// tell anybody anything, and the household's only evidence would be a
+/// picture that blinks. This counter is what puts a floor under that - see
+/// kMaxSilentSelfRestarts in App.ino for the budget and what happens when it
+/// is spent.
+///
+/// Has to live in NVS rather than RTC memory for exactly the reason BootDiag.h
+/// documents at length for the restart cause: every restart on this device
+/// goes App -> CAL -> App, two software resets with a different binary in
+/// between, and RTC_NOINIT does not survive that hop. Measured there, not
+/// assumed here.
+///
+/// Saturates at 255 rather than wrapping, same reasoning as totalBoots(): a
+/// counter that rolled to 0 would read as a perfectly healthy device, which is
+/// the one thing it must never be able to say about a unit that has restarted
+/// itself 256 times.
+///
+/// App-only key, like lastUtcOffsetMinutes() above - CAL never reads or writes
+/// it, so it needs no mirroring into CAL's own copy of this file.
+uint8_t consecutiveSelfRestarts();
+
+/// Counted immediately before a deliberate, self-inflicted restart - the two
+/// watchdogs in App.ino and nowhere else. Deliberately NOT called for
+/// RestartCause::Ota, ::Reprovision or ::SelfTest: those are restarts somebody
+/// asked for (an admin, a household holding BOOT, a self-test build request),
+/// not evidence of a device trying and failing to fix itself, and counting
+/// them would spend the silence budget on boots that were never meant to be
+/// silent in the first place.
+void recordSelfRestart();
+
+/// Called once the device has demonstrated the restart actually worked - a
+/// long stretch of uptime with no further self-restart. See
+/// kSelfRestartRecoveredUptimeMs in App.ino for why "worked" is measured as
+/// uptime rather than as a successful check-in or a successful draw: the two
+/// watchdogs fire on different symptoms, and a device can pass either one's
+/// idea of healthy while still cycling on the other's.
+void clearSelfRestarts();
+
 void begin();
 
 }  // namespace Identity

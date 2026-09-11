@@ -153,6 +153,275 @@ void releaseBluetoothMemory() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// What a boot is allowed to say on the glass.
+//
+// This device restarts itself far more often than its boot screens were
+// designed for. Measured across the fleet on 2026-09-11: restarts every 13-27
+// minutes, one unit 24 times in five hours. The boot sequence is therefore not
+// a rare event a household sees once when they unbox the thing - on the worst
+// devices it is most of what they ever see it do.
+//
+// The distinction that matters is the one BootDiag.h already draws: power was
+// applied, versus this firmware restarted itself to get unstuck. They want
+// opposite treatment on screen, and until now got identical treatment.
+//
+//   - Cold power-on. Somebody just plugged it in and is standing there waiting
+//     to find out whether it works. "Looking for known networks", "Connecting
+//     to WiFi", "Checking the time" are reassuring, and a silent panel would
+//     read as a dead appliance. Narrate.
+//
+//   - Therapeutic restart. Nobody touched anything. The device was sitting on
+//     a shelf showing cards and it blinked. Replaying the whole network
+//     handshake turns an invisible self-heal into a visible fault - and at one
+//     restart every quarter of an hour, into the device's dominant visual
+//     behaviour. Do not narrate.
+//
+// **What a therapeutic boot shows instead is one screen, held - not a dark
+// panel.** Darkness was considered and rejected: several seconds of black on a
+// wall display reads as "the screen died", which is a worse lie than the one
+// being fixed, and it would land every 13 minutes on exactly the devices
+// already behaving worst. Redrawing the last card was also considered and is
+// not possible - the card's content does not survive the restart, and by the
+// time the App is running CAL has already repainted the panel anyway (every
+// restart goes App -> CAL -> App; see BootDiag.h). So the rule is not "show
+// nothing", it is "show one thing and stop changing it": a single static
+// screen is indistinguishable from a picture that paused for a moment, which
+// is the honest reading of a self-heal. A four-step ladder of network jargon
+// is what makes it look like a fault.
+//
+// The "Starting" screen at the top of setup() is deliberately NOT suppressed,
+// on a therapeutic boot or any other. It is not one of the messages this
+// change exists to remove (it names no network, no clock and no server), it is
+// what covers the gap while SD mounts and the splash decodes, and a device with
+// a slow or failing card would otherwise sit on a blank panel for as long as
+// that takes.
+//
+// Only LowHeap and Unreachable count as therapeutic. The other deliberate
+// causes are somebody's request, not a device trying to fix itself:
+// Reprovision means a household is standing at the device holding BOOT,
+// SelfTest means an operator asked for a diagnostic build, and Ota is the one
+// restart where a long wait is expected and legitimate - CAL runs its full
+// download-and-install ladder in front of it, and if a new build fails to come
+// up, the App's boot screens are the only visible evidence of how far it got.
+// Hiding those would mean the one restart a person is actually waiting on
+// became the least legible. An unexpected reset (panic, watchdog, brownout)
+// narrates too, for a blunter reason: a crash is not therapy, this firmware
+// did not choose it, and it has no basis for claiming the device is fine.
+// ---------------------------------------------------------------------------
+
+/// How many self-restarts in a row stay silent before the boot starts saying
+/// something again.
+///
+/// **This is the floor under the silence, and it is the whole reason the
+/// suppression above is defensible.** "Don't show noise" and "don't hide a
+/// fault" are in genuine tension here: a device stuck in an unreachable loop
+/// that silently swallows every restart is a device nobody ever learns is
+/// unwell - it renders its cards perfectly, tells the household nothing, and
+/// the only remaining evidence is a picture that blinks. Resolving that in
+/// favour of silence forever would be trading a real diagnosis for a cosmetic
+/// one.
+///
+/// Three, because the two cases are far apart in practice. A router hiccup or
+/// one poisoned TLS session produces exactly one self-restart and then the
+/// device runs for hours - that must never be narrated, and with a budget of
+/// three it never is, not even if it happens twice more in the same day. A
+/// device genuinely cycling at the observed 13-27 minute cadence spends three
+/// restarts inside about an hour and starts explaining itself, which is soon
+/// enough to be reported and late enough that nothing transient reaches it.
+constexpr uint8_t kMaxSilentSelfRestarts = 3;
+
+/// How long this boot has to last before the restart that caused it counts as
+/// having worked, clearing the budget above.
+///
+/// Uptime rather than "a successful check-in" or "a successful card draw", and
+/// that choice is deliberate: the two watchdogs fire on different symptoms, and
+/// a device can satisfy either one's idea of healthy while still cycling on the
+/// other's. A LowHeap unit checks in perfectly right up to the moment it cannot
+/// draw; an Unreachable unit draws perfectly and cannot check in at all. The
+/// only condition that means "the restart actually fixed it" for both is the
+/// absence of the next restart, and the only way to observe an absence is to
+/// wait.
+///
+/// An hour is comfortably past the worst observed cycle (a restart every 13-27
+/// minutes), so a device in that state never reaches it and its count keeps
+/// climbing, while a device that recovered clears on its first quiet hour.
+constexpr uint32_t kSelfRestartRecoveredUptimeMs = 60UL * 60UL * 1000UL;
+
+/// The shortest time the boot splash is allowed to be the thing on screen.
+///
+/// Reported by the household as "the splash is on screen for a split second".
+/// Two separate things were doing that and both are fixed; this constant is the
+/// second one.
+///
+/// The first was WifiJoin painting over it a few hundred milliseconds after it
+/// appeared - see WifiJoin::setProgressVisible(), which is where the actual bug
+/// was and why the README's claim that the logo "stays up through the WiFi
+/// join" had never been true.
+///
+/// The second is that nothing ever guaranteed the splash any time at all. With
+/// the join silenced, the splash lives until CardManager::begin() fetches and
+/// draws the first card - and on a fast boot (a therapeutic restart skips the
+/// SNTP wait entirely via trySkipSyncAfterFastReboot(), and WiFi can associate
+/// in about a second) that is a very short life. A splash whose duration is
+/// whatever the network happened to cost is not a boot experience, it is a race
+/// the brand keeps losing. Three seconds is long enough to read as deliberate
+/// from across a room and short enough that it is not felt as a delay; it is
+/// measured from when the splash was drawn, so on any boot that already took
+/// longer than this the wait is zero and nothing is slowed down at all.
+constexpr uint32_t kMinSplashOnScreenMs = 3000;
+
+/// Whether this boot narrates its progress on the glass. See the block comment
+/// above for the decision; decideBootNarration() below is where it is made.
+/// True until then, so anything drawn before the decision point (the "Starting"
+/// screen) is unaffected.
+bool gNarrateBoot = true;
+
+/// When Assets::showBootSplash() put the logo up, or 0 if it never did. Read
+/// only by holdSplash() below.
+uint32_t gSplashDrawnAtMs = 0;
+
+/// Latches once checkSelfRestartRecovery() has run, so the recovery check is a
+/// once-per-boot event rather than something loop() re-evaluates forever after
+/// the threshold passes.
+bool gSelfRestartsCleared = false;
+
+/// Whether wifiResetRequested() has put its "keep holding BOOT" prompt on the
+/// screen. See restoreHeldBootScreen() below for the one thing that reads it
+/// and why a quiet boot needs it at all.
+bool gBootPromptDrawn = false;
+
+/// Whether the restart that produced this boot was this firmware restarting
+/// itself to recover, as opposed to a power-on, a crash, or a restart somebody
+/// asked for. See the block comment above for why Ota, Reprovision and SelfTest
+/// are deliberately excluded.
+bool restartWasTherapeutic() {
+  switch (BootDiag::lastRestartCause()) {
+    case BootDiag::RestartCause::LowHeap:
+    case BootDiag::RestartCause::Unreachable:
+      return true;
+    case BootDiag::RestartCause::None:
+    case BootDiag::RestartCause::Ota:
+    case BootDiag::RestartCause::Reprovision:
+    case BootDiag::RestartCause::SelfTest:
+      return false;
+  }
+  // Unreachable with the enum as it stands. Present so a cause added to
+  // BootDiag.h later and not considered here defaults to being narrated - the
+  // safe direction, since a boot that says too much is a nuisance and one that
+  // hides a new failure mode is a bug nobody can see.
+  return false;
+}
+
+/// Decides whether the rest of setup() talks, and says so in the log either
+/// way.
+///
+/// Called once, immediately after the splash draw, because that is the first
+/// moment both inputs exist - and because everything downstream of it (the WiFi
+/// join, the time sync, "Loading") is exactly what is being decided about.
+void decideBootNarration(bool splashOnScreen) {
+  const bool therapeutic = restartWasTherapeutic();
+  const uint8_t selfRestarts = Identity::consecutiveSelfRestarts();
+  const bool budgetSpent = therapeutic && selfRestarts > kMaxSilentSelfRestarts;
+
+  // A splash on the glass suppresses the ladder on ANY boot, cold ones
+  // included - that predates this change and is what the splash feature was
+  // always for (see Assets.h's showBootSplash() and the README's "Where the
+  // boot splash has to happen"). What is new is that the suppression now
+  // actually reaches WifiJoin, which is where it had been leaking.
+  //
+  // budgetSpent overrides both, splash or no splash. A device that has restarted
+  // itself four times running has a fault worth more than a tidy logo.
+  gNarrateBoot = budgetSpent || !(therapeutic || splashOnScreen);
+
+  WifiJoin::setProgressVisible(gNarrateBoot);
+
+  if (gNarrateBoot && gSplashDrawnAtMs != 0) {
+    // A narrating boot paints over the splash within moments no matter what
+    // this file does - WifiJoin is the very next thing to draw and it is not
+    // suppressed here - so there is nothing left to hold, and holding whatever
+    // replaced the logo would just add three seconds to a boot that is already
+    // the loud kind. Forgetting the timestamp is how holdSplash() learns that.
+    gSplashDrawnAtMs = 0;
+  }
+
+  Log::printf("[boot] boot progress screens %s (restart was %s, self-restarts in a row=%u/%u, "
+              "splash on screen=%d)",
+              gNarrateBoot ? "will be drawn" : "are SUPPRESSED - screen only, the log is unchanged",
+              therapeutic ? "therapeutic" : "not therapeutic",
+              static_cast<unsigned>(selfRestarts),
+              static_cast<unsigned>(kMaxSilentSelfRestarts), splashOnScreen ? 1 : 0);
+
+  if (!budgetSpent) {
+    return;
+  }
+
+  // Past the budget, so this boot stops pretending. Said on the one screen that
+  // is already going to be held for a while rather than added to the ladder as
+  // yet another step - a household needs to be able to read it and repeat it to
+  // whoever set the device up, which means it has to still be there a few
+  // seconds later.
+  //
+  // Worded as a symptom, not a diagnosis. The device does not know whether this
+  // is its own memory, the household's router, or the service being down, and a
+  // screen that guesses wrong sends somebody to reset a router that was never
+  // the problem.
+  Log::printf("[boot] this device has restarted itself %u times in a row (budget %u) - saying so "
+              "on screen rather than staying quiet about a restart that clearly is not working",
+              static_cast<unsigned>(selfRestarts), static_cast<unsigned>(kMaxSilentSelfRestarts));
+  Display::showStatus("Starting", "This device keeps restarting itself. If it continues, "
+                                  "contact whoever set it up.");
+}
+
+/// A boot-ladder status screen that a quiet boot swallows.
+///
+/// The log line on the suppressed path is not decoration and must not be
+/// removed to make a quiet boot quieter: the remote debug stream is the only
+/// diagnostic channel a deployed device has, and "this screen was deliberately
+/// withheld" has to be distinguishable there from "this stage never ran".
+/// Nothing about what this firmware reports changes with this feature - only
+/// what it paints.
+void bootStatus(const String& headline, const String& detail) {
+  if (!gNarrateBoot) {
+    Log::printf("[boot] not drawing \"%s\" (%s) - boot progress is suppressed for this boot; "
+                "see decideBootNarration()",
+                headline.c_str(), detail.length() > 0 ? detail.c_str() : "no detail");
+    return;
+  }
+  Display::showStatus(headline, detail);
+}
+
+/// Waits out whatever is left of kMinSplashOnScreenMs before the caller is
+/// allowed to replace the splash.
+///
+/// A plain blocking wait, and that is fine here: this is the tail of setup(),
+/// nothing else is running, touch is not sampled yet (CardManager::begin() has
+/// not been called) and loop() has not started. It is the same shape as the
+/// delay() the time-sync retry above already uses.
+///
+/// Logs the figure rather than only the decision, so it is answerable from the
+/// field whether this minimum ever actually binds - if every device reports
+/// waiting 0 ms the constant is dead weight, and if they all report waiting
+/// most of it then boots are faster than this comment assumes.
+void holdSplash() {
+  if (gSplashDrawnAtMs == 0) {
+    return;
+  }
+  const uint32_t shownForMs = millis() - gSplashDrawnAtMs;
+  if (shownForMs >= kMinSplashOnScreenMs) {
+    Log::printf("[boot] splash has been up %lu ms, past its %lu ms minimum - not waiting",
+                static_cast<unsigned long>(shownForMs),
+                static_cast<unsigned long>(kMinSplashOnScreenMs));
+    return;
+  }
+  const uint32_t remainingMs = kMinSplashOnScreenMs - shownForMs;
+  Log::printf("[boot] holding the splash another %lu ms (up for %lu of a %lu ms minimum) so it is "
+              "part of the boot rather than a frame of it",
+              static_cast<unsigned long>(remainingMs), static_cast<unsigned long>(shownForMs),
+              static_cast<unsigned long>(kMinSplashOnScreenMs));
+  delay(remainingMs);
+}
+
 // Same pin and hold time as CAL's own WiFi-reset gesture, and deliberately so
 // - a household should not need to know which binary happens to be running to
 // know how to fix "wrong network".
@@ -165,6 +434,12 @@ bool wifiResetRequested() {
     return false;
   }
 
+  // Straight to Display, deliberately not through bootStatus() above: a finger
+  // is on the button, so this is not boot progress being narrated at nobody -
+  // it is the device answering a gesture in progress, and a quiet boot must
+  // never make the one user-driven control on this appliance look dead. Same
+  // reasoning that keeps the failure screens ungated.
+  gBootPromptDrawn = true;
   Display::showStatus("Keep holding BOOT to set up WiFi", "Release now to cancel");
   const uint32_t deadline = millis() + kWifiResetHoldMs;
   while (millis() < deadline) {
@@ -175,6 +450,45 @@ bool wifiResetRequested() {
   }
   Log::line("[boot] WiFi reset gesture confirmed");
   return true;
+}
+
+/// Puts back whatever a quiet boot was holding on screen after
+/// wifiResetRequested() painted its prompt over it and the hold was then
+/// abandoned.
+///
+/// **This is a cleanup that used to happen by accident and stopped.** The
+/// "Keep holding BOOT" prompt is drawn the instant the button reads LOW and
+/// stays there when the household lets go before three seconds. Nothing ever
+/// cleared it - WifiJoin's "Looking for known networks" simply landed
+/// milliseconds later and took the screen. Silencing that join is exactly what
+/// this change does, so on a quiet boot the prompt would now sit there, telling
+/// a household to keep holding a button they already released, until the first
+/// card arrives some seconds later.
+///
+/// Does nothing on a narrating boot, where the accident still works and
+/// re-decoding the splash for a screen about to be replaced anyway would only
+/// cost the boot an SD read.
+void restoreHeldBootScreen(bool splashOnScreen) {
+  if (!gBootPromptDrawn) {
+    return;
+  }
+  gBootPromptDrawn = false;
+  if (gNarrateBoot) {
+    return;
+  }
+
+  if (splashOnScreen && Assets::showBootSplash()) {
+    // The minimum starts again from here, not from the original draw: the logo
+    // was interrupted, and what a household actually saw of it is the stretch
+    // that starts now.
+    gSplashDrawnAtMs = millis();
+    Log::line("[boot] BOOT was pressed and released during a quiet boot - the splash is back up");
+    return;
+  }
+
+  Log::line("[boot] BOOT was pressed and released during a quiet boot - putting the \"Starting\" "
+            "screen back over the abandoned hold prompt");
+  Display::showStatus("Starting", "");
 }
 
 /// Blocks until WiFi is up, retrying indefinitely rather than giving up - the
@@ -227,6 +541,12 @@ void ensureWifiConnected() {
         // when it isn't.
         Display::showFailure("Could not join WiFi",
                              "Hold BOOT for 3 seconds to set up WiFi again.");
+        // This site does its own cleanup - the line above IS the restore - so
+        // the flag is cleared here rather than left standing for
+        // restoreHeldBootScreen(), which has already run by the time this loop
+        // is reachable and would otherwise be looking at a prompt that is no
+        // longer on screen.
+        gBootPromptDrawn = false;
       }
       delay(100);
     }
@@ -257,9 +577,9 @@ uint32_t lastHeapCheckMs = 0;
 // What survives from that: free bytes and contiguous bytes really are different
 // quantities on this board, and the second is the one that decides whether a
 // card draws. What does not survive: the belief that ESP.getMaxAllocHeap()
-// measures it. It does not - see kMaxConsecutiveBufferAllocFailures below for
-// the measurements that settled that, and for why this now acts on real
-// allocation failures instead of on any reading at all.
+// measures it. It does not - see kMaxConsecutiveDrawFailures below for the
+// measurements that settled that, and for why this now acts on draws that
+// actually failed instead of on any reading at all.
 //
 // Nor does the ambition of acting BEFORE the first failure, which is what the
 // old thresholds were for. That is given up deliberately. Predicting the
@@ -359,11 +679,30 @@ constexpr uint32_t kHeapCheckGraceMs = 3UL * 60UL * 1000UL;
 // draws from, so no threshold against it could ever have predicted a draw.
 //
 // **So this no longer thresholds anything.** It restarts on a run of
-// consecutive failed DRAWS - Display::consecutiveDrawFailures(),
-// incremented only when a file-buffer allocation has exhausted plain malloc,
-// all three explicit capability sets, and the TLS release, and the draw is
-// genuinely lost. That is better than any threshold for three reasons worth
-// stating plainly:
+// consecutive failed DRAWS - Display::consecutiveDrawFailures().
+//
+// That sentence used to finish "incremented only when a file-buffer allocation
+// has exhausted plain malloc, all three explicit capability sets, and the TLS
+// release, and the draw is genuinely lost", and every clause of it described a
+// mechanism that had already been deleted. There is no file buffer: draws
+// stream from SD (commit 40440da), so there is no per-draw allocation left to
+// exhaust anything, no capability-set escalation, and no TLS release on the
+// draw path. The description is kept here in its corrected form rather than
+// dropped because the wrong version was not harmless - it, and the old name on
+// the constant below, are why a reading of 6/6 was taken for memory exhaustion
+// for an entire evening on a device whose largest 8-bit block was 21,492 at the
+// time.
+//
+// What the counter actually is: Display.cpp's noteDrawOutcome() ticks it once
+// for every card draw where an image was in front of the decoder and no picture
+// came out - a decode that failed, or a file whose bytes are not an image. Its
+// noteNoImageAvailable() handles the case that is NOT counted, a draw that never
+// reached a decoder because there was no image to give one. Both are internal to
+// that file on purpose (the count is only meaningful if exactly one place
+// decides what a failure is); see Display.h's consecutiveDrawFailures() for the
+// contract this file actually depends on, why the exclusion exists, and what
+// counting it cost. Acting on failed draws is better than any threshold for
+// three reasons worth stating plainly:
 //
 //   - It measures the harm itself. "This device can no longer draw its cards"
 //     is the condition worth restarting for, and this counts exactly that
@@ -393,12 +732,24 @@ constexpr uint32_t kHeapCheckGraceMs = 3UL * 60UL * 1000UL;
 //
 // 6 is two full cards' worth. Exceeding it means every attempt on more than two
 // assets failed with no success anywhere in between - the counter resets on ANY
-// success, including the case where the buffer was already big enough - which
-// is the difference between "this asset is bad" and "this device cannot draw".
-// Draws are seconds apart while a check runs once a minute, so a device in that
-// state passes 6 well inside one interval and restarts on the very next check
-// rather than much later.
-constexpr uint32_t kMaxConsecutiveBufferAllocFailures = 6;
+// successful draw - which is the difference between "this asset is bad" and
+// "this device cannot draw". Draws are seconds apart while a check runs once a
+// minute, so a device in that state passes 6 well inside one interval and
+// restarts on the very next check rather than much later.
+//
+// That last sentence is true of a device failing continuously and was read too
+// broadly. Graphic.cpp drops an instance out of the rotation after its first
+// failed draw ("dropping this card for now"), so a device with two picture
+// cards reaches exactly 6 and then stops, sitting at 6/6 - which this limit
+// tolerates, since the test below is <= - until Config::kContentRefreshIntervalMs
+// re-fetches and re-arms the cards ten minutes later and the next failure is the
+// 7th. On device 7 that produced a restart at 620-660s of uptime, every cycle,
+// all evening: the period was the content refresh interval, not this check's own
+// cadence. Worth knowing before reading a reboot period as a memory curve.
+//
+// Renamed from kMaxConsecutiveBufferAllocFailures. It never counted buffer
+// allocations - see the block above for what the old name cost.
+constexpr uint32_t kMaxConsecutiveDrawFailures = 6;
 
 /// How many check-ins in a row may fail before this device restarts itself to
 /// get its connection back.
@@ -470,25 +821,34 @@ void checkHeapHealth() {
 
   // Logged on every check whether or not anything is wrong, and both numbers
   // together on purpose. heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) is
-  // the real figure - 8BIT because that is the pool a byte buffer comes from,
-  // see Display.cpp's ensureFileBufferCapacity() - and ESP.getMaxAllocHeap() is
-  // the one three thresholds were wrongly derived from. Keeping them side by
-  // side in the fleet's logs is what makes the gap between them (6,132 against
-  // 32,756 at the one instant both were captured on device 17) an observable
-  // fact on real hardware rather than a finding that has to be taken on trust,
-  // and it is the same reasoning Telemetry.cpp uses for sending freeHeapBytes
-  // alongside free8BitBytes instead of replacing it.
+  // the real figure - 8BIT because that is the pool a byte-addressable
+  // allocation comes from, which on the draw path today means LovyanGFX's own
+  // decode scratch (see Display.cpp's releaseDecodeMemory()) rather than any
+  // buffer this firmware allocates - and ESP.getMaxAllocHeap() is the one three
+  // thresholds were wrongly derived from. Keeping them side by side in the
+  // fleet's logs is what makes the gap between them (6,132 against 32,756 at the
+  // one instant both were captured on device 17) an observable fact on real
+  // hardware rather than a finding that has to be taken on trust, and it is the
+  // same reasoning Telemetry.cpp uses for sending freeHeapBytes alongside
+  // free8BitBytes instead of replacing it.
+  //
+  // **The heap figure on this line is context, not the trigger, and the wording
+  // below now says so.** It used to read "consecutive file-buffer alloc
+  // failures", naming a buffer that has not existed since draws became
+  // streaming, sitting immediately after two heap numbers - so the line read as
+  // a memory report with a memory trigger. It is a draw report: the count is
+  // failed card draws and nothing about the heap decides anything here.
   const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   const uint32_t failures = Display::consecutiveDrawFailures();
   Log::printf(
       "[health] largest 8BIT block=%u (ESP.getMaxAllocHeap says %u at the same instant), "
-      "consecutive file-buffer alloc failures=%lu/%lu after %lu ms uptime",
+      "consecutive failed draws=%lu/%lu after %lu ms uptime",
       static_cast<unsigned>(largestBlock), static_cast<unsigned>(ESP.getMaxAllocHeap()),
       static_cast<unsigned long>(failures),
-      static_cast<unsigned long>(kMaxConsecutiveBufferAllocFailures),
+      static_cast<unsigned long>(kMaxConsecutiveDrawFailures),
       static_cast<unsigned long>(now));
 
-  if (failures <= kMaxConsecutiveBufferAllocFailures) {
+  if (failures <= kMaxConsecutiveDrawFailures) {
     return;
   }
 
@@ -506,11 +866,10 @@ void checkHeapHealth() {
   // and keeps reporting telemetry; and because the counter clears on the first
   // success after the reboot, one that recovers stops restarting immediately.
   Log::printf(
-      "[health] %lu consecutive file-buffer allocation failures (limit %lu) after %lu ms "
-      "uptime - this device can no longer draw its cards, restarting to reclaim memory "
+      "[health] %lu consecutive failed card draws (limit %lu) after %lu ms uptime - this "
+      "device can no longer draw its cards, restarting to reclaim memory "
       "(largest 8BIT block=%u)",
-      static_cast<unsigned long>(failures),
-      static_cast<unsigned long>(kMaxConsecutiveBufferAllocFailures),
+      static_cast<unsigned long>(failures), static_cast<unsigned long>(kMaxConsecutiveDrawFailures),
       static_cast<unsigned long>(now), static_cast<unsigned>(largestBlock));
   // So the line above actually reaches the server instead of being lost with
   // everything else in RAM at restart - same reasoning as every other
@@ -527,6 +886,12 @@ void checkHeapHealth() {
   // unexplained software reset. This is the restart that spent a night looking
   // like a crash loop, which is exactly why it should name itself.
   BootDiag::recordRestartIntent(BootDiag::RestartCause::LowHeap);
+  // Beside the cause, not instead of it: BootDiag says what the LAST restart
+  // was for, this says how many in a row this device has now needed. The next
+  // boot reads both - the first to decide whether to be quiet, the second to
+  // decide whether it has been quiet for too long. See
+  // Identity::consecutiveSelfRestarts() and kMaxSilentSelfRestarts.
+  Identity::recordSelfRestart();
   Display::showStatus("Refreshing", "Reclaiming memory - back in a moment");
   // Long enough for both the status message and the flushed log line to be
   // visibly sent before the restart cuts everything off.
@@ -611,6 +976,11 @@ void checkUnreachableWatchdog() {
   Log::flushNow();
   AppService::stashTimeForFastReboot();
   BootDiag::recordRestartIntent(BootDiag::RestartCause::Unreachable);
+  // Same pairing as checkHeapHealth() above, and this is the watchdog the
+  // counter matters most for: an unreachable device that a restart does not fix
+  // is precisely the one that would otherwise reboot silently forever with
+  // nobody - server or household - ever being told.
+  Identity::recordSelfRestart();
   Display::showStatus("Reconnecting", "Restoring the connection - back in a moment");
 
   // Set before the restart even though this variable does not survive one,
@@ -628,6 +998,41 @@ void checkUnreachableWatchdog() {
   delay(1500);
   esp_restart();
   // Unreachable: the call above never returns.
+}
+
+/// Clears the consecutive-self-restart budget once this boot has lasted long
+/// enough to say the restart it followed actually worked.
+///
+/// The counterpart to Identity::recordSelfRestart() at the two watchdogs above,
+/// and the half that keeps the budget from being a one-way ratchet: without it,
+/// a device that needed three restarts across a year would narrate every boot
+/// it ever had afterwards, which is the noise this whole feature exists to
+/// remove, just delayed.
+///
+/// Checked once per loop() iteration and latched, so this is one comparison in
+/// the steady state and at most one flash write per boot - and
+/// Identity::clearSelfRestarts() declines even that when there is nothing to
+/// clear, which is the ordinary case on a healthy device.
+void checkSelfRestartRecovery() {
+  if (gSelfRestartsCleared) {
+    return;
+  }
+  if (millis() < kSelfRestartRecoveredUptimeMs) {
+    return;
+  }
+  // Latched before the work, not after, so a clear that somehow fails is not
+  // retried on every one of the millions of loop iterations that follow.
+  gSelfRestartsCleared = true;
+
+  const uint8_t before = Identity::consecutiveSelfRestarts();
+  if (before == 0) {
+    return;
+  }
+  Identity::clearSelfRestarts();
+  Log::printf("[health] %lu ms of uptime with no further self-restart - the last one worked, so "
+              "the run of %u is cleared and the next one starts its silence budget over",
+              static_cast<unsigned long>(kSelfRestartRecoveredUptimeMs),
+              static_cast<unsigned>(before));
 }
 
 // The server can shorten or lengthen this on every check-in response
@@ -1014,8 +1419,19 @@ void setup() {
   }
 
   Display::begin();
+
+  // Drawn on every boot, quiet ones included, and deliberately BEFORE
+  // decideBootNarration() exists to suppress anything. See the "What a boot is
+  // allowed to say on the glass" block above: a therapeutic reboot gets one
+  // screen rather than no screen, this is the screen that covers the gap while
+  // SD mounts and the splash decodes, and it names no network, no clock and no
+  // server - it is not part of the handshake chatter being removed.
   Display::showStatus("Starting", "");
 
+  // Already ahead of the splash, and now load-bearing rather than incidental:
+  // decideBootNarration() below reads Identity::consecutiveSelfRestarts(), so
+  // prefs.begin() has to have happened by then. Anything that moves this line
+  // later has to move that decision later too.
   Identity::begin();
 
   // Storage and the boot splash come up HERE - before Http/WiFi/TLS - and the
@@ -1059,20 +1475,42 @@ void setup() {
   Sd::begin();
   Assets::begin();
 
-  // Whether the logo actually reached the screen. When it did, the status
-  // screens below ("Checking the time", "Loading") are skipped so it stays up
-  // for the whole of WiFi join and time sync, rather than being painted over
-  // a moment after appearing - the branded boot this feature exists for, and
-  // what the splash was always meant to do: the logo first, the network
-  // connecting underneath it.
+  // Whether the logo actually reached the screen. When it did, every status
+  // screen for the rest of this boot is skipped so it stays up for the whole of
+  // WiFi join and time sync, rather than being painted over a moment after
+  // appearing - the branded boot this feature exists for, and what the splash
+  // was always meant to do: the logo first, the network connecting underneath
+  // it.
+  //
+  // **That was already the design and it did not work, which is half of why
+  // this file changed.** The skip used to be two `if (!splashOnScreen)` checks
+  // around App.ino's own "Checking the time" and "Loading" calls - and WifiJoin
+  // draws two status screens of its own that neither check could ever cover.
+  // They land a few hundred milliseconds after the splash, so the logo was a
+  // single frame followed by "Looking for known networks", on every device, for
+  // the whole life of the feature. The README's claim that the logo stays up
+  // through the WiFi join was describing an intention, not the binary. The skip
+  // is now one decision (decideBootNarration below) pushed into every module
+  // that draws during boot, which is why it reaches WifiJoin at all.
   //
   // A device with no splash - no card, nothing configured, or a decode that
-  // failed - falls back to those status screens exactly as before. Silence on
-  // a blank panel while WiFi retries is a worse boot than a plain status line,
-  // so this only ever suppresses them when there is genuinely something better
-  // on screen. Failure screens (see ensureWifiConnected) are never suppressed:
-  // a household that needs to hold BOOT to fix its WiFi has to be told so.
+  // failed - falls back to those status screens exactly as before, unless this
+  // boot is a quiet one for its own reasons. Silence on a blank panel while
+  // WiFi retries is a worse boot than a plain status line. Failure screens (see
+  // ensureWifiConnected) are never suppressed on any path: a household that
+  // needs to hold BOOT to fix its WiFi has to be told so.
   const bool splashOnScreen = Assets::showBootSplash();
+  if (splashOnScreen) {
+    // Read only by holdSplash() at the bottom of setup(), which is what stops
+    // the first card replacing the logo before anyone has seen it.
+    gSplashDrawnAtMs = millis();
+  }
+
+  // Everything below this line that draws boot progress goes through
+  // bootStatus() or WifiJoin's own gate, and this is where both are decided.
+  // See the "What a boot is allowed to say on the glass" block near the top of
+  // this file for the reasoning; it is the substance of this change.
+  decideBootNarration(splashOnScreen);
 
   // Configures the one shared HTTPS connection's TLS trust bundle exactly
   // once for this boot - see Http.h's own remarks for why every HTTP call
@@ -1119,6 +1557,10 @@ void setup() {
     Loader::returnToLoaderForReprovisioning();
     // Unreachable: the call above never returns.
   }
+  // Reached when BOOT was never touched (a no-op) or when it was held and let
+  // go before the three seconds - see restoreHeldBootScreen() for why a quiet
+  // boot has to tidy that up explicitly now that nothing else will.
+  restoreHeldBootScreen(splashOnScreen);
 
   ensureWifiConnected();
   WiFi.setAutoReconnect(true);
@@ -1137,9 +1579,11 @@ void setup() {
   // handing back from CAL after an OTA install - none of which have
   // anything to restore).
   if (!AppService::trySkipSyncAfterFastReboot()) {
-    if (!splashOnScreen) {
-      Display::showStatus("Checking the time", "Needed before a secure connection");
-    }
+    // Through bootStatus() rather than a local `if (!splashOnScreen)`: the
+    // splash is no longer the only reason a boot stays quiet, and a second copy
+    // of that rule here is how the WifiJoin screens came to be missed in the
+    // first place.
+    bootStatus("Checking the time", "Needed before a secure connection");
     while (!AppService::synchroniseTime()) {
       Display::showFailure("Cannot reach the internet", "Retrying...");
       delay(10000);
@@ -1155,14 +1599,31 @@ void setup() {
   // Hands the screen over. Every card registered itself before setup() was
   // ever called; this is where the rotation starts running.
   //
-  // "Loading" is skipped while the logo is up, for the same reason the time
-  // screen above is: CardManager::poll() holds whatever is on screen until a
-  // real policy arrives (see its own gPolicyEverApplied remarks), so leaving
-  // the splash there means the logo stays put right up until the first real
-  // card replaces it - instead of a blank "Loading" filling that gap.
-  if (!splashOnScreen) {
-    Display::showStatus("Loading", "");
-  }
+  // "Loading" is skipped on a quiet boot, for the same reason the time screen
+  // above is: CardManager::poll() holds whatever is on screen until a real
+  // policy arrives (see its own gPolicyEverApplied remarks), so leaving the
+  // splash - or the single "Starting" screen a splash-less quiet boot holds -
+  // there means it stays put right up until the first real card replaces it,
+  // instead of a blank "Loading" filling that gap.
+  bootStatus("Loading", "");
+
+  // The last thing before the rotation takes the screen, because
+  // CardManager::begin() fetches and draws one card immediately - it is the
+  // thing that replaces the splash, and on a fast boot it can do so within a
+  // second or two of the logo appearing. See kMinSplashOnScreenMs for why that
+  // is the second half of "the splash is on screen for a split second" and why
+  // this wait is usually zero.
+  holdSplash();
+
+  // Narration goes back on before loop() ever runs, and it has to: every
+  // showStatus() beyond this point is a running device reporting something
+  // that is happening NOW to somebody who may well be looking at it - an
+  // update installing, a reconnect, a WiFi drop mid-rotation. None of that is
+  // boot progress, and leaving the gate shut would silence it for the whole
+  // uptime rather than for the boot.
+  gNarrateBoot = true;
+  WifiJoin::setProgressVisible(true);
+
   CardManager::begin();
 }
 
@@ -1185,6 +1646,11 @@ void loop() {
   // costs a comparison on every iteration and does nothing until five
   // check-ins in a row have failed.
   checkUnreachableWatchdog();
+
+  // Beside the two watchdogs because it is their counterpart: they count this
+  // device's self-restarts, and this is the one thing that ever clears the
+  // count. Costs one comparison per iteration and fires at most once per boot.
+  checkSelfRestartRecovery();
 
   if (forceUpdateCheckRequested()) {
     forceUpdateCheck();

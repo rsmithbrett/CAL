@@ -20,6 +20,7 @@ constexpr const char* kKeyBootAtt = "bootatt";
 constexpr const char* kKeyProvForced = "provforced";
 constexpr const char* kKeyTotBoots = "totboots";
 constexpr const char* kKeyUtcOffset = "utcoffmin";
+constexpr const char* kKeySelfRestarts = "selfrst";
 
 // Per-slot keys are built at runtime: "ssid0".."ssid2", "pass0".."pass2".
 // NVS keys are capped at 15 characters, so these stay deliberately short.
@@ -155,5 +156,33 @@ void recordBoot() {
 int lastUtcOffsetMinutes() { return prefs.getInt(kKeyUtcOffset, 0); }
 
 void setLastUtcOffsetMinutes(int minutes) { prefs.putInt(kKeyUtcOffset, minutes); }
+
+uint8_t consecutiveSelfRestarts() { return prefs.getUChar(kKeySelfRestarts, 0); }
+
+void recordSelfRestart() {
+  const uint8_t current = consecutiveSelfRestarts();
+  // Saturate instead of wrapping, same reasoning recordBoot() above states for
+  // its own counter and for the same reason it matters more here: a wrap to 0
+  // would hand a device that has restarted itself 256 times in a row the exact
+  // reading of one that has never restarted at all, and buy it a fresh silence
+  // budget on top. Pinned at 255, which is far past any threshold that reads
+  // this.
+  if (current == UINT8_MAX) {
+    return;
+  }
+  prefs.putUChar(kKeySelfRestarts, current + 1);
+}
+
+void clearSelfRestarts() {
+  // Guarded rather than written unconditionally. The caller is a once-per-boot
+  // check in loop(), and the ordinary case by far is a device that never
+  // restarted itself and has nothing to clear - writing a 0 over a 0 on every
+  // boot would put a flash write into the steady state of every healthy device
+  // in the fleet to record nothing at all.
+  if (consecutiveSelfRestarts() == 0) {
+    return;
+  }
+  prefs.putUChar(kKeySelfRestarts, 0);
+}
 
 }  // namespace Identity

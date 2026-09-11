@@ -22,10 +22,32 @@ struct Candidate {
   int32_t rssi;
 };
 
+/// See setProgressVisible() in the header for what this gates and why it is a
+/// runtime switch. True by default so nothing that never touches it changes
+/// behaviour.
+bool gProgressVisible = true;
+
+/// Draws one of this file's two progress screens, or explains into the log why
+/// it did not.
+///
+/// The log line is not decoration and must not be deleted to make a quiet boot
+/// quieter still: the remote debug stream is the only diagnostic channel a
+/// deployed device has, and a screen this firmware deliberately withheld has to
+/// be distinguishable in that stream from one it never tried to draw. Screen
+/// output is the thing being suppressed here; the narration is not.
+void showProgress(const String& headline, const String& detail) {
+  if (!gProgressVisible) {
+    Log::printf("[wifi] not drawing \"%s\" (%s) - boot progress is suppressed for this join; "
+                "see WifiJoin::setProgressVisible() and App.ino's gNarrateBoot",
+                headline.c_str(), detail.length() > 0 ? detail.c_str() : "no detail");
+    return;
+  }
+  Display::showStatus(headline, detail);
+}
+
 bool attemptJoin(const Identity::Network& net) {
   for (uint8_t attempt = 1; attempt <= Config::kWifiJoinAttempts; ++attempt) {
-    Display::showStatus("Connecting to WiFi",
-                        net.ssid + "  (attempt " + String(attempt) + ")");
+    showProgress("Connecting to WiFi", net.ssid + "  (attempt " + String(attempt) + ")");
     WiFi.begin(net.ssid.c_str(), net.password.c_str());
 
     const uint32_t deadline = millis() + Config::kWifiJoinTimeoutMs;
@@ -46,6 +68,14 @@ bool attemptJoin(const Identity::Network& net) {
 
 }  // namespace
 
+void setProgressVisible(bool visible) {
+  if (visible == gProgressVisible) {
+    return;
+  }
+  gProgressVisible = visible;
+  Log::printf("[wifi] join progress screens are now %s", visible ? "visible" : "suppressed");
+}
+
 bool joinStoredNetwork() {
   const uint8_t known = Identity::networkCount();
   if (known == 0) {
@@ -56,7 +86,7 @@ bool joinStoredNetwork() {
   WiFi.mode(WIFI_STA);
   WiFi.setMinSecurity(WIFI_AUTH_WEP);
 
-  Display::showStatus("Looking for known networks", "");
+  showProgress("Looking for known networks", "");
   const int found = WiFi.scanNetworks();
 
   Candidate candidates[Identity::kMaxNetworks];
