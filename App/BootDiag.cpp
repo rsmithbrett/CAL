@@ -26,6 +26,16 @@ constexpr const char* kKeyCause = "cause";
 /// logResetReason(), so this is the only surviving record within this boot.
 RestartCause gLastCause = RestartCause::None;
 
+/// The wire form of the pair, built once in logResetReason() and handed out by
+/// restartReasonToken(). A fixed buffer rather than a String because it is read
+/// on every telemetry POST and this device's scarce resource is contiguous
+/// heap, not flash - see the fragmentation measurements in BootDiag.h.
+///
+/// 48 bytes covers the longest pair this firmware can produce
+/// ("DEEPSLEEP_RESET+REPROVISION", 27) with room for a longer cause name later.
+/// snprintf truncates rather than overruns if that is ever wrong.
+char gReasonToken[48] = "UNREPORTED+NONE";
+
 /// The reason, in words, plus what it actually implies. The second half is the
 /// point: `ESP_RST_TASK_WDT` means nothing to someone who has not just been
 /// reading ESP-IDF headers, and a diagnostic that needs a second lookup to
@@ -152,6 +162,8 @@ RestartCause lastRestartCause() { return gLastCause; }
 
 bool lastResetWasUnexpected() { return describe(esp_reset_reason()).unexpected; }
 
+const char* restartReasonToken() { return gReasonToken; }
+
 void logResetReason() {
   const esp_reset_reason_t reason = esp_reset_reason();
   const ResetDescription described = describe(reason);
@@ -167,6 +179,12 @@ void logResetReason() {
   // whatever it had been meaning to do beforehand did not cause this boot.
   const RestartCause cause = (reason == ESP_RST_POWERON) ? RestartCause::None : recorded;
   gLastCause = cause;
+
+  // Built here rather than on demand so the token reflects the same suppression
+  // rule applied to `cause` just above, instead of re-deriving it at each call
+  // site and risking the two drifting apart. Every telemetry POST reads it; see
+  // restartReasonToken() in the header for why it is sent on all of them.
+  snprintf(gReasonToken, sizeof gReasonToken, "%s+%s", described.name, describeCause(cause));
 
   if (reason == ESP_RST_POWERON && recorded != RestartCause::None) {
     // Worth saying rather than swallowing: it means a deliberate restart was

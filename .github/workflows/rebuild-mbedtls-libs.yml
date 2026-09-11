@@ -17,24 +17,51 @@
 # from a compile-time constant, so nothing on the API side can change them -
 # not NetworkClientSecure, not raw mbedTLS. The library has to be rebuilt.
 #
-# AND WHY THE STOCK LIBRARIES ARE LIKE THAT, which turned out to be the
-# interesting half.
+# AND WHY THE STOCK LIBRARIES ARE LIKE THAT, stated narrowly.
 #
-# Espressif's own lib-builder has had CONFIG_MBEDTLS_DYNAMIC_BUFFER=y in
-# configs/defconfig.common since December 2022. The libraries actually shipped
-# with arduino-esp32 3.3.11 do not have it: the symbol is absent from
-# tools/esp32-libs/3.3.11/sdkconfig entirely - not "=n", not "# is not set",
-# absent - because IDF's Kconfig makes it
+# Three things are verified:
 #
-#     depends on !MBEDTLS_SSL_PROTO_DTLS
+#   1. lib-builder master's configs/defconfig.common sets
+#      CONFIG_MBEDTLS_DYNAMIC_BUFFER=y (and has carried that line since a commit
+#      dated December 2022).
+#   2. The sdkconfig shipped with arduino-esp32 3.3.11, at
+#      tools/esp32-libs/3.3.11/sdkconfig, does NOT contain
+#      CONFIG_MBEDTLS_DYNAMIC_BUFFER at all - not "=y", not "=n", not
+#      "# ... is not set". Absent.
+#   3. That same shipped sdkconfig has CONFIG_MBEDTLS_SSL_PROTO_DTLS=y, and IDF
+#      release/v5.5's components/mbedtls/Kconfig declares
 #
-# and the same shipped config has CONFIG_MBEDTLS_SSL_PROTO_DTLS=y. Kconfig
-# discards a symbol whose dependencies are unmet without a word. So the setting
-# has been requested and silently dropped on every official build for four
-# years, and the fleet's handshake failures are downstream of a dependency
-# nobody was told about. The fix is therefore not "enable a flag Espressif
-# forgot" - it is "turn off DTLS, which this firmware does not use, so the flag
-# they did set can finally take."
+#          config MBEDTLS_DYNAMIC_BUFFER
+#              select MBEDTLS_ASYMMETRIC_CONTENT_LEN
+#              depends on !IDF_TARGET_LINUX && !MBEDTLS_SSL_PROTO_DTLS \
+#                         && !MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH
+#
+#      Kconfig omits a symbol whose dependencies are unmet, silently. That makes
+#      the option unsatisfiable in this configuration, which explains (2).
+#
+# So: the current lib-builder config requests dynamic TLS buffers, the shipped
+# 3.3.11 sdkconfig does not contain the symbol, and with DTLS enabled Kconfig
+# makes that option unsatisfiable. The configuration conflict is established.
+#
+# WHAT IS NOT ESTABLISHED, and is deliberately not claimed here. An earlier
+# version of this comment said the setting "has been requested and silently
+# dropped on every official build for four years". That generalises two data
+# points - one current defconfig, one shipped sdkconfig - into a release-history
+# claim that was never checked. Whether other releases in that lineage shipped
+# the same way, and when the conflict first appeared, is a separate question
+# answerable only by sampling generated sdkconfigs or artifacts across those
+# releases. Worth doing, and worth doing AFTER this build has proved the
+# mechanism, not before.
+#
+# Note what this means for the experiment's baseline: the stock Arduino build
+# the fleet runs today is already the real non-dynamic control, since the
+# feature demonstrably is not in it. This workflow's "baseline" variant proves
+# the rebuild itself is neutral, which is a different and still useful thing,
+# but it is not where the non-dynamic comparison comes from.
+#
+# The order is therefore: clear the conflicting dependency, ASSERT the generated
+# configuration actually contains the symbol (the Verify step below refuses to
+# pass otherwise), and only then measure whether runtime behaviour changes.
 #
 # 4096 takes the pair from ~32KB to ~8KB, which fits inside the worst contiguous
 # block observed on a struggling device with room to spare. TLS 1.2/1.3 both

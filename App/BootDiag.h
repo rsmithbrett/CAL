@@ -147,4 +147,34 @@ RestartCause lastRestartCause();
 /// duplicating the mapping.
 bool lastResetWasUnexpected();
 
+/// The same two-part reason `logResetReason()` prints, as one short token for
+/// the wire: "POWERON_RESET+NONE", "PANIC_RESET+NONE",
+/// "SOFTWARE_RESET+UNREACHABLE". Never null; reads "UNREPORTED+NONE" before
+/// logResetReason() has run.
+///
+/// **This exists because the log is not a delivery mechanism, and measurement
+/// proved it.** Everything above was already computed and printed, and on
+/// 2026-09-11 the server had exactly zero restart causes on record for the
+/// whole fleet's history. Two reasons compounded. `[boot]` lines are emitted in
+/// setup(), before check-in has authorised the debug stream, so they are
+/// dropped at the source. And on the two devices restarting most often the
+/// stream was delivering 1.3% and 7.3% of the lines it produced - because a
+/// debug POST needs TLS, TLS needs roughly 32KB contiguous, and those devices
+/// sit at 8-9KB. Of 38 restarts measured across five hours, 36 were
+/// unattributable. A diagnostic that fails on exactly the devices that need
+/// diagnosing is not a diagnostic.
+///
+/// Telemetry is the right carrier precisely because it is not the log: a small
+/// fixed-size POST that still succeeds on these devices when the stream does
+/// not, landing in a row the server keeps per device rather than in a buffer
+/// that can be truncated.
+///
+/// Deliberately sent on EVERY telemetry report, not just the first after a
+/// boot. The obvious economy - report it once, then stop - assumes the first
+/// report gets through, and that assumption is what produced zero records. It
+/// costs about 25 bytes on a request that already carries far more, and it
+/// means the cause is learned on whichever POST first succeeds instead of being
+/// lost with the one that did not.
+const char* restartReasonToken();
+
 }  // namespace BootDiag

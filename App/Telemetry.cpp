@@ -9,6 +9,7 @@
 #include <esp_heap_caps.h>
 
 #include "Assets.h"
+#include "BootDiag.h"
 #include "Config.h"
 #include "Http.h"
 #include "Identity.h"
@@ -157,6 +158,22 @@ void report(const char* lastCheckInOutcome) {
   requestDoc["sdUsedBytes"] = sdUsedBytes;
   requestDoc["assetCount"] = assetCount;
   requestDoc["totalBoots"] = totalBoots;
+  // WHY this device last restarted, beside totalBoots which only says THAT it
+  // did. Those two have been a count with no explanation for the life of this
+  // fleet: on 2026-09-11, 38 restarts were measured across five hours and 36 of
+  // them could not be attributed to anything, because the only place the reason
+  // was ever written was the debug stream - which emits it in setup(), before
+  // check-in authorises that stream, and which was delivering 1.3% and 7.3% of
+  // the lines it produced on the two devices restarting most often. See
+  // BootDiag::restartReasonToken() for the full measurement, and for why this
+  // rides on every report rather than only the first after a boot.
+  //
+  // A short token rather than the prose BootDiag logs ("PANIC_RESET+NONE", not
+  // "a crash: null dereference, stack canary, or a failed assertion"): the
+  // server groups and counts these across a fleet, and the sentence explaining
+  // what a panic means belongs once on a diagnostics page, not in every row of
+  // a database table.
+  requestDoc["restartReason"] = BootDiag::restartReasonToken();
   // Omitted rather than sent empty when nothing is installed yet: the server
   // treats a missing field as "this firmware does not report it", and an empty
   // string would be stored as a real answer that happens to say nothing.
@@ -191,11 +208,11 @@ void report(const char* lastCheckInOutcome) {
   // the gap without having to know it exists.
   Log::printf(
       "[telemetry] ok (uptimeSeconds=%lu rssi=%d freeHeap=%lu free8BIT=%lu largest8BIT=%lu "
-      "bootCount=%u totalBoots=%lu "
+      "bootCount=%u totalBoots=%lu restart=%s "
       "version=%s outcome=%s sdUsedMB=%lu sdTotalMB=%lu assets=%u)",
       static_cast<unsigned long>(uptimeSeconds), rssi, static_cast<unsigned long>(freeHeap),
       static_cast<unsigned long>(free8Bit), static_cast<unsigned long>(largestFreeBlock8Bit),
-      bootCount, static_cast<unsigned long>(totalBoots),
+      bootCount, static_cast<unsigned long>(totalBoots), BootDiag::restartReasonToken(),
       firmwareVersion.length() > 0 ? firmwareVersion.c_str() : "(none)", lastCheckInOutcome,
       static_cast<unsigned long>(sdUsedBytes / (1024ULL * 1024ULL)),
       static_cast<unsigned long>(sdTotalBytes / (1024ULL * 1024ULL)), assetCount);
