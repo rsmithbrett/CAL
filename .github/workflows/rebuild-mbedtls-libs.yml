@@ -86,26 +86,67 @@ name: Rebuild mbedTLS libs (reduce TLS heap footprint)
 
 # Manual only. This is a multi-hour build and must never fire on a push.
 #
-# ONE VARIABLE PER BUILD, IN THIS ORDER
+# ONE VARIABLE PER BUILD, AND TWO BRANCHES THAT MUST NOT MERGE
 #
-# Run these as four separate builds rather than one combined change, so that a
-# result attributes to something:
+# Run these as separate builds rather than one combined change, so that a result
+# attributes to something:
 #
 #   1. baseline    - rebuilt core, no TLS config change. Proves the custom
 #                    library build is itself neutral. Without this, any later
 #                    difference could be the rebuild rather than the setting.
-#   2. dynamic     - DYNAMIC_BUFFER + FREE_CONFIG_DATA + FREE_CA_CERT.
-#                    Espressif's own figures put TLS heap at roughly 42KB
-#                    default against ~22KB with this combination, and it
-#                    attacks precisely this failure: TLS transiently taking
-#                    large contiguous internal-SRAM blocks.
-#   3. contentlen  - 4096 alone. Only worth building if (2) leaves too little
-#                    contiguous headroom.
-#   4. both        - only if (2) alone is insufficient.
+#   2. dynamic     - DYNAMIC_BUFFER + FREE_CONFIG_DATA + FREE_CA_CERT, with DTLS
+#                    cleared so the option is selectable at all. Espressif's own
+#                    figures put TLS heap at roughly 42KB default against ~22KB
+#                    with this combination, and it attacks precisely this
+#                    failure: TLS taking large contiguous internal-SRAM blocks.
+#   3. varbuf      - VARIABLE_BUFFER_LENGTH alone. See "THE MATRIX HAS TWO
+#                    BRANCHES" below; this is NOT a step after (2), it is the
+#                    other side of a fork.
+#   4. contentlen  - 4096 alone. Only worth building if (2) or (3) leaves too
+#                    little contiguous headroom.
+#   5. both        - dynamic + contentlen, only if (2) alone is insufficient.
 #
 # Prefer stopping at (2). Leaving the record length at its normal value avoids
 # constraining TLS records at all, and 4096 is a compatibility/performance
 # variable that should not be spent unless it is needed.
+#
+# THE MATRIX HAS TWO BRANCHES, AND THEY CANNOT BE COMBINED
+#
+# IDF release/v5.5 declares
+#
+#     config MBEDTLS_DYNAMIC_BUFFER
+#         depends on !IDF_TARGET_LINUX && !MBEDTLS_SSL_PROTO_DTLS \
+#                    && !MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH
+#
+# so DYNAMIC_BUFFER and VARIABLE_BUFFER_LENGTH are mutually exclusive by
+# construction. Setting both does not produce a build with both; it produces a
+# build with VARIABLE_BUFFER_LENGTH and DYNAMIC_BUFFER silently dropped - the
+# exact failure mode that hid the DTLS conflict, arriving by a second route.
+#
+# They are therefore separate BRANCHES of the experiment, not successive steps,
+# and each branch's Verify step asserts the absence of the other's flag rather
+# than only the presence of its own. An assertion that only checks what it hoped
+# for cannot catch a silent drop, which is the whole lesson of this workflow.
+#
+# What each branch actually does, because they are not the same idea:
+#
+#   dynamic  changes WHEN the buffers exist. esp_mbedtls_dynamic_impl.c idles
+#            the TX buffer at 24 bytes, grows it to the record being sent and
+#            frees it back; the RX buffer starts null, is allocated per record
+#            sized to the actual in_msglen, and is freed to 16 bytes after
+#            processing. A permanent 16,717x2 reservation becomes a transient
+#            few-KB one.
+#   varbuf   changes HOW BIG they are at setup. It is the switch that makes the
+#            already-compiled MBEDTLS_SSL_MAX_FRAGMENT_LENGTH support actually
+#            reduce the allocation instead of only reducing what is used - see
+#            the correction in "WHY THIS EXISTS" above. The buffers stay
+#            resident; they are merely smaller.
+#
+# Which is better here is an empirical question. dynamic should win on a device
+# whose problem is a large contiguous reservation held across card rendering;
+# varbuf may win if the transient per-record allocations turn out to fragment
+# worse than one stable smaller pair. That is exactly why they are measured
+# separately rather than argued about.
 #
 # SUCCESS IS NOT "IT COMPILES"
 #
@@ -132,6 +173,7 @@ on:
         options:
           - baseline
           - dynamic
+          - varbuf
           - contentlen
           - both
       content_len:
@@ -272,6 +314,22 @@ jobs:
             done
 
             echo "appended the three dynamic-buffer settings, and disabled DTLS which blocks them"
+          fi
+
+          # The other branch of the fork. Deliberately does NOT touch DTLS and
+          # deliberately does NOT set any DYNAMIC_* flag: VARIABLE_BUFFER_LENGTH
+          # and DYNAMIC_BUFFER are mutually exclusive in IDF's Kconfig, so a
+          # build carrying both is a build carrying neither's intent. See "THE
+          # MATRIX HAS TWO BRANCHES" in this file's header.
+          #
+          # This is the switch that makes MBEDTLS_SSL_MAX_FRAGMENT_LENGTH - which
+          # IS compiled in, unconditionally, at esp_config.h:1215 - actually
+          # shrink the allocation rather than only the bytes used. Without it
+          # mbedtls_ssl_setup() takes the full 16,717 per direction from a
+          # compile-time constant whatever gets negotiated.
+          if [ "$VARIANT" = "varbuf" ]; then
+            echo "CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH=y" >> configs/defconfig.common
+            echo "appended CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH=y (and nothing else, on purpose)"
           fi
 
           # Edited in place rather than appended, because the stock config
@@ -421,6 +479,51 @@ jobs:
             else
               echo "OK: DTLS disabled, so the dynamic-buffer symbols are selectable"
             fi
+
+            # The OTHER exclusion, asserted for the same reason. DYNAMIC_BUFFER
+            # also depends on !MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH, so a config
+            # that picked both up - from a future defconfig, or from someone
+            # combining variants - would drop DYNAMIC_BUFFER exactly as silently
+            # as DTLS did. Checking only for what we hoped to find is what let
+            # the first conflict hide for as long as it did.
+            if grep -rhq "^#define CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH 1\|^CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH=y" $CFGS 2>/dev/null; then
+              echo "::error::VARIABLE_BUFFER_LENGTH is set, which also makes MBEDTLS_DYNAMIC_BUFFER unselectable."
+              echo "These are two branches of the experiment and must not be combined - see this file's header."
+              fail=1
+            else
+              echo "OK: VARIABLE_BUFFER_LENGTH absent, so it is not competing with the dynamic branch"
+            fi
+          fi
+
+          # The varbuf branch, asserted in both directions for the same reason:
+          # the flag we asked for must be present, and the flag it is mutually
+          # exclusive with must be absent. A varbuf build that quietly carried
+          # DYNAMIC_BUFFER would not be the varbuf arm of the experiment, and
+          # nothing downstream would ever say so.
+          if [ "$VARIANT" = "varbuf" ]; then
+            if grep -rhq "^#define CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH 1\|^CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH=y" $CFGS 2>/dev/null; then
+              echo "OK: CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH enabled"
+            else
+              echo "::error::CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH did not reach the generated config."
+              fail=1
+            fi
+
+            if grep -rhq "^#define CONFIG_MBEDTLS_DYNAMIC_BUFFER 1\|^CONFIG_MBEDTLS_DYNAMIC_BUFFER=y" $CFGS 2>/dev/null; then
+              echo "::error::This varbuf build also carries DYNAMIC_BUFFER - the two branches have merged."
+              echo "They are mutually exclusive in Kconfig; a build with both is a build with neither's intent."
+              fail=1
+            else
+              echo "OK: DYNAMIC_BUFFER absent, so this is a clean varbuf arm"
+            fi
+
+            # MBEDTLS_SSL_MAX_FRAGMENT_LENGTH is the thing varbuf exists to
+            # activate, and unlike the flags above it is defined unconditionally
+            # in esp_config.h rather than from Kconfig - so it will not appear in
+            # sdkconfig at all. Said out loud here so its absence from the
+            # listing above is not read as a failure.
+            echo "note: MBEDTLS_SSL_MAX_FRAGMENT_LENGTH is defined unconditionally in esp_config.h,"
+            echo "      not via Kconfig, so it does not appear in sdkconfig. Its presence is not in question;"
+            echo "      VARIABLE_BUFFER_LENGTH is what makes it affect the ALLOCATION rather than only usage."
           fi
 
           if [ "$VARIANT" = "contentlen" ] || [ "$VARIANT" = "both" ]; then
@@ -435,12 +538,20 @@ jobs:
 
           if [ "$VARIANT" = "baseline" ]; then
             # A baseline that quietly picked up a change would invalidate every
-            # comparison made against it, so this asserts the absence too.
+            # comparison made against it, so this asserts the absence too - now
+            # of both branches' flags, not just one.
             if grep -rhq "CONFIG_MBEDTLS_DYNAMIC" $CFGS 2>/dev/null; then
               echo "::error::baseline build contains dynamic-buffer settings - it is not a baseline."
               fail=1
             else
               echo "OK: baseline carries no dynamic-buffer settings"
+            fi
+
+            if grep -rhq "^#define CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH 1\|^CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH=y" $CFGS 2>/dev/null; then
+              echo "::error::baseline build has VARIABLE_BUFFER_LENGTH set - it is not a baseline."
+              fail=1
+            else
+              echo "OK: baseline carries no variable-buffer setting either"
             fi
           fi
 
