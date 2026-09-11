@@ -17,6 +17,25 @@
 # from a compile-time constant, so nothing on the API side can change them -
 # not NetworkClientSecure, not raw mbedTLS. The library has to be rebuilt.
 #
+# AND WHY THE STOCK LIBRARIES ARE LIKE THAT, which turned out to be the
+# interesting half.
+#
+# Espressif's own lib-builder has had CONFIG_MBEDTLS_DYNAMIC_BUFFER=y in
+# configs/defconfig.common since December 2022. The libraries actually shipped
+# with arduino-esp32 3.3.11 do not have it: the symbol is absent from
+# tools/esp32-libs/3.3.11/sdkconfig entirely - not "=n", not "# is not set",
+# absent - because IDF's Kconfig makes it
+#
+#     depends on !MBEDTLS_SSL_PROTO_DTLS
+#
+# and the same shipped config has CONFIG_MBEDTLS_SSL_PROTO_DTLS=y. Kconfig
+# discards a symbol whose dependencies are unmet without a word. So the setting
+# has been requested and silently dropped on every official build for four
+# years, and the fleet's handshake failures are downstream of a dependency
+# nobody was told about. The fix is therefore not "enable a flag Espressif
+# forgot" - it is "turn off DTLS, which this firmware does not use, so the flag
+# they did set can finally take."
+#
 # 4096 takes the pair from ~32KB to ~8KB, which fits inside the worst contiguous
 # block observed on a struggling device with room to spare. TLS 1.2/1.3 both
 # tolerate smaller records, and this fleet's payloads are small JSON plus assets
@@ -120,15 +139,39 @@ jobs:
                                   gperf python3 python3-pip python3-venv cmake ninja-build \
                                   ccache jq
 
-      # release/v5.5 because this fleet's core (arduino-esp32 3.3.11) reports
-      # CONFIG_IDF_INIT_VERSION "5.5.5". Libraries built against a different IDF
-      # minor are not safe to drop into this core.
+      # master, not release/v5.5.
+      #
+      # The first run of this workflow died here in four minutes: "fatal: Remote
+      # branch release/v5.5 not found in upstream origin". The branch was chosen
+      # because this fleet's core (arduino-esp32 3.3.11) reports
+      # CONFIG_IDF_INIT_VERSION "5.5.5", on the assumption that lib-builder's
+      # release branches track the IDF version. They do, but only historically -
+      # the newest are release/v6.0 and release/v6.1, release/v3.3 was last
+      # touched in 2021, and there has never been a v5.5. The IDF version is
+      # pinned INSIDE the repository instead: tools/config.sh on master sets
+      # IDF_BRANCH="release/v5.5", which is exactly the pin this build wants.
+      # master is also the actively maintained line (last commit 2026-09-02).
+      #
+      # The version pin is asserted below rather than trusted, because "we are
+      # building against the IDF this core ships" is the one assumption that
+      # makes the resulting libraries safe to drop in, and master will move.
       - name: Check out esp32-arduino-lib-builder
         run: |
-          git clone --depth 1 --branch release/v5.5 \
+          set -euo pipefail
+          git clone --depth 1 --branch master \
             https://github.com/espressif/esp32-arduino-lib-builder.git lib-builder
           cd lib-builder
           git log -1 --format='lib-builder at %h %ci %s'
+
+          PINNED=$(grep -oP 'IDF_BRANCH="\K[^"]+' tools/config.sh | head -1)
+          echo "lib-builder pins IDF_BRANCH=$PINNED"
+          if [ "$PINNED" != "release/v5.5" ]; then
+            echo "::error::lib-builder master now pins IDF $PINNED, not release/v5.5."
+            echo "This fleet's core (arduino-esp32 3.3.11) reports CONFIG_IDF_INIT_VERSION 5.5.5."
+            echo "Libraries built against a different IDF minor are not safe to drop into it."
+            echo "Pin this checkout to a lib-builder commit that still targets release/v5.5."
+            exit 1
+          fi
 
       # The layout of configs/ moves between releases, so this does not assume a
       # path - it finds the fragment that already carries the stock value and
@@ -154,13 +197,54 @@ jobs:
           # holds the config data and the CA copy for the session's life; the
           # other two are what turn the saving from partial into the ~42KB ->
           # ~22KB Espressif documents.
+          #
+          # DTLS MUST BE TURNED OFF IN THE SAME BREATH, and this is the finding
+          # that explains the entire bug rather than merely working around it.
+          #
+          # configs/defconfig.common on lib-builder master has carried
+          # CONFIG_MBEDTLS_DYNAMIC_BUFFER=y since December 2022. The libraries
+          # this fleet actually runs do not have it - the symbol is not in
+          # tools/esp32-libs/3.3.11/sdkconfig at all, not even as "is not set".
+          # The reason is IDF release/v5.5 components/mbedtls/Kconfig:
+          #
+          #     config MBEDTLS_DYNAMIC_BUFFER
+          #         select MBEDTLS_ASYMMETRIC_CONTENT_LEN
+          #         depends on !IDF_TARGET_LINUX && !MBEDTLS_SSL_PROTO_DTLS \
+          #                    && !MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH
+          #
+          # and the shipped config has CONFIG_MBEDTLS_SSL_PROTO_DTLS=y. Kconfig
+          # drops a symbol whose dependencies are unmet, silently: the request
+          # is made, nothing objects, and the feature is simply absent. Four
+          # years of official builds have been asking for dynamic buffers and
+          # not getting them, and nothing anywhere says so.
+          #
+          # So appending the three settings without also clearing DTLS would
+          # reproduce exactly that silence - a green build, an artifact, and no
+          # behavioural change whatsoever. The Verify step below is what would
+          # eventually have caught it; clearing DTLS here is what makes the
+          # build worth running.
+          #
+          # Nothing in this firmware speaks DTLS. The App does HTTPS over TCP
+          # and nothing else: no ESP-NOW, no Matter, no Thread, no CoAP. It is
+          # on in the stock config because the stock config serves every board
+          # and every use, not this one.
           if [ "$VARIANT" = "dynamic" ] || [ "$VARIANT" = "both" ]; then
             {
+              echo "# CONFIG_MBEDTLS_SSL_PROTO_DTLS is not set"
               echo "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y"
               echo "CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y"
               echo "CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y"
             } >> configs/defconfig.common
-            echo "appended the three dynamic-buffer settings to configs/defconfig.common"
+
+            # Appending "# ... is not set" does not override an earlier "=y" in
+            # the same fragment the way an "=n" would, so clear the positive
+            # line wherever it is actually set rather than relying on ordering.
+            for f in $(grep -rl "^CONFIG_MBEDTLS_SSL_PROTO_DTLS=y" configs/ || true); do
+              sed -i "s/^CONFIG_MBEDTLS_SSL_PROTO_DTLS=y/# CONFIG_MBEDTLS_SSL_PROTO_DTLS is not set/" "$f"
+              echo "cleared DTLS in $f"
+            done
+
+            echo "appended the three dynamic-buffer settings, and disabled DTLS which blocks them"
           fi
 
           # Edited in place rather than appended, because the stock config
@@ -218,9 +302,15 @@ jobs:
           fail=0
 
           if [ "$VARIANT" = "dynamic" ] || [ "$VARIANT" = "both" ]; then
+            # MBEDTLS_DYNAMIC_BUFFER selects MBEDTLS_ASYMMETRIC_CONTENT_LEN, so
+            # that one is asserted too: if it is missing, the symbol was dropped
+            # rather than enabled, which is the exact silent failure the stock
+            # libraries have been shipping for four years (see the DTLS note in
+            # "Apply the mbedTLS configuration" above).
             for k in CONFIG_MBEDTLS_DYNAMIC_BUFFER \
                      CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA \
-                     CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT; do
+                     CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT \
+                     CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN; do
               if grep -rhq "^#define $k 1\|^$k=y" $CFGS 2>/dev/null; then
                 echo "OK: $k enabled"
               else
@@ -228,6 +318,18 @@ jobs:
                 fail=1
               fi
             done
+
+            # The dependency, asserted directly. DTLS left on is the one way the
+            # four checks above can all fail at once for a single reason, and
+            # saying so here turns four confusing errors into one actionable
+            # line.
+            if grep -rhq "^#define CONFIG_MBEDTLS_SSL_PROTO_DTLS 1\|^CONFIG_MBEDTLS_SSL_PROTO_DTLS=y" $CFGS 2>/dev/null; then
+              echo "::error::DTLS is still enabled, which makes MBEDTLS_DYNAMIC_BUFFER unselectable."
+              echo "Kconfig drops it silently rather than complaining. Check the sed in the apply step."
+              fail=1
+            else
+              echo "OK: DTLS disabled, so the dynamic-buffer symbols are selectable"
+            fi
           fi
 
           if [ "$VARIANT" = "contentlen" ] || [ "$VARIANT" = "both" ]; then
