@@ -1,5 +1,5 @@
-# Rebuilds the ESP32 Arduino core's precompiled libraries with a smaller
-# mbedTLS record buffer, to fix the TLS failure this fleet has been living with.
+# Rebuilds the ESP32 Arduino core's precompiled libraries with a smaller TLS
+# heap footprint, to fix the TLS failure this fleet has been living with.
 #
 # WHY THIS EXISTS
 #
@@ -36,20 +36,62 @@
 # index, so releases are unaffected until something is changed to consume these.
 # That is deliberate: this runs, we inspect what it produced, and adopting it is
 # a separate decision.
-name: Rebuild mbedTLS libs (smaller TLS record buffers)
+name: Rebuild mbedTLS libs (reduce TLS heap footprint)
 
 # Manual only. This is a multi-hour build and must never fire on a push.
+#
+# ONE VARIABLE PER BUILD, IN THIS ORDER
+#
+# Run these as four separate builds rather than one combined change, so that a
+# result attributes to something:
+#
+#   1. baseline    - rebuilt core, no TLS config change. Proves the custom
+#                    library build is itself neutral. Without this, any later
+#                    difference could be the rebuild rather than the setting.
+#   2. dynamic     - DYNAMIC_BUFFER + FREE_CONFIG_DATA + FREE_CA_CERT.
+#                    Espressif's own figures put TLS heap at roughly 42KB
+#                    default against ~22KB with this combination, and it
+#                    attacks precisely this failure: TLS transiently taking
+#                    large contiguous internal-SRAM blocks.
+#   3. contentlen  - 4096 alone. Only worth building if (2) leaves too little
+#                    contiguous headroom.
+#   4. both        - only if (2) alone is insufficient.
+#
+# Prefer stopping at (2). Leaving the record length at its normal value avoids
+# constraining TLS records at all, and 4096 is a compatibility/performance
+# variable that should not be spent unless it is needed.
+#
+# SUCCESS IS NOT "IT COMPILES"
+#
+# The criterion is behavioural, measured on a device after repeated HTTPS plus
+# PNG/asset cycles: the largest free 8-bit block must stay comfortably above the
+# largest contiguous allocation the application needs, and must stop ratcheting
+# downward across a session. Today it starts near 34,804 and has been measured
+# at 4,596 while cards render. A dynamic-buffer build that lifts the post-TLS
+# figure by 15-25KB and HOLDS it there is a pass.
+#
+# Note for whoever measures it: read heap_caps_get_largest_free_block
+# (MALLOC_CAP_8BIT), not ESP.getMaxAllocHeap(). The latter reads a constant
+# 32,756 on this board while the true figure ranges 7,668-47,092, and it has
+# already caused several wrong diagnoses. The App's [heapdiag] and [health]
+# lines print both side by side for exactly this reason.
 on:
   workflow_dispatch:
     inputs:
+      variant:
+        description: "Which one thing to change (run them in order; see the header)"
+        required: true
+        type: choice
+        default: "dynamic"
+        options:
+          - baseline
+          - dynamic
+          - contentlen
+          - both
       content_len:
-        description: "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN (bytes). 16384 is the stock value; 4096 is the fix."
+        description: "Record buffer size, used only by the contentlen/both variants"
         required: true
         default: "4096"
-      dynamic_buffer:
-        description: "Also set CONFIG_MBEDTLS_DYNAMIC_BUFFER=y (frees TLS buffers between records)"
-        required: true
-        default: "true"
 
 jobs:
   build:
@@ -97,28 +139,47 @@ jobs:
         run: |
           set -euo pipefail
           cd lib-builder
+          VARIANT="${{ inputs.variant }}"
           echo "--- configs/ before ---"
           ls -la configs/ || true
 
-          TARGETS=$(grep -rl "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" configs/ || true)
-          if [ -z "$TARGETS" ]; then
-            echo "::error::No config fragment defines CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN."
-            echo "The layout has changed; inspect configs/ above and update this workflow."
-            exit 1
+          if [ "$VARIANT" = "baseline" ]; then
+            echo "baseline: leaving every mbedTLS setting at its stock value on purpose."
+            echo "This build exists to prove the rebuilt libraries behave identically to"
+            echo "the published core, so that a later difference attributes to the setting"
+            echo "rather than to the act of rebuilding."
           fi
 
-          echo "--- fragments defining the setting ---"
-          echo "$TARGETS"
-          for f in $TARGETS; do
-            sed -i "s/^CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN=.*/CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN=${{ inputs.content_len }}/" "$f"
-            echo "$f -> $(grep CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN "$f")"
-          done
+          # The three dynamic settings go together. DYNAMIC_BUFFER alone still
+          # holds the config data and the CA copy for the session's life; the
+          # other two are what turn the saving from partial into the ~42KB ->
+          # ~22KB Espressif documents.
+          if [ "$VARIANT" = "dynamic" ] || [ "$VARIANT" = "both" ]; then
+            {
+              echo "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y"
+              echo "CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y"
+              echo "CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y"
+            } >> configs/defconfig.common
+            echo "appended the three dynamic-buffer settings to configs/defconfig.common"
+          fi
 
-          if [ "${{ inputs.dynamic_buffer }}" = "true" ]; then
-            # Appended to the common fragment rather than edited in place: it is
-            # absent from the stock config, so there is nothing to substitute.
-            echo "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y" >> configs/defconfig.common
-            echo "appended CONFIG_MBEDTLS_DYNAMIC_BUFFER=y to configs/defconfig.common"
+          # Edited in place rather than appended, because the stock config
+          # already defines it and a duplicate would be ambiguous. The fragment
+          # is located rather than assumed - the layout of configs/ moves
+          # between releases - and a failure to find it is fatal, because
+          # libraries that look correct and still contain 16384 are the worst
+          # outcome this workflow could produce.
+          if [ "$VARIANT" = "contentlen" ] || [ "$VARIANT" = "both" ]; then
+            TARGETS=$(grep -rl "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" configs/ || true)
+            if [ -z "$TARGETS" ]; then
+              echo "::error::No config fragment defines CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN."
+              echo "The layout has changed; inspect the configs/ listing above and update this workflow."
+              exit 1
+            fi
+            for f in $TARGETS; do
+              sed -i "s/^CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN=.*/CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN=${{ inputs.content_len }}/" "$f"
+              echo "$f -> $(grep CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN "$f")"
+            done
           fi
 
       # esp32 only. Building every target multiplies the time by roughly the
@@ -133,26 +194,70 @@ jobs:
       # generated sdkconfig still says 16384 then the fragment edit did not
       # reach the build and the artifact is worthless - better to fail here than
       # to ship libraries that quietly changed nothing.
-      - name: Verify the setting actually took effect
+      # Verified against the GENERATED sdkconfig, not the fragment that was
+      # edited. A fragment the build ignored would leave the fragment looking
+      # correct and the libraries unchanged, and nothing downstream would ever
+      # reveal it - the firmware would simply keep failing handshakes for a
+      # reason we had convinced ourselves was fixed.
+      - name: Verify the intended settings actually took effect
         run: |
           set -euo pipefail
           cd lib-builder
-          FOUND=$(grep -rh "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" \
-                    $(find . -name sdkconfig -o -name sdkconfig.h | head -20) 2>/dev/null | sort -u || true)
-          echo "--- generated values ---"
-          echo "$FOUND"
-          if echo "$FOUND" | grep -q "=${{ inputs.content_len }}\b\|CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN ${{ inputs.content_len }}"; then
-            echo "OK: built with ${{ inputs.content_len }}"
-          else
-            echo "::error::Generated config does not carry ${{ inputs.content_len }} - the edit did not reach the build."
+          VARIANT="${{ inputs.variant }}"
+          CFGS=$(find . -name sdkconfig -o -name sdkconfig.h 2>/dev/null | head -40)
+          if [ -z "$CFGS" ]; then
+            echo "::error::No generated sdkconfig found - the build did not get far enough to verify."
             exit 1
           fi
+
+          echo "--- record length, as generated ---"
+          grep -rh "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" $CFGS 2>/dev/null | sort -u || true
+          echo "--- dynamic buffer settings, as generated ---"
+          grep -rh "CONFIG_MBEDTLS_DYNAMIC" $CFGS 2>/dev/null | sort -u || echo "(none)"
+
+          fail=0
+
+          if [ "$VARIANT" = "dynamic" ] || [ "$VARIANT" = "both" ]; then
+            for k in CONFIG_MBEDTLS_DYNAMIC_BUFFER \
+                     CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA \
+                     CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT; do
+              if grep -rhq "^#define $k 1\|^$k=y" $CFGS 2>/dev/null; then
+                echo "OK: $k enabled"
+              else
+                echo "::error::$k did not reach the generated config."
+                fail=1
+              fi
+            done
+          fi
+
+          if [ "$VARIANT" = "contentlen" ] || [ "$VARIANT" = "both" ]; then
+            WANT="${{ inputs.content_len }}"
+            if grep -rhq "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN[ =]$WANT\b" $CFGS 2>/dev/null; then
+              echo "OK: record length $WANT"
+            else
+              echo "::error::Record length is not $WANT in the generated config."
+              fail=1
+            fi
+          fi
+
+          if [ "$VARIANT" = "baseline" ]; then
+            # A baseline that quietly picked up a change would invalidate every
+            # comparison made against it, so this asserts the absence too.
+            if grep -rhq "CONFIG_MBEDTLS_DYNAMIC" $CFGS 2>/dev/null; then
+              echo "::error::baseline build contains dynamic-buffer settings - it is not a baseline."
+              fail=1
+            else
+              echo "OK: baseline carries no dynamic-buffer settings"
+            fi
+          fi
+
+          exit $fail
 
       - name: Upload the rebuilt libraries
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: esp32-libs-mbedtls-${{ inputs.content_len }}
+          name: esp32-libs-${{ inputs.variant }}
           path: |
             lib-builder/out/**
             lib-builder/dist/**
