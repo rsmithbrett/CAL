@@ -268,7 +268,33 @@ jobs:
 
       # esp32 only. Building every target multiplies the time by roughly the
       # number of chips supported, and this fleet is entirely ESP32-D0WD-V3.
+      #
+      # GITHUB_REPOSITORY_OWNER IS OVERRIDDEN, and it has to be.
+      #
+      # lib-builder's tools/config.sh decides whose arduino-esp32 and esp-idf to
+      # clone from the environment:
+      #
+      #     AR_USER="${GITHUB_REPOSITORY_OWNER:-espressif}"
+      #     AR_REPO="$AR_USER/arduino-esp32"
+      #
+      # The default is espressif, but GitHub Actions always sets that variable,
+      # so on this runner it resolved to the owner of THIS repository and the
+      # build went looking for rsmithbrett/arduino-esp32. That repository does
+      # not exist, git fell back to asking for a username, and with no tty it
+      # died with "could not read Username for 'https://github.com': No such
+      # device or address" - a credentials error that has nothing to do with
+      # credentials.
+      #
+      # The assumption baked into that default is that lib-builder runs from a
+      # fork inside an org that also forks arduino-esp32 and esp-idf, which is
+      # how Espressif's own CI uses it. This workflow lives in an unrelated
+      # repository and wants the upstream sources, so it says so explicitly.
+      #
+      # GITHUB_TOKEN is deliberately NOT set: config.sh would splice it into the
+      # clone URLs, and these are public repositories that need no token.
       - name: Build
+        env:
+          GITHUB_REPOSITORY_OWNER: espressif
         run: |
           set -euo pipefail
           cd lib-builder
