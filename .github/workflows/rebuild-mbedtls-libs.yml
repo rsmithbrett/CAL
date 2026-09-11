@@ -292,12 +292,50 @@ jobs:
       #
       # GITHUB_TOKEN is deliberately NOT set: config.sh would splice it into the
       # clone URLs, and these are public repositories that need no token.
+      # install-arduino.sh only clones if components/arduino is absent:
+      #
+      #     if [ ! -d "$AR_COMPS/arduino" ]; then
+      #         git clone $AR_REPO_URL "$AR_COMPS/arduino"
+      #     fi
+      #
+      # So putting the right repository there first makes its own clone a no-op,
+      # and everything after it - fetch, checkout -B, pull --ff-only - works
+      # against a remote that exists. It then resolves the branch itself
+      # (idf-release/v5.5 if present, else master) exactly as it would have.
+      #
+      # This is belt and braces over the GITHUB_REPOSITORY_OWNER override on the
+      # build step below, and it is here because that override alone did not fix
+      # it: run 34553618905 shows GITHUB_REPOSITORY_OWNER=espressif in the step
+      # env and STILL died with "could not read Username for
+      # 'https://github.com'" on this clone - while the TinyUSB clone two lines
+      # earlier, anonymous and from the same host, succeeded. Whatever
+      # AR_REPO_URL was resolving to, it was not the public upstream. Rather
+      # than keep bisecting a variable inside someone else's script, this states
+      # the source outright, and the echo below records what the script thought
+      # it was going to use so the next failure is diagnosable in one read.
+      - name: Pre-place the upstream arduino-esp32 source
+        run: |
+          set -euo pipefail
+          cd lib-builder
+          git clone --quiet https://github.com/espressif/arduino-esp32.git components/arduino
+          git -C components/arduino log -1 --format='arduino-esp32 at %h %ci %s'
+
       - name: Build
         env:
           GITHUB_REPOSITORY_OWNER: espressif
         run: |
           set -euo pipefail
           cd lib-builder
+
+          # What the script resolved, printed before it is used. AR_REPO_URL is
+          # the value that has failed twice with a credentials error on a public
+          # repository, and it has never been visible in a log.
+          ( source ./tools/config.sh >/dev/null 2>&1 || true
+            echo "AR_USER=${AR_USER:-<unset>}"
+            echo "AR_REPO=${AR_REPO:-<unset>}"
+            echo "AR_REPO_URL=${AR_REPO_URL:-<unset>}"
+            echo "IDF_BRANCH=${IDF_BRANCH:-<unset>}" ) || true
+
           ./build.sh -t esp32 2>&1 | tail -n 400
 
       # The whole point of the exercise, verified rather than assumed. If the
