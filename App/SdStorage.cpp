@@ -16,6 +16,11 @@ constexpr uint8_t kChipSelectPin = 5;
 
 bool gReady = false;
 
+// The mount's measured cost, retained so it can ride on telemetry instead of
+// only being printed. -1 until a mount succeeds, and it STAYS -1 on a device
+// with no card - see Sd::mountCostBytes() on why that is not 0.
+int32_t gMountCostBytes = -1;
+
 // How many times begin() below retries a failed mount, and how long it waits
 // between attempts - found live: this used to be a single SD.begin() call
 // with no retry at all, and a device that reported zero SD capacity for its
@@ -125,6 +130,12 @@ bool begin() {
       // those two outcomes would ever get investigated if this only logged the
       // bad case.
       const size_t largestAfterMount = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+      // Retained as well as printed. Computed as a signed long first: a mount
+      // that somehow LEFT more contiguous memory than it found would produce a
+      // negative cost, and clamping that to 0 would hide a measurement worth
+      // seeing rather than tidy one up.
+      gMountCostBytes = static_cast<int32_t>(
+          static_cast<long>(largestBeforeMount) - static_cast<long>(largestAfterMount));
       Log::printf("[sd] mount cost %ld bytes of the largest contiguous 8-bit block (%u -> %u) "
                   "with max_files=%d; a TLS record buffer needs 16717, so %s",
                   static_cast<long>(largestBeforeMount) - static_cast<long>(largestAfterMount),
@@ -184,5 +195,11 @@ bool isReady() { return gReady; }
 uint64_t totalBytes() { return gReady ? SD.totalBytes() : 0; }
 
 uint64_t usedBytes() { return gReady ? SD.usedBytes() : 0; }
+
+// Deliberately NOT gated on gReady the way the two above are. Those answer
+// "how big is the card", which is meaningless without one. This answers "what
+// did mounting cost", and -1 is the honest answer for a device that never
+// mounted - whereas gating it would return 0 and claim the mount was free.
+int32_t mountCostBytes() { return gMountCostBytes; }
 
 }  // namespace Sd

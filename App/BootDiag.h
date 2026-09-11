@@ -182,4 +182,24 @@ bool lastResetWasUnexpected();
 /// lost with the one that did not.
 const char* restartReasonToken();
 
+/// Records this boot's largest contiguous 8-bit block. Call once from setup(),
+/// as early as the rest of the boot allows and before the card rotation has
+/// drawn anything - the value is meant to be the high-water mark for the boot,
+/// so calling it late understates what was available and makes every later
+/// decay figure computed from it too small.
+void recordBootHeap();
+
+/// The value recordBootHeap() captured, or 0 if it was never called. Repeated
+/// unchanged on every telemetry report for the life of the boot, deliberately -
+/// see restartReasonToken() above for why a once-only report is the economy that
+/// produced zero records.
+///
+/// Paired with the LIVE largest-block figure on the same report, this makes the
+/// heap ratchet arithmetic rather than an observation: boot minus live is what
+/// the running firmware has consumed, per device, on every report, without
+/// anybody watching a stream. Device 17 went 90,100 at boot to 16,372 in
+/// twenty-six minutes and the only way anyone knew was reading log lines by
+/// hand - during which the same plateau was called wrongly twice.
+uint32_t bootLargestFreeBlock();
+
 }  // namespace BootDiag

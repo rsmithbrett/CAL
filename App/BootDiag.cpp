@@ -1,6 +1,7 @@
 #include "BootDiag.h"
 
 #include <Preferences.h>
+#include <esp_heap_caps.h>
 #include <esp_system.h>
 
 #include "Log.h"
@@ -35,6 +36,12 @@ RestartCause gLastCause = RestartCause::None;
 /// ("DEEPSLEEP_RESET+REPROVISION", 27) with room for a longer cause name later.
 /// snprintf truncates rather than overruns if that is ever wrong.
 char gReasonToken[48] = "UNREPORTED+NONE";
+
+// This boot's largest contiguous 8-bit block, captured once by recordBootHeap().
+// 0 until then, and 0 is a safe "not measured": the server treats it as a
+// missing figure rather than as a device with no memory, and the pairing with
+// the live figure is simply unavailable for that report.
+uint32_t gBootLargestFreeBlock = 0;
 
 /// The reason, in words, plus what it actually implies. The second half is the
 /// point: `ESP_RST_TASK_WDT` means nothing to someone who has not just been
@@ -163,6 +170,16 @@ RestartCause lastRestartCause() { return gLastCause; }
 bool lastResetWasUnexpected() { return describe(esp_reset_reason()).unexpected; }
 
 const char* restartReasonToken() { return gReasonToken; }
+
+void recordBootHeap() {
+  gBootLargestFreeBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  Log::printf("[boot] largest contiguous 8-bit block at boot: %u bytes (a TLS record buffer "
+              "needs 16717) - now carried on every telemetry report, so the decay since boot "
+              "is arithmetic rather than something somebody has to sit and watch",
+              static_cast<unsigned>(gBootLargestFreeBlock));
+}
+
+uint32_t bootLargestFreeBlock() { return gBootLargestFreeBlock; }
 
 void logResetReason() {
   const esp_reset_reason_t reason = esp_reset_reason();

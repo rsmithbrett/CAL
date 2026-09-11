@@ -195,6 +195,34 @@ void report(const char* lastCheckInOutcome) {
   // batteryPercent can start carrying a real number and these can go.
   requestDoc["adc34Millivolts"] = PowerProbe::millivoltsGpio34();
   requestDoc["adc35Millivolts"] = PowerProbe::millivoltsGpio35();
+  // The two figures that turn the heap ratchet from something somebody has to
+  // sit and watch into arithmetic the server does on every report.
+  //
+  // bootLargestFreeBlockBytes is this boot's high-water mark, captured in
+  // setup() before the rotation has drawn anything, and repeated unchanged on
+  // every report for the life of the boot - the same redundancy restartReason
+  // uses, and for the same reason: the first post-boot report is the one most
+  // likely to be lost, because a fragmented device is one that fails at the TLS
+  // handshake.
+  //
+  // Why a SECOND heap field when largestFreeBlock8BitBytes already reports the
+  // live one: the live figure alone cannot separate the two conditions that need
+  // different answers. A device at 16,372 bytes that booted at 90,100 has a
+  // fragmentation problem in its rotation; one that booted at 18,000 has a
+  // mount-and-init cost problem and nothing to do with drawing cards at all.
+  // Those are indistinguishable in a single sample, and telling them apart by
+  // hand meant reading this very log line by line - which is how a fleet-wide
+  // ratchet went a week unquantified, and how the same plateau got called
+  // wrongly twice in one evening.
+  requestDoc["bootLargestFreeBlockBytes"] = BootDiag::bootLargestFreeBlock();
+  // -1 from Sd::mountCostBytes() means "there was no card to mount", which is
+  // NOT the same as a mount that cost nothing. Omitted rather than sent, so the
+  // server's own "this firmware does not report it" null carries the
+  // distinction instead of a negative byte count appearing on the wire.
+  const int32_t mountCost = Sd::mountCostBytes();
+  if (mountCost >= 0) {
+    requestDoc["sdMountCostBytes"] = mountCost;
+  }
   // Omitted rather than sent empty when nothing is installed yet: the server
   // treats a missing field as "this firmware does not report it", and an empty
   // string would be stored as a real answer that happens to say nothing.

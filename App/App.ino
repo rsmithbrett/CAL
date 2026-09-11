@@ -1444,6 +1444,14 @@ void setup() {
   // the only evidence was the boot counter going up. See BootDiag.h.
   BootDiag::logResetReason();
 
+  // Immediately after the reset reason, and before the display, WiFi, the SD
+  // mount or the TLS client have taken anything: this boot's high-water mark
+  // for contiguous 8-bit heap. Placed here deliberately - every line below
+  // costs memory, so measuring later would understate what the boot started
+  // with and make every decay figure computed against it too small. Carried on
+  // every telemetry report from then on; see BootDiag::bootLargestFreeBlock().
+  BootDiag::recordBootHeap();
+
   // If the previous restart was this device restarting itself for
   // unreachability, start the backoff clock already running rather than at
   // zero. Without this the guard is ineffective across reboots - the variable

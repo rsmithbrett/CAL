@@ -46,4 +46,21 @@ bool isReady();
 uint64_t totalBytes();
 uint64_t usedBytes();
 
+/// Contiguous 8-bit bytes the mount consumed, as the measured delta straddling
+/// SD.begin(). **-1 when no card is mounted**, which is a different fact from 0
+/// and has to survive all the way to the server: 0 would mean "mounting cost
+/// nothing", -1 means "there was nothing to mount", and the devices with no card
+/// are exactly the ones where that distinction matters - they pay no mount cost
+/// and get no SD-backed draw path either.
+///
+/// The figure has been printed on every boot since the mount was instrumented,
+/// and until now it never left the device: those lines are emitted before
+/// check-in authorises the debug stream, so on the devices that most needed
+/// explaining they were dropped at the source. Exactly the reason restartReason
+/// moved onto telemetry. ~67KB was measured once, by hand, on one device, and
+/// has been quoted as a constant ever since; nobody can currently say whether it
+/// varies by card, cluster size or core version. Putting it on the wire is how
+/// that stops being a quoted number and starts being data.
+int32_t mountCostBytes();
+
 }  // namespace Sd
