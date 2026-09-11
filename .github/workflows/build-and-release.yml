@@ -25,10 +25,23 @@ name: Build and publish CAL and App firmware
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      # Opt-in and empty on every push, so an ordinary release is always a
+      # stock-core release. See "Overlay custom ESP32 libraries" below.
+      custom_libs_run_id:
+        description: >-
+          Optional. Run id of "Rebuild mbedTLS libs" whose esp32-libs-* artifact
+          replaces the stock core's precompiled libraries for this build only.
+          Leave EMPTY for a normal release.
+        required: false
+        default: ""
 
 permissions:
   contents: write
+  # Needed to download an artifact from another workflow run - the stock
+  # contents:write alone cannot read actions artifacts.
+  actions: read
 
 jobs:
   build-and-release:
@@ -38,6 +51,118 @@ jobs:
 
       - name: Install arduino-cli
         uses: arduino/setup-arduino-cli@v2
+
+      # The core has to be present before its libraries can be replaced, and
+      # build-firmware.sh installs it. Running the install separately here would
+      # duplicate the version pin; instead the overlay below runs after a
+      # no-op-on-second-call core install, which is what build-firmware.sh's own
+      # `arduino-cli core install` already is.
+      - name: Install the ESP32 core
+        run: |
+          set -euo pipefail
+          # Same two lines build-firmware.sh runs, sourced from it rather than
+          # copied so the version pin has one home. It is idempotent, so the
+          # script installing it again below costs nothing.
+          BOARD_INDEX_URL=$(grep -oP 'BOARD_INDEX_URL="\K[^"]+' ci/build-firmware.sh | head -1)
+          ESP32_CORE_VERSION=$(grep -oP 'ESP32_CORE_VERSION="?\K[0-9.]+' ci/build-firmware.sh | head -1)
+          echo "core esp32:esp32@${ESP32_CORE_VERSION} from ${BOARD_INDEX_URL}"
+          arduino-cli core update-index --additional-urls "$BOARD_INDEX_URL"
+          arduino-cli core install "esp32:esp32@${ESP32_CORE_VERSION}" --additional-urls "$BOARD_INDEX_URL"
+          echo "ESP32_CORE_VERSION=${ESP32_CORE_VERSION}" >> "$GITHUB_ENV"
+
+      # WHY THIS EXISTS, and why it is opt-in rather than the default.
+      #
+      # The stock core ships precompiled mbedTLS with
+      # CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN=16384 and no dynamic buffering, so a
+      # TLS session holds two resident 16,717-byte buffers for its whole life -
+      # 33,434 bytes of contiguous internal heap that graphics have to coexist
+      # with. On this hardware they frequently cannot: devices were measured
+      # unable to open a new session at all, which costs them check-in,
+      # telemetry, card policy AND firmware updates simultaneously.
+      #
+      # "Rebuild mbedTLS libs" produces a replacement set. Its dynamic variant
+      # was verified as built (run 34555017889) to contain:
+      #   CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+      #   CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+      #   CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
+      #   CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
+      #   CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
+      #   CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+      #   # CONFIG_MBEDTLS_SSL_PROTO_DTLS is not set   <- the dependency that
+      #                                                   made the others
+      #                                                   unsatisfiable
+      #
+      # So the outbound buffer drops from 16,717 to 4,429 and BOTH become
+      # transient rather than resident. Note what does not change: the largest
+      # single contiguous demand is still 16,717 for the inbound buffer at
+      # handshake time. Dynamic buffering does not remove the requirement, it
+      # stops it being held - which is the point, because the failure here is
+      # TLS and graphics having to coexist, not a one-off allocation.
+      #
+      # OPT-IN, because these libraries are not Espressif's published ones. A
+      # push-triggered release must stay reproducible from the public core
+      # alone, and this overlay is for a deliberate hardware experiment. An
+      # empty input leaves the build untouched.
+      - name: Overlay custom ESP32 libraries
+        if: inputs.custom_libs_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUN_ID="${{ inputs.custom_libs_run_id }}"
+
+          # The artifact name varies by variant (esp32-libs-dynamic,
+          # -varbuf, -contentlen, -both, -baseline), so it is discovered rather
+          # than assumed - and exactly one match is required, because guessing
+          # which of several to use is how the wrong libraries get shipped.
+          NAME=$(gh api "repos/${{ github.repository }}/actions/runs/${RUN_ID}/artifacts" \
+                   --jq '[.artifacts[] | select(.expired == false) | .name] | join(" ")')
+          echo "artifacts on run ${RUN_ID}: ${NAME:-<none>}"
+          COUNT=$(echo "$NAME" | wc -w)
+          if [ "$COUNT" -ne 1 ]; then
+            echo "::error::Expected exactly one unexpired artifact on run ${RUN_ID}, found ${COUNT}."
+            echo "An expired artifact cannot be used - rerun the rebuild workflow."
+            exit 1
+          fi
+
+          gh run download "$RUN_ID" -n "$NAME" -D /tmp/customlibs
+          SRC=/tmp/customlibs/out/tools/esp32-arduino-libs/esp32
+          if [ ! -f "$SRC/sdkconfig" ]; then
+            echo "::error::Artifact layout unexpected - no sdkconfig at $SRC."
+            find /tmp/customlibs -maxdepth 4 -type d
+            exit 1
+          fi
+
+          # The installed tool is named esp32-libs and the artifact's is
+          # esp32-arduino-libs. Same contents (bin, flags, include, ld, lib,
+          # sdkconfig), different directory name upstream, so the destination
+          # is located rather than assumed.
+          DEST=$(find "$HOME/.arduino15/packages/esp32/tools" -maxdepth 2 -type d \
+                   -name "${ESP32_CORE_VERSION}" -path "*esp32-libs*" | head -1)
+          if [ -z "$DEST" ]; then
+            echo "::error::Could not find the installed esp32-libs directory for core ${ESP32_CORE_VERSION}."
+            find "$HOME/.arduino15/packages/esp32/tools" -maxdepth 2 -type d
+            exit 1
+          fi
+          echo "overlaying $SRC -> $DEST"
+
+          echo "--- stock config, before ---"
+          grep -E "MBEDTLS_DYNAMIC_BUFFER|MBEDTLS_SSL_MAX_CONTENT_LEN|MBEDTLS_SSL_(IN|OUT)_CONTENT_LEN|MBEDTLS_SSL_PROTO_DTLS" "$DEST/sdkconfig" || true
+
+          cp -a "$SRC/." "$DEST/"
+
+          echo "--- overlaid config, after ---"
+          grep -E "MBEDTLS_DYNAMIC_BUFFER|MBEDTLS_SSL_MAX_CONTENT_LEN|MBEDTLS_SSL_(IN|OUT)_CONTENT_LEN|MBEDTLS_SSL_PROTO_DTLS" "$DEST/sdkconfig" || true
+
+          # Asserted, not hoped for. A copy that silently did nothing would
+          # produce a stock binary wearing a -customlibs tag, which is worse
+          # than a failed build: every measurement taken against it would be
+          # attributed to a change that was never there.
+          if ! grep -q "^CONFIG_MBEDTLS_DYNAMIC_BUFFER=y" "$DEST/sdkconfig"; then
+            echo "::error::Overlay did not take - DYNAMIC_BUFFER absent from the installed sdkconfig."
+            exit 1
+          fi
+          echo "CUSTOM_LIBS_RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
 
       - name: Build
         # Invoked via bash explicitly rather than ./ci/build-firmware.sh: a
@@ -97,9 +222,27 @@ jobs:
           # only source of truth for "how many already happened today", since
           # nothing else records it.
           last=$(gh api "repos/${{ github.repository }}/tags" --paginate \
-            --jq '.[].name' | grep "^${prefix}" | sed "s/^${prefix}//" | sort -n | tail -1)
+            --jq '.[].name' | grep "^${prefix}" | sed "s/^${prefix}//" \
+            | sed 's/-customlibs.*$//' | sort -n | tail -1)
           next=$(printf '%04d' "$((10#${last:-0} + 1))")
-          echo "tag=${prefix}${next}" >> "$GITHUB_OUTPUT"
+
+          # A build whose mbedTLS libraries were replaced gets a distinguishable
+          # tag, and this is not cosmetic. Those libraries are not Espressif's
+          # published ones, so the binary is not reproducible from the public
+          # core: anyone reading /diag/firmware, or bisecting a regression, or
+          # asking "what is device 7 actually running", has to be able to see
+          # that from the version alone. A -customlibs build silently wearing an
+          # ordinary version number would make every measurement taken against
+          # it uninterpretable later.
+          #
+          # The counter above strips the suffix before sorting, so a custom
+          # build does not reset or fork the same-day sequence.
+          suffix=""
+          if [ -n "${CUSTOM_LIBS_RUN_ID:-}" ]; then
+            suffix="-customlibs.${CUSTOM_LIBS_RUN_ID}"
+            echo "custom libraries from run ${CUSTOM_LIBS_RUN_ID} - tagging ${prefix}${next}${suffix}"
+          fi
+          echo "tag=${prefix}${next}${suffix}" >> "$GITHUB_OUTPUT"
 
       - name: Publish the permanent ${{ steps.version.outputs.tag }} release
         # Never reused: each of these is a distinct, permanent tag by
