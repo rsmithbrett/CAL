@@ -62,7 +62,40 @@ void begin() {
 
 bool ready() { return gReady; }
 
-bool beginRequest(const String& url) { return gHttp.begin(gClient, url); }
+size_t largestContiguousBytes() {
+  return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+}
+
+bool canOpenNewSession() { return largestContiguousBytes() >= kTlsRecordBufferBytes; }
+
+bool beginRequest(const String& url) {
+  // Pre-flight, and the reason it is worth a branch on every request: when
+  // canOpenNewSession() is false the handshake CANNOT succeed - there is no
+  // block large enough for the first of mbedTLS's two record buffers - and
+  // attempting it anyway costs up to the full 15-second handshake timeout
+  // (see begin()). A device in this state makes several requests a minute
+  // across check-in, telemetry, the debug stream and every card's own fetch,
+  // so those timeouts are most of its loop: it stops sampling touch, stops
+  // advancing the rotation, and looks frozen to anyone in front of it while
+  // achieving nothing.
+  //
+  // Only blocks a request that would need a NEW session. An established one
+  // keeps working below this floor, which is why the check is here rather
+  // than in begin() - gHttp.begin() reuses gClient's live connection when it
+  // has one, and refusing that would take a working device off the air to
+  // prevent a handshake it was never going to attempt.
+  if (!gClient.connected() && !canOpenNewSession()) {
+    Log::printf(
+        "[http] refusing %s - largest 8-bit block is %lu and one TLS record buffer needs %lu, so a "
+        "new session is impossible rather than unlikely. Not spending a 15s handshake timeout to "
+        "discover that. This device needs a restart to talk to the server again - see "
+        "Http::canOpenNewSession() and BootDiag::RestartCause::Unreachable.",
+        url.c_str(), static_cast<unsigned long>(largestContiguousBytes()),
+        static_cast<unsigned long>(kTlsRecordBufferBytes));
+    return false;
+  }
+  return gHttp.begin(gClient, url);
+}
 
 HTTPClient& client() { return gHttp; }
 

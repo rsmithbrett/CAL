@@ -105,6 +105,73 @@ HTTPClient& client();
 // devices. Anything revisiting TLS lifetime should use a short-lived
 // per-request client rather than reaching into this shared one.
 
+/// Bytes mbedTLS takes for ONE of its two record buffers, and therefore the
+/// smallest contiguous block in which a new TLS session can possibly be set up.
+///
+/// Derived, not guessed. `mbedtls_ssl_setup()` allocates IN_BUFFER_LEN and
+/// OUT_BUFFER_LEN as two separate flat `mbedtls_calloc(1, len)` calls, each
+/// sized from compile-time constants:
+///
+///   MBEDTLS_SSL_HEADER_LEN                             13
+///   MBEDTLS_MAX_IV_LENGTH                              16
+///   MBEDTLS_SSL_MAC_ADD           (SHA-384 branch)     48
+///   MBEDTLS_SSL_PADDING_ADD       (CBC compiled in)   256
+///   MBEDTLS_SSL_MAX_CID_EXPANSION (CID off)             0
+///   CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN              16384
+///   ------------------------------------------------------
+///   13 + (16 + 48 + 256 + 0) + 16384              = 16,717
+///
+/// Neither figure depends on the ciphersuite, on certificates, or on what
+/// max_fragment_length gets negotiated - only on
+/// MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH, which is not set in the shipped build.
+///
+/// **Note this is 16,717 twice, not "roughly 32KB" once.** That distinction
+/// matters and was got wrong for a while: the total is 33,434, but the largest
+/// single contiguous demand is half that, so a device with a 20,000-byte block
+/// is much closer to working than a "needs 32KB" framing suggests.
+constexpr size_t kTlsRecordBufferBytes = 16717;
+
+/// The largest single contiguous 8-bit allocation this device could satisfy
+/// right now. `heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)`, never
+/// `ESP.getMaxAllocHeap()` - the latter reads a constant 32,756 on this board
+/// while the true figure has been measured anywhere from 1,780 to 77,812, and
+/// it has caused several wrong diagnoses.
+size_t largestContiguousBytes();
+
+/// Whether a NEW TLS session could be established at this instant.
+///
+/// This is a PROOF OF IMPOSSIBILITY when it returns false, not an estimate.
+/// Below kTlsRecordBufferBytes there is no block big enough for even the first
+/// of the two buffers, so `mbedtls_ssl_setup()` cannot succeed - no amount of
+/// retrying, waiting, or better luck changes that. Returning true is weaker: it
+/// means the first buffer could be allocated, not that both can, so a handshake
+/// may still fail for ordinary reasons. The asymmetry is deliberate and is what
+/// makes the false case safe to act on.
+///
+/// **Why a caller wants this.** It separates the only two reasons an HTTPS
+/// request fails on this device, which want opposite responses:
+///
+///   - can open a session, request failed  -> the network or the server is the
+///     problem. A restart cannot help and would be pure churn: a lost boot, a
+///     fresh fragmentation cycle, and a device off the wall for several seconds
+///     to fix something that was never on this device.
+///   - cannot open a session               -> the device is out of contiguous
+///     heap. A restart is the ONLY recovery this firmware has, observed on
+///     every occasion across two devices, and every second spent not restarting
+///     is a second the device is unreachable for telemetry, card policy AND
+///     firmware updates simultaneously.
+///
+/// Before this existed the two were indistinguishable and both were handled the
+/// same way - count five consecutive failures, then restart - which was too
+/// slow for the second case and wrong for the first.
+///
+/// Note the live session is a separate question. A device already holding an
+/// established session keeps using it happily below this floor; what it cannot
+/// do is get a new one once that session drops. That is exactly how devices 12
+/// and 17 were found rendering their cards perfectly off SD while invisible to
+/// the server - see BootDiag::RestartCause::Unreachable.
+bool canOpenNewSession();
+
 /// Says which layer an HTTPS failure actually happened at, for a call site
 /// that just got a negative status back. HTTPClient reports a DNS failure, a
 /// refused TCP connect and a rejected TLS handshake all as -1, which is not

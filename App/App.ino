@@ -911,8 +911,48 @@ void checkHeapHealth() {
 /// perfectly healthy in the other. Merging them would mean one threshold
 /// standing in for two unrelated diagnoses.
 void checkUnreachableWatchdog() {
-  if (gConsecutiveCheckInFailures < kMaxConsecutiveCheckInFailures) {
+  // TWO WAYS IN, and the first is a proof rather than a count.
+  //
+  // Http::canOpenNewSession() is false only when the largest contiguous 8-bit
+  // block is smaller than ONE of mbedTLS's two record buffers, at which point
+  // mbedtls_ssl_setup() cannot succeed - not "probably won't", cannot. A device
+  // in that state and already failing check-ins has exactly one recovery
+  // available to it, and every interval spent waiting for a fifth failure is an
+  // interval it is unreachable for telemetry, card policy AND firmware updates
+  // at once. Waiting to become more certain about something already proved is
+  // just downtime.
+  //
+  // The count stays for what the proof does not cover: ample contiguous heap
+  // and the requests failing anyway. That is genuinely ambiguous - a server
+  // restart, a router blip, DNS - so it keeps exactly the patience it had.
+  //
+  // Requiring at least one failure ALONGSIDE the proof is what stops this
+  // firing on a healthy device. A device below the floor whose existing session
+  // is still up checks in fine and has nothing wrong with it; it merely could
+  // not build a new session if it lost this one. Restarting that device would
+  // be taking a working unit off the wall to pre-empt a hypothetical - and
+  // restarting is not free here, since it costs the household several seconds
+  // of blank screen and starts a fresh fragmentation cycle.
+  //
+  // Devices 12 and 17, measured 2026-09-11, are what this exists for: 9,204 and
+  // 4,084 contiguous against a 16,717 requirement, rendering their cards
+  // perfectly off SD, invisible to the server for hours, and unable to be told
+  // that the firmware fixing it was waiting for them.
+  const bool provablyCannotReconnect =
+      !Http::canOpenNewSession() && gConsecutiveCheckInFailures > 0;
+
+  if (!provablyCannotReconnect && gConsecutiveCheckInFailures < kMaxConsecutiveCheckInFailures) {
     return;
+  }
+
+  if (provablyCannotReconnect && gConsecutiveCheckInFailures < kMaxConsecutiveCheckInFailures) {
+    Log::printf("[health] acting after %lu failure(s) instead of waiting for %lu - the largest "
+                "8-bit block is %lu and one TLS record buffer needs %lu, so a new session is "
+                "impossible and further attempts cannot change that",
+                static_cast<unsigned long>(gConsecutiveCheckInFailures),
+                static_cast<unsigned long>(kMaxConsecutiveCheckInFailures),
+                static_cast<unsigned long>(Http::largestContiguousBytes()),
+                static_cast<unsigned long>(Http::kTlsRecordBufferBytes));
   }
 
   // WiFi first. If this device is not associated then the server being
@@ -961,12 +1001,13 @@ void checkUnreachableWatchdog() {
   Log::printf(
       "[health] %lu consecutive check-in failures (limit %lu) after %lu ms uptime with WiFi "
       "associated - this device can render but cannot be reached, managed or updated, so it is "
-      "restarting to get a working TLS session (largest 8BIT block=%u, mbedTLS needs ~32KB "
-      "contiguous for a new one)",
+      "restarting to get a working TLS session (largest 8BIT block=%u; mbedTLS needs %u "
+      "contiguous for EACH of its two record buffers, so that is the floor, not 32KB)",
       static_cast<unsigned long>(gConsecutiveCheckInFailures),
       static_cast<unsigned long>(kMaxConsecutiveCheckInFailures),
       static_cast<unsigned long>(now),
-      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+      static_cast<unsigned>(Http::largestContiguousBytes()),
+      static_cast<unsigned>(Http::kTlsRecordBufferBytes));
 
   // The line above has to survive the restart, and the remote stream is the
   // only channel a deployed device has - except that this is the one restart
@@ -1545,8 +1586,17 @@ void setup() {
   // hardware RNG - available this early, and true entropy rather than
   // something that would need seeding from a value this device does not
   // have yet anyway.
+  //
+  // SUPERSEDED AS THE FIRST CHECK-IN'S TIMER, kept as the RETRY interval. The
+  // first check-in of a boot now happens synchronously at the end of setup(),
+  // before any card is drawn - see the long note at that call site for the
+  // measurement that forced it. This value is what remains in force only if
+  // that check-in FAILS, in which case a short random interval is exactly what
+  // is wanted: retry soon, and do not have a whole failed fleet retry in
+  // lockstep. On success performCheckIn() overwrites it with the server's own
+  // figure before loop() ever reads it.
   checkInIntervalMs = esp_random() % kFirstCheckInMaxJitterMs;
-  Log::printf("[boot] first check-in in %lu ms (jittered, not the old flat 5 minutes)",
+  Log::printf("[boot] retry interval if this boot's check-in fails: %lu ms (jittered)",
               static_cast<unsigned long>(checkInIntervalMs));
 
   if (wifiResetRequested()) {
@@ -1614,6 +1664,78 @@ void setup() {
   // is the second half of "the splash is on screen for a split second" and why
   // this wait is usually zero.
   holdSplash();
+
+  // THE FIRST CHECK-IN OF A BOOT HAPPENS HERE, BEFORE ANY CARD IS DRAWN.
+  //
+  // It used to happen in loop(), on the ordinary timer, which put it somewhere
+  // between 0 and 90 seconds AFTER the rotation had already started running.
+  // That ordering spent the one window in which this device is guaranteed able
+  // to reach the server, and then tried to reach the server with what was left.
+  //
+  // A new TLS session needs a contiguous block of Http::kTlsRecordBufferBytes
+  // (16,717) for each of two buffers. A fresh boot has roughly 77,000 and
+  // manages it comfortably. Card rendering ratchets that down and does not give
+  // it back: device 7 measured 77,812 -> 7,412 within a single boot, and
+  // devices 12 and 17 sat at 9,204 and 4,084 for hours. Below 16,717 a new
+  // session is impossible, so a device that fragments before its first check-in
+  // cannot be told its card policy, cannot report telemetry, and cannot be told
+  // that a firmware update is waiting - including the update that fixes this.
+  // Both of those devices were observed in exactly that state, rendering
+  // perfectly off SD and invisible to the server.
+  //
+  // Placed AFTER holdSplash() so the network round trip is not additive with
+  // the splash minimum - the handshake happens with the logo already up and
+  // usually satisfies the 3s minimum by itself. Placed BEFORE
+  // CardManager::begin() because begin() draws immediately, and drawing is
+  // what costs the contiguous heap.
+  //
+  // Two things this fixes beyond delivery. The first card is drawn from a
+  // policy this check-in just fetched rather than from the cached one with a
+  // correction arriving up to 90 seconds later. And checkInIntervalMs becomes
+  // the server's real figure from here on, instead of the first-boot jitter
+  // value standing in for it through one whole interval.
+  //
+  // THE JITTER IS NOT LOST, it is relocated - see kFirstCheckInMaxJitterMs,
+  // which now applies to the SECOND check-in rather than the first. Its purpose
+  // was to stop a fleet that all rebooted together (an OTA rollout, the one
+  // moment reboots are correlated) sending every first check-in in the same
+  // instant. That is still worth avoiding, but it cannot be worth making every
+  // device unreachable to achieve, which is what spending the window on card
+  // draws amounted to.
+  //
+  // Blocking is bounded: ensureWifiConnected() above does not return until WiFi
+  // is associated, so an offline device never reaches this line, and a
+  // reachable network with an unreachable server costs one HTTP timeout
+  // (Config::kHttpTimeoutMs) once, behind the splash.
+  Log::printf("[boot] checking in before the first card draw - largest 8-bit block is %lu, the "
+              "most contiguous heap this boot will ever have (a TLS record buffer needs %lu)",
+              static_cast<unsigned long>(Http::largestContiguousBytes()),
+              static_cast<unsigned long>(Http::kTlsRecordBufferBytes));
+  performCheckIn();
+  lastCheckInMs = millis();
+
+  // The relocated jitter. performCheckIn() has just overwritten
+  // checkInIntervalMs with the server's real figure (CheckIn::Result::intervalMs),
+  // so adding a short random offset here spreads the SECOND check-in of a
+  // simultaneous fleet-wide reboot across a window, which is what
+  // kFirstCheckInMaxJitterMs was always for. Additive rather than replacing, so
+  // a device never checks in more often than the server asked - only slightly
+  // less often, once.
+  //
+  // Skipped when the boot check-in failed: in that case checkInIntervalMs is
+  // still the pre-boot jitter value, which is already random and already short,
+  // and it is serving as a retry interval. Stacking another 90 seconds onto a
+  // device that has just failed to reach the server would delay its next
+  // attempt for no benefit - a device that could not check in is not part of
+  // any herd.
+  if (gConsecutiveCheckInFailures == 0) {
+    const uint32_t secondCheckInJitterMs = esp_random() % kFirstCheckInMaxJitterMs;
+    checkInIntervalMs += secondCheckInJitterMs;
+    Log::printf("[boot] second check-in jittered by %lu ms on top of the server's %lu ms, so a "
+                "fleet that rebooted together does not converge on one instant",
+                static_cast<unsigned long>(secondCheckInJitterMs),
+                static_cast<unsigned long>(checkInIntervalMs - secondCheckInJitterMs));
+  }
 
   // Narration goes back on before loop() ever runs, and it has to: every
   // showStatus() beyond this point is a running device reporting something
