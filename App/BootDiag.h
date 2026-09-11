@@ -78,8 +78,11 @@ enum class RestartCause : uint32_t {
   ///
   /// Specifically: repeated check-in failures where WiFi was associated and a
   /// plain TCP connect to the service succeeded, but the TLS handshake did not.
-  /// mbedTLS needs roughly 32KB contiguous for a new session and the largest
-  /// 8-bit block settles far below that once cards have been rendering, so the
+  /// mbedTLS needs 16,717 bytes contiguous for EACH of a session's two record
+  /// buffers - not "roughly 32KB" once, which is how this comment used to read
+  /// and which cost an evening of diagnosis before the difference was noticed.
+  /// Http.h's kTlsRecordBufferBytes carries the arithmetic. The largest 8-bit
+  /// block settles far below even 16,717 once cards have been rendering, so the
   /// handshake fails and nothing in the firmware resets the shared client - one
   /// failure is permanent for the life of the process. A restart is the only
   /// thing observed to recover it, on every occasion across two devices.
@@ -159,8 +162,10 @@ bool lastResetWasUnexpected();
 /// setup(), before check-in has authorised the debug stream, so they are
 /// dropped at the source. And on the two devices restarting most often the
 /// stream was delivering 1.3% and 7.3% of the lines it produced - because a
-/// debug POST needs TLS, TLS needs roughly 32KB contiguous, and those devices
-/// sit at 8-9KB. Of 38 restarts measured across five hours, 36 were
+/// debug POST needs TLS, TLS needs 16,717 bytes contiguous per record buffer,
+/// and those devices sit at 8-9KB - short under any reading of the figure, but
+/// the figure itself is 16,717 and not "roughly 32KB" (see Http.h). Of 38
+/// restarts measured across five hours, 36 were
 /// unattributable. A diagnostic that fails on exactly the devices that need
 /// diagnosing is not a diagnostic.
 ///

@@ -92,11 +92,21 @@ constexpr const char* kFetchPathSuffix = "/content";
 /// with the card in a reader can see exactly what a device has pulled down.
 constexpr const char* kCacheDir = "/assets";
 
-/// The cache filename suffix, and **as of the JPEG change this is a suffix
-/// rather than a format claim - a cached file ending .png may well hold a
-/// JPEG.** Kept anyway, deliberately, and the reasoning is worth having
-/// because "the extension is wrong, fix the extension" is the obvious first
-/// instinct and it is the wrong one here.
+/// The cache filename suffix, and **this is a suffix rather than a format
+/// claim - a cached file ending .png may hold a JPEG, and as of the raw-bitmap
+/// work it may hold something that is not a picture file at all.** Kept anyway,
+/// deliberately, and the reasoning is worth having because "the extension is
+/// wrong, fix the extension" is the obvious first instinct and it is the wrong
+/// one here.
+///
+/// The third format is the one that most tempts a reader to revisit this. An
+/// RGB565 asset is a raw frame buffer (Display.cpp's drawRgb565FromSd()) with
+/// no standard extension to be truthful ABOUT, so making the filename honest
+/// would mean inventing one - which turns this cache key into the very "the
+/// format travels in the filename" scheme the paragraphs below reject, for a
+/// format that then could not be identified without it. The container's own
+/// 16-byte header settles the question instead, in the file, where every other
+/// format already answers it.
 ///
 /// pathFor() is a cache-key function: it turns an asset id into the one place
 /// on the card that asset's bytes live. Nothing in this file or in Display

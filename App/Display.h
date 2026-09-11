@@ -213,6 +213,30 @@ void showClockDate(const String& timeText, const String& dateText);
 /// calling this at all when there is nothing configured.
 void showAnnouncementCard(const String& text);
 
+/// One calendar event, already rendered to a line of prose by the caller.
+///
+/// **Exists because Calendar.cpp was drawing through showAnnouncementCard() and
+/// therefore stamping a green "NOTICE" banner over a household's own
+/// appointments.** The layout was never the problem - an event line is the same
+/// shape of content as a notice, one short paragraph, and the two-tier wrap
+/// below is that function's, unchanged, because those sizes were chosen against
+/// this exact screen and button row. What was wrong was the label and the
+/// colour: a dentist appointment is not a system notice, and on a wall display
+/// the banner is the part read from across the room.
+///
+/// `itemNumber`/`itemCount` draw a "2 of 3" beside the banner. Calendar is a
+/// list card whose items cycle one at a time, so without it a household seeing
+/// one appointment cannot tell whether it is the only one - and "nothing else
+/// today" versus "something else is coming" is most of what a glance at this
+/// card is for. Pass itemCount 1 (or 0) to omit it; "1 of 1" is noise.
+///
+/// Takes finished text and knows nothing about events, deliberately: the event
+/// itself must not reach this file. CalendarEventSummary carries an explicit
+/// rule that nothing in it may be logged, and on this device the remote debug
+/// stream is a log - Calendar.cpp keeps every title out of Log:: entirely, and
+/// that is only tractable while the formatting stays on its side of the wall.
+void showCalendarCard(const String& text, uint8_t itemNumber = 0, uint8_t itemCount = 0);
+
 /// A banner: a header strip reminding a household of something, drawn across
 /// the top of the panel instead of a card's own ordinary full-screen layout.
 /// Deliberately NOT full-screen - the strip claims only the top portion and
@@ -399,9 +423,16 @@ void drawNavAffordances(bool canReverse);
 /// have.
 void flashNavEdge(bool isForward, bool canReverse);
 
-/// How many draws in a row have been unable to get the file buffer they asked
-/// for - zero on a device drawing its cards normally, and reset to zero by the
-/// very next success.
+/// How many card draws in a row have failed - zero on a device drawing its
+/// cards normally, and reset to zero by the very next success.
+///
+/// The summary line above used to read "how many draws in a row have been
+/// unable to get the file buffer they asked for", which had not been true since
+/// draws became streaming and there stopped being a file buffer at all. It is
+/// corrected rather than quietly reworded because the stale wording did real
+/// damage: it, and the matching name on App.ino's constant, sent an evening's
+/// debugging after memory exhaustion on a device whose heap was fine (largest
+/// 8-bit block 21,492 at the time this number read 6 of 6).
 ///
 /// Exists for App.ino's heap watchdog, which restarts the device on a RUN of
 /// these rather than on any heap threshold. That is the whole point: this
@@ -422,6 +453,17 @@ void flashNavEdge(bool isForward, bool canReverse);
 /// failed RAM draw - see the three draw functions below. Both are cases of
 /// "this device could not put its card on the glass", which is the only thing
 /// this number has ever claimed to mean.
+///
+/// **A draw that never reached a decoder does NOT count, in either direction.**
+/// A cached file that will not open, and an empty RAM buffer, mean there was no
+/// image here - not that this device failed to render one. That is the ordinary
+/// resting state of a card nobody has configured a picture for, of a card whose
+/// asset has not been fetched yet, and of every graphic card on a device with no
+/// SD card. Counting it made the watchdog restart devices for the absence of a
+/// picture, which no amount of reclaimed memory was ever going to supply. Such a
+/// draw does not reset the count either: "there was nothing to draw" is no more
+/// evidence that this device can draw than that it cannot, so it is left out of
+/// the measurement entirely rather than being allowed to mask a genuine run.
 uint32_t consecutiveDrawFailures();
 
 /// Draws a cached image from the SD card, scaled to fit and centred on the
@@ -431,15 +473,27 @@ uint32_t consecutiveDrawFailures();
 /// caller - the SD read lives behind this function because this file owns the
 /// one LGFX instance for this panel, the same reason readTouchRaw() is here.
 ///
-/// **PNG or JPEG, decided by the file rather than by the caller.** This was
-/// drawPngFromSd() until JPEG became the default encoding for photographs, and
-/// it has been renamed rather than left alone: a name that says PNG on a
-/// function that dispatches on a sniffed signature would send the next person
-/// debugging a JPEG failure looking for a JPEG code path that does not exist
-/// under that name. Nothing in the parameters or the contract changed. See the
-/// implementation for the memory arithmetic that forced the format change, and
-/// sniffImageFormat() there for why the format travels in the file's own first
-/// bytes instead of on the wire.
+/// **PNG, JPEG or raw RGB565, decided by the file rather than by the caller.**
+/// This was drawPngFromSd() until JPEG became the default encoding for
+/// photographs, and it has been renamed rather than left alone: a name that
+/// says PNG on a function that dispatches on a sniffed signature would send the
+/// next person debugging a JPEG failure looking for a JPEG code path that does
+/// not exist under that name. Nothing in the parameters or the contract
+/// changed. See the implementation for the memory arithmetic that forced the
+/// format change, and sniffImageFormat() there for why the format travels in
+/// the file's own first bytes instead of on the wire.
+///
+/// The third format needs no decoder at all: an RGB565 file is a frame buffer
+/// in this panel's own pixel layout behind a 16-byte header, read a band of
+/// scanlines at a time straight into pushImage(). Its draw-time cost is one
+/// fixed 5,120-byte allocation - the same for every picture, where a decoder's
+/// workspace varies with the content - against the JPEG decoder's 3,900 and the
+/// PNG decoder's ~45,056 retained. The price is a file roughly ten times a
+/// JPEG of the same picture, which is free on an SD card and impossible without
+/// one: a device with no card fetches assets into a single contiguous heap
+/// buffer, so it can never hold one of these. The server's card policy editor
+/// refuses that assignment; see drawRgb565FromSd() in the implementation for
+/// the whole argument, including how the byte order was verified.
 bool drawImageFromSd(const String& path);
 
 /// Same decode, bounded to a caller-given rectangle instead of the whole
@@ -455,6 +509,13 @@ bool drawImageFromSd(const String& path);
 /// composed card. The format is still sniffed, not assumed: an operator who
 /// uploads a JPEG logo gets it drawn (opaque box and all) rather than getting
 /// nothing.
+///
+/// For the same transparency reason the server does not offer an RGB565 option
+/// for the asset types this path draws - RGB565 carries no alpha, so a logo in
+/// one would arrive as a logo in an opaque box. The implementation handles the
+/// format here regardless, centred and clipped to the rect, because the
+/// alternative to handling it is reporting a file this build reads perfectly
+/// well as unrecognised bytes and counting it against the draw watchdog.
 ///
 /// UNVERIFIED ON HARDWARE more pointedly than most of this file: every other
 /// image draw here fills the whole panel, and this is the first one that
@@ -475,6 +536,15 @@ bool drawImageFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, 
 /// read to do first: the caller already has the bytes, from the network rather
 /// than from a file - so there is no file to open in order to identify it
 /// either, just the front of the buffer.
+///
+/// An RGB565 buffer is handled here and should never arrive: a device taking
+/// this path has no SD card, and a device with no SD card cannot fetch one of
+/// those files at all, since the fetch wants every one of its ~153,600 bytes in
+/// a single contiguous heap block. The server refuses to assign one to a device
+/// that has REPORTED having no card; a device it has never heard from is only
+/// warned, which is the gap this branch covers. If the bytes do turn up they
+/// are already in RAM, so drawing them is one pushImage and no allocation at
+/// all - cheaper than either decoder by a wide margin.
 bool drawImageFromBuffer(const uint8_t* data, size_t size);
 
 }  // namespace Display

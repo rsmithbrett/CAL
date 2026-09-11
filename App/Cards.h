@@ -344,20 +344,23 @@ struct CardSpec {
 
 };
 
-// 28 registrations exist today: aircraft, clockdate, issflyover, listings,
-// moonphase, sunmoon, tides and homevalue at one apiece (8), plus graphic,
+// 29 registrations exist today: aircraft, calendar, clockdate, issflyover,
+// listings, moonphase, sunmoon, tides and homevalue at one apiece (9), plus graphic,
 // announcement, qrtext and forecast at five independently-configured
 // instances each (20) - the multi-instance generalisation that widened
 // Graphic's original three-instance precedent to every card type whose own
 // descriptor carries a field an admin can set differently per instance
-// (assetId/text/qrData/location). Aircraft, listings, tides, sunmoon,
-// moonphase, clockdate, issflyover and homevalue deliberately did NOT get
-// multiple instances - each either has no such field at all (sunmoon/
+// (assetId/text/qrData/location). Aircraft, calendar, listings, tides,
+// sunmoon, moonphase, clockdate, issflyover and homevalue deliberately did NOT
+// get multiple instances - each either has no such field at all (sunmoon/
 // moonphase/clockdate compute one fact for the device's own position/time,
 // with nothing a second instance could be configured differently from) or
 // fetches an unparameterised "mine" endpoint that would return
 // byte-identical data to a second instance for the price of a second HTTP
-// round trip (aircraft/listings) or is pushed unconditionally on every
+// round trip (aircraft/listings/calendar - and for calendar there is a second
+// reason on top: a second instance would mean a second copy of the household's
+// private event titles resident in RAM, which Calendar.h's privacy remarks
+// rule out on their own) or is pushed unconditionally on every
 // check-in with nothing to distinguish a second copy (tides/issflyover/
 // homevalue - see HomeValue.h's own remarks for that card specifically). See
 // Graphic.h/Announcement.h/QrText.h/Forecast.h's own remarks for the full
@@ -372,7 +375,20 @@ struct CardSpec {
 // a registration and nothing else - which is exactly what just happened.
 // That spare slot is now spent: the next new card type past this one will
 // need this bound raised alongside its own registration.
-static constexpr uint8_t kMaxCards = 28;
+//
+// And that is exactly what happened next. 29 registrations exist as of the
+// "calendar" card (see Calendar.cpp), which is the 29th - the server's
+// KnownCards.cs had advertised that id for a while and a real device was
+// logging "[cards] policy names unknown card 'calendar' - ignored" on every
+// check-in until firmware caught up. Raised to 29 rather than to 32-with-slack
+// on purpose: each unused slot is a whole CardSpec (several hundred bytes of
+// .bss apiece, given the assetId/text/qrData/location buffers on it), and this
+// file's own remarks on kMaxAnnouncements explain why .bss is not free on a
+// board whose heap watchdog restarts it below 28,000 bytes. Tracking the real
+// count exactly means the next new card type needs this line touched again -
+// which is the point: it is a one-line edit, and it is far better than paying
+// for three empty descriptors forever so that edit can be skipped.
+static constexpr uint8_t kMaxCards = 29;
 
 /// Called from each card module's own translation unit at static-init time
 /// (see the `kRegistered` idiom at the bottom of Weather.cpp/Aircraft.cpp),
