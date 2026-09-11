@@ -1779,6 +1779,11 @@ void loop() {
     lastUpdateCheckMs = millis();
   }
 
+  // Before poll(), because poll() is what triggers a fetch or a draw and the
+  // count has to be correct at the moment Assets.cpp emits its trace lines.
+  // Five null checks per iteration - see Graphic::refreshHeapTraceCounters().
+  Graphic::refreshHeapTraceCounters();
+
   // Everything about what is on the screen - the dwell timer, the
   // interstitial interleaving, touch-driven forward/reverse and its
   // manual-nav hold, and refreshing at most one due card per pass - happens

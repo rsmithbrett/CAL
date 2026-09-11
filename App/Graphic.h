@@ -118,4 +118,20 @@ extern const char* const kCardId5;
 /// picture.
 void releaseRamBuffers();
 
+/// Recomputes the graphics-active count every HeapTrace line carries, and
+/// pushes it into HeapTrace.
+///
+/// Called once per loop() iteration from App.ino. A per-iteration refresh
+/// rather than an update at each acquire and release site, because the count
+/// has to be right at the moment Assets.cpp emits a trace line and Assets has
+/// no business knowing Graphic exists - see HeapTrace::setGraphicsActive() for
+/// why the figure is pushed rather than pulled. It costs five null checks.
+///
+/// The count matters because the decay under investigation is expected to be
+/// per-buffer: a device with two graphic cards holds two buffers at once with
+/// interleaved cycles, and a trace line without this number beside it would
+/// make one cycle's arithmetic look non-deterministic when it was really
+/// measuring two.
+void refreshHeapTraceCounters();
+
 }  // namespace Graphic

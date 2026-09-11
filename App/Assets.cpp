@@ -6,6 +6,7 @@
 
 #include "Config.h"
 #include "Display.h"
+#include "HeapTrace.h"
 #include "Http.h"
 #include "Identity.h"
 #include "Log.h"
@@ -554,6 +555,12 @@ bool fetchToCard(const String& fetchId, const String& cacheId) {
 /// read back. See Assets.h's own remarks on fetchToRam() for why this
 /// exists and the network-cost tradeoff it accepts.
 bool fetchToRamImpl(const String& id, RamAssetBuffer& buffer) {
+  // Stage 1 of 8 - see HeapTrace.h. This path is under measurement because it
+  // is the only mechanism left unexplained on a card-less device, and this is
+  // the baseline every later stage subtracts from. assetBytes is 0 because no
+  // header has been read yet.
+  HeapTrace::mark(HeapTrace::Stage::BeforeAssetFetch, id.c_str(), 0);
+
   if (!Http::ready()) {
     Log::line("[assets] TLS setup failed (direct-to-RAM fetch)");
     return false;
@@ -586,6 +593,14 @@ bool fetchToRamImpl(const String& id, RamAssetBuffer& buffer) {
   const int expectedSize = http.getSize();
   const String expectedHash = http.header("X-Asset-Sha256");
 
+  // Stage 2 of 8. Taken here rather than immediately after http.GET() because
+  // this is the first point the asset's size is known - and carrying the size
+  // on every subsequent line is what lets a per-cycle shortfall be tested
+  // against it. The delta from stage 1 is what the request and its response
+  // headers cost, separate from the buffer that comes next.
+  HeapTrace::mark(HeapTrace::Stage::AfterResponseHeaders, id.c_str(),
+                  expectedSize > 0 ? static_cast<size_t>(expectedSize) : 0);
+
   // Grow up front when the server told us how big this is (the ordinary
   // case) - one allocation instead of one per 512-byte chunk below. A
   // chunked response with no Content-Length still works: ensureRamBufferCapacity()
@@ -599,6 +614,15 @@ bool fetchToRamImpl(const String& id, RamAssetBuffer& buffer) {
         static_cast<unsigned>(ESP.getMaxAllocHeap()));
     return false;
   }
+
+  // Stage 3 of 8, and the most important figure on the way in: the buffer for
+  // the whole asset has now been allocated in one contiguous piece. Stage 3
+  // minus stage 2 is what that allocation cost, and it is the number that has
+  // to come back at stage 8. Reached only when the server sent a
+  // Content-Length, which is the ordinary case; a chunked response grows the
+  // buffer inside the loop below and its cost shows up at stage 4 instead.
+  HeapTrace::mark(HeapTrace::Stage::AfterRamAlloc, id.c_str(),
+                  expectedSize > 0 ? static_cast<size_t>(expectedSize) : 0);
 
   mbedtls_sha256_context sha;
   mbedtls_sha256_init(&sha);
@@ -676,6 +700,15 @@ bool fetchToRamImpl(const String& id, RamAssetBuffer& buffer) {
   }
 
   buffer.size = written;
+
+  // Stage 4 of 8. The socket is closed (http.end() ran above) and the bytes
+  // are all in the buffer, so anything the TLS read path took transiently has
+  // been given back by now - or has not, which is exactly the kind of thing
+  // this stage exists to expose. Sits after the hash check rather than before
+  // it so a failed fetch does not emit a stage-4 line claiming a download that
+  // was rejected.
+  HeapTrace::mark(HeapTrace::Stage::AfterDownload, id.c_str(), written);
+
   Log::printf("[assets] fetched '%s' straight to RAM (%u bytes, sha256 verified) - no SD "
               "dependency",
               id.c_str(), static_cast<unsigned>(written));
@@ -801,17 +834,58 @@ void releaseRamBuffer(RamAssetBuffer& buffer) {
   buffer.size = 0;
 
   Log::printf("[assets] released a %u-byte RAM asset buffer - largest 8BIT block now %u "
-              "(a new TLS session needs ~32KB contiguous)",
+              "(a new TLS session needs %u contiguous for EACH of two record buffers)",
               static_cast<unsigned>(released),
-              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+              static_cast<unsigned>(Http::kTlsRecordBufferBytes));
+
+  // STAGE 8 OF 8, AND THE WHOLE POINT OF THE SEQUENCE.
+  //
+  // The buffer is gone. If largestInt here does not match stage 1's figure for
+  // this same subject, the difference is the ratchet - measured, per cycle,
+  // with the transition it first appeared at already named by stages 2 to 7.
+  // If it does match, this path is clean and device 7's decay is somewhere
+  // else entirely, which is just as useful an answer and cannot currently be
+  // given.
+  //
+  // free() returning memory is not the same as the largest contiguous block
+  // recovering: a block handed back between two survivors leaves the total
+  // restored and the largest run unchanged. That distinction is the difference
+  // between a leak and fragmentation, the two have opposite fixes, and no
+  // figure gathered so far on this fleet has been able to tell them apart on
+  // this path.
+  HeapTrace::mark(HeapTrace::Stage::AfterRamRelease, "-", released);
 }
 
 bool drawRam(const String& id, const RamAssetBuffer& buffer) {
   if (buffer.data == nullptr || buffer.size == 0) {
     return false;
   }
+
+  // Stages 5 and 6 of 8 bracket the decoder, which is the other candidate for
+  // holding memory it does not give back: a PNG decode on this hardware was
+  // measured retaining 45,056 bytes once, and although that turned out not to
+  // be the SD devices' problem it has never been ruled out as this one's.
+  // Bracketing every attempt rather than only the first means a retry's cost is
+  // visible too - two decodes of the same image should cost the same, and a
+  // second that costs more is itself the finding.
+  HeapTrace::mark(HeapTrace::Stage::BeforeDecode, id.c_str(), buffer.size);
+
   for (uint8_t attempt = 0; attempt < kMaxDrawAttempts; ++attempt) {
-    if (Display::drawImageFromBuffer(buffer.data, buffer.size)) {
+    const bool drawn = Display::drawImageFromBuffer(buffer.data, buffer.size);
+
+    // Stage 6 on every attempt, successful or not. drawImageFromBuffer() both
+    // decodes and blits, so these two stages are not separable from out here
+    // without reaching into Display - and the pair is still the decoder's cost,
+    // which is what matters.
+    HeapTrace::mark(HeapTrace::Stage::AfterDecode, id.c_str(), buffer.size);
+
+    if (drawn) {
+      // Stage 7. Identical to stage 6 today for the reason above; kept as its
+      // own stage so that if the decode and the blit are ever separated, every
+      // trace already gathered stays comparable with every trace gathered
+      // after. A stage that has to be inserted later invalidates the history.
+      HeapTrace::mark(HeapTrace::Stage::AfterDraw, id.c_str(), buffer.size);
       return true;
     }
     if (attempt + 1 < kMaxDrawAttempts) {

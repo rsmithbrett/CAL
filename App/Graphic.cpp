@@ -3,6 +3,7 @@
 #include "Assets.h"
 #include "Cards.h"
 #include "Display.h"
+#include "HeapTrace.h"
 #include "Log.h"
 
 namespace Graphic {
@@ -290,6 +291,13 @@ struct Instance {
   /// by design (see Graphic.h), and this is only ever reached on a device
   /// whose check-ins are already failing - which is also a device that
   /// cannot re-fetch anything until its connection comes back.
+  /// Whether this instance is currently holding a RAM asset buffer. Read only
+  /// by refreshGraphicsActiveCount() below, to put a per-device count on every
+  /// HeapTrace line - a device with two graphic cards has two buffers live with
+  /// interleaved cycles, and a trace without that count would read as
+  /// non-deterministic.
+  static bool holdsRamBuffer() { return gRamBuffer.data != nullptr; }
+
   static void releaseRamBuffer() {
     if (!gFromRam && gRamBuffer.data == nullptr) {
       return;
@@ -403,7 +411,23 @@ const char* Instance<5>::id() {
 [[maybe_unused]] const bool kRegistered4 = Instance<4>::registerSelf(3, 8);
 [[maybe_unused]] const bool kRegistered5 = Instance<5>::registerSelf(3, 8);
 
+/// Counts the instances currently holding a RAM asset buffer and pushes the
+/// figure into HeapTrace, so every trace line carries it.
+///
+/// Pushed rather than pulled: HeapTrace::mark() is called from Assets.cpp as
+/// well, and having Assets reach into Graphic for one integer would invert the
+/// module graph. See HeapTrace::setGraphicsActive().
+void refreshGraphicsActiveCount() {
+  const uint8_t active = static_cast<uint8_t>(
+      (Instance<1>::holdsRamBuffer() ? 1 : 0) + (Instance<2>::holdsRamBuffer() ? 1 : 0) +
+      (Instance<3>::holdsRamBuffer() ? 1 : 0) + (Instance<4>::holdsRamBuffer() ? 1 : 0) +
+      (Instance<5>::holdsRamBuffer() ? 1 : 0));
+  HeapTrace::setGraphicsActive(active);
+}
+
 }  // namespace
+
+void refreshHeapTraceCounters() { refreshGraphicsActiveCount(); }
 
 void releaseRamBuffers() {
   // Only an instance actually holding a RAM buffer has anything to give back;
