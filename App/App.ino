@@ -79,6 +79,7 @@ size_t getArduinoLoopTaskStackSize(void) {
 #include "Graphic.h"
 #include "HomeValue.h"
 #include "Http.h"
+#include "PowerProbe.h"
 #include "Identity.h"
 #include "IssFlyover.h"
 #include "Loader.h"
@@ -1559,6 +1560,12 @@ void setup() {
   // instead of building its own. Needs no network of its own (it only
   // attaches this device's baked-in cert bundle) so it can run this early,
   // well before WiFi or the first check-in that will actually use it.
+  // Before Http::begin() only because it is cheaper to reason about a fixed
+  // order than to work out whether ADC setup and WiFi bring-up interact. They
+  // do not - GPIO34/35 are both ADC1, and it is ADC2 that WiFi makes unusable
+  // (which is why GPIO27 is not probed at all; see PowerProbe.h).
+  PowerProbe::begin();
+
   Http::begin();
 
   // Seeded from NVS before WiFi, time sync, or the first check-in - all of

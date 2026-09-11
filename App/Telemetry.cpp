@@ -14,6 +14,7 @@
 #include "Http.h"
 #include "Identity.h"
 #include "Log.h"
+#include "PowerProbe.h"
 #include "SdStorage.h"
 
 namespace Telemetry {
@@ -174,6 +175,26 @@ void report(const char* lastCheckInOutcome) {
   // what a panic means belongs once on a diagnostics page, not in every row of
   // a database table.
   requestDoc["restartReason"] = BootDiag::restartReasonToken();
+  // The two ADC pins that could carry a battery sense line on this board, as
+  // measured, with no divider ratio applied - see PowerProbe.h. Sent as raw pin
+  // millivolts precisely because the right interpretation is not yet known:
+  // GPIO34 is documented elsewhere as the onboard LDR, GPIO35 is the free
+  // input-only ADC1 pin on P3, and published pinouts for this board disagree.
+  //
+  // These exist to replace batteryPercent/charging above, which have been
+  // literal constants (100/true) since this firmware was written. That is a
+  // placeholder shaped like a measurement, and this fleet has already been
+  // misled twice by that shape - totalBoots counting restarts with no cause,
+  // and ESP.getMaxAllocHeap() returning a constant that reads as a real figure.
+  //
+  // They stay separate from batteryPercent rather than replacing its value
+  // in-place: a field whose meaning changes underneath a server that has not
+  // been updated is the one failure the firmware-compatibility rule exists to
+  // prevent, and giving a new quantity a new name is the cheap way to avoid it.
+  // Once a multimeter has confirmed which pin is which and what the divider is,
+  // batteryPercent can start carrying a real number and these can go.
+  requestDoc["adc34Millivolts"] = PowerProbe::millivoltsGpio34();
+  requestDoc["adc35Millivolts"] = PowerProbe::millivoltsGpio35();
   // Omitted rather than sent empty when nothing is installed yet: the server
   // treats a missing field as "this firmware does not report it", and an empty
   // string would be stored as a real answer that happens to say nothing.
