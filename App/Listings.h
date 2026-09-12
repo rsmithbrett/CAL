@@ -43,8 +43,9 @@ enum class Status {
 /// scroll through a single card type.
 static constexpr uint8_t kMaxListings = 5;
 
-/// One listing, trimmed to what Display::showListingsCard() actually draws -
-/// mirrors ListingSummary on the server (DiscoverAroundMe.Providers.Data).
+/// One listing, trimmed to what Display::showListingsCard() draws plus the one
+/// field it deliberately does not - mirrors ListingSummary on the server
+/// (DiscoverAroundMe.Providers.Data).
 struct ListingInfo {
   String address;
   String propertyType;
@@ -54,6 +55,22 @@ struct ListingInfo {
   int squareFootage = 0;
   int daysOnMarket = 0;
   double distanceMiles = 0;
+
+  /// The MLS number, when the server has one. Empty is ordinary - not every
+  /// sale listing is an MLS listing, and RentCast's coverage varies by market.
+  ///
+  /// **Held but never drawn**, which makes it the only field here that
+  /// showListingsCard() ignores. It is carried so a button press can take it
+  /// into the press log and the notification email, where the recipient is an
+  /// agent who can look the listing up. On a card read from across a room it
+  /// would be eight characters of noise beside the address, which is what
+  /// identifies the house to the household actually looking at it. See
+  /// cardDescribe() in Listings.cpp and Cards::DescribeFn.
+  ///
+  /// A deliberate exception to the rule the fetch filter otherwise follows -
+  /// "only the fields this card actually draws are worth keeping" - so do not
+  /// remove it as unused. Roughly 10 bytes per listing, kMaxListings of them.
+  String mlsNumber;
 };
 
 struct Result {

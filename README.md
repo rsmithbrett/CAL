@@ -753,7 +753,9 @@ fetch module (`Weather.cpp`, `Aircraft.cpp`), a draw function in
 both of them. Adding a third card meant editing all three. A card is now a
 `Cards::CardSpec` descriptor — an id, a kind, a fetch function, an
 item-count function, a draw function, an optional "is this item notable"
-predicate — that the card module registers itself at static-init time (see
+predicate, an optional `describe` function naming the item on screen for a
+button press to carry (`Cards::DescribeFn` — see *What a press carries*,
+below) — that the card module registers itself at static-init time (see
 the block at the bottom of `Weather.cpp` and `Aircraft.cpp`). `App.ino` does
 not name a single card anywhere any more; it brings up the hardware and the
 network, calls `CardManager::begin()`, and pumps `CardManager::poll()` once
@@ -958,6 +960,174 @@ everything — except on the one path that skips that redraw entirely
 (`rewind()` when there is no history to step back into), where the button
 would otherwise stay visibly bitten into until some unrelated redraw fixed
 it.
+
+### What a press carries: the card says what was on screen
+
+A press carried `actionId`, `instanceId` and `pressedAtUtc`. The button sits on
+a rotating card, so by the time the press reaches the server on the next
+check-in the card is showing something else, and the server is told only which
+*kind* of card was pressed. A press on the listings card named no house.
+
+**`Cards::DescribeFn` is an optional per-card function returning one line
+naming the item currently on screen** — `String (*)(uint16_t itemIndex)`, held
+on `CardSpec::describe`, `nullptr` by default.
+
+`CardManager::handleTap()` asks at the instant of the press, before anything can
+rotate — the only moment the answer exists:
+
+```cpp
+String onScreen;
+if (gCurrent.card >= 0 && gCards[gCurrent.card].describe != nullptr) {
+  onScreen = gCards[gCurrent.card].describe(gCurrent.item);
+}
+Actions::recordPress(pressed, onScreen);
+```
+
+**Only the device can answer it.** The rotation position is never reported, and
+the provider cache behind a card can be replaced between the press and its
+delivery, so the server rebuilding this line would be a guess that looks exactly
+like a fact.
+
+**`nullptr` means "nothing worth naming"** — the honest answer for a clock, a
+moon phase or a splash. The server stores empty for those and every surface
+renders it as "not reported" rather than as a gap. It is optional per card
+precisely so the cards where it would be noise do not have to invent something.
+
+Implemented today:
+
+| Card | What the line says |
+|---|---|
+| `listings` | Address, price, beds/baths. Distance and days-on-market are left out: both are relative to this device and this moment, and neither survives usefully into an email read hours later. A status screen returns empty rather than "No listings nearby" |
+| `homevalue` | Address and estimate; the estimate alone when there is no address. Carries no "automated estimate, not an appraisal" qualifier — that wording is a display requirement for the card, and this string lands in a press-log column and an email body where the surrounding text is the server's to write |
+| `aircraft` | Callsign, route and distance. Distance is included here, unlike on listings, because for an aircraft it is the point of the press. Names fall back to codes per side independently, matching how the card draws its own route |
+| `announcement` | The notice text itself, re-read rather than cached. On this card the text *is* the content, so there is nothing to summarise, and several instances can be configured at once with no item id to tell them apart |
+
+**`calendar` has no `describe`, and that is a requirement rather than a
+judgement call.** `Calendar.h` quotes the server's own rule — nothing in
+`CalendarEventSummary` may ever be written to a log, an audit record or an
+exception message. A press-log row *is* an audit record, read later by an admin
+who is not necessarily the household, and the press email is a copy of it sent
+outside the system entirely — a wider exposure than the remote debug stream that
+rule already forbids, which is why that file logs counts and never titles. A
+press on a calendar card records that a calendar button was pressed and nothing
+about which appointment. The thinner result is the point.
+
+**Capped at 200 characters**, in `Actions::recordPress` rather than at the call
+site, so every path into the queue gets the same limit and a card returning
+something long cannot push an NVS write past what the slot holds.
+`Actions::kMaxOnScreenSummaryLength` matches the server's own
+`CheckInGatewayService.MaxOnScreenSummaryLength` and both press columns, so the
+device never sends something the store would have to cut.
+
+**The NVS queue format went from three fields to four, and reads both.**
+`packEntry`/`unpackEntry` separate on `'\n'`. A three-field entry is not
+corrupt, it is older — a press queued by firmware predating the field, sitting
+in NVS across a reboot — and it must keep its press rather than be dropped by
+the update meant to improve things. Absent reads as empty, which is what the
+server stores for a card that had nothing to name, so the two arrive at the same
+place.
+
+The summary is the **last** field for a reason: it is the only one composed from
+provider text rather than from ids this firmware controls. Being last means a
+summary that somehow contained a newline can only corrupt itself, never the
+`instanceId` that server-side dedup depends on.
+
+**Omitted from the check-in JSON entirely when empty**, rather than sent as
+`""`. The request is built with ArduinoJson, which needs roughly the payload's
+size again in heap to serialise it, and a key nobody reads is heap spent for
+nothing on the device that can least afford it. The server treats a missing
+field and an empty one identically.
+
+### The content budget: a card knows whether a button will cover it
+
+`CardManager` drew the card and **then** called `drawChrome()`, which paints the
+button row on top. The card was never told, so every card laid itself out
+against the full panel and a card with a button silently lost the 60px band from
+y=160 down — whatever it had drawn there was covered. On the home value card
+that band is where "Automated estimate, not an appraisal" lands, and that line
+is not allowed to go missing.
+
+**The buttons are resolved before the card draws.** `drawCurrent()` calls
+`Actions::forCard()` once, records the count in `gButtonCount`, and tells the
+display:
+
+```cpp
+gButtonCount = Actions::forCard(card.id, gButtons, Actions::kMaxButtonsPerCard);
+Display::setContentBudget(gButtonCount > 0);
+```
+
+`drawChrome()` no longer recomputes the count. Two `Actions::forCard()` calls
+around a draw could disagree if a policy arrived in between, and the card would
+have budgeted for one number of buttons while a different number got painted
+over it.
+
+| Call | Returns |
+|---|---|
+| `Display::contentBottom()` | The lowest y a card may draw to: **220** with no buttons (`kClockTop`, where the corner clock's bottom-right patch begins), **154** with them (`kButtonRowY` 160 less a 6px gap) |
+| `Display::contentIsTight()` | True when a button row is taking the bottom of the panel |
+| `Display::noteContentOverrun(name, reachedY)` | Logs a card that drew past its budget, with how many pixels are underneath what |
+
+Read `contentBottom()` rather than hardcoding either number. The band has moved
+once already — `kButtonRowY` went from 190 to 160 when the button row doubled in
+height — and a card that reads it survives the next move.
+
+`gContentBottom` starts at the no-buttons value, so a card drawn outside the
+normal path (a boot splash, an error screen) sees a sane budget rather than
+zero.
+
+**An overrun is logged, not clipped.** Clipping hides the problem behind a card
+that merely looks a bit short; the remote debug stream is the only diagnostic
+channel a deployed device has, and a card overrunning its budget is exactly the
+kind of thing nobody notices until a household complains that a line they needed
+is missing.
+
+**The home value card reserves its compliance line first, not last.**
+`complianceY = contentBottom() - 18`. The detail block (price per square foot
+and the RentCast refresh date) gets whatever is left above it, at whatever line
+count fits, and is dropped entirely when that is nothing — with a log line
+saying how many pixels were left. Price per square foot is worth having; it is
+not worth pushing a legal qualifier off the panel. The address headline and both
+stat rows also move up and close up in tight mode (50/80 with an address, 38/72
+without, against 62/100 and 44/90 in full mode).
+
+**Which cards read the budget: `homevalue`, and nothing else yet.** Every other
+renderer in `Display.cpp` still lays itself out against the full panel. Measured
+against the 154 floor, by reading the renderers:
+
+Figures are the bottom of the lowest content drawn, the same thing
+`showHomeValueCard` passes to `noteContentOverrun()`.
+
+| Renderer | Bottom of content | Over 154 by |
+|---|---:|---:|
+| `showAircraftCard` | ~211, or ~229 with a two-line route (rows every 30px from y=100 or y=118, then the freshness line 4px under the last) | 57–75px |
+| `showListingsCard` | ~213 (four 26px stat rows from y=88, then the distance/freshness footer at y=196) | ~59px |
+| `showForecastCard` | ~195 (strip icons centred at y=155, r=17; column temperatures at y=178) | ~41px |
+| `showMoonPhaseCard` | ~194 (phase name at y=150, "% illuminated" at y=176) | ~40px |
+| `showNoContent` | ~192 at full headline and detail line counts | ~38px |
+| `showClockDate` | ~185 (date block from y=145, up to two 20px lines) | ~31px |
+| `showSunMoonCard`, `showIssFlyoverCard`, `showIssNextPassCard` | ~180 when the optional detail line is present (y=140, up to two 20px lines) | ~26px |
+| `showAircraftStatus`, `showListingsStatus`, `showForecastStatus` | ~172 at three headline lines plus three detail lines | ~18px |
+| `showQrTextCard` | ~164 with a caption, ~156 without | 2–10px |
+| `showAnnouncementCard`, `showCalendarCard` | 150 at the 5×24px tier, 156 at the 7×18px fallback tier | 0–2px |
+
+Within budget as drawn: `showTidesCard` (bottom stat row and its icon end
+~y=115) and `showBannerCard` (the strip is `kBannerStripHeight`, 100px).
+
+The announcement card is the near miss worth reading: its own comment records
+30–156 as "a tighter but still real 4px clearance", which was measured against
+`kButtonRowY` at 160. The budget's floor is 154 — `kButtonRowY` less a 6px gap —
+so the 7-line fallback tier is 2px into the gap rather than into the buttons.
+
+`showListingsCard` is the one worth acting on first. It is the card the press
+mechanism exists for, so it is the card most likely to have a button bound, and
+its bottom two stat rows and its whole footer sit under the button row.
+`showAircraftCard` is the larger overrun but the less likely to carry a button.
+
+Nothing here is a regression — these cards behave exactly as they did before the
+budget existed — but `noteContentOverrun()` is only called by
+`showHomeValueCard` today, so the rest overrun silently. A card adopting the
+budget adds a `contentIsTight()` branch and one `noteContentOverrun()` call at
+the end of its draw.
 
 ### Assets and the SD card
 

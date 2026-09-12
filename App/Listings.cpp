@@ -129,6 +129,10 @@ Result fetchMine() {
     f["listings"][0]["squareFootage"] = true;
     f["listings"][0]["daysOnMarket"] = true;
     f["listings"][0]["distanceMiles"] = true;
+    // The one whitelisted field this card never draws. It rides along so a
+    // button press can carry it into the press log and the email - see
+    // ListingInfo::mlsNumber and cardDescribe() below.
+    f["listings"][0]["mlsNumber"] = true;
     return f;
   }();
 
@@ -188,6 +192,7 @@ Result fetchMine() {
     info.squareFootage = listing["squareFootage"] | 0;
     info.daysOnMarket = listing["daysOnMarket"] | 0;
     info.distanceMiles = listing["distanceMiles"] | 0.0;
+    info.mlsNumber = String((const char*)(listing["mlsNumber"] | ""));
     result.count++;
   }
 
@@ -363,6 +368,15 @@ String cardDescribe(uint16_t itemIndex) {
   }
   if (listing.bedrooms > 0 || listing.bathrooms > 0) {
     summary += " - " + String(listing.bedrooms, 0) + "bd/" + String(listing.bathrooms, 1) + "ba";
+  }
+  // The MLS number appears here and nowhere else on this device: never on the
+  // card, only in what a press carries. It is last because it is the one part
+  // written for the recipient rather than for the household - an agent reading
+  // the email can look the listing up by it, and if the 200-character cap ever
+  // truncates this string it is the right thing to lose, since the address
+  // above already identifies the property.
+  if (listing.mlsNumber.length() > 0) {
+    summary += " - MLS " + listing.mlsNumber;
   }
   return summary;
 }
