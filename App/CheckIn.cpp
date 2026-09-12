@@ -88,6 +88,51 @@ void addPendingActions(JsonDocument& requestDoc) {
   Log::printf("[checkin] carrying %u pending action(s)", count);
 }
 
+/// Turns the response's ISO-8601 `maintenanceUntilUtc` into an epoch second, or
+/// 0 for absent, null, malformed, or already past.
+///
+/// Hand-parsed rather than handed to strptime() because the ESP32 newlib build
+/// does not provide it, and timegm() is likewise absent - so the conversion uses
+/// mktime(), which is correct here only because this device's timezone IS UTC:
+/// AppService.cpp calls configTime(0, 0, ...) with a zero GMT offset and a zero
+/// DST offset, so local time and UTC are the same clock. If that ever changes,
+/// this function breaks silently by the size of the new offset. Only the shape the
+/// server emits is accepted: "YYYY-MM-DDTHH:MM:SS" with an optional fractional
+/// part and a trailing Z or offset, all of which the server always writes as UTC.
+/// Anything else yields 0, which means "no window" - the safe direction, since a
+/// window that fails to parse costs a restart during a deploy, while one wrongly
+/// accepted suppresses the watchdog on a device that really is unreachable.
+time_t parseMaintenanceUntil(JsonVariantConst value) {
+  if (value.isNull()) {
+    return 0;
+  }
+  const char* text = value.as<const char*>();
+  if (text == nullptr) {
+    return 0;
+  }
+
+  int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+  if (sscanf(text, "%4d-%2d-%2dT%2d:%2d:%2d", &year, &month, &day, &hour, &minute, &second) != 6) {
+    Log::printf("[checkin] maintenanceUntilUtc '%s' is not an instant this build can read - ignored", text);
+    return 0;
+  }
+
+  struct tm parts = {};
+  parts.tm_year = year - 1900;
+  parts.tm_mon = month - 1;
+  parts.tm_mday = day;
+  parts.tm_hour = hour;
+  parts.tm_min = minute;
+  parts.tm_sec = second;
+  parts.tm_isdst = 0;
+
+  const time_t until = mktime(&parts);
+  if (until <= 0 || until < Config::kEarliestPlausibleTime) {
+    return 0;
+  }
+  return until;
+}
+
 /// Every field here is optional on the wire. A server that predates them -
 /// or one that simply has nothing to say this time - leaves `present` false
 /// and the counts at zero, and the device carries on with whatever it
@@ -414,6 +459,13 @@ Result perform() {
   result.updateAvailable = responseDoc["updateAvailable"] | false;
   result.debugStreamRequested = responseDoc["debugStreamRequested"] | false;
   result.sdReformatRequested = responseDoc["sdReformatRequested"] | false;
+  // An ISO-8601 instant on the wire, converted to an epoch second here so the
+  // watchdog compares two integers rather than parsing a string on every health
+  // check. The server has already dropped a window that elapsed by ITS clock;
+  // this device checks again against its own, because the two can disagree and a
+  // suppressed watchdog on a genuinely unreachable device is the one harm this
+  // feature could do. See CheckIn::Result::maintenanceUntilUtc.
+  result.maintenanceUntilUtc = parseMaintenanceUntil(responseDoc["maintenanceUntilUtc"]);
   result.utcOffsetMinutes = responseDoc["utcOffsetMinutes"] | 0;
   result.isDaytime = responseDoc["isDaytime"] | true;
   // `| -1` covers a JSON null and a field an older server never sends at all. Both

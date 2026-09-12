@@ -784,6 +784,18 @@ constexpr uint32_t kMaxConsecutiveCheckInFailures = 5;
 /// ever climbs while the device is genuinely unable to reach the server.
 uint32_t gConsecutiveCheckInFailures = 0;
 
+/// When a planned server outage is expected to end, as a UTC epoch second, or 0
+/// when none is known. Set from the last successful check-in - the only kind
+/// that can carry it, since a server that is already down cannot tell anyone
+/// anything. See CheckIn::Result::maintenanceUntilUtc.
+///
+/// Deliberately NOT persisted to NVS. A window survives only as long as this
+/// boot: if the device restarts for an unrelated reason mid-window it comes back
+/// with the watchdog armed, which is the safe direction - it will simply be told
+/// about the window again on its next successful check-in, and if there is no
+/// successful check-in then the watchdog SHOULD be armed.
+time_t gMaintenanceUntilUtc = 0;
+
 /// When this device last restarted itself for unreachability, so it cannot do
 /// it again immediately. 0 means "not since boot".
 uint32_t gLastUnreachableRestartMs = 0;
@@ -940,6 +952,31 @@ void checkUnreachableWatchdog() {
   // 4,084 contiguous against a 16,717 requirement, rendering their cards
   // perfectly off SD, invisible to the server for hours, and unable to be told
   // that the firmware fixing it was waiting for them.
+  // A known maintenance window exempts this device entirely, and it is checked
+  // before everything below - including the provably-cannot-reconnect fast path.
+  // During a deploy the failures are real, repeated, and explained; restarting
+  // fixes nothing and costs a reboot per device per five intervals. This is the
+  // same judgement the WiFi check below already makes: "the server being
+  // unreachable is a network fact, not a TLS one, and a restart fixes nothing".
+  //
+  // Checked against this device's OWN clock, even though the server already
+  // dropped a window that had elapsed by its clock. The two can disagree, and a
+  // suppressed watchdog on a genuinely unreachable device is the one harm this
+  // feature could do - so both ends enforce the expiry rather than either
+  // trusting the other. A device whose clock is unset (before the first SNTP
+  // sync) reads time(nullptr) as near zero, which is below every plausible
+  // window and therefore leaves the watchdog armed: the safe direction.
+  const time_t nowUtc = time(nullptr);
+  if (gMaintenanceUntilUtc > 0 && nowUtc > 0 && nowUtc < gMaintenanceUntilUtc) {
+    if (gConsecutiveCheckInFailures > 0) {
+      Log::printf("[health] %lu check-in(s) have failed, but the server announced maintenance for "
+                  "another %ld second(s) - NOT restarting, and cards keep drawing from cache",
+                  static_cast<unsigned long>(gConsecutiveCheckInFailures),
+                  static_cast<long>(gMaintenanceUntilUtc - nowUtc));
+    }
+    return;
+  }
+
   const bool provablyCannotReconnect =
       !Http::canOpenNewSession() && gConsecutiveCheckInFailures > 0;
 
@@ -1381,6 +1418,26 @@ void performCheckIn() {
   // someone watching a live stream is most likely trying to diagnose. Costs
   // nothing when streaming is off; see Cards::logProviderStatuses().
   Cards::logProviderStatuses();
+
+  // Carried forward from a check-in that SUCCEEDED, which is the only kind that
+  // can deliver it: the whole point is that the server tells us before it goes
+  // away, because afterwards it cannot tell us anything at all.
+  //
+  // Assigned on every successful check-in rather than only when non-zero, so a
+  // window the operator cancels - or one that elapses server-side - disarms this
+  // device on its very next check-in instead of leaving the watchdog suppressed
+  // until the original deadline passes.
+  if (result.maintenanceUntilUtc != gMaintenanceUntilUtc) {
+    if (result.maintenanceUntilUtc > 0) {
+      Log::printf("[checkin] server announced maintenance until %ld (epoch) - failed check-ins "
+                  "will not count as a broken connection until then, and cards keep drawing from "
+                  "cache",
+                  static_cast<long>(result.maintenanceUntilUtc));
+    } else if (gMaintenanceUntilUtc > 0) {
+      Log::line("[checkin] maintenance window cleared by the server - connection watchdog armed again");
+    }
+    gMaintenanceUntilUtc = result.maintenanceUntilUtc;
+  }
 
   // One-shot, like updateAvailable below - the server already cleared its
   // own copy of this flag the moment it answered true (see CheckIn.h's own

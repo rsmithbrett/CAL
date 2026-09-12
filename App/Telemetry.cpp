@@ -223,9 +223,12 @@ void report(const char* lastCheckInOutcome) {
   //
   // Why a SECOND heap field when largestFreeBlock8BitBytes already reports the
   // live one: the live figure alone cannot separate the two conditions that need
-  // different answers. A device at 16,372 bytes that booted at 90,100 has a
-  // fragmentation problem in its rotation; one that booted at 18,000 has a
-  // mount-and-init cost problem and nothing to do with drawing cards at all.
+  // different answers. A device at 16,372 bytes that booted at 90,100 lost
+  // 73,728 since boot - init, the mount and the rotation between them; one that
+  // booted at 18,000 never had the memory, which is a static-footprint problem
+  // and a much rarer finding. (This comment first said the second case was "a
+  // mount cost problem". It cannot be: recordBootHeap() runs BEFORE Sd::begin(),
+  // so the mount's cost is inside the loss, never inside the boot figure.)
   // Those are indistinguishable in a single sample, and telling them apart by
   // hand meant reading this very log line by line - which is how a fleet-wide
   // ratchet went a week unquantified, and how the same plateau got called

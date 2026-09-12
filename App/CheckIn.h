@@ -44,6 +44,28 @@ struct Result {
   /// that predates this field, which JsonDocument's `| false` default
   /// already handles the same way every other additive field here does.
   bool sdReformatRequested = false;
+  /// When a planned server outage is expected to end, as a UTC epoch second, or
+  /// 0 when the server named none. Absent from a server that predates the
+  /// field, which `| 0` handles like every other additive field here.
+  ///
+  /// **Why this arrives in advance.** Once the server is down it cannot tell us
+  /// anything - that is what being down means. The notice rides on ordinary
+  /// check-in responses while the server is still healthy, and this device
+  /// carries it forward through the window.
+  ///
+  /// **What it suppresses, and what it does not.** Only the unreachable
+  /// watchdog in App.ino: failed check-ins inside a known window stop counting
+  /// as evidence that THIS device's connection is broken, because they are
+  /// evidence of something else. Cards keep rotating from cached content and
+  /// the household is told nothing - a wall display announcing server
+  /// maintenance reports a problem its reader cannot act on.
+  ///
+  /// Without this, taking the server down gracefully guarantees a fleet-wide
+  /// restart: MaintenanceMode answers every request with a 503 HTML page
+  /// including /api/checkin, CAL counts any non-200 as a failure, and five
+  /// consecutive failures restart the device - five minutes on a 60-second
+  /// interval.
+  time_t maintenanceUntilUtc = 0;
   /// Minutes to add to UTC to get this device's local time right now - DST
   /// already applied, recomputed by the server fresh on every check-in from
   /// the device's own location rather than looked up once and cached. Local
