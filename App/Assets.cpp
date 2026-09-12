@@ -143,6 +143,13 @@ constexpr const char* kExtension = ".png";
 /// id the way every other cached asset's is.
 constexpr const char* kSplashCacheId = "splash";
 
+/// The plain-text explanation left on the card itself - see
+/// writeCardReadmeIfAbsent() for why it is there at all. Named here rather than
+/// spelled out at each of its three uses because two of those are the places
+/// that have to NOT treat it as a cached picture, and a literal repeated in
+/// three files' worth of loops is how splash.id nearly ended up miscounted.
+constexpr const char* kReadmeName = "README.txt";
+
 /// Refuses anything that would escape kCacheDir or confuse the filesystem.
 /// Asset ids come from the server, which is trusted, but a path built by
 /// string concatenation from a remote value deserves a guard regardless -
@@ -727,6 +734,81 @@ bool fetchToRamImpl(const String& id, RamAssetBuffer& buffer) {
 
 }  // namespace
 
+// Reopened rather than moved up beside the rest of this file's private
+// helpers: this one exists only for begin() directly below it, and keeping the
+// two adjacent is worth more than alphabetical tidiness in a file this long.
+namespace {
+
+/// The one place the "why is this .png not a PNG" question can actually be
+/// answered for the person who has the card in their hand.
+///
+/// kExtension above argues - correctly, and at length - that the filename is a
+/// cache key rather than a type declaration, and that the comment serves the
+/// reader as well as a truthful extension would. That is true of the reader of
+/// this SOURCE. It is not true of the person who pulled the card out of a
+/// device, put it in a reader, double-clicked a .png and got a broken-image
+/// icon: they have no comment in front of them, and what they have instead is
+/// evidence that the device is writing corrupt files. The cheapest honest fix
+/// is to put the explanation where they will be standing, which is the card.
+///
+/// Written once, only when absent, so the ordinary boot is one SD.exists() and
+/// no write at all. No heap: the text is a flash literal handed straight to
+/// File::print(), and the only String is the path this function builds, which
+/// is the same one-off cost every other path in this file already pays.
+///
+/// Failure is silent beyond a log line, and deliberately so. A card that cannot
+/// take this file can still cache every asset the device needs; refusing to
+/// proceed, or retrying on every boot, would trade a working display for a
+/// README nobody has asked for yet.
+void writeCardReadmeIfAbsent() {
+  const String path = String(kCacheDir) + "/" + kReadmeName;
+  if (SD.exists(path)) {
+    return;
+  }
+
+  File f = SD.open(path, FILE_WRITE);
+  if (!f) {
+    Log::line("[assets] could not write the cache README - harmless, the cache itself is fine");
+    return;
+  }
+
+  // Addressed to a person, not to a parser, and it says the one thing that
+  // turns "this device is broken" into "this is on purpose": how to find out
+  // what any of these files actually is, using something they already have.
+  f.print(
+      "These files are NOT PNGs, whatever the .png on the end says.\r\n"
+      "\r\n"
+      "Every cached picture on this card is named <asset-id>.png because the\r\n"
+      "filename is a cache KEY, not a type: the device turns an asset id into\r\n"
+      "exactly one path and asks the card whether it is there. The picture's\r\n"
+      "real format is decided by the server and read back from the file's own\r\n"
+      "first bytes, so it is already in the file and never needed to be in the\r\n"
+      "name as well.\r\n"
+      "\r\n"
+      "A file here may be any of three things. Open one in a hex viewer and\r\n"
+      "look at the first four bytes:\r\n"
+      "\r\n"
+      "  89 50 4E 47   a real PNG. Rename it .png and it will open.\r\n"
+      "  FF D8 FF      a JPEG. Rename it .jpg and it will open.\r\n"
+      "  44 41 4D 35   'DAM5' - raw 16-bit pixels, no compression and no\r\n"
+      "                standard extension to rename it to. 16-byte header:\r\n"
+      "                magic, version, flags, then width and height as two\r\n"
+      "                big-endian 16-bit numbers. The pixels follow as\r\n"
+      "                big-endian RGB565, two bytes each, top-left first.\r\n"
+      "\r\n"
+      "splash.id is a plain text file naming which asset is currently sitting\r\n"
+      "in the fixed 'splash' slot, because that slot's filename never changes\r\n"
+      "when the picture behind it does.\r\n"
+      "\r\n"
+      "Deleting anything here is safe. The device re-downloads what it needs.\r\n");
+  f.close();
+
+  Log::line("[assets] wrote /assets/README.txt - so anyone reading this card is not left "
+            "concluding the .png files are corrupt");
+}
+
+}  // namespace
+
 void begin() {
   if (!Sd::isReady()) {
     return;
@@ -734,6 +816,7 @@ void begin() {
   if (!SD.exists(kCacheDir)) {
     SD.mkdir(kCacheDir);
   }
+  writeCardReadmeIfAbsent();
 }
 
 bool ensureCached(const String& id) {
@@ -974,8 +1057,15 @@ uint16_t cachedCount() {
     // splash.id is bookkeeping (see splashSourceIdPath()), not a cached
     // picture - counting it here would make Telemetry's cache-growth number
     // over-report by one for any device with a splash configured at all.
+    //
+    // README.txt is the same case for the same reason (see
+    // writeCardReadmeIfAbsent()): it is a note to a human, not an asset. Worth
+    // excluding rather than shrugging at, because assetCount rides telemetry
+    // and is read fleet-wide - a firmware that quietly started reporting one
+    // extra asset per device would look like a caching change, and tracking
+    // that back to a README would cost somebody an afternoon.
     const String name = entry.name();
-    if (!entry.isDirectory() && name != "splash.id") {
+    if (!entry.isDirectory() && name != "splash.id" && name != kReadmeName) {
       count++;
     }
     entry.close();
@@ -1025,6 +1115,19 @@ uint16_t wipeCache() {
     const bool isDirectory = entry.isDirectory();
     entry.close();
     if (isDirectory) {
+      continue;
+    }
+    // The README survives a wipe. A server-requested reformat is about
+    // discarding stale PICTURES - it is triggered when an admin suspects the
+    // cache, and every file it removes is re-downloadable through the same
+    // SHA-256-verified path - whereas the README is the explanation of why the
+    // remaining files are named the way they are. Deleting it would leave the
+    // card in exactly the confusing state it was written to prevent until the
+    // next boot happened to notice, which is the one window somebody is most
+    // likely to have the card in a reader: right after being told to try a
+    // reformat. It is not counted as a removal either, so the "(N file(s)
+    // removed)" figure stays a count of pictures.
+    if (name == kReadmeName) {
       continue;
     }
     // entry.name() is the bare filename (SD.open(kCacheDir) already put us

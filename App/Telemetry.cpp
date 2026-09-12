@@ -11,6 +11,7 @@
 #include "Assets.h"
 #include "BootDiag.h"
 #include "Config.h"
+#include "HeapRatchet.h"
 #include "Http.h"
 #include "Identity.h"
 #include "Log.h"
@@ -25,6 +26,21 @@ constexpr const char* kPath = "/api/telemetry";
 }  // namespace
 
 void report(const char* lastCheckInOutcome) {
+  // This report's own allocations - the JsonDocument's pool, the body String,
+  // HTTPClient's headers - belong to a phase, and the honest phase for them is
+  // Service rather than the CheckIn scope this function is called from inside
+  // (see performCheckIn()). Opened as the very first statement so the Scope's
+  // entry observation closes out everything check-in did BEFORE the report
+  // starts, which is what keeps the identity in HeapRatchet.h tight: the only
+  // thing left unaccounted between the buckets and the live largest-block
+  // figure read below is what this function itself has done in between, and
+  // that is a handful of Strings rather than a whole check-in.
+  //
+  // An instrument reporting on a channel that itself allocates is a real
+  // hazard, and this is the answer to it: the cost is not hidden, it is
+  // measured, and it lands in a bucket that says so.
+  const HeapRatchet::Scope scope(HeapRatchet::Phase::Service, "telemetry");
+
   if (!Http::ready()) {
     Log::line("[telemetry] TLS setup failed, skipping this report");
     return;
@@ -215,6 +231,73 @@ void report(const char* lastCheckInOutcome) {
   // ratchet went a week unquantified, and how the same plateau got called
   // wrongly twice in one evening.
   requestDoc["bootLargestFreeBlockBytes"] = BootDiag::bootLargestFreeBlock();
+
+  // ---- Where the contiguous heap actually went, by phase of the rotation ----
+  //
+  // bootLargestFreeBlockBytes above and largestFreeBlock8BitBytes further up
+  // between them say HOW FAR this device has fallen. They have never said WHAT
+  // DID IT, and that is now the only open question on this fleet: the asset
+  // path was instrumented at eight transitions and ruled out, RGB565 draws were
+  // measured five times with the largest block identical either side, and
+  // nobody has ever instrumented the ordinary card rotation at all.
+  //
+  // **These ride telemetry rather than the debug stream on purpose, and it is
+  // the whole design.** The stream is itself the dominant consumer (200 String
+  // slots, a 16KB ceiling, a JsonDocument and a body String per batch), device
+  // 19 has never streamed and has never decayed, and every stream on the fleet
+  // is off right now deliberately so that real-world reboots can be measured.
+  // An answer that only existed in the stream would describe a device in a
+  // state nobody is trying to fix. Telemetry is a small fixed POST that still
+  // gets through when the stream does not - the same argument that put
+  // bootLargestFreeBlockBytes and sdMountCostBytes here in the first place.
+  //
+  // **Signed, and they sum.** Each field is the NET contiguous heap that phase
+  // took and did not give back since boot. Positive is a phase that ratchets;
+  // negative is one the free list coalesced under; near-zero on a phase that
+  // allocates megabytes over an uptime is that phase being exonerated, which no
+  // gross-allocation counter could ever say. By construction they sum to
+  // (bootLargestFreeBlockBytes - largestFreeBlock8BitBytes), give or take what
+  // this very function has allocated between the Scope above and the reading a
+  // few lines up. **The server should check that sum**, because if it does not
+  // hold, this instrument is wrong - a phase is missing a Scope, or the carving
+  // happens somewhere all five buckets miss - and an instrument that can be
+  // caught being wrong from its own output is the only kind worth adding to an
+  // investigation that has already been sent down two blind alleys by figures
+  // that looked authoritative (ESP.getMaxAllocHeap()'s constant 32,756, and
+  // "roughly 32KB" for a floor that is really 16,717 twice over).
+  //
+  // heapPhaseIdleBytes is not the leftovers column. It is the WiFi and LWIP
+  // stacks, touch, the timers, the whole of setup() before the rotation starts
+  // - and anything this instrumentation forgot. A device up for half an hour
+  // with its decay sitting in Idle has ruled out drawing, fetching, check-in
+  // and the housekeeping POSTs in a single figure, which is the most useful
+  // thing this could possibly report and the one result a set of buckets that
+  // only covered the suspects could never produce.
+  requestDoc["heapPhaseDrawBytes"] = HeapRatchet::netBytes(HeapRatchet::Phase::Draw);
+  requestDoc["heapPhaseFetchBytes"] = HeapRatchet::netBytes(HeapRatchet::Phase::Fetch);
+  requestDoc["heapPhaseCheckInBytes"] = HeapRatchet::netBytes(HeapRatchet::Phase::CheckIn);
+  requestDoc["heapPhaseServiceBytes"] = HeapRatchet::netBytes(HeapRatchet::Phase::Service);
+  requestDoc["heapPhaseIdleBytes"] = HeapRatchet::netBytes(HeapRatchet::Phase::Idle);
+  // How many discrete downward steps made up all of that. Sent so the "steps
+  // are multiples of 2,048" claim - made by reading a debug stream line by line
+  // on one device - becomes arithmetic the server can do on a whole fleet with
+  // every stream off. Total decay divided by this is the mean step, and if that
+  // lands on 2,048 across many devices the quantum is real; if it lands on 40
+  // the decay is small-String churn and the large-block hypotheses are dead.
+  requestDoc["heapRatchetSteps"] = HeapRatchet::stepCount();
+  // The biggest single carve, and which phase took it. One 20KB step and fifty
+  // 400-byte ones decay a heap at the same rate and want completely different
+  // fixes; the buckets alone cannot tell those apart, and this is the cheapest
+  // field that can. The card id that was on screen at the time is deliberately
+  // NOT sent - it only means anything once the phase is already narrowed down,
+  // and it is on the [ratchet] log line for whoever turns a stream on next.
+  requestDoc["heapWorstStepBytes"] = HeapRatchet::worstStepBytes();
+  // A short literal ("draw"/"fetch"/"checkin"/"service"/"idle"/"none"), never a
+  // String - ArduinoJson links a const char* rather than copying it, so this
+  // field costs one slot and no string storage. Same reasoning as
+  // restartReason's token above: the server groups these across a fleet, and
+  // prose belongs once on a diagnostics page rather than in every row.
+  requestDoc["heapWorstStepPhase"] = HeapRatchet::worstStepPhaseName();
   // -1 from Sd::mountCostBytes() means "there was no card to mount", which is
   // NOT the same as a mount that cost nothing. Omitted rather than sent, so the
   // server's own "this firmware does not report it" null carries the
@@ -265,6 +348,27 @@ void report(const char* lastCheckInOutcome) {
       firmwareVersion.length() > 0 ? firmwareVersion.c_str() : "(none)", lastCheckInOutcome,
       static_cast<unsigned long>(sdUsedBytes / (1024ULL * 1024ULL)),
       static_cast<unsigned long>(sdTotalBytes / (1024ULL * 1024ULL)), assetCount);
+
+  // A SECOND line rather than more fields on the one above, because Log::printf
+  // formats into a fixed 256-byte scratch and truncates past it - the line
+  // above is already most of the way there, and a summary that silently lost
+  // its last two buckets to "...(truncated)" would be worse than no summary.
+  //
+  // Not the deliverable - the eight fields on the POST above are - but a device
+  // on a bench cable or a stream turned on for ten minutes should not have to
+  // wait for a server round trip to see where its heap is going. The same five
+  // figures, in the same order, so a serial capture and a telemetry row can be
+  // read against each other without a translation step.
+  Log::printf("[ratchet] since boot: draw=%d fetch=%d checkin=%d service=%d idle=%d over %u steps, "
+              "worst -%u in %s (%s)",
+              static_cast<int>(HeapRatchet::netBytes(HeapRatchet::Phase::Draw)),
+              static_cast<int>(HeapRatchet::netBytes(HeapRatchet::Phase::Fetch)),
+              static_cast<int>(HeapRatchet::netBytes(HeapRatchet::Phase::CheckIn)),
+              static_cast<int>(HeapRatchet::netBytes(HeapRatchet::Phase::Service)),
+              static_cast<int>(HeapRatchet::netBytes(HeapRatchet::Phase::Idle)),
+              static_cast<unsigned>(HeapRatchet::stepCount()),
+              static_cast<unsigned>(HeapRatchet::worstStepBytes()),
+              HeapRatchet::worstStepPhaseName(), HeapRatchet::worstStepSubject());
 }
 
 }  // namespace Telemetry

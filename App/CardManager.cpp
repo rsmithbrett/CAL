@@ -3,6 +3,7 @@
 #include "Actions.h"
 #include "Config.h"
 #include "Display.h"
+#include "HeapRatchet.h"
 #include "Log.h"
 #include "Touch.h"
 
@@ -561,6 +562,30 @@ void drawChrome(const Cards::CardSpec& card) {
 }
 
 void drawCurrent() {
+  // The draw phase, opened at the very top so it covers every exit including
+  // the no-content one below - see HeapRatchet::Scope on why an enter/leave
+  // pair was rejected for exactly this shape of function.
+  //
+  // This is the one choke point every card's draw passes through, the same
+  // property the "[cards] showing" line further down relies on, which is what
+  // makes one Scope here cover every card module including ones added after
+  // this line was written. What it bills to Draw: LovyanGFX's decoders and
+  // sprites, drawRgb565FromSd()'s band buffer, every per-card draw String, and
+  // drawChrome()'s dozen small String allocate/free pairs below - it copies up
+  // to three Actions::Definitions (three Strings each) and then builds three
+  // more Strings for the labels, on EVERY draw, which is precisely the kind of
+  // small repeated churn that carves a heap into unusable holes without leaking
+  // a byte.
+  //
+  // The subject is resolved before the guard clause rather than after, so a
+  // draw that bails still names something. "none" is a real state here - a
+  // device waiting for its first policy - not an error.
+  const char* const subject =
+      (gCurrent.card >= 0 && gCurrent.card < static_cast<int8_t>(gCardCount))
+          ? gCards[gCurrent.card].id
+          : "none";
+  const HeapRatchet::Scope scope(HeapRatchet::Phase::Draw, subject);
+
   if (gCurrent.card < 0 || gCurrent.card >= static_cast<int8_t>(gCardCount) ||
       !showable(static_cast<uint8_t>(gCurrent.card))) {
     gButtonCount = 0;
@@ -754,7 +779,30 @@ void fetchCard(uint8_t index) {
   if (card.fetch == nullptr) {
     return;
   }
-  card.fetch();
+
+  // Opened AFTER the nothing-to-fetch return, so a scan over cards with no
+  // fetch function does not open and close a phase for each of them - that
+  // would be two heap walks per card per sweep to measure nothing happening.
+  //
+  // What this bills to Fetch, in one Scope covering every provider rather than
+  // a Scope per provider file: the TLS request, ArduinoJson's variant pools
+  // (1,024 bytes apiece on this 32-bit target, and the observed steps are
+  // multiples of 2,048 - see the ranked hypotheses in HeapRatchet.h), the HTTP
+  // body Strings on the refusal paths, and the long-lived Result Strings each
+  // provider builds. One Scope because the providers are the same code written
+  // several times - Forecast, Aircraft and Listings are structurally identical
+  // down to the filter idiom - so instrumenting them individually would be an
+  // edit per provider to learn one thing. The subject names which card it was,
+  // which is what narrows it afterwards.
+  //
+  // card.fetch() alone is inside the phase; everything below it is ordinary
+  // bookkeeping, and the drawCurrent()/show() calls at the end open their own
+  // Draw scope so a refresh of the visible card does not bill its redraw here.
+  {
+    const HeapRatchet::Scope scope(HeapRatchet::Phase::Fetch, card.id);
+    card.fetch();
+  }
+
   card.lastFetchMs = millis();
   card.everFetched = true;
 

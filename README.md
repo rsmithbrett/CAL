@@ -4981,3 +4981,156 @@ than folded into an account it does not fit.
 And, so that tonight's six builds are not mistaken for verification: **none of
 this has been compiled or run.** The measurements are real; the code written in
 response to them has been read, not built.
+
+## Instrumenting the ordinary rotation, because everything else has been ruled out
+
+The contiguous-heap ratchet is **not** the asset path. That was instrumented at
+eight transitions (`HeapTrace`) and ruled out; RGB565 draws were then measured
+five times with the largest free block *identical* before and after each one. So
+whatever degrades the heap is in the ordinary card rotation - drawing, fetching,
+checking in, the housekeeping POSTs - and nobody had ever instrumented that.
+
+`App/HeapRatchet.{h,cpp}` does, and its header carries the full reasoning. What
+is worth having outside the source:
+
+**One correction to this document, made where it does damage.** The section
+"The numbers tonight rests on" above says mbedTLS "needs roughly 32KB
+contiguous". That is a misreading and it cost an evening. The requirement is
+**16,717 contiguous bytes, twice over, in two separate flat allocations**
+(`Http::kTlsRecordBufferBytes`). A device at 20,000 contiguous can still stand up
+a session; a device at 30,000 whose space is two 15,000-byte holes cannot.
+"Roughly 32KB" describes neither case correctly, and it made a whole class of
+measurements look like comfortable margin when they were not. The older text is
+left in place - this project keeps superseded reasoning rather than deleting it -
+but read it through this correction.
+
+**The figure that matters** is `heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)`.
+Not free total. Not `ESP.getMaxAllocHeap()`, for every reason the section above
+gives.
+
+**What was measured, twice, to the minute**, on device 17
+(`v2026.09.11.0017-customlibs`, debug stream on): 65,524 bytes at boot,
+`SOFTWARE_RESET+UNREACHABLE` 34 minutes later. Steps down are multiples of 2,048
+with plateaus between them; free total falls more slowly and does not plateau in
+step. That is fragmentation carving the largest block, not a steady leak. The
+waypoints recur across boots (65,524 -> ... -> 42,996 -> 36,852 ...) but their
+*order* differs between runs while the total time to failure matches - a small
+set of repeated allocation sizes reached in a varying order.
+
+**Five buckets, signed, on telemetry rather than the debug stream.** The stream
+is itself the dominant consumer (200 `String` slots, a 16KB ceiling, a
+`JsonDocument` and a body `String` per batch), device 19 has never streamed and
+has never decayed, and every stream on the fleet is off right now deliberately,
+so that real-world reboots can be measured. An instrument that needed the stream
+would describe a device in a state nobody is trying to fix. So the deliverable is
+eight flat fields on the telemetry POST:
+
+| Field | What it discriminates |
+| --- | --- |
+| `heapPhaseDrawBytes` | LovyanGFX, the RGB565 band buffer, per-card draw `String`s, and `drawChrome()`'s dozen small `String` allocate/free pairs per draw |
+| `heapPhaseFetchBytes` | provider HTTPS fetches: ArduinoJson pools, HTTP body `String`s, the long-lived `Result` `String`s |
+| `heapPhaseCheckInBytes` | the ~4KB `CheckIn::Result`, the largest JSON parse this firmware does, the policy and announcement `String`s |
+| `heapPhaseServiceBytes` | telemetry, the debug-stream flush, the fallback update check |
+| `heapPhaseIdleBytes` | WiFi/LWIP, touch, the timers - **and anything this instrumentation forgot** |
+| `heapRatchetSteps` | how many discrete downward steps; total decay over this is the mean step, which is what checks the "multiples of 2,048" claim across a fleet with every stream off |
+| `heapWorstStepBytes` | one big carve versus fifty small ones - same decay rate, completely different fixes |
+| `heapWorstStepPhase` | which phase took that worst step |
+
+They are **signed net** figures, not a tally of drops, and that is the design.
+A phase that allocates 44KB and hands all of it back nets ~0 and is visibly not
+the culprit; a phase that carves 2,048 and keeps it reads `+2048`. Telling those
+two apart is the entire question, and gross allocation volume cannot.
+
+**The instrument can be caught being wrong from its own output.** By
+construction the five buckets sum to
+`bootLargestFreeBlockBytes - largestFreeBlock8BitBytes`. If that identity does
+not hold on a real device, a phase is missing a scope or the carving happens
+somewhere all five buckets miss. Given how many confident wrong figures this
+investigation has already been sent down blind alleys by, an instrument with a
+built-in check on itself was worth the extra field.
+
+**A large `heapPhaseIdleBytes` is the most useful result, not the boring one.**
+It rules out drawing, fetching, check-in and the housekeeping POSTs in a single
+figure and sends the next person somewhere else entirely - which is the one
+outcome a set of buckets covering only the suspects could never produce.
+
+**What it costs**, said plainly, because adding instrumentation to a memory
+investigation that changes the memory is worse than adding nothing:
+
+- **Heap: zero.** No `String`, no `JsonDocument`, no `malloc`, on any path.
+  Every label is a `const char*` into flash - phase names, `CardSpec::id`, four
+  fixed subject literals. Pointers are copied, never characters.
+- **Static RAM: 46 bytes** (five `int32_t` buckets, a floor, a step count, a
+  worst-step triple, the current phase and subject), 48 with alignment.
+- **Stack: 12 bytes per live scope**, maximum nesting two.
+- **Wire: ~190 bytes** of body text and eight more ArduinoJson slots at 8 bytes
+  each - inside the pool the telemetry document already holds, since
+  `ARDUINOJSON_POOL_CAPACITY` is 128 slots on this 32-bit target and that
+  document uses roughly twenty. **No new pool is allocated.** The body `String`
+  may cross one realloc boundary; that lands in the Service bucket, which is the
+  correct self-consistent answer rather than an unmeasured cost.
+- **CPU:** two `heap_caps_get_largest_free_block()` walks per scope plus one per
+  `loop()` iteration, against a loop paced at 50ms.
+
+**Where the scopes are, and why only there.** `CardManager::drawCurrent()` (the
+one choke point every card's draw passes through, so one scope covers every card
+module including ones added later), `CardManager::fetchCard()` around
+`card.fetch()` alone (one scope for all the providers, which are the same code
+written several times), `performCheckIn()`, `Telemetry::report()`, the
+`Log::poll()` call site in `loop()`, and the fallback `AppUpdater` call site.
+Scoped at the *call sites* for the last two on purpose: wrapping
+`Log::sendOneBatch()` would put an observation inside the window where it is
+staging and consuming its own ring buffer, and wrapping
+`AppUpdater::checkForUpdate()` would mix the once-an-hour background timer with
+the human pressing BOOT.
+
+The nesting is load-bearing. A refresh of the card currently on screen redraws
+it, so without a Draw scope nested inside the Fetch scope the two leading
+candidates would be permanently inseparable. Telemetry nests inside check-in for
+the same reason - it rides check-in's cadence deliberately, so the bucket would
+otherwise read "the thing that happens every few minutes" and name neither.
+
+**No wire-compatibility liberty was taken, although one was available.** The
+six-month rule is currently suspended (`DeploymentStage.IsProduction` is false;
+nothing has shipped to a household), so a breaking change was permitted. It was
+not needed: every field here is a new flat name added alongside the existing
+ones, which a server that has not been updated ignores and a server that has
+reads without coordination. Redefining an existing field would have bought
+nothing and cost the one property that makes a fleet's history interpretable.
+
+**None of this has been compiled or run.** There is no host C++ compiler on the
+machine it was written on and `arduino-cli` hangs there; CI is the first real
+compile. The measurements it was written against are real. The code is read, not
+built. Devices were all offline when it was written, so the first boot after they
+return is what produces the answer.
+
+## The cached files are named `.png` and are not PNGs, and the log said so out loud
+
+Observed on device 17:
+
+```
+[display] drew 320x240 rgb565 from /assets/89003ca7-....png in 30 bands of 5120 bytes (no decoder)
+```
+
+The file holds a `DAM5` container of raw 16-bit pixels. This is **by design** -
+`Assets.cpp`'s `kExtension` sets out at length why the filename is a cache *key*
+rather than a type declaration, and why making it truthful turns one
+`SD.exists()` into a directory search. The filename does not change.
+
+What changed is the reporting, in the cheapest place that fixes every format at
+once. `Display::sniffImageFormat()` - which every SD draw already passes through
+before it draws - now names the format it read out of the file's own header, so
+the path stops being allowed to imply one. One line, covering PNG, JPEG and
+RGB565 together and any format added later for free, rather than three
+per-decoder lines that would have to be kept in agreement.
+
+The other half of the cost was never in the log. Somebody who pulls the card out
+and double-clicks a `.png` gets a broken-image icon and no comment in front of
+them to explain it - what they have instead is evidence that the device writes
+corrupt files. `Assets::begin()` now writes `/assets/README.txt` once, if absent,
+saying what the files are and how to tell the three formats apart from their
+first four bytes. It is excluded from `cachedCount()` (which rides telemetry, and
+a firmware that quietly reported one extra asset per device would look like a
+caching change) and survives `wipeCache()` - a reformat discards stale pictures,
+and the moment right after somebody has been told to try one is exactly when the
+card is most likely to be in a reader.

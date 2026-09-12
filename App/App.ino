@@ -77,6 +77,7 @@ size_t getArduinoLoopTaskStackSize(void) {
 // here because the RAM asset buffers are the largest thing a card-less device
 // holds, and freeing them is a recovery action rather than a card concern.
 #include "Graphic.h"
+#include "HeapRatchet.h"
 #include "HomeValue.h"
 #include "Http.h"
 #include "PowerProbe.h"
@@ -1207,6 +1208,22 @@ void forceUpdateCheck() {
 /// same as a normal one. A check-in rejected for a stale secret is not
 /// ordinary - see CheckIn.h's own remarks on secretRejected.
 void performCheckIn() {
+  // The largest JSON parse this firmware does, a ~4KB CheckIn::Result on the
+  // stack, and the policy, action and announcement Strings it leaves behind in
+  // module state afterwards. Scoped as one phase rather than broken up inside
+  // CheckIn.cpp because what this has to answer first is "is it check-in or is
+  // it the rotation" - and a device only checks in every few minutes, so if the
+  // answer is check-in the next question is a different investigation with a
+  // different instrument.
+  //
+  // Telemetry::report() is called from further down this function and opens its
+  // own Service scope, so the report's own cost does NOT land in this bucket.
+  // That nesting matters here more than anywhere else: telemetry rides
+  // check-in's cadence deliberately (see Telemetry.h), so without it the two
+  // would be permanently inseparable and the bucket would read "the thing that
+  // happens every few minutes" rather than naming either one.
+  const HeapRatchet::Scope scope(HeapRatchet::Phase::CheckIn, "checkin");
+
   const CheckIn::Result result = CheckIn::perform();
   if (!result.ok) {
     if (result.secretRejected) {
@@ -1451,6 +1468,22 @@ void setup() {
   // with and make every decay figure computed against it too small. Carried on
   // every telemetry report from then on; see BootDiag::bootLargestFreeBlock().
   BootDiag::recordBootHeap();
+
+  // Anchored to the figure recorded on the line above, at the same instant, so
+  // the per-phase attribution this module reports and the
+  // bootLargestFreeBlockBytes the server already receives are measured from one
+  // reading rather than two taken moments apart. That shared anchor is what
+  // lets the server check the buckets against
+  // (bootLargestFreeBlockBytes - largestFreeBlock8BitBytes) and catch this
+  // instrument being wrong - see HeapRatchet.h.
+  //
+  // Everything from here to CardManager::begin() - the display, the SD mount,
+  // WiFi, TLS, the boot check-in - is billed to Idle, which is correct and
+  // deliberate: those are one-time boot costs, not the rotation, and the
+  // rotation is what has never been instrumented. A large Idle bucket on a
+  // device that has been up for half an hour means something OUTSIDE the four
+  // named phases is doing the carving, which is a finding rather than a gap.
+  HeapRatchet::begin(BootDiag::bootLargestFreeBlock());
 
   // If the previous restart was this device restarting itself for
   // unreachability, start the backoff clock already running rather than at
@@ -1770,6 +1803,20 @@ void loop() {
   // could have been dropped inside them.
   const uint32_t iterationStartMs = millis();
 
+  // One sample per iteration, outside every Scope, so the stretches no phase
+  // covers are credited to Idle as they happen rather than only at the moment
+  // some other phase next begins. Without this a device parked on a single card
+  // with nothing due - which is most of a rotation's wall-clock time - would go
+  // unsampled for however long that lasts, and a device that stopped rotating
+  // would be indistinguishable from a device that stopped losing memory.
+  //
+  // Placed before ensureWifiConnected() rather than after, so a reconnect's own
+  // allocations land in Idle on the iteration they happen rather than being
+  // rolled into whatever phase runs next. The WiFi and LWIP stacks are the
+  // largest thing in this loop that none of the four named phases cover, and if
+  // the carving turns out to be theirs it has to show up somewhere legible.
+  HeapRatchet::observe();
+
   ensureWifiConnected();
 
   // Independent of every other timer in this loop, and checked early - see
@@ -1836,6 +1883,13 @@ void loop() {
     // rather than put an error on a wall display nobody asked. That is the
     // opposite of the BOOT-button path above, where a person is waiting for an
     // answer and silence is the wrong response.
+    // Scoped at the call site rather than inside AppUpdater, because the OTHER
+    // call to checkForUpdate() is forceUpdateCheck() - somebody standing at the
+    // device with a finger on the BOOT button - and that is not the ordinary
+    // rotation this module is measuring. Wrapping the function itself would mix
+    // a once-an-hour background timer with a human-triggered event into one
+    // bucket.
+    const HeapRatchet::Scope updateScope(HeapRatchet::Phase::Service, "update");
     if (AppUpdater::checkForUpdate() == AppUpdater::UpdateCheck::Newer) {
       Log::line("[update] fallback timer found a newer version - rebooting into CAL");
       Display::showStatus("Updating", "A new version is available");
@@ -1855,7 +1909,23 @@ void loop() {
   // by performCheckIn() above) - a no-op the rest of the time. Called once
   // per loop() iteration rather than on its own timer, same as every other
   // periodic thing in this loop.
-  Log::poll();
+  //
+  // Scoped HERE rather than inside Log.cpp, and that placement is a correctness
+  // requirement rather than a preference. HeapRatchet::observe() emits its step
+  // line through Log::printf, which with streaming ON appends to the very ring
+  // buffer sendOneBatch() is part-way through staging and consuming. Wrapping
+  // sendOneBatch() would put an observation inside that window; wrapping the
+  // public entry point puts both observations safely outside it.
+  //
+  // The stream is the leading suspect in its own right - 200 String slots, a
+  // 16KB ceiling, a JsonDocument and a body String per batch, and device 19 has
+  // never streamed and has never decayed - so this bucket is worth having even
+  // though it reads 0 on the whole fleet today. It is what will be waiting the
+  // first time somebody turns a stream on to chase something else.
+  {
+    const HeapRatchet::Scope logScope(HeapRatchet::Phase::Service, "logstream");
+    Log::poll();
+  }
 
   // Still ~50ms of pacing, but spent sampling touch rather than asleep.
   //

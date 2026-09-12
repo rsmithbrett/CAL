@@ -2305,6 +2305,42 @@ ImageFormat sniffImageFormat(const String& path) {
     hex[sizeof(hex) - 1] = '\0';
     Log::printf("[display] %s has no recognised image signature (read %u bytes, header %s)",
                 path.c_str(), static_cast<unsigned>(got), hex);
+  } else if (format != ImageFormat::Missing) {
+    // Says what the file IS, next to the name that suggests something else.
+    //
+    // **This line exists because the log was reading as a contradiction.**
+    // Observed on device 17:
+    //
+    //   [display] drew 320x240 rgb565 from /assets/89003ca7-....png in 30
+    //             bands of 5120 bytes (no decoder)
+    //
+    // That file holds a DAM5 container of raw 16-bit pixels and is not a PNG,
+    // and the same is true of every JPEG on the card. The naming is correct and
+    // deliberate - Assets.cpp's kExtension sets out at length why the filename
+    // is a cache KEY and not a type declaration, and why making it truthful
+    // would turn one SD.exists() into a directory search on a device whose
+    // scarce resources are contiguous memory and code nobody has to reason
+    // about twice. Nothing about that changes here. What changes is that the
+    // log stops letting the path imply a format and states the one actually
+    // detected from the file's own first bytes.
+    //
+    // Placed at this choke point rather than in each draw path, which is the
+    // cheapest correct place: every SD draw in this file sniffs before it draws
+    // (drawImageFromSd(), drawImageFromSdInRect()), so one line here covers
+    // PNG, JPEG and RGB565 at once, covers a format added later for free, and
+    // does not need three per-decoder lines kept in agreement. The rgb565 draw
+    // line further down still prints the path, and now reads correctly because
+    // this line has already said what the bytes are.
+    //
+    // Log::verbose, not printf, for the same reason the rgb565 draw line is
+    // verbose: this is the boring path, it runs on every card that has a
+    // picture, and a line per draw emitted unconditionally would crowd out the
+    // failures worth reading. The contradiction this fixes is only visible to
+    // someone reading a stream in the first place.
+    Log::verbose("[display] %s is %s - the .png suffix is a cache key, not the format "
+                 "(see Assets.cpp's kExtension); the format here was read from the file's own "
+                 "header",
+                 path.c_str(), formatName(format));
   }
   return format;
 }
@@ -2345,7 +2381,18 @@ ImageFormat sniffImageFormat(const String& path) {
 /// swap565_t. That was read out of the library source rather than assumed,
 /// because a wrong byte order here produces a recognisable image in wrong
 /// colours, which reads as a subtle rendering bug rather than as a format
-/// error and is the classic way this goes wrong:
+/// error and is the classic way this goes wrong.
+///
+/// **CONFIRMED ON HARDWARE, 2026-09-12.** Device 17 drew a 320x240 panel-native
+/// asset beside the identical picture as a JPEG - a control card added for
+/// exactly this comparison - and the two matched. That is the only thing that
+/// can settle byte order here: the container has no checksum over pixel
+/// content, the draw reports success either way, and every automated test
+/// asserts the bytes the ENCODER emits rather than what the panel makes of
+/// them. Until somebody looked at the screen this was reasoned and unverified.
+///
+/// The reasoning is kept below, because it is what to re-check if a future core
+/// changes these pixel types underneath:
 ///
 ///   - lgfx/v1/misc/colortype.hpp:263 declares swap565_t as bitfields
 ///     gh:3, r5:5, b5:5, gl:3 in a uint16_t. Little-endian allocation puts
