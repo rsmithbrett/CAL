@@ -33,9 +33,24 @@ String slotKey(uint8_t index) { return String("a") + String(index); }
 constexpr char kFieldSeparator = '\n';
 
 String packEntry(const Pending& entry) {
-  return entry.actionId + kFieldSeparator + entry.instanceId + kFieldSeparator + entry.pressedAtUtc;
+  return entry.actionId + kFieldSeparator + entry.instanceId + kFieldSeparator +
+         entry.pressedAtUtc + kFieldSeparator + entry.onScreenSummary;
 }
 
+/// Reads both the three-field and four-field layouts.
+///
+/// The fourth field - what was on screen - was added when devices were already in
+/// the field with presses queued in NVS across a reboot. A three-field entry is
+/// not corrupt, it is older, and it has to keep its press rather than have it
+/// dropped by the very update meant to improve things. Absent reads as empty,
+/// which is exactly what the server stores for a card that had nothing to name,
+/// so the two arrive at the same place.
+///
+/// The separator is '\n', and the summary is the last field for a reason: it is
+/// the only one composed from provider text rather than from ids this firmware
+/// controls. Being last means even a summary that somehow contained a newline
+/// can only corrupt itself, never the instanceId that dedup depends on. Cards
+/// are expected to return a single line; see Actions.h.
 bool unpackEntry(const String& packed, Pending& out) {
   const int first = packed.indexOf(kFieldSeparator);
   if (first < 0) {
@@ -47,7 +62,16 @@ bool unpackEntry(const String& packed, Pending& out) {
   }
   out.actionId = packed.substring(0, first);
   out.instanceId = packed.substring(first + 1, second);
-  out.pressedAtUtc = packed.substring(second + 1);
+
+  const int third = packed.indexOf(kFieldSeparator, second + 1);
+  if (third < 0) {
+    out.pressedAtUtc = packed.substring(second + 1);
+    out.onScreenSummary = "";
+    return true;
+  }
+
+  out.pressedAtUtc = packed.substring(second + 1, third);
+  out.onScreenSummary = packed.substring(third + 1);
   return true;
 }
 
@@ -144,7 +168,7 @@ uint8_t forCard(const char* cardId, Definition* out, uint8_t maxOut) {
   return written;
 }
 
-bool recordPress(const Definition& definition) {
+bool recordPress(const Definition& definition, const String& onScreenSummary) {
   if (gPendingCount >= kMaxPending) {
     Log::printf("[actions] queue full (%u) - dropping press of '%s'", gPendingCount,
                 definition.actionId.c_str());
@@ -167,11 +191,25 @@ bool recordPress(const Definition& definition) {
   entry.actionId = definition.actionId;
   entry.instanceId = Identity::macAddress() + ":" + String(counter);
   entry.pressedAtUtc = nowAsIso8601Utc();
+
+  // Capped here rather than at the call site so every path into the queue gets
+  // the same limit, and so a card returning something long can never push an NVS
+  // write past what the slot holds.
+  entry.onScreenSummary = onScreenSummary;
+  if (entry.onScreenSummary.length() > kMaxOnScreenSummaryLength) {
+    entry.onScreenSummary = entry.onScreenSummary.substring(0, kMaxOnScreenSummaryLength);
+    Log::printf("[actions] on-screen summary truncated to %u chars",
+                static_cast<unsigned>(kMaxOnScreenSummaryLength));
+  }
+
   gPending[gPendingCount++] = entry;
   persistQueue();
 
-  Log::printf("[actions] recorded press actionId=%s instanceId=%s at=%s",
-              entry.actionId.c_str(), entry.instanceId.c_str(), entry.pressedAtUtc.c_str());
+  Log::printf("[actions] recorded press actionId=%s instanceId=%s at=%s onScreen=%s",
+              entry.actionId.c_str(), entry.instanceId.c_str(), entry.pressedAtUtc.c_str(),
+              entry.onScreenSummary.length() > 0
+                  ? entry.onScreenSummary.c_str()
+                  : "(nothing - this card does not describe its items)");
   return true;
 }
 

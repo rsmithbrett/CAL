@@ -392,6 +392,31 @@ void showNoContent(const String& headline, const String& detail);
 /// wording and this file does not second-guess it.
 void drawActionButtons(const String* labels, uint8_t count);
 
+/// Tells the display how much vertical room the card about to draw actually has.
+///
+/// **Call this BEFORE the card draws, not after.** CardManager paints buttons on
+/// top of a finished card, so a card with a button loses the 60px band from
+/// y=160 down without ever being told - which is how the home value card's
+/// compliance line came to be drawn underneath a button. Passing whether this
+/// card has buttons lets the card choose a tighter layout instead of drawing
+/// into a band that is about to be covered.
+void setContentBudget(bool hasActionButtons);
+
+/// The lowest y a card may draw to. 220 with no buttons (the corner clock starts
+/// there), 154 with them. Read it rather than hardcoding either number: a card
+/// that reads it keeps working if the button band ever moves again, and it has
+/// moved once already.
+int contentBottom();
+
+/// True when a button row is taking the bottom of the panel, so a card can pick
+/// its compact layout without repeating the arithmetic.
+bool contentIsTight();
+
+/// Reports a card that drew past <see cref="contentBottom"/> to the debug stream.
+/// Logged rather than clipped - clipping hides it behind a card that merely looks
+/// short, and the stream is the only diagnostic channel a deployed device has.
+void noteContentOverrun(const char* cardName, int reachedY);
+
 /// The hit rectangle for button `index` of `count`, in the same layout
 /// drawActionButtons() uses. Handed to Touch::setActionZones() so the hit
 /// test and the drawing can never disagree about where a button is.

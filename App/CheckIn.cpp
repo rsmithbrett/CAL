@@ -84,6 +84,15 @@ void addPendingActions(JsonDocument& requestDoc) {
     entry["actionId"] = pending[i].actionId;
     entry["instanceId"] = pending[i].instanceId;
     entry["pressedAtUtc"] = pending[i].pressedAtUtc;
+    // Omitted entirely when there is nothing to say, rather than sent as "".
+    // This request is built with ArduinoJson, which needs roughly the payload's
+    // size again in heap to serialise it, and a key nobody will read is heap
+    // spent for nothing on the device that can least afford it. The server
+    // treats a missing field and an empty one identically - see
+    // PendingDeviceAction.OnScreenSummary.
+    if (pending[i].onScreenSummary.length() > 0) {
+      entry["onScreenSummary"] = pending[i].onScreenSummary;
+    }
   }
   Log::printf("[checkin] carrying %u pending action(s)", count);
 }

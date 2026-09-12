@@ -99,6 +99,29 @@ using NotableFn = bool (*)(uint16_t itemIndex);
 /// card, on the stream-only path, so that allocation is not on any hot path.
 using StatusFn = String (*)();
 
+/// One line naming the item on screen right now, for a button press to carry
+/// with it - "123 Main St, Annapolis - $450,000 - 3bd/2ba".
+///
+/// **Why the card has to answer this and nothing else can.** A button sits on a
+/// rotating card. By the time the press reaches the server on the next check-in,
+/// and by the time a person reads the email it produces, this card is showing a
+/// different item. The server is told which *kind* of card was pressed and never
+/// which item: the rotation position is not reported, and the provider cache
+/// behind a card can be replaced between the press and its delivery. So a press
+/// on a listings card said "somebody is interested" and named no house. Only the
+/// device knows, and only at the instant the finger comes down.
+///
+/// nullptr means "nothing worth naming", which is the right answer for a clock,
+/// a moon phase or a splash. The server stores empty for those and every surface
+/// renders it as "not reported" rather than as a gap. Optional per card exactly
+/// so the cards where it would be noise do not have to pretend otherwise.
+///
+/// Keep it under 200 characters - the wire cap and the column width, and longer
+/// is truncated server-side. Called once per press and never on the draw path,
+/// so its String allocation is not on a hot path, which matters on a device
+/// whose largest contiguous block is the binding constraint.
+using DescribeFn = String (*)(uint16_t itemIndex);
+
 /// The longest asset id a policy entry can carry. Matches Assets::kMaxIdLength,
 /// which is what actually validates one - Graphic.cpp static_asserts that the
 /// two agree, so a divergence is a compile error rather than a silently
@@ -225,6 +248,9 @@ struct CardSpec {
   NotableFn isNotable = nullptr;
   /// Optional - see StatusFn. nullptr for every card with no fetch of its own.
   StatusFn status = nullptr;
+  /// Optional - see DescribeFn. nullptr for a card with nothing worth naming in
+  /// a press notification, which is the honest answer for a clock or a splash.
+  DescribeFn describe = nullptr;
 
   // ---- Policy. Built-in defaults until a cardPolicy arrives on check-in,
   // then replaced wholesale by whatever the server said (see

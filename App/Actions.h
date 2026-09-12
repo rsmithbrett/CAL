@@ -62,6 +62,20 @@ struct Pending {
   /// device-local, which a MAC is.
   String instanceId;
   String pressedAtUtc;
+
+  /// What the card was showing when the finger came down - "123 Main St,
+  /// Annapolis - $450,000 - 3bd/2ba" - from the card's own Cards::DescribeFn.
+  ///
+  /// Empty is a real, ordinary value: a clock or a moon phase has nothing worth
+  /// naming, and so does a press queued by firmware older than this field. The
+  /// server treats both the same way and renders them as "not reported".
+  ///
+  /// Captured at press time because it cannot be recovered afterwards. The card
+  /// rotates within seconds and the check-in carrying this press may be minutes
+  /// away; by then the item is gone, and nothing server-side ever knew which one
+  /// it was. Expected to be one line under 200 characters - see Cards::DescribeFn,
+  /// and packEntry() in the .cpp for why it is stored last.
+  String onScreenSummary;
 };
 
 /// A card draws at most this many buttons - what fits on a 320px-wide panel
@@ -88,7 +102,18 @@ uint8_t forCard(const char* cardId, Definition* out, uint8_t maxOut);
 /// Records a press: assigns the next instanceId, stamps it with the current
 /// UTC time, and writes it to NVS. Returns false when the queue is full (see
 /// kMaxPending) or NVS refused the write.
-bool recordPress(const Definition& definition);
+///
+/// `onScreenSummary` is what the card was showing at that instant - the caller
+/// asks the card, since only CardManager knows which item is up. Empty is fine
+/// and ordinary; see Pending::onScreenSummary. Truncated to
+/// kMaxOnScreenSummaryLength here rather than at the call site, so every path
+/// into the queue gets the same cap.
+bool recordPress(const Definition& definition, const String& onScreenSummary = String());
+
+/// The longest on-screen summary a press will carry. Matches the server's own
+/// cap and column width (CheckInGatewayService.MaxOnScreenSummaryLength), so the
+/// device never sends something the store would have to cut.
+static constexpr uint16_t kMaxOnScreenSummaryLength = 200;
 
 uint8_t pendingCount();
 

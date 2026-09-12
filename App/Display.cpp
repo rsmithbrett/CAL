@@ -205,6 +205,34 @@ constexpr int kButtonRowRight = 312;
 constexpr int kButtonGap = 6;
 constexpr int kButtonRadius = 6;
 
+// ---- The content budget -------------------------------------------------
+//
+// How far down a card is allowed to draw, which is NOT a constant: it depends
+// on whether this card is about to get a button row painted over it.
+//
+// The bug this exists to fix. CardManager draws the card and THEN calls
+// drawChrome(), which paints the buttons on top. The card was never told, so
+// every card laid itself out against the full panel and a card with a button
+// silently lost the 60px band from y=160 down - whatever it had drawn there was
+// covered. On the home value card that band is where the "automated estimate,
+// not an appraisal" line lands, and that line is not allowed to go missing.
+//
+// So the budget is set before the card draws, not after. A card that respects it
+// uses contentBottom() as its floor and picks a tighter layout when the number
+// comes back small; a card that ignores it is no worse off than before, and
+// noteContentOverrun() below puts it in the debug stream so it stops being
+// invisible.
+//
+// kClockTop is where drawClock() puts its bottom-right corner clock (roughly
+// y 222-236), and nothing may overlap it in either mode.
+constexpr int kClockTop = 220;
+constexpr int kButtonBandGap = 6;
+
+/// Set from CardManager before each card draws. Starts at the no-buttons value
+/// so a card drawn outside the normal path (a boot splash, an error screen) sees
+/// a sane budget rather than zero.
+int gContentBottom = kClockTop;
+
 // The same bright, high-contrast blue CYD-Dickey settled on for its own
 // buttons (its BUTTON_COLOR = 0x2E9FFF), chosen there because the default
 // dark navy was hard to read on this panel. Deliberately outside the
@@ -1100,8 +1128,16 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // function's declaration in Display.h for why it is drawn here at all). The
   // gaps between the two stat rows were 46px and 50px for 17px-tall text, so
   // the room came out of those rather than off the end of the card.
-  const int firstRowY = hasAddress ? 62 : 44;
-  const int secondRowY = hasAddress ? 100 : 90;
+  //
+  // Tight mode is the same reasoning applied again, with less room. A button row
+  // takes everything below y=154, and the compliance line still has to fit under
+  // the detail block, so the address and both stat rows move up and close up.
+  // The address is the first thing to go if even that is not enough - it is the
+  // only element here that a reader can do without, since the card's own banner
+  // already says what kind of thing this is.
+  const bool tight = contentIsTight();
+  const int firstRowY = tight ? (hasAddress ? 50 : 38) : (hasAddress ? 62 : 44);
+  const int secondRowY = tight ? (hasAddress ? 80 : 72) : (hasAddress ? 100 : 90);
 
   // Same stat-row layout as showSunMoonCard()/showTidesCard() above: two
   // rows, label left and value right-justified. Unlike either of those,
@@ -1131,21 +1167,44 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // and pushes the fixed compliance line below it down by however many lines
   // it actually used - the same "grow down rather than overlap" reasoning
   // showAircraftCard() applies to its own variable-height route line.
-  int nextY = hasAddress ? 138 : 140;
+  int nextY = tight ? (hasAddress ? 108 : 100) : (hasAddress ? 138 : 140);
+
+  // The compliance line is reserved FIRST, not fitted last. It is the one line
+  // on this card that is not allowed to go missing, so the detail block gets
+  // whatever is left above it rather than the other way round - and when that is
+  // nothing, the detail is dropped. Price per square foot and a refresh date are
+  // worth having; they are not worth pushing a legal qualifier off the panel,
+  // which is exactly what happened when a button appeared on this card.
+  const int complianceHeight = 18;
+  const int complianceY = contentBottom() - complianceHeight;
+
   if (detail.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
-    const int detailLines =
-        wrappedLeftText(detail, kCardMargin, nextY, muted(), 18, 2, kScreenW - kCardMargin * 2);
-    nextY += detailLines * 18 + 6;
+    const int roomForDetail = complianceY - 6 - nextY;
+    const int detailLinesAllowed = roomForDetail / 18;
+    if (detailLinesAllowed >= 1) {
+      lcd.setFont(&fonts::FreeSansBold9pt7b);
+      const int detailLines = wrappedLeftText(detail, kCardMargin, nextY, muted(), 18,
+                                              detailLinesAllowed > 2 ? 2 : detailLinesAllowed,
+                                              kScreenW - kCardMargin * 2);
+      nextY += detailLines * 18 + 6;
+    } else {
+      Log::verbose("[display] homevalue dropped its detail line - %d px left above the "
+                   "compliance line at y=%d",
+                   roomForDetail, complianceY);
+    }
   }
 
   // The one line this function draws unconditionally, regardless of what any
-  // of the three parameters say - see this function's own declaration in
+  // of the four parameters say - see this function's own declaration in
   // Display.h for why this compliance wording lives here rather than in
-  // whatever HomeValue.cpp happened to pass as `detail`.
+  // whatever HomeValue.cpp happened to pass as `detail`. Drawn at the reserved
+  // position, or lower if the detail block ended up below it, so it is never
+  // overlapped by the thing above it either.
+  const int drawComplianceAt = nextY > complianceY ? nextY : complianceY;
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  wrappedLeftText("Automated estimate, not an appraisal.", kCardMargin, nextY, muted(), 18, 2,
-                  kScreenW - kCardMargin * 2);
+  wrappedLeftText("Automated estimate, not an appraisal.", kCardMargin, drawComplianceAt, muted(),
+                  18, 1, kScreenW - kCardMargin * 2);
+  noteContentOverrun("homevalue", drawComplianceAt + complianceHeight);
 
   drawClock();
   restoreDefaultFont();
@@ -1842,6 +1901,28 @@ void showNoContent(const String& headline, const String& detail) {
 
   drawClock();
   restoreDefaultFont();
+}
+
+void setContentBudget(bool hasActionButtons) {
+  gContentBottom = hasActionButtons ? kButtonRowY - kButtonBandGap : kClockTop;
+}
+
+int contentBottom() { return gContentBottom; }
+
+bool contentIsTight() { return gContentBottom < kClockTop; }
+
+void noteContentOverrun(const char* cardName, int reachedY) {
+  if (reachedY <= gContentBottom) {
+    return;
+  }
+  // Logged rather than clipped. Clipping would hide the problem behind a card
+  // that merely looks a bit short; the stream is the only diagnostic channel a
+  // deployed device has, and a card overrunning its budget is exactly the kind
+  // of thing nobody would otherwise notice until a household complained that a
+  // line they needed was missing.
+  Log::printf("[display] card '%s' drew to y=%d, past its %d budget - %d px of it is under %s",
+              cardName == nullptr ? "?" : cardName, reachedY, gContentBottom,
+              reachedY - gContentBottom, contentIsTight() ? "the button row" : "the clock");
 }
 
 void actionButtonZone(uint8_t index, uint8_t count, int16_t& x, int16_t& y, int16_t& w,

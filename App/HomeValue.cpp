@@ -196,12 +196,37 @@ void cardDraw(uint16_t) {
 // this less often than either of those two, or as often as something that
 // actually changes within the day.
 // ---------------------------------------------------------------------------
+/// What a press on this card is about: this household's own home and what
+/// RentCast currently thinks it is worth. See Cards::DescribeFn.
+///
+/// The address comes first for the same reason it leads the card itself - an
+/// estimate that names no house is the one thing a reader cannot check. When
+/// there is no address (a valuation resolved from a position fix) the estimate
+/// alone still identifies what was pressed well enough to act on, so this
+/// returns it rather than nothing.
+///
+/// Deliberately carries no "automated estimate, not an appraisal" qualifier.
+/// That wording is a display requirement for the card, and this string is not a
+/// display - it lands in a press-log column and an email body, where the
+/// surrounding text is the server's to write. Smuggling a legal disclaimer into
+/// a data field would put it somewhere nobody maintains it.
+String cardDescribe(uint16_t /*itemIndex*/) {
+  if (!hasEstimate()) {
+    return String();
+  }
+
+  String summary = gAddress.length() > 0 ? gAddress + " - " : String();
+  summary += estimateText();
+  return summary;
+}
+
 [[maybe_unused]] const bool kRegistered = [] {
   Cards::CardSpec spec;
   spec.id = kCardId;
   spec.kind = Cards::Kind::Interstitial;
   spec.fetch = cardFetch;
   spec.itemCount = cardItemCount;
+  spec.describe = cardDescribe;
   spec.draw = cardDraw;
   spec.status = cardStatus;
   spec.order = 4;

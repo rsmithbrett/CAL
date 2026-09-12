@@ -542,7 +542,12 @@ uint32_t dwellMs() {
 /// card itself has drawn, so it lands on top of a finished card rather than
 /// being painted over by it.
 void drawChrome(const Cards::CardSpec& card) {
-  gButtonCount = Actions::forCard(card.id, gButtons, Actions::kMaxButtonsPerCard);
+  // gButtonCount was resolved by drawCurrent() BEFORE the card drew, so the card
+  // could size itself against the room these leave. Deliberately not recomputed
+  // here: two Actions::forCard() calls around a draw could disagree if a policy
+  // arrived in between, and the card would then have budgeted for one number of
+  // buttons while a different number got painted over it.
+  (void)card;
 
   String labels[Actions::kMaxButtonsPerCard];
   for (uint8_t i = 0; i < gButtonCount; ++i) {
@@ -615,6 +620,19 @@ void drawCurrent() {
   // dismissed - falls through to the card's ordinary draw(), which is what
   // makes allowBanner eligibility rather than a promise: a card with it set
   // and nothing to show looks exactly like a card without it.
+  // Resolve this card's buttons BEFORE it draws, and tell Display how much room
+  // that leaves it. drawChrome() below paints them on top of a finished card, so
+  // a card laying itself out against the full panel silently loses the 60px band
+  // they cover - which is how the home value card's compliance line came to be
+  // drawn underneath a button. Same call on both branches: an announcement
+  // banner gets a button row too when its action is bound.
+  gButtonCount = Actions::forCard(card.id, gButtons, Actions::kMaxButtonsPerCard);
+  Display::setContentBudget(gButtonCount > 0);
+  if (gButtonCount > 0) {
+    Log::verbose("[cards] '%s' draws with %u button(s), so content stops at y=%d", card.id,
+                 static_cast<unsigned>(gButtonCount), Display::contentBottom());
+  }
+
   const Cards::Announcement* banner = Cards::announcementFor(card);
   if (banner != nullptr) {
     Log::printf("[banner] '%s' showing announcement %s as a %s", card.id, banner->id,
@@ -689,7 +707,18 @@ void handleTap(const Touch::Tap& tap) {
       const Actions::Definition& pressed = gButtons[tap.actionIndex];
       Log::printf("[cards] action button pressed: card=%s actionId=%s",
                   pressed.cardId.c_str(), pressed.actionId.c_str());
-      Actions::recordPress(pressed);
+
+      // Ask the card what it is showing, right now, before anything can rotate.
+      // This is the only moment the answer exists: the check-in carrying this
+      // press may be minutes away, the card will have moved on, and the server
+      // is never told which item was up. A card with no describe() has nothing
+      // worth naming (a clock, a splash) and sends empty, which is a real value
+      // rather than a failure - see Cards::DescribeFn.
+      String onScreen;
+      if (gCurrent.card >= 0 && gCards[gCurrent.card].describe != nullptr) {
+        onScreen = gCards[gCurrent.card].describe(gCurrent.item);
+      }
+      Actions::recordPress(pressed, onScreen);
 
       // A Banner Button's whole reason for existing: pressing it satisfies the
       // announcement, on top of - not instead of - whatever effect the press

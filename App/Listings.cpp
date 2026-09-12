@@ -337,12 +337,43 @@ void cardDraw(uint16_t itemIndex) {
   Display::showListingsStatus(headline, gLast.message, /*isProblem=*/!isRestingState);
 }
 
+/// The line a press carries: which house was on screen when somebody tapped
+/// Interested. This is the card the whole mechanism exists for - a press here is
+/// about one specific listing, and without this the server is told only that the
+/// listings card was pressed. See Cards::DescribeFn.
+///
+/// Address and price lead, because those identify the property to whoever reads
+/// the email. Beds and baths follow, because an agent scanning a list of
+/// enquiries uses them to tell two similar addresses apart. Distance and
+/// days-on-market are deliberately left out: both are relative to this device
+/// and this moment, and neither survives usefully into an email read hours later.
+///
+/// A status screen returns empty rather than "No listings nearby". A press on a
+/// card showing nothing has nothing to name, and inventing a description would
+/// put a sentence in the press log that reads like content.
+String cardDescribe(uint16_t itemIndex) {
+  if (gLast.status != Status::Ok || itemIndex >= gLast.count) {
+    return String();
+  }
+
+  const ListingInfo& listing = gLast.listings[itemIndex];
+  String summary = listing.address;
+  if (listing.price > 0) {
+    summary += " - $" + String(listing.price);
+  }
+  if (listing.bedrooms > 0 || listing.bathrooms > 0) {
+    summary += " - " + String(listing.bedrooms, 0) + "bd/" + String(listing.bathrooms, 1) + "ba";
+  }
+  return summary;
+}
+
 [[maybe_unused]] const bool kRegistered = [] {
   Cards::CardSpec spec;
   spec.id = "listings";
   spec.kind = Cards::Kind::List;
   spec.fetch = cardFetch;
   spec.itemCount = cardItemCount;
+  spec.describe = cardDescribe;
   spec.draw = cardDraw;
   spec.isNotable = cardIsNotable;
   spec.status = cardStatus;
