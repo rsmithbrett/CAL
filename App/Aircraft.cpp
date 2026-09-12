@@ -354,12 +354,45 @@ void cardDraw(uint16_t) {
   Display::showAircraftStatus(headline, gLast.message, /*isProblem=*/!isRestingState);
 }
 
+/// Which aircraft was overhead when somebody pressed - see Cards::DescribeFn.
+///
+/// Callsign, route and distance. The callsign identifies the flight to anyone
+/// who looks it up afterwards; the route is what makes it mean something to a
+/// reader who will not. Distance is included here, unlike on the listings card,
+/// because for an aircraft it is the point of the press - "there was a plane two
+/// miles away" is the observation, where a listing's distance from the device is
+/// incidental to the house.
+///
+/// Names fall back to codes per side independently, matching how the card itself
+/// draws its route: a flight with one known airport name and one unknown reads
+/// better half-resolved than not at all.
+String cardDescribe(uint16_t) {
+  if (gLast.status != Status::Ok || gLast.nearest.callsign.length() == 0) {
+    return String();
+  }
+
+  const String origin =
+      gLast.nearest.originName.length() > 0 ? gLast.nearest.originName : gLast.nearest.originCode;
+  const String destination = gLast.nearest.destinationName.length() > 0
+                                 ? gLast.nearest.destinationName
+                                 : gLast.nearest.destinationCode;
+
+  String summary = gLast.nearest.callsign;
+  if (origin.length() > 0 || destination.length() > 0) {
+    summary += " - " + (origin.length() > 0 ? origin : String("?")) + " to " +
+               (destination.length() > 0 ? destination : String("?"));
+  }
+  summary += " - " + String(gLast.nearest.distanceMiles, 1) + " mi away";
+  return summary;
+}
+
 [[maybe_unused]] const bool kRegistered = [] {
   Cards::CardSpec spec;
   spec.id = "aircraft";
   spec.kind = Cards::Kind::List;
   spec.fetch = cardFetch;
   spec.itemCount = cardItemCount;
+  spec.describe = cardDescribe;
   spec.draw = cardDraw;
   spec.isNotable = cardIsNotable;
   spec.status = cardStatus;

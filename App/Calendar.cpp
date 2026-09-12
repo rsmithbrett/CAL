@@ -944,6 +944,28 @@ void cardDraw(uint16_t itemIndex) {
 // short title is about as much as a listing's address and price, and reads in
 // about as long from across a room. notableDwellSeconds = 18 likewise mirrors
 // listings' own, for an event about to start.
+//
+// NO spec.describe, DELIBERATELY - and here that is a requirement rather than a
+// judgement call.
+//
+// Cards::DescribeFn exists so a button press carries what was on screen: the
+// listings card sends the address, the aircraft card the callsign. That line is
+// stored in device_action_press_log, shown to account and brand admins, and
+// mailed to whatever address a binding names.
+//
+// This module is bound by the rule quoted at the top of Calendar.h: "Nothing in
+// this type may ever be written to a log, an audit record, or an exception
+// message." A press-log row IS an audit record, read later by an admin who is
+// not necessarily the household, and the email is a copy of it sent outside the
+// system entirely - a wider exposure than the remote debug stream that rule
+// already forbids, which is why this file logs counts and never titles.
+//
+// So a press on a calendar card records that a calendar button was pressed and
+// nothing about which appointment. That is the correct outcome rather than a
+// gap: the nullptr default already means "nothing worth naming" and the server
+// renders it as "not reported" with no special case. Do not add a describe()
+// here - the thinner result is the point, exactly as Calendar.h says of the
+// logging.
 [[maybe_unused]] const bool kRegistered = [] {
   Cards::CardSpec spec;
   spec.id = kCardId;

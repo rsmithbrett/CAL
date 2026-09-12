@@ -102,6 +102,20 @@ struct Instance {
     Display::showAnnouncementCard(String(text));
   }
 
+  /// The notice itself, for a press to carry - see Cards::DescribeFn.
+  ///
+  /// On this card the text IS the content, so unlike every other card there is
+  /// nothing to summarise: whoever reads the press needs the words the household
+  /// was looking at when they tapped. An admin who writes "Trash goes out
+  /// tonight - press when done" gets back a press that says which notice was
+  /// answered, which is otherwise unrecoverable: the card carries no item id, and
+  /// several announcement instances can be configured at once.
+  ///
+  /// Re-read rather than cached, exactly as draw() and itemCount() do - the
+  /// policy can change at any check-in, and a press must name the words that were
+  /// actually on screen, not the ones configured when this instance last drew.
+  static String describe(uint16_t) { return String(currentText()); }
+
   /// Builds and registers this instance's descriptor. Called once per
   /// instantiation from the static-init block at the bottom of this file.
   static bool registerSelf(int16_t order, uint16_t interleaveEvery) {
@@ -116,6 +130,7 @@ struct Instance {
     spec.fetch = nullptr;
     spec.itemCount = &itemCount;
     spec.draw = &draw;
+    spec.describe = &describe;
     spec.order = order;
     spec.dwellSeconds = 10;
     spec.interleaveEvery = interleaveEvery;
