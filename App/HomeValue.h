@@ -65,9 +65,19 @@ extern const char* const kCardId;
 /// out-of-range-epoch sentinel CheckIn.h's own issNextPassRiseUtc uses and
 /// for the same reason: a real instant is never exactly the Unix epoch.
 ///
+/// `address` is the property the estimate is of - the card's headline, drawn
+/// the same way showListingsCard() draws its own. Empty means "no address to
+/// show" and is a real answer rather than a failure: the server resolves a
+/// valuation from a UserPrecise position fix when an owner has no stored home
+/// address, and RentCast returns no formatted address for a lat/lon query. The
+/// card then draws the value with no heading rather than printing coordinates
+/// at a household as though they were a street.
+///
 /// Cheap and idempotent; safe to call on every check-in whether or not
-/// anything changed.
+/// anything changed. The address is assigned only when it actually differs, so
+/// the common case - the same string every 60 seconds, since RentCast refreshes
+/// monthly at most - costs no allocation.
 void setValue(int estimatedValue, int rangeLow, int rangeHigh, double pricePerSquareFoot,
-              time_t updatedAtUtc);
+              time_t updatedAtUtc, const String& address);
 
 }  // namespace HomeValue

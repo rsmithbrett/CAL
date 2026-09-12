@@ -194,11 +194,20 @@ struct Result {
   /// above uses and for the same reason. 0 is the "absent" sentinel,
   /// matching that field's own convention: a real instant is never exactly
   /// the Unix epoch.
+  ///
+  /// homeValueAddress is the property the estimate is of, which the card draws
+  /// as its headline the same way the listings card draws its own. Empty is a
+  /// real answer rather than a fault, and covers two cases that need no telling
+  /// apart on-device: the server resolved this valuation from a position fix
+  /// rather than a stored home address and so has no address to give, or the
+  /// server predates the field and never sends it. Either way the card draws
+  /// the value with no heading - see HomeValue.h.
   int homeValueEstimate = -1;
   int homeValueRangeLow = -1;
   int homeValueRangeHigh = -1;
   double homeValuePricePerSquareFoot = -1.0;
   time_t homeValueUpdatedAtUtc = 0;
+  String homeValueAddress;
 
   /// The Assets-catalog id of this device's configured boot splash, resolved
   /// server-side per account (CheckInModels.cs's CheckInResponse.SplashAssetId) -

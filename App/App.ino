@@ -1344,7 +1344,8 @@ void performCheckIn() {
   // no fetch of its own either, and its content rides this exact response
   // too - see HomeValue.h.
   HomeValue::setValue(result.homeValueEstimate, result.homeValueRangeLow, result.homeValueRangeHigh,
-                      result.homeValuePricePerSquareFoot, result.homeValueUpdatedAtUtc);
+                      result.homeValuePricePerSquareFoot, result.homeValueUpdatedAtUtc,
+                      result.homeValueAddress);
   // Same reasoning, same push, one card over again: the ISS flyover card has
   // no fetch of its own either, and its content rides this exact response
   // too.

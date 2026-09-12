@@ -517,6 +517,12 @@ Result perform() {
   result.homeValueRangeHigh = responseDoc["homeValueRangeHigh"] | -1;
   result.homeValuePricePerSquareFoot = responseDoc["homeValuePricePerSquareFoot"] | -1.0;
   result.homeValueUpdatedAtUtc = parseIso8601Utc(responseDoc["homeValueUpdatedAtUtc"] | "");
+  // `| ""` covers a JSON null, and a server predating this field that never
+  // sends it at all - same reasoning as moonPhaseName below. Both mean "no
+  // address to put at the top of the card" here, which is a real answer: a
+  // valuation the server resolved from a position fix rather than a stored
+  // address has none. See CheckIn.h's own homeValueAddress remarks.
+  result.homeValueAddress = String(responseDoc["homeValueAddress"] | "");
   // `| ""` covers a JSON null and a field an older server never sends at all, the
   // same reasoning as moonPhaseName above - both mean "no splash configured" here.
   // See CheckIn.h's own splashAssetId remarks for what this device does with it.

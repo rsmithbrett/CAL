@@ -147,7 +147,17 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
 /// point - a future edit to that string can shorten or reword the
 /// price-per-square-foot line without ever being able to silently drop the
 /// one line compliance actually requires.
-void showHomeValueCard(const String& estimateText, const String& rangeText, const String& detail);
+///
+/// `address` is the property the estimate is of, drawn as the headline the
+/// same way showListingsCard() draws its own - a dollar figure that names no
+/// house is the one fact on this card a reader cannot check. Empty is a real
+/// case rather than a fault (a valuation resolved from a GPS fix has no
+/// address to print) and the headline row is then not drawn at all, with the
+/// rows below moving back up. Truncated to one line, never wrapped: the
+/// compliance line above has to fit underneath everything else on a 240px
+/// screen, and a second headline line is what it would cost.
+void showHomeValueCard(const String& address, const String& estimateText, const String& rangeText,
+                       const String& detail);
 
 /// The ISS flyover card: distance and compass direction to the International
 /// Space Station's current sub-satellite point, plus a one-line detail

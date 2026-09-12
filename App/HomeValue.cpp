@@ -23,6 +23,19 @@ double gPricePerSquareFoot = -1.0;
 /// 0 means "no refresh timestamp to show" - see HomeValue.h.
 time_t gUpdatedAtUtc = 0;
 
+/// The property the estimate is of, drawn as the card's headline. Empty means
+/// "no address to show" and is a real answer rather than a fault: a valuation
+/// the server resolved from a GPS fix instead of an owner's stored address has
+/// none, and Display::showHomeValueCard() then omits the headline row.
+///
+/// A retained String rather than a char buffer, matching every other retained
+/// text global in this build. It holds roughly 45 characters of formatted
+/// address; it is assigned only on a check-in whose value actually differs,
+/// below, so it does not reallocate on every check-in the way an unconditional
+/// assignment would - which matters on a device whose largest contiguous block
+/// is the binding constraint, not its free total.
+String gAddress;
+
 /// Logged only on a change of the headline estimate, the same "don't spam
 /// the remote debug stream every check-in" reasoning Tides.cpp's
 /// gLastLoggedHighTide/gLastLoggedLowTide use. -2 rather than -1 so the very
@@ -166,7 +179,7 @@ void cardDraw(uint16_t) {
   Log::verbose("[homevalue] on screen: estimate=%s range=%s perSqFt=%s", estimate.c_str(),
                range.c_str(), perSqFt.c_str());
 
-  Display::showHomeValueCard(estimate, range, detailText());
+  Display::showHomeValueCard(gAddress, estimate, range, detailText());
 }
 
 // ---------------------------------------------------------------------------
@@ -200,12 +213,26 @@ void cardDraw(uint16_t) {
 }  // namespace
 
 void setValue(int estimatedValue, int rangeLow, int rangeHigh, double pricePerSquareFoot,
-              time_t updatedAtUtc) {
+              time_t updatedAtUtc, const String& address) {
   gEstimatedValue = estimatedValue;
   gRangeLow = rangeLow;
   gRangeHigh = rangeHigh;
   gPricePerSquareFoot = pricePerSquareFoot;
   gUpdatedAtUtc = updatedAtUtc;
+
+  // Assigned only on a real change. The address is the same string on every
+  // check-in for the life of a device's ownership - RentCast refreshes monthly
+  // at most - so an unconditional assign would free and reallocate a ~45-byte
+  // String every 60 seconds for nothing. On a device where the largest
+  // contiguous block is what binds, the allocations nobody needed are the ones
+  // worth not making.
+  if (gAddress != address) {
+    gAddress = address;
+    Log::printf("[homevalue] subject address is now %s",
+                address.length() > 0 ? address.c_str()
+                                     : "(none - valuation came from a position fix, not an "
+                                       "address, so the card draws no headline)");
+  }
 
   if (estimatedValue != gLastLoggedEstimate) {
     gLastLoggedEstimate = estimatedValue;

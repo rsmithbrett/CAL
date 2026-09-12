@@ -1067,9 +1067,41 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
   restoreDefaultFont();
 }
 
-void showHomeValueCard(const String& estimateText, const String& rangeText, const String& detail) {
+void showHomeValueCard(const String& address, const String& estimateText, const String& rangeText,
+                       const String& detail) {
   lcd.fillScreen(bg());
   drawCardBanner("HOME VALUE", kHomeValueBanner, 150);
+
+  // The address leads, exactly as it does on showListingsCard() - a dollar
+  // figure that names no house is the one thing on this card a reader cannot
+  // check. Truncated rather than wrapped, and to ONE line: a formatted RentCast
+  // address ("300 Eatons Landing Dr, Annapolis, MD 21401") runs to two lines at
+  // 12pt and there is no vertical room for a second one, per the budget below.
+  //
+  // Absent is a real case - a valuation resolved from a GPS fix has no address
+  // to print - and then this row is not drawn and everything below it moves
+  // back up to where it was. An empty headline would leave a gap that reads as
+  // a rendering fault rather than as an absent fact.
+  const bool hasAddress = address.length() > 0;
+  if (hasAddress) {
+    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    lcd.setTextSize(1);
+    lcd.setTextColor(ink(), bg());
+    lcd.setTextDatum(top_left);
+    drawTruncatedLeft(address, kCardMargin, 30, kScreenW - kCardMargin * 2);
+  }
+
+  // THE VERTICAL BUDGET, and why the rows below tightened rather than simply
+  // shifting down by the height of the new one. The screen is 240px tall. The
+  // detail block can take two 18px lines and the compliance line another two,
+  // so the old 44/90/140 layout already ran to roughly y=218. Adding a headline
+  // on top of that without tightening would push the compliance line off the
+  // bottom - and that is the line that is not allowed to go missing (see this
+  // function's declaration in Display.h for why it is drawn here at all). The
+  // gaps between the two stat rows were 46px and 50px for 17px-tall text, so
+  // the room came out of those rather than off the end of the card.
+  const int firstRowY = hasAddress ? 62 : 44;
+  const int secondRowY = hasAddress ? 100 : 90;
 
   // Same stat-row layout as showSunMoonCard()/showTidesCard() above: two
   // rows, label left and value right-justified. Unlike either of those,
@@ -1086,20 +1118,20 @@ void showHomeValueCard(const String& estimateText, const String& rangeText, cons
 
   lcd.setTextColor(muted(), bg());
   lcd.setTextDatum(top_left);
-  lcd.drawString("Est. value", kCardMargin, 44);
+  lcd.drawString("Est. value", kCardMargin, firstRowY);
   lcd.setTextColor(ink(), bg());
-  drawRightJustified(estimateText, rightX, 44, rowValueWidth);
+  drawRightJustified(estimateText, rightX, firstRowY, rowValueWidth);
 
   lcd.setTextColor(muted(), bg());
-  lcd.drawString("Range", kCardMargin, 90);
+  lcd.drawString("Range", kCardMargin, secondRowY);
   lcd.setTextColor(ink(), bg());
-  drawRightJustified(rangeText, rightX, 90, rowValueWidth);
+  drawRightJustified(rangeText, rightX, secondRowY, rowValueWidth);
 
   // detail (price-per-square-foot and the RentCast refresh date) is optional
   // and pushes the fixed compliance line below it down by however many lines
   // it actually used - the same "grow down rather than overlap" reasoning
   // showAircraftCard() applies to its own variable-height route line.
-  int nextY = 140;
+  int nextY = hasAddress ? 138 : 140;
   if (detail.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     const int detailLines =
