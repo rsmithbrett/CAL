@@ -533,14 +533,19 @@ String describeEvent(const Event& event) {
       snprintf(when, sizeof(when), "%s, all day", dateText);
     }
   } else {
+    // Through Display so an appointment reads in the same clock as every other
+    // time on this device - a household set to 12-hour would otherwise get
+    // "Today 14:30" here beside a corner clock saying "2:30 PM". See
+    // Display::formatTimeOfDay().
+    const String timeText = Display::formatTimeOfDay(shownTm.tm_hour, shownTm.tm_min);
     if (eventDay == today) {
-      snprintf(when, sizeof(when), "Today %02d:%02d", shownTm.tm_hour, shownTm.tm_min);
+      snprintf(when, sizeof(when), "Today %s", timeText.c_str());
     } else if (eventDay == today + 1) {
-      snprintf(when, sizeof(when), "Tomorrow %02d:%02d", shownTm.tm_hour, shownTm.tm_min);
+      snprintf(when, sizeof(when), "Tomorrow %s", timeText.c_str());
     } else {
       char dateText[24];
       strftime(dateText, sizeof(dateText), "%a %d %b", &shownTm);
-      snprintf(when, sizeof(when), "%s %02d:%02d", dateText, shownTm.tm_hour, shownTm.tm_min);
+      snprintf(when, sizeof(when), "%s %s", dateText, timeText.c_str());
     }
   }
 

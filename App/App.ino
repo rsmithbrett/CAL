@@ -1323,6 +1323,17 @@ void performCheckIn() {
   lastUtcOffsetMinutes = result.utcOffsetMinutes;
   lastIsDaytime = result.isDaytime;
   Display::setEnvironment(lastUtcOffsetMinutes, lastIsDaytime);
+  // Same "current as of this check-in" treatment as the two above, and for the
+  // same reason: an admin changing the household's clock preference should see
+  // every device follow on its next check-in, not on its next firmware update.
+  // Not persisted to NVS, unlike the offset: a device that reboots before its
+  // first check-in shows 24-hour for one card cycle, which is a cosmetic
+  // difference nobody will catch, where a wrong UTC offset would put every time
+  // on the screen hours out.
+  if (Display::use12HourClock() != result.use12HourClock) {
+    Log::printf("[checkin] clock format is now %s", result.use12HourClock ? "12-hour" : "24-hour");
+  }
+  Display::setUse12HourClock(result.use12HourClock);
   // Persisted so the value survives a reboot - see Identity::lastUtcOffsetMinutes()'s
   // own remarks. Written on every successful check-in, not just the first, same as
   // the RAM copy above: NVS wear from one small write per checkInIntervalMs (minutes

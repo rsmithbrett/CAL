@@ -115,9 +115,10 @@ String localHhMm(time_t utcEpoch) {
   const time_t localEpoch = utcEpoch + static_cast<time_t>(gNextPassUtcOffsetMinutes) * 60;
   struct tm localTm;
   gmtime_r(&localEpoch, &localTm);
-  char buffer[6];
-  snprintf(buffer, sizeof(buffer), "%02d:%02d", localTm.tm_hour, localTm.tm_min);
-  return String(buffer);
+  // Through Display so a household that reads 12-hour clocks sees one here too -
+  // Display::formatTimeOfDay() is the only place a time of day becomes text on
+  // this device.
+  return Display::formatTimeOfDay(localTm.tm_hour, localTm.tm_min);
 }
 
 String nextPassRiseTimeText() { return localHhMm(gNextPassRiseUtc); }

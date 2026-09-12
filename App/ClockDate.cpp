@@ -33,8 +33,10 @@ void cardDraw(uint16_t) {
   struct tm localTm;
   gmtime_r(&localNow, &localTm);
 
-  char timeBuffer[6];
-  snprintf(timeBuffer, sizeof(timeBuffer), "%02d:%02d", localTm.tm_hour, localTm.tm_min);
+  // Through Display so this card honours the household's 12-or-24 preference -
+  // it is the card most obviously about the time, so it would be the first place
+  // anybody noticed the setting not being applied.
+  const String timeText = Display::formatTimeOfDay(localTm.tm_hour, localTm.tm_min);
 
   // Weekday and month spelled out, the way a wall clock's own calendar strip
   // would read them, rather than the numeric HH:MM this device already shows
@@ -45,8 +47,8 @@ void cardDraw(uint16_t) {
   char dateBuffer[32];
   strftime(dateBuffer, sizeof(dateBuffer), "%A, %B %d", &localTm);
 
-  Log::verbose("[clockdate] drawing: %s %s", dateBuffer, timeBuffer);
-  Display::showClockDate(String(timeBuffer), String(dateBuffer));
+  Log::verbose("[clockdate] drawing: %s %s", dateBuffer, timeText.c_str());
+  Display::showClockDate(timeText, String(dateBuffer));
 }
 
 // ---------------------------------------------------------------------------

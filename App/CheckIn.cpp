@@ -476,6 +476,9 @@ Result perform() {
   // feature could do. See CheckIn::Result::maintenanceUntilUtc.
   result.maintenanceUntilUtc = parseMaintenanceUntil(responseDoc["maintenanceUntilUtc"]);
   result.utcOffsetMinutes = responseDoc["utcOffsetMinutes"] | 0;
+  // `| false` covers a server predating this field, which means 24-hour - the
+  // same thing an explicit false means. See CheckIn.h's own remarks.
+  result.use12HourClock = responseDoc["use12HourClock"] | false;
   result.isDaytime = responseDoc["isDaytime"] | true;
   // `| -1` covers a JSON null and a field an older server never sends at all. Both
   // mean the same thing to this client - no sunrise or sunset to show - so neither

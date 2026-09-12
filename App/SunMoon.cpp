@@ -42,9 +42,10 @@ int toLocalMinutes(int utcMinutes) {
 }
 
 String formatHhMm(int minutesOfDay) {
-  char buffer[6];
-  snprintf(buffer, sizeof(buffer), "%02d:%02d", minutesOfDay / 60, minutesOfDay % 60);
-  return String(buffer);
+  // Through Display so a household that reads 12-hour clocks sees one here too.
+  // Display::formatTimeOfDay() is the only place a time of day becomes text on
+  // this device - see its remarks on why that is a rule rather than a habit.
+  return Display::formatTimeOfDay(minutesOfDay / 60, minutesOfDay % 60);
 }
 
 /// Sunset minus sunrise, in UTC, wrapped so a day that crosses UTC midnight

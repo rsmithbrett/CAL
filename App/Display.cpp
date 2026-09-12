@@ -78,6 +78,14 @@ constexpr uint32_t kBannerLabelInk = 0xFFFFFFu;
 // daytime) so the very first boot screens - drawn before any check-in has
 // ever completed - still render sensibly.
 int gUtcOffsetMinutes = 0;
+
+/// Whether every time on this device reads "2:30 PM" rather than "14:30".
+///
+/// Resolved per device through the config cascade and pushed on each check-in,
+/// like the UTC offset beside it - it is a household preference, not a firmware
+/// build. Defaults to false so a device that has never checked in, or one whose
+/// account has never set it, looks exactly as it did before this existed.
+bool gUse12HourClock = false;
 bool gIsDaytime = true;
 
 uint32_t bg() { return gIsDaytime ? kBgDay : kBgNight; }
@@ -293,8 +301,7 @@ void drawClock() {
   const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
   struct tm localTm;
   gmtime_r(&localNow, &localTm);
-  char buffer[6];
-  snprintf(buffer, sizeof(buffer), "%02d:%02d", localTm.tm_hour, localTm.tm_min);
+  const String clockText = formatTimeOfDay(localTm.tm_hour, localTm.tm_min);
 
   // Sized for a person across a room, not for a screenshot. The first version of
   // this used Font0 at size 1 in muted grey - 6x8 pixels per character, roughly
@@ -318,7 +325,7 @@ void drawClock() {
   lcd.setTextSize(1);
   lcd.setTextColor(ink(), bg());
   lcd.setTextDatum(bottom_right);
-  lcd.drawString(buffer, kScreenW - 6, kScreenH - 4);
+  lcd.drawString(clockText, kScreenW - 6, kScreenH - 4);
 }
 
 // The boot-ladder screens' (showStatus/showFailure) own word-wrap - greedy,
@@ -831,6 +838,40 @@ void setEnvironment(int utcOffsetMinutes, bool isDaytime) {
 }
 
 int utcOffsetMinutes() { return gUtcOffsetMinutes; }
+
+void setUse12HourClock(bool use12Hour) { gUse12HourClock = use12Hour; }
+
+bool use12HourClock() { return gUse12HourClock; }
+
+String formatTimeOfDay(int hour24, int minute) {
+  // Defensive rather than trusting: two of the eight call sites derive the hour
+  // by dividing a minutes-of-day figure the server sent, so a bad value arrives
+  // as arithmetic rather than as an obviously wrong struct tm. Clamping here
+  // keeps a wrong time on screen from becoming a buffer full of nonsense.
+  if (hour24 < 0 || hour24 > 23 || minute < 0 || minute > 59) {
+    return String("--:--");
+  }
+
+  char buffer[9];
+  if (!gUse12HourClock) {
+    snprintf(buffer, sizeof(buffer), "%02d:%02d", hour24, minute);
+    return String(buffer);
+  }
+
+  // Midnight and noon are the two the naive "% 12" gets wrong - both land on 0,
+  // and "0:30 AM" is not a time anybody writes. 12-hour clocks have no zero.
+  int hour12 = hour24 % 12;
+  if (hour12 == 0) {
+    hour12 = 12;
+  }
+
+  // No leading zero on the hour: "2:30 PM", not "02:30 PM". That is how a
+  // 12-hour clock is written, and it also keeps the string one character
+  // shorter, which matters in the right-justified stat columns on the tides and
+  // sun/moon cards where this is 7 characters against 24-hour's 5.
+  snprintf(buffer, sizeof(buffer), "%d:%02d %s", hour12, minute, hour24 < 12 ? "AM" : "PM");
+  return String(buffer);
+}
 
 bool readTouchRaw(int32_t& x, int32_t& y) {
   return lcd.getTouch(&x, &y);

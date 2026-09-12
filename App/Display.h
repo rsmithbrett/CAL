@@ -36,6 +36,29 @@ void setEnvironment(int utcOffsetMinutes, bool isDaytime);
 /// pre-first-check-in default.
 int utcOffsetMinutes();
 
+/// Whether this household reads clocks as "2:30 PM" or "14:30". Pushed on every
+/// check-in from a per-device config value, the same way the UTC offset is - a
+/// preference, not a firmware build. False (24-hour) until a check-in says
+/// otherwise, which is how every device behaved before this existed.
+void setUse12HourClock(bool use12Hour);
+
+bool use12HourClock();
+
+/// **The one place a time of day becomes text on this device.** Every card that
+/// shows a clock time goes through here: the corner clock, the clock/date card,
+/// tides, sun/moon, the ISS pass, and the calendar's own "Today 14:30".
+///
+/// It exists because that list was eight separate `snprintf("%02d:%02d")` calls
+/// in seven files, which is why "show all times in 12-hour" was a change to
+/// seven files rather than to one setting. Anything new that prints a time calls
+/// this rather than adding a ninth.
+///
+/// Takes a 24-hour hour and a minute, because that is what every caller already
+/// has - either from a `struct tm` or from dividing a minutes-of-day figure the
+/// server sent. Returns "--:--" for an out-of-range value rather than formatting
+/// nonsense confidently.
+String formatTimeOfDay(int hour24, int minute);
+
 /// The raw touch read beneath Touch.h/.cpp's debounced, event-style API.
 /// Lives here, not in Touch.cpp, because this file already owns the one
 /// LGFX instance for this panel (see `lcd` and begin() below) - a second

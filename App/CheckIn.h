@@ -77,6 +77,19 @@ struct Result {
   /// survives a reboot that happens before this run's first check-in ever
   /// completes.
   int utcOffsetMinutes = 0;
+
+  /// Whether this household reads clocks as "2:30 PM" rather than "14:30",
+  /// resolved server-side from the ClockFormat config value.
+  ///
+  /// A per-check-in fact like the offset above rather than a one-time setting:
+  /// an admin can change it and every device picks it up on its next check-in
+  /// with no firmware involvement. False - and a server too old to send it -
+  /// both mean 24-hour, which is what every device did before this existed.
+  ///
+  /// Applied by handing it to Display::setUse12HourClock(), which is where the
+  /// whole fleet's clock formatting is decided; see Display::formatTimeOfDay().
+  bool use12HourClock = false;
+
   /// Whether the Sun is up right now at the device's location, recomputed
   /// fresh from real sunrise/sunset on every check-in - not a fixed
   /// day/night schedule. Defaults to true (daytime), matching the server's
