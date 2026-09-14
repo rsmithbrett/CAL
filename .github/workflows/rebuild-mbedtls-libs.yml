@@ -3,19 +3,44 @@
 #
 # WHY THIS EXISTS
 #
-# A new TLS session needs roughly 32KB CONTIGUOUS on this board: the stock core
-# ships CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN=16384, which buys a 16KB inbound plus
-# a 16KB outbound record buffer. The largest 8-bit block an ESP32-D0WD-V3 has
-# once WiFi is up is about 34,804 bytes, and it falls well below that while
-# cards are rendering - 4,596 has been measured. Handshakes then fail with
-# MBEDTLS_ERR_SSL_ALLOC_FAILED (-32512) and the device becomes unreachable for
-# telemetry, card policy AND firmware updates simultaneously.
+# A new TLS session needs 16,717 bytes CONTIGUOUS, twice, on this board. The
+# stock core ships CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN=16384, and
+# mbedtls_ssl_setup() makes TWO SEPARATE allocations from it - IN_BUFFER_LEN and
+# OUT_BUFFER_LEN, each 13 + 320 + 16384 = 16,717 bytes. The total is 33,434, but
+# the total is not what a marginal device has to clear: the largest SINGLE
+# contiguous demand is 16,717, and that is the figure the heap either has a hole
+# for or does not. Say 16,717 and not "roughly 32KB" - the two framings put a
+# struggling device on opposite sides of plausible, and this comment said the
+# wrong one for a while.
 #
-# Neither runtime escape is available: the shipped build defines no
-# MBEDTLS_SSL_MAX_FRAGMENT_LENGTH (so RFC 6066 negotiation cannot be used) and
-# no MBEDTLS_DYNAMIC_BUFFER. The buffers are sized inside mbedtls_ssl_setup()
-# from a compile-time constant, so nothing on the API side can change them -
-# not NetworkClientSecure, not raw mbedTLS. The library has to be rebuilt.
+# The largest 8-bit block an ESP32-D0WD-V3 has once WiFi is up is about 34,804
+# bytes, and it falls well below that while cards are rendering - 4,596 has been
+# measured. Handshakes then fail with MBEDTLS_ERR_SSL_ALLOC_FAILED (-32512) and
+# the device becomes unreachable for telemetry, card policy AND firmware updates
+# simultaneously.
+#
+# Neither runtime escape is available, though NOT for the reason this comment
+# used to give. It said the shipped build "defines no
+# MBEDTLS_SSL_MAX_FRAGMENT_LENGTH (so RFC 6066 negotiation cannot be used)".
+# That is false and checkably so: esp_config.h:1215 defines
+# MBEDTLS_SSL_MAX_FRAGMENT_LENGTH UNCONDITIONALLY, with no #ifdef CONFIG_ guard,
+# unlike the neighbours either side of it. MFL is compiled in and
+# mbedtls_ssl_conf_max_frag_len() is callable today.
+#
+# It buys nothing here anyway, and this is the real reason: the shipped
+# sdkconfig carries "# CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH is not set", so
+# mbedtls_ssl_setup() sizes both buffers from the compile-time constant before
+# any handshake happens and allocates the full 16,717 each regardless of what
+# gets negotiated afterwards. MFL shrinks what is USED. It never shrinks what is
+# ALLOCATED. Getting that reason right matters operationally: "MFL is absent"
+# points at rebuilding to add it, "MFL is present but inert" points at
+# VARIABLE_BUFFER_LENGTH, which is the varbuf branch below and a different
+# build.
+#
+# MBEDTLS_DYNAMIC_BUFFER is genuinely absent - see the three verified points
+# below. So the buffers are sized inside mbedtls_ssl_setup() from a compile-time
+# constant, and nothing on the API side can change them - not
+# NetworkClientSecure, not raw mbedTLS. The library has to be rebuilt.
 #
 # AND WHY THE STOCK LIBRARIES ARE LIKE THAT, stated narrowly.
 #
@@ -63,10 +88,13 @@
 # configuration actually contains the symbol (the Verify step below refuses to
 # pass otherwise), and only then measure whether runtime behaviour changes.
 #
-# 4096 takes the pair from ~32KB to ~8KB, which fits inside the worst contiguous
-# block observed on a struggling device with room to spare. TLS 1.2/1.3 both
-# tolerate smaller records, and this fleet's payloads are small JSON plus assets
-# under ~20KB.
+# 4096 takes each buffer from 13 + 320 + 16384 = 16,717 down to 13 + 320 + 4096
+# = 4,429, so the binding single contiguous demand drops from 16,717 to 4,429
+# (and the pair from 33,434 to 8,858). 4,429 fits inside the worst contiguous
+# block observed on a struggling device - 4,596 - with very little room to
+# spare, which is worth knowing before treating this variant as the safe one.
+# TLS 1.2/1.3 both tolerate smaller records, and this fleet's payloads are small
+# JSON plus assets under ~20KB.
 #
 # WHY ON A RUNNER RATHER THAN THE SERVER
 #
