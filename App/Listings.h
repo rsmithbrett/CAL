@@ -26,12 +26,15 @@ enum class Status {
                      // nothing is listed nearby right now - not an error. This is the ONLY
                      // status that licenses a claim about the market, which is why
                      // RefreshFailed below had to be split out of it.
-  RefreshFailed,     // the fetch succeeded and the list came back empty, but the server also
-                     // sent a lastRefreshError - so the emptiness is the absence of an
-                     // answer, not an answer. See the field of that name on Result, and
-                     // fetchMine()'s own remarks on why "nothing nearby" and "we could not
-                     // find out" must not share a status.
-  NotConfigured,     // ListingsResult.IsConfigured == false (no RentCast key on file) - an
+  RefreshFailed,     // the fetch succeeded and the list came back empty, but the server's own
+                     // upstream refresh did not - so the emptiness is the absence of an
+                     // answer, not an answer. Read from the server's `status`
+                     // (ProviderStatus.Unavailable), falling back on a pre-strip payload to
+                     // the presence of `lastRefreshError`; see fetchMine()'s own remarks on
+                     // both wire shapes, and on why "nothing nearby" and "we could not find
+                     // out" must not share a status.
+  NotConfigured,     // ListingsResult.IsConfigured == false, equivalently
+                     // ProviderStatus.NotConfigured (no RentCast key on file) - an
                      // operational resting state, not a device problem - see ListingsResult
                      // on the server for why this is a first-class value rather than an
                      // error string to pattern-match.
@@ -122,6 +125,15 @@ struct Result {
   /// Truncated to a length worth keeping in RAM (the column is 1000 characters
   /// server-side, and this lives in the retained gLast for as long as the state
   /// does). The head of the string is the part that identifies the fault.
+  ///
+  /// **Expected to be permanently empty, and that is not a regression.** The
+  /// server marks `LastRefreshError` `[OperatorDiagnostic]` and strips every
+  /// marked property from device-facing payloads, so a current server sends no
+  /// such field to a device at all - the reason now lives only on the server's
+  /// operator routes, which is where the reader who can act on it already was.
+  /// This field stays for as long as any reachable server predates that strip;
+  /// the status it used to be inferred from comes from `status` instead (see
+  /// fetchMine()). Every reader of it must tolerate empty - `cardStatus()` does.
   String refreshError;
 
   /// Whether this failure is one the words "cannot reach the service" were being

@@ -5730,11 +5730,15 @@ Not a stale reading and not a hedge - a confident claim about somebody's local
 property market, made by a device that had been told nothing at all about that
 market.
 
-The server had said so. `lastRefreshError` has been on the wire since the
+The server had said so. `lastRefreshError` had been on the wire since the
 endpoint existed and in the card's ArduinoJson filter since the card was
 written, and exactly one branch read it. So a 200 carrying `listings: []` went
 to `Status::Empty` whether the server had asked RentCast and heard "none" or had
 never got an answer out of it.
+
+The split below is the fix for that. The signal it reads is no longer that
+field - see "The signal moved to `status`" further down, which is the part to
+read if you are looking at `Listings.cpp` today rather than at this history.
 
 ### `Status::RefreshFailed` splits the two
 
@@ -5761,6 +5765,58 @@ fine. What broke is a feed only an administrator can restore, which is exactly
 `ProviderDisabled`'s and `NotConfigured`'s situation and they are already muted.
 Amber in a kitchen for a fault nobody in that kitchen can fix teaches its reader
 to ignore amber.
+
+### The signal moved to `status`, because the old one was a sentence
+
+The split above was right and the thing it read was not. Telling the two facts
+apart by the *presence* of `lastRefreshError` made a field written for an
+operator into a protocol element - and that field is the one whose contents
+reached a kitchen wall (next section). The server now marks it
+`[OperatorDiagnostic]` and strips every marked property from device-facing
+payloads at `DeviceJsonResult`, which put the strip and this split on a
+collision course: remove the field and every empty list looks like an answered
+question again, which is precisely the claim this section exists to have
+deleted.
+
+So the card reads `status` instead - `ProviderStatus` on the server, four values
+(`Ok`, `NotConfigured`, `Stale`, `Unavailable`), serialized by name, derived on
+the record from state it already has rather than authored at each failure site.
+`Unavailable` is what reaches `RefreshFailed`; `Stale` is the
+cached-rows-behind-a-failed-refresh case, which drew the rows before and still
+does. The device phrases each value in its own words, which is the whole point:
+four codes cannot leak a vendor's name.
+
+**The ArduinoJson filter was the actual work.** The filter whitelisted
+`isConfigured` and `lastRefreshError` and nothing else, and an un-whitelisted
+key is dropped during deserialization - it never reaches the parsed document at
+all. Reading `doc["status"]` without adding `f["status"] = true` in the same
+edit would have compiled, shipped, and fallen back to the old inference forever,
+silently, with nothing anywhere able to tell that apart from a server that never
+sent the field. There is an observation point now: the stream names the parsed
+value, so `status='(absent)'` against a server known to send it is a filter bug
+and reads as one. This is the same trap the two open gaps at the end of this
+section are sitting in, and it is now a demonstrated one rather than a predicted
+one.
+
+**Both wire shapes, deliberately.** `status` wins when present; the old
+presence-inference survives as a fallback for a server that predates the strip,
+reached only when the field is genuinely absent. One boolean reconciles them and
+every branch reads that boolean, so the fallback is one arm of one switch to
+delete once no reachable server predates the strip - `Listings.cpp` names what
+goes with it. An *unrecognized* status is deliberately not treated as an absent
+one: a newer server saying something specific is not an older server saying
+nothing, and its payload has no `lastRefreshError` to fall back to anyway, so a
+future fifth value degrades to "could not check for listings" rather than to a
+claim about the market.
+
+`isConfigured` is untouched. It is a boolean rather than operator prose, it is
+not marked, and the server asserts it present on the device payload - so the
+calm "not set up yet" branch needed no change and got none.
+
+None of this may raise `serviceUnreachable`. Every one of the four values
+arrives on a well-formed 200 from a server that answered; the distinction the
+previous subsection makes is exactly the one a status field could most easily
+have destroyed, and it did not.
 
 ### The leak that was already there: a vendor's error message on a kitchen wall
 

@@ -257,8 +257,18 @@ wrong figure routes a reader to the wrong work.
 upstream error from a drawn string.
 
 **Automated coverage:** the server side of this is covered by
-`Providers.Tests` / `MyListingsServiceTests` in the DiscoverAroundMe repository,
-which is what puts `lastRefreshError` on the wire. Nothing tests the card.
+`Providers.Tests` / `MyListingsServiceTests` and `DeviceFacingPayloadTests` in
+the DiscoverAroundMe repository, which are what put `status` on the wire and
+keep `lastRefreshError` off it. Nothing tests the card. **Nothing can:** the
+behaviour under test is a branch taken inside `fetchMine()` on a parsed
+response, on hardware, with no test harness on either side of it - which is why
+every step below is a human at a bench, and why 3c exists at all.
+
+> **The signal this card reads changed.** It used to be the *presence* of
+> `lastRefreshError`; it is now the server's `status` field, with the old
+> inference kept as a fallback. Section 3c is the procedure for that, and it
+> supersedes 3a step 5 - read 3c before running 3a against a current server, or
+> you will report a regression that is the fix working.
 
 ### 3a. The three empty states draw three different things
 
@@ -276,10 +286,15 @@ of the RentCast key.
    "rentcast.io", "API key", "MyListings" and any HTTP status code appear
    nowhere on it. This is the actual regression being guarded: a household read
    a vendor's sign-up instructions off a kitchen wall.
-5. Confirm the same error text **is** present in the debug stream and on
-   `/diag`'s status line for that card, truncated to 120 characters. Suppressing
-   it from the screen while also losing it would be a worse outcome than the
-   leak.
+5. ~~Confirm the same error text **is** present in the debug stream and on
+   `/diag`'s status line for that card, truncated to 120 characters.~~
+   **Superseded - see 3c step 4.** This was right when the device could still
+   read the sentence. A current server sends no operator diagnostic to a device
+   at all, so the text is *absent* from the stream by design and the card's
+   `/diag` line reads "upstream refresh failed (reason is on the server, not the
+   device)". The reason has not been lost - it moved to the server's own
+   operator routes. Against a pre-strip server the original wording still
+   applies, which is the only reason it is struck through rather than deleted.
 6. Declare a maintenance window while the key is invalid. The card must keep
    saying "could not be refreshed" - **not** "server maintenance". Our server is
    answering fine; it is RentCast that is not, and relabelling that as our
@@ -315,6 +330,148 @@ them from scratch.
 Note both open fixes need a filter entry added before the field is readable at
 all, and the filter is what decides how much heap the parse takes. That is why
 neither was smuggled into the listings change.
+
+### 3c. The card reads `status`, and still works on a server that does not send it
+
+The signal moved. `Status::RefreshFailed` used to be reached by noticing that
+`lastRefreshError` was a non-empty string; the server now strips that field from
+every device-facing payload (it is operator prose, and one of those sentences
+reached a household's wall), so noticing its absence would have put the original
+defect straight back. The card reads the server's `status` field instead -
+`ProviderStatus`, four values, serialized by name in PascalCase - and falls back
+to the old inference only when `status` is not on the payload at all.
+
+So there are **two wire shapes in service at once**, and this section is about
+proving the card is right on both. It needs no new hardware state beyond 3a's;
+what it needs is the debug stream on and somebody reading it.
+
+**Prerequisites, and one that silently voids the whole section.**
+
+- A device with the listings card in its policy, on `v2026.09.14.0003` or later.
+- Server-side control of `MyListings:ApiKey` **and** of which server build is
+  deployed at `kServiceHost` (`api.discoveraroundme.com`, compiled in - there is
+  no runtime override, so "point it at a different server" means a firmware
+  rebuild, not a setting).
+- **The remote debug stream must be ON.** The two lines that name the decision
+  are `Log::verbose`, which is a complete no-op when nobody is listening. With
+  the stream off, every step below is unobservable and the card looks identical
+  in all four states. This is the single most common way to waste a bench
+  session on this card.
+- Content refreshes every 10 minutes (`kContentRefreshIntervalMs`), so budget
+  one wait per state change rather than expecting the screen to follow a
+  server-side edit immediately. Do not read a stale card as a failed test.
+
+#### 1. Establish which shape the server is actually sending
+
+Watch the stream across one fetch and find the pair:
+
+```
+[listings] status='Unavailable' - refresh failed with nothing cached to fall back on
+[listings] lastRefreshError absent; refresh treated as FAILED, decided by status (lastRefreshError not consulted)
+```
+
+The first line is the whole point of the exercise: **`status='(absent)'` against
+a server you know sends the field means the field was dropped by
+`Listings.cpp`'s ArduinoJson filter, not by the server.** An un-whitelisted key
+never reaches the parsed document, so a missing filter entry is indistinguishable
+at every other observation point from a server that never sent anything - it
+would look exactly like a permanent, silent fallback that happens to still work.
+This line is the only place that distinction is visible. Check it first; if it
+reads `(absent)` when it should not, stop, because nothing below is meaningful.
+
+#### 2. Each of the four values, with the branch it must produce
+
+Drive these the same way 3a drives its three states - the server derives `status`
+from the key and the cache rather than being told it, so there is no way to set
+it directly, which is deliberate.
+
+| Server state | `status` | Card must draw | Must NOT draw |
+|---|---|---|---|
+| Valid key, market genuinely empty | `Ok` | "No listings nearby right now" | anything about a failure |
+| Invalid key, no cached rows | `Unavailable` | "Could not check for listings" | "No listings nearby right now" |
+| Invalid key, cached rows present | `Stale` | the real listings, dated | any warning at all |
+| Key removed entirely | `NotConfigured` | the fixed "not set up yet" sentence | a vendor, a URL, a settings key |
+
+Row 2 is the regression this commit exists to prevent: on a stripped payload
+with the old code the card would have said the market was empty. Row 3's "no
+warning at all" is a deliberate choice, not an oversight - see 3a step 7.
+
+The corresponding decision lines, which say what was chosen **and what was
+skipped**, are:
+
+```
+[listings] empty list AND a failed refresh -> RefreshFailed; Empty NOT taken - ...
+[listings] empty list and a SUCCESSFUL refresh -> Empty; RefreshFailed NOT taken - ...
+[listings] serving 3 cached listing(s) behind a failed refresh - drawing them rather than a warning, and NOT taking RefreshFailed: ...
+[listings] NOT CONFIGURED - resting; neither an empty market nor a failed refresh, and the listings array was not consulted
+```
+
+Confirm the line matches the screen. A card and a stream that disagree is a
+worse finding than either being wrong alone.
+
+#### 3. The fallback, which is the half that is live on the fleet today
+
+Deploy a server build from **before** the strip (one that still sends
+`lastRefreshError` and no `status`) and repeat rows 2-4. Every screen must be
+identical to the table above. The stream is what differs, and must say so
+explicitly:
+
+```
+[listings] status='(absent)' - no status field on this payload - a server that predates the field
+[listings] lastRefreshError present; refresh treated as FAILED, decided by lastRefreshError's presence (FALLBACK: no status on this payload)
+```
+
+Two shapes, one set of screens. That is the requirement. A device in the field
+sees both across a rolling deploy, sometimes minutes apart.
+
+*Deleting this step is how you know the fallback can go:* once no reachable
+server predates the strip, `decided by ... FALLBACK` can never be logged again,
+and `Listings.cpp` says which names then become a pure deletion.
+
+#### 4. The reason is gone from the device, and that is the fix
+
+Against a current server, in rows 2, 3 and 4:
+
+1. The operator's sentence appears **nowhere on the device** - not on screen
+   (3a step 4 already photographs for this), and now not in the debug stream or
+   the `/diag` status line either. The card's `/diag` line reads "upstream
+   refresh failed (reason is on the server, not the device)".
+2. The same sentence is still readable on the server's own operator routes -
+   `/diag/providers`, `by-zip`, `for-user`, the POST refresh. **Check this.**
+   Losing the diagnostic entirely would be a worse outcome than the leak, and
+   "it is off the device" and "it still exists" are two separate claims.
+3. Confirm the stream says the absence is expected rather than staying silent
+   about it - the "no reason on the wire - status alone said so" line. A blank
+   where a reason used to be must not read as a server bug to the next person.
+
+#### 5. The two distinctions that must survive, and are easy to break
+
+1. **`serviceUnreachable` stays false.** Declare a maintenance window while the
+   key is invalid (3a step 6 already covers the wording; this is the same check
+   restated against the new signal, because the signal changed and the reason
+   for the flag did not). The card must keep saying "could not be refreshed" and
+   must not say "server maintenance". None of the four `status` values means our
+   server is unreachable - every one of them arrives on a well-formed 200 from a
+   server that answered - so nothing read out of that field may ever raise the
+   flag.
+2. **`NotConfigured` is unchanged and must stay calm.** `isConfigured` is a
+   boolean, not operator prose, and is **not** stripped - the server asserts it
+   present on the device payload. So the "not set up yet" branch was not touched
+   and must behave exactly as it did in 3a step 3. Confirm it still rests rather
+   than going amber, and that the card does not report a failed refresh for a
+   provider that was never asked.
+
+#### 6. A status this build has never heard of
+
+Not reachable against today's server - `ProviderStatus` has four values and the
+card knows all four - so this is a read of the code rather than a bench step,
+recorded because the next value added is when it matters. An unknown `status` is
+treated as a failed refresh, **not** as an absent one: a newer server saying
+something specific is not the same as an older server saying nothing, and its
+payload will have no `lastRefreshError` to fall back to anyway. The consequence
+is that a future fifth value degrades to "could not check for listings" - never
+to a claim about the market. If a fifth value is ever added and that is the wrong
+default for it, this is the line to change.
 
 ---
 
