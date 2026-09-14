@@ -57,7 +57,7 @@
 /// signed difference from the floor to the phase in force, and moves the floor.
 /// Nothing is thresholded away, so by construction:
 ///
-///   bootLargestFreeBlock - floor  ==  sum of the five phase buckets
+///   bootLargestFreeBlock - floor  ==  sum of the six phase buckets
 ///
 /// That identity is the point, and it is why the buckets are SIGNED rather than
 /// a tally of downward steps only. Three things follow from it that a
@@ -74,7 +74,7 @@
 ///     already sends. If the buckets do not account for
 ///     (bootLargestFreeBlockBytes - largestFreeBlock8BitBytes), then either a
 ///     phase is missing a Scope or the carving happens somewhere none of the
-///     five phases cover. An instrument that can be caught being wrong from its
+///     six phases cover. An instrument that can be caught being wrong from its
 ///     own output is worth more than one that cannot.
 ///
 /// Observations happen only at phase BOUNDARIES, never mid-phase, and that is
@@ -83,6 +83,20 @@
 /// tracks the true ratchet instead of chasing transient dips it will never see
 /// recovered. Sampling mid-phase would record a 44KB decode scratch as a 44KB
 /// loss and then never credit the free, which is precisely the wrong answer.
+///
+/// **A boundary is quiescent for the phase that just ended, NOT for the one
+/// enclosing it, and the first real reading is what made that distinction
+/// expensive.** Telemetry opens a Service scope nested inside check-in's, so the
+/// Service boundary lands in the middle of the check-in - and device 17 came
+/// back with checkin -12,288 and service +12,288. The sum is right, the halves
+/// are not: that is one transient observed from both sides, credited on the way
+/// down and credited back on the way up. The buckets survive it (they net to
+/// zero, which is the truth), but the STEP COUNTER did not - each half was being
+/// counted as a discrete downward step and the mean step size, which is the only
+/// thing stepCount() exists to support, was being pulled toward the size of
+/// something that never cost this device a byte. See stepCount() for how a step
+/// is now confirmed rather than counted, and for why observing at outermost
+/// boundaries only - which would also have fixed it - was the wrong trade.
 ///
 /// ---------------------------------------------------------------------------
 /// WHAT IT COSTS - because this is a memory investigation and an instrument
@@ -96,22 +110,24 @@
 ///     never the characters. This property is load-bearing, not incidental: an
 ///     instrument that allocated would carve the very heap it is measuring and
 ///     the measurement would include itself.
-///   - Static RAM: 46 bytes of state (5 int32 buckets, a floor, a step count, a
-///     worst-step triple, the current phase and subject), call it 48 with
-///     alignment.
+///   - Static RAM: about 70 bytes of state (6 int32 buckets, a floor, a step
+///     count, a worst-step triple, the current phase and subject, and the
+///     held-step quintuple stepCount() describes), call it 72 with alignment.
+///     Up from 46 - the Boot bucket is 4 bytes of it and the deferral the rest.
 ///   - Stack: 12 bytes per live Scope - two pointers and a byte - and the
-///     deepest nesting this firmware reaches is two (a Draw inside a Fetch, or
-///     a Service inside a CheckIn). 24 bytes, against the headroom StackWatch
-///     reports.
-///   - Telemetry wire: eight new flat fields, ~190 bytes of body text. Eight
-///     more ArduinoJson slots at 8 bytes each inside the pool the document
-///     already holds - ARDUINOJSON_POOL_CAPACITY is 128 slots on this 32-bit
-///     target and the telemetry document uses roughly 20, so this allocates NO
-///     new pool. Keys and the one string value are literals, which ArduinoJson
-///     links rather than copies. The body String may cross one realloc
-///     boundary; that is a transient inside the Service phase and this module
-///     measures it, which is the correct self-consistent answer rather than an
-///     unaccounted cost.
+///     deepest nesting this firmware reaches is three, all of it inside setup()
+///     (Boot, the boot check-in's CheckIn, and telemetry's Service inside that).
+///     36 bytes, against the headroom StackWatch reports.
+///   - Telemetry wire: nine flat fields, ~210 bytes of body text. Nine more
+///     ArduinoJson slots at 8 bytes each inside the pool the document already
+///     holds - ARDUINOJSON_POOL_CAPACITY is 128 slots on this 32-bit target and
+///     the telemetry document uses roughly 20, so this allocates NO new pool.
+///     Keys and the one string value are literals, which ArduinoJson links
+///     rather than copies. The body String may cross one realloc boundary; that
+///     is a transient inside the Service phase and this module measures it,
+///     which is the correct self-consistent answer rather than an unaccounted
+///     cost - and one of the very transients the deferred step counter now
+///     declines to call a ratchet step.
 ///   - CPU: two heap_caps_get_largest_free_block() calls per Scope plus one per
 ///     loop() iteration. That walk is O(free blocks) under a lock, tens of
 ///     microseconds, against a loop paced at 50ms. HeapTrace already does three
@@ -129,7 +145,7 @@
 /// where "we suspected that all along" is worth nothing unless it was said
 /// beforehand, and a hypothesis that cannot be embarrassed by the data is not a
 /// hypothesis. Each of these predicts a DIFFERENT bucket, which is the only
-/// reason five buckets are enough.
+/// reason the named buckets are enough.
 ///
 /// 1. **A long-lived String built on top of a JsonDocument that is then freed
 ///    underneath it.** Predicts Fetch.
@@ -191,7 +207,7 @@
 /// what settles it.
 namespace HeapRatchet {
 
-/// The five buckets, chosen to discriminate between the candidates the
+/// The six buckets, chosen to discriminate between the candidates the
 /// rotation actually offers rather than to cover every function.
 ///
 /// The candidates, and which bucket each one lands in:
@@ -214,6 +230,10 @@ namespace HeapRatchet {
 ///     costs three wire fields to separate three things nobody would treat
 ///     differently. The subject on the log line still names which one.
 ///                                                                  -> Service
+///   - setup(), all of it: the splash decode (45,056 bytes in one step on device
+///     17, the largest single step of that entire session), the display, the SD
+///     mount, WiFi association, the TLS client, the boot check-in. One-time
+///     costs, paid once, and not the rotation.               -> Boot
 ///   - Everything else: the WiFi and LWIP stacks, touch sampling, the timers,
 ///     and - this is the important part - anything this instrumentation FORGOT.
 ///                                                                  -> Idle
@@ -224,8 +244,21 @@ namespace HeapRatchet {
 /// person somewhere entirely different. That is the outcome worth designing
 /// for, because it is the one an instrument that only covered its own
 /// hypotheses could never produce.
+///
+/// **Boot was added after the first real reading, and it is a correction rather
+/// than an extra.** setup() runs before any Scope exists, so everything it did -
+/// the display, the SD mount, WiFi, TLS, the boot check-in, and above all the
+/// splash decode, which showed up as a single 45,056-byte step, the largest of
+/// the whole session - was landing in Idle. Idle's entire job is to isolate the
+/// one thing nothing else covers: the LWIP and WiFi background allocation, over
+/// a whole session, on a device that is just sitting there. Mixing a known
+/// one-time boot cost into that bucket does not merely inflate it, it makes it
+/// mean nothing: "47,104 in Idle" reads as a finding about the background and
+/// was in fact mostly one PNG. Naming the boot honestly is what lets Idle answer
+/// its own question.
 enum class Phase : uint8_t {
   Idle = 0,
+  Boot,
   Draw,
   Fetch,
   CheckIn,
@@ -295,16 +328,47 @@ class Scope {
 /// back; negative means the free list coalesced more than the phase consumed.
 int32_t netBytes(Phase phase);
 
-/// How many observations moved the floor DOWNWARD. Sent beside the buckets so
-/// the mean step size is arithmetic the server can do: the claim these steps
-/// are multiples of 2,048 was made by reading a stream line by line, and this
-/// is what lets it be checked on a fleet with every stream off.
+/// How many downward moves of the floor were still unrecovered at the following
+/// observation. Sent beside the buckets so the mean step size is arithmetic the
+/// server can do: the claim these steps are multiples of 2,048 was made by
+/// reading a stream line by line, and this is what lets it be checked on a fleet
+/// with every stream off.
+///
+/// **"Still unrecovered at the following observation" is a correction, and the
+/// first real reading is what forced it.** This used to count every downward
+/// move at the instant it was seen, which meant a transient inside a nested
+/// scope counted as a ratchet step and was then silently given back. Device 17,
+/// 17 minutes, stream off: checkin -12,288 and service +12,288, net zero and
+/// arithmetically correct, but two contaminated steps in a counter whose only
+/// consumer is a mean. Telemetry runs nested inside the check-in scope on
+/// purpose (see Telemetry.cpp), so this is not a rare shape - it happens on
+/// every single check-in, and it was pushing the mean step toward the size of a
+/// transient that never cost the device anything.
+///
+/// A step is therefore CONFIRMED rather than counted: a qualifying drop is held,
+/// and the next observation decides. Recovered, and it never happened; still
+/// down, and it is counted at the size actually retained, which is the honest
+/// figure when the recovery was partial. observe() runs once per loop()
+/// iteration, so a held step resolves within about 50ms and the counter is never
+/// meaningfully behind.
+///
+/// The obvious alternative - observing only at OUTERMOST scope boundaries - was
+/// rejected. It fixes this by giving up the nesting, and separating a Draw
+/// inside a Fetch is most of the point of having Scope at all (see the class's
+/// own remarks). Deferring the step keeps every bucket exactly as accurate as it
+/// was, including the identity above, and changes only the counter that was
+/// actually wrong.
 uint16_t stepCount();
 
-/// The largest single downward step since begin(), and the phase it happened
-/// in. One big carve and fifty small ones decay a heap at the same rate and
-/// want completely different fixes, and the buckets alone cannot tell them
+/// The largest single CONFIRMED downward step since begin(), and the phase it
+/// happened in. One big carve and fifty small ones decay a heap at the same rate
+/// and want completely different fixes, and the buckets alone cannot tell them
 /// apart.
+///
+/// Same confirmation rule as stepCount(), and it matters more here than there: a
+/// 12,288-byte transient handed straight back was previously eligible to become
+/// the reported worst step of a whole session, which is the single most
+/// misleading field this module could produce.
 uint32_t worstStepBytes();
 const char* worstStepPhaseName();
 

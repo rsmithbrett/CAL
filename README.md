@@ -5212,18 +5212,49 @@ is itself the dominant consumer (200 `String` slots, a 16KB ceiling, a
 has never decayed, and every stream on the fleet is off right now deliberately,
 so that real-world reboots can be measured. An instrument that needed the stream
 would describe a device in a state nobody is trying to fix. So the deliverable is
-eight flat fields on the telemetry POST:
+nine flat fields on the telemetry POST:
 
 | Field | What it discriminates |
 | --- | --- |
+| `heapPhaseBootBytes` | all of `setup()`: the splash decode, the display, the SD mount, WiFi, TLS, the boot check-in. Finished the moment `setup()` returns, so every other bucket reads as "since that" |
 | `heapPhaseDrawBytes` | LovyanGFX, the RGB565 band buffer, per-card draw `String`s, and `drawChrome()`'s dozen small `String` allocate/free pairs per draw |
 | `heapPhaseFetchBytes` | provider HTTPS fetches: ArduinoJson pools, HTTP body `String`s, the long-lived `Result` `String`s |
 | `heapPhaseCheckInBytes` | the ~4KB `CheckIn::Result`, the largest JSON parse this firmware does, the policy and announcement `String`s |
 | `heapPhaseServiceBytes` | telemetry, the debug-stream flush, the fallback update check |
 | `heapPhaseIdleBytes` | WiFi/LWIP, touch, the timers - **and anything this instrumentation forgot** |
-| `heapRatchetSteps` | how many discrete downward steps; total decay over this is the mean step, which is what checks the "multiples of 2,048" claim across a fleet with every stream off |
+| `heapRatchetSteps` | how many downward moves were still unrecovered at the following observation; total decay over this is the mean step, which is what checks the "multiples of 2,048" claim across a fleet with every stream off |
 | `heapWorstStepBytes` | one big carve versus fifty small ones - same decay rate, completely different fixes |
 | `heapWorstStepPhase` | which phase took that worst step |
+
+**Two of these are corrections made after the first real reading**, which is
+recorded here because both changed what the earlier numbers meant. Device 17,
+stream off, 17 minutes: draw 0, fetch 0, checkin -12,288, service +12,288, idle
+47,104, sum 47,104 = boot 110,580 - live 63,476. The identity held to the byte,
+and neither correction changes the conclusion - the rotation costs nothing and
+the debug stream was the ratchet. Both stop the next reader misreading the
+buckets.
+
+`heapPhaseBootBytes` is new because `setup()` runs before any scope exists, so
+the whole boot was landing in Idle - including the splash PNG decode, one step of
+45,056 bytes and the largest of that entire session. Idle's job is to isolate the
+LWIP and WiFi background that nothing else covers, and a bucket reading 47,104
+that is 96% a known one-time cost does not overstate the background so much as
+make it unreadable. The remaining ~2KB was the actual answer and could not be
+seen. **A reader summing the buckets for the identity check must now include
+this field**, or it will come up short by whatever `setup()` cost.
+
+`heapRatchetSteps` counts *confirmed* steps. It used to count every downward move
+at the instant it was seen, so the check-in/service pair above - one transient
+observed from both sides of a nested scope, credited down and credited back -
+contributed two steps that cost the device nothing, on every single check-in
+(telemetry rides inside check-in's scope deliberately). A qualifying drop is now
+held for one observation: recovered, and it never happened; still down, and it
+counts at the size actually retained. Observing only at outermost scope
+boundaries would have fixed it too, and was rejected - it buys the fix by giving
+up the nesting, and separating a Draw inside a Fetch is most of the point of
+having scopes at all. `heapWorstStepBytes` follows the same rule, where it
+matters more: a 12,288-byte transient handed straight back was previously
+eligible to be reported as the worst step of a whole session.
 
 They are **signed net** figures, not a tally of drops, and that is the design.
 A phase that allocates 44KB and hands all of it back nets ~0 and is visibly not
@@ -5231,12 +5262,14 @@ the culprit; a phase that carves 2,048 and keeps it reads `+2048`. Telling those
 two apart is the entire question, and gross allocation volume cannot.
 
 **The instrument can be caught being wrong from its own output.** By
-construction the five buckets sum to
+construction the six buckets sum to
 `bootLargestFreeBlockBytes - largestFreeBlock8BitBytes`. If that identity does
 not hold on a real device, a phase is missing a scope or the carving happens
-somewhere all five buckets miss. Given how many confident wrong figures this
+somewhere all six buckets miss. Given how many confident wrong figures this
 investigation has already been sent down blind alleys by, an instrument with a
-built-in check on itself was worth the extra field.
+built-in check on itself was worth the extra field. Six, not five - see
+`heapPhaseBootBytes` above, and check the reading end first if the sum starts
+coming up short by roughly a boot's worth.
 
 **A large `heapPhaseIdleBytes` is the most useful result, not the boring one.**
 It rules out drawing, fetching, check-in and the housekeeping POSTs in a single
@@ -5249,10 +5282,13 @@ investigation that changes the memory is worse than adding nothing:
 - **Heap: zero.** No `String`, no `JsonDocument`, no `malloc`, on any path.
   Every label is a `const char*` into flash - phase names, `CardSpec::id`, four
   fixed subject literals. Pointers are copied, never characters.
-- **Static RAM: 46 bytes** (five `int32_t` buckets, a floor, a step count, a
-  worst-step triple, the current phase and subject), 48 with alignment.
-- **Stack: 12 bytes per live scope**, maximum nesting two.
-- **Wire: ~190 bytes** of body text and eight more ArduinoJson slots at 8 bytes
+- **Static RAM: about 70 bytes** (six `int32_t` buckets, a floor, a step count, a
+  worst-step triple, the current phase and subject, and the held-step quintuple
+  the deferred counter needs), 72 with alignment. Up from 46: the Boot bucket is
+  4 bytes of that and the deferral the rest.
+- **Stack: 12 bytes per live scope**, maximum nesting three - Boot, the boot
+  check-in inside it, and telemetry's Service inside that.
+- **Wire: ~210 bytes** of body text and nine more ArduinoJson slots at 8 bytes
   each - inside the pool the telemetry document already holds, since
   `ARDUINOJSON_POOL_CAPACITY` is 128 slots on this 32-bit target and that
   document uses roughly twenty. **No new pool is allocated.** The body `String`
@@ -5261,7 +5297,9 @@ investigation that changes the memory is worse than adding nothing:
 - **CPU:** two `heap_caps_get_largest_free_block()` walks per scope plus one per
   `loop()` iteration, against a loop paced at 50ms.
 
-**Where the scopes are, and why only there.** `CardManager::drawCurrent()` (the
+**Where the scopes are, and why only there.** A Boot scope opened immediately
+after `HeapRatchet::begin()` in `setup()` and living to that function's closing
+brace (a named local, so RAII covers every exit); `CardManager::drawCurrent()` (the
 one choke point every card's draw passes through, so one scope covers every card
 module including ones added later), `CardManager::fetchCard()` around
 `card.fetch()` alone (one scope for all the providers, which are the same code

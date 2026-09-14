@@ -263,19 +263,36 @@ void report(const char* lastCheckInOutcome) {
   // this very function has allocated between the Scope above and the reading a
   // few lines up. **The server should check that sum**, because if it does not
   // hold, this instrument is wrong - a phase is missing a Scope, or the carving
-  // happens somewhere all five buckets miss - and an instrument that can be
+  // happens somewhere all six buckets miss - and an instrument that can be
   // caught being wrong from its own output is the only kind worth adding to an
   // investigation that has already been sent down two blind alleys by figures
   // that looked authoritative (ESP.getMaxAllocHeap()'s constant 32,756, and
   // "roughly 32KB" for a floor that is really 16,717 twice over).
   //
   // heapPhaseIdleBytes is not the leftovers column. It is the WiFi and LWIP
-  // stacks, touch, the timers, the whole of setup() before the rotation starts
-  // - and anything this instrumentation forgot. A device up for half an hour
-  // with its decay sitting in Idle has ruled out drawing, fetching, check-in
-  // and the housekeeping POSTs in a single figure, which is the most useful
-  // thing this could possibly report and the one result a set of buckets that
-  // only covered the suspects could never produce.
+  // stacks, touch, the timers - and anything this instrumentation forgot. A
+  // device up for half an hour with its decay sitting in Idle has ruled out
+  // drawing, fetching, check-in and the housekeeping POSTs in a single figure,
+  // which is the most useful thing this could possibly report and the one result
+  // a set of buckets that only covered the suspects could never produce.
+  //
+  // It no longer includes setup(). That sentence used to be part of this comment
+  // and was the problem: device 17's first reading put 47,104 in Idle, of which
+  // 45,056 was one step - the boot splash decode - so the bucket meant to
+  // isolate the background was 96% a known one-time cost and the ~2KB that was
+  // the actual answer could not be seen.
+  //
+  // **heapPhaseBootBytes has to be included in the server's identity check.**
+  // The buckets are still exact; Boot did not create bytes, it took them out of
+  // Idle. But a reader summing only the five fields it already knows will now
+  // come up short by whatever setup() cost, which on device 17 is most of the
+  // total. That is work on the reading end, not a defect here, and it is said
+  // out loud so the first person to watch the check fail knows which end to fix.
+  //
+  // Sent first because it is the one bucket that FINISHES: it stops accumulating
+  // the moment setup() returns, so from the second report onward it is a
+  // constant and everything after it reads as "since the boot cost".
+  requestDoc["heapPhaseBootBytes"] = HeapRatchet::netBytes(HeapRatchet::Phase::Boot);
   requestDoc["heapPhaseDrawBytes"] = HeapRatchet::netBytes(HeapRatchet::Phase::Draw);
   requestDoc["heapPhaseFetchBytes"] = HeapRatchet::netBytes(HeapRatchet::Phase::Fetch);
   requestDoc["heapPhaseCheckInBytes"] = HeapRatchet::netBytes(HeapRatchet::Phase::CheckIn);

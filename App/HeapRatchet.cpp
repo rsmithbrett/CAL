@@ -41,6 +41,7 @@ constexpr int32_t kNotableStepBytes = 1024;
 const char* phaseName(Phase phase) {
   switch (phase) {
     case Phase::Idle:    return "idle";
+    case Phase::Boot:    return "boot";
     case Phase::Draw:    return "draw";
     case Phase::Fetch:   return "fetch";
     case Phase::CheckIn: return "checkin";
@@ -76,6 +77,58 @@ uint32_t gWorstStepBytes = 0;
 const char* gWorstStepPhase = "none";
 const char* gWorstStepSubject = "-";
 
+/// A qualifying drop seen but not yet confirmed as a ratchet step - see
+/// stepCount()'s remarks in the header for why counting one at the instant it is
+/// seen was wrong.
+///
+/// Held for exactly one observation. The next one decides: if the largest block
+/// has climbed back to where it was before the drop, the drop was a transient
+/// inside somebody's scope and never cost this device anything; if it has not,
+/// the step is committed at the size actually retained. Nothing here touches the
+/// buckets, which credit every byte at the moment they see it and always did -
+/// this is only about which drops deserve to be called steps.
+bool gPendingStep = false;
+/// The largest block immediately BEFORE the held drop, which is the level the
+/// next observation has to reach for the drop to count as recovered.
+size_t gPendingFloorBefore = 0;
+/// The held drop's own size, so a later further drop cannot be folded into it
+/// and counted twice - see the min() at the commit site.
+int32_t gPendingBytes = 0;
+Phase gPendingPhase = Phase::Idle;
+const char* gPendingSubject = "-";
+
+/// Commits a confirmed step. Split out because the confirmation site and the
+/// log line both want it and neither is the obvious owner.
+void commitStep(int32_t bytes, size_t landedAt) {
+  ++gSteps;
+  if (static_cast<uint32_t>(bytes) > gWorstStepBytes) {
+    gWorstStepBytes = static_cast<uint32_t>(bytes);
+    gWorstStepPhase = phaseName(gPendingPhase);
+    gWorstStepSubject = gPendingSubject;
+  }
+
+  // Log::printf, not Log::verbose, for the reason HeapTrace::mark() gives at
+  // length: verbose is gated on the debug stream, and the stream is exactly
+  // what stops working on a device that has fallen below the TLS floor - so a
+  // trace that vanishes in the failure it was added to measure is no trace at
+  // all. With the stream off this costs a Serial.println and no heap
+  // whatsoever (see Log::line(const char*), which builds its String only inside
+  // the streaming branch).
+  //
+  // This is a bonus channel, not the deliverable. All streams are off
+  // fleet-wide right now by design, so the figures that have to survive are the
+  // ones on the telemetry POST; this line is what pays off for whoever turns a
+  // stream on afterwards and wants the exact card rather than just the phase.
+  //
+  // Named for the phase and subject that were in force when the drop HAPPENED,
+  // not for whatever is running now that it has been confirmed. Getting that
+  // wrong would attribute every step to the phase one observation later, which
+  // is the same one-to-the-right error Scope's constructor comment warns about.
+  Log::printf("[ratchet] step -%d to %u during %s (%s), step %u this boot",
+              static_cast<int>(bytes), static_cast<unsigned>(landedAt),
+              phaseName(gPendingPhase), gPendingSubject, static_cast<unsigned>(gSteps));
+}
+
 }  // namespace
 
 void begin(uint32_t bootLargestFreeBlock) {
@@ -101,6 +154,38 @@ void observe() {
   }
 
   const size_t now = heap_caps_get_largest_free_block(kCaps);
+
+  // Resolve whatever the last observation held, and do it BEFORE the unchanged
+  // early return below rather than after - see stepCount() in the header for the
+  // rule, and note that "unchanged" is the commonest way for a held step to turn
+  // out to be real. The steps this investigation is chasing are followed by
+  // plateaus lasting minutes; resolving after the early return would leave every
+  // one of them held, uncounted, for the whole plateau, which is exactly the
+  // steps that matter arriving late on a counter whose consumer is a mean.
+  if (gPendingStep) {
+    gPendingStep = false;
+    const int32_t retained = static_cast<int32_t>(static_cast<int64_t>(gPendingFloorBefore) -
+                                                  static_cast<int64_t>(now));
+    if (retained < kNotableStepBytes) {
+      // Given back. A transient inside somebody's scope - a check-in's response
+      // Strings, a telemetry body, a decode scratch - and it is no longer costing
+      // this device anything. Not a step, and never narrated, because a line per
+      // transient is precisely the noise kNotableStepBytes exists to keep out.
+      //
+      // The bytes were credited to their phase on the way down and credited back
+      // on the way up, so the buckets already say "net zero" without any help
+      // from here. The deferral touches the step counter and nothing else.
+    } else {
+      // Committed at the size actually RETAINED rather than at the size first
+      // seen, so a partial recovery reports what it really left behind. min()
+      // against the held drop's own size is what stops a second, further drop
+      // arriving on this same observation from being folded into the first and
+      // counted twice: that second drop is about to be held on its own below,
+      // measured from its own previousFloor.
+      commitStep(retained < gPendingBytes ? retained : gPendingBytes, now);
+    }
+  }
+
   if (now == gFloor) {
     return;
   }
@@ -111,40 +196,30 @@ void observe() {
   // that silently accumulated 4 billion on every coalesce would look exactly
   // like the catastrophic finding this module exists to report. The whole
   // figure fits in int32 comfortably - the entire heap is ~320KB.
+  const size_t previousFloor = gFloor;
   const int32_t delta =
       static_cast<int32_t>(static_cast<int64_t>(gFloor) - static_cast<int64_t>(now));
   gFloor = now;
 
+  // The buckets are credited first, unconditionally, exactly as they always
+  // were. Everything below this line is about the STEP COUNTER only - the
+  // identity in HeapRatchet.h holds regardless of what the step logic decides,
+  // and keeping the two independent is what makes the deferral safe to add to an
+  // instrument whose whole value is that identity.
   gNet[static_cast<uint8_t>(gPhase)] += delta;
 
   if (delta < kNotableStepBytes) {
     // Includes every recovery (delta negative) and all the sub-quantum churn.
-    // Accounted for above, just not narrated.
+    // Accounted for in the buckets above, just not a candidate step.
     return;
   }
 
-  ++gSteps;
-  if (static_cast<uint32_t>(delta) > gWorstStepBytes) {
-    gWorstStepBytes = static_cast<uint32_t>(delta);
-    gWorstStepPhase = phaseName(gPhase);
-    gWorstStepSubject = gSubject;
-  }
-
-  // Log::printf, not Log::verbose, for the reason HeapTrace::mark() gives at
-  // length: verbose is gated on the debug stream, and the stream is exactly
-  // what stops working on a device that has fallen below the TLS floor - so a
-  // trace that vanishes in the failure it was added to measure is no trace at
-  // all. With the stream off this costs a Serial.println and no heap
-  // whatsoever (see Log::line(const char*), which builds its String only inside
-  // the streaming branch).
-  //
-  // This is a bonus channel, not the deliverable. All streams are off
-  // fleet-wide right now by design, so the figures that have to survive are the
-  // ones on the telemetry POST; this line is what pays off for whoever turns a
-  // stream on afterwards and wants the exact card rather than just the phase.
-  Log::printf("[ratchet] step -%d to %u during %s (%s), step %u this boot",
-              static_cast<int>(delta), static_cast<unsigned>(now), phaseName(gPhase), gSubject,
-              static_cast<unsigned>(gSteps));
+  // Held, not counted. The next observation decides.
+  gPendingStep = true;
+  gPendingFloorBefore = previousFloor;
+  gPendingBytes = delta;
+  gPendingPhase = gPhase;
+  gPendingSubject = gSubject;
 }
 
 Scope::Scope(Phase phase, const char* subject)

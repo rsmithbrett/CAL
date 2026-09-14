@@ -1706,13 +1706,32 @@ void setup() {
   // (bootLargestFreeBlockBytes - largestFreeBlock8BitBytes) and catch this
   // instrument being wrong - see HeapRatchet.h.
   //
-  // Everything from here to CardManager::begin() - the display, the SD mount,
-  // WiFi, TLS, the boot check-in - is billed to Idle, which is correct and
-  // deliberate: those are one-time boot costs, not the rotation, and the
-  // rotation is what has never been instrumented. A large Idle bucket on a
-  // device that has been up for half an hour means something OUTSIDE the four
-  // named phases is doing the carving, which is a finding rather than a gap.
   HeapRatchet::begin(BootDiag::bootLargestFreeBlock());
+
+  // Everything from here to the end of setup() - the display, the SD mount,
+  // WiFi, TLS, the boot check-in, and the splash decode above all - is billed to
+  // Boot.
+  //
+  // **It used to be billed to Idle, and the first real reading is what showed
+  // why that could not stand.** Device 17, 17 minutes, stream off: draw 0, fetch
+  // 0, checkin -12,288, service +12,288, idle 47,104. The identity held to the
+  // byte, so the arithmetic was never in question - but 45,056 of that Idle
+  // figure was ONE step, the boot splash PNG decode, and Idle's entire job is to
+  // isolate the LWIP and WiFi background that nothing else covers. A bucket
+  // reading 47,104 that is 96% one known one-time cost does not merely overstate
+  // the background, it makes the background unreadable. The remaining ~2KB is
+  // the actual answer, and it was invisible.
+  //
+  // A named local rather than a lexical block, because the phase has to run to
+  // the closing brace of setup() and RAII is what guarantees it does so on every
+  // exit - including the ones that never return, where the destructor simply
+  // never runs and nothing is mis-billed either way.
+  //
+  // Nested Scopes inside setup() (performCheckIn()'s CheckIn scope on the boot
+  // check-in, and the Service scope telemetry opens inside it) restore to Boot
+  // rather than to Idle, which is the whole reason Scope restores instead of
+  // resetting.
+  const HeapRatchet::Scope bootScope(HeapRatchet::Phase::Boot, "setup");
 
   // If the previous restart was this device restarting itself for
   // unreachability, start the backoff clock already running rather than at
