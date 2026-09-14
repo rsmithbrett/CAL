@@ -4711,14 +4711,33 @@ were previously indistinguishable from the server, where the only evidence was
 So the reason reads as a pair:
 
 ```
-POWERON_RESET   + NONE          power was applied; nothing to explain
-SOFTWARE_RESET  + LOW_HEAP      the cannot-draw watchdog restarted us
-SOFTWARE_RESET  + OTA           restarting to install an update
-SOFTWARE_RESET  + REPROVISION   returning to CAL for new WiFi or a new owner
-SOFTWARE_RESET  + UNREACHABLE   the connection watchdog restarted us (new tonight)
-PANIC_RESET     + NONE          we crashed; no intent was recorded, by definition
-BROWNOUT_RESET  + NONE          the supply sagged; not a software fault
+POWERON_RESET   + NONE               power was applied; nothing to explain
+SOFTWARE_RESET  + LOW_HEAP           the cannot-draw watchdog restarted us
+SOFTWARE_RESET  + LOW_HEAP_RESPONSE  check-in responses arrived intact and would not parse for lack of heap
+SOFTWARE_RESET  + OTA                restarting to install an update
+SOFTWARE_RESET  + REPROVISION        returning to CAL for new WiFi or a new owner
+SOFTWARE_RESET  + UNREACHABLE        the connection watchdog restarted us (new tonight)
+PANIC_RESET     + NONE               we crashed; no intent was recorded, by definition
+BROWNOUT_RESET  + NONE               the supply sagged; not a software fault
 ```
+
+`LOW_HEAP_RESPONSE` exists because this used to be reported as `UNREACHABLE`. A
+`deserializeJson()` failure of any kind fed the same consecutive-failure counter
+that drives the connection watchdog, so a device short of heap was walked toward
+a restart by a mechanism built for a server it could not reach. The restart
+clears the heap, so it worked - which is exactly why it went unnoticed - but the
+round trip had *completed* every time: TLS up, secret accepted, a whole response
+returned, and ArduinoJson then unable to find roughly the response size again in
+heap to parse it into. Right action, wrong cause, recorded permanently on every
+boot and every telemetry report afterwards. It now has its own counter
+(`gConsecutiveResponseOom`, threshold 3 against the connection watchdog's 5,
+because there is no ambiguity here to wait out), its own watchdog
+(`checkResponseOomWatchdog()`, sharing the connection watchdog's twenty-minute
+anti-loop floor), and its own cause. The token contains `LOW_HEAP` deliberately,
+so the server's existing `RebootHeatmap.Classify()` already sorts it as a
+recovery restart with no server change needed. It is distinct from plain
+`LOW_HEAP` too: that one is the cannot-draw watchdog, and a device can hit this
+one while drawing every card perfectly.
 
 The obvious cheaper design - "read the log line the firmware printed just before
 it restarted" - was the first version of this and is exactly wrong: the remote

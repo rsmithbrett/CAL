@@ -112,6 +112,12 @@ const char* describeCause(RestartCause cause) {
       return "SELF_TEST";
     case RestartCause::Unreachable:
       return "UNREACHABLE";
+    // Contains "LOW_HEAP" on purpose - see RestartCause::LowHeapResponse. The
+    // server's RebootHeatmap.Classify() substring-matches that token and already
+    // sorts this as a recovery restart, so the fleet view is correct on the day
+    // this ships rather than after a matching server change.
+    case RestartCause::LowHeapResponse:
+      return "LOW_HEAP_RESPONSE";
   }
   return "UNRECOGNISED";
 }
@@ -144,6 +150,7 @@ RestartCause takeRecordedCause() {
     case RestartCause::Reprovision:
     case RestartCause::SelfTest:
     case RestartCause::Unreachable:
+    case RestartCause::LowHeapResponse:
       return static_cast<RestartCause>(stored);
   }
   // A value this build does not recognise - most likely an older or newer

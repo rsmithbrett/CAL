@@ -94,6 +94,35 @@ enum class RestartCause : uint32_t {
   /// the two want opposite investigations - one is "this device cannot draw",
   /// the other is "this device cannot be reached".
   Unreachable = 5,
+  /// Check-in responses arrived complete and this device had no heap to parse
+  /// them into, repeatedly, so the App restarted itself to reclaim memory.
+  ///
+  /// Specifically: three consecutive check-ins where the round trip COMPLETED -
+  /// TLS up, secret accepted, a whole response returned - and deserializeJson()
+  /// then failed with DeserializationError::NoMemory. ArduinoJson needs roughly
+  /// the response size again in heap while parsing, and the check-in response is
+  /// the largest parse this firmware does.
+  ///
+  /// **This used to be reported as Unreachable, and that is why it exists.** A
+  /// parse failure of any kind fed the same counter that drives the connection
+  /// watchdog, so a device short of heap was pushed to a restart by a mechanism
+  /// built for a server it could not reach. The restart clears the heap, so the
+  /// device recovered and nobody looked twice - but the boot afterwards said
+  /// UNREACHABLE, telemetry carried UNREACHABLE, and the reboot heatmap counted
+  /// a connectivity incident, on a device that had reached the server and been
+  /// answered in full every single time. Right action, wrong cause, recorded
+  /// permanently.
+  ///
+  /// Distinct from LowHeap as well as from Unreachable: LowHeap is the
+  /// cannot-draw watchdog, and a device can hit this one while drawing every
+  /// card perfectly. Both are memory, but they fail in different places and want
+  /// different first questions.
+  ///
+  /// The token describeCause() emits, "LOW_HEAP_RESPONSE", deliberately contains
+  /// "LOW_HEAP" so the server's existing RebootHeatmap.Classify() sorts it as a
+  /// recovery restart rather than as an unrecognised reason, with no server
+  /// change required for it to read correctly on day one.
+  LowHeapResponse = 6,
 };
 
 /// Records what this restart is FOR, immediately before calling

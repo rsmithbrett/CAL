@@ -306,6 +306,10 @@ bool restartWasTherapeutic() {
   switch (BootDiag::lastRestartCause()) {
     case BootDiag::RestartCause::LowHeap:
     case BootDiag::RestartCause::Unreachable:
+    // Therapeutic for the same reason the two above are: nobody asked for it,
+    // this firmware decided it needed it, and the household is owed the same
+    // quiet boot rather than a ladder of progress screens.
+    case BootDiag::RestartCause::LowHeapResponse:
       return true;
     case BootDiag::RestartCause::None:
     case BootDiag::RestartCause::Ota:
@@ -787,7 +791,50 @@ constexpr uint32_t kMaxConsecutiveCheckInFailures = 5;
 
 /// Consecutive failed check-ins. Cleared by the first success, so this only
 /// ever climbs while the device is genuinely unable to reach the server.
+///
+/// **A response that arrived and then failed to parse for lack of heap does NOT
+/// come here.** See gConsecutiveResponseOom below for what does instead, and
+/// why.
 uint32_t gConsecutiveCheckInFailures = 0;
+
+/// How many check-ins in a row completed the round trip and then died parsing
+/// the response with DeserializationError::NoMemory.
+///
+/// **Why this is not simply more of the counter above, which is the whole point
+/// of having it.** Until now a parse failure of any kind incremented
+/// gConsecutiveCheckInFailures, so a device short of heap was walked toward
+/// "failure N of 5 before this device restarts to recover its connection" by a
+/// mechanism built for a server it could not reach. The restart does clear the
+/// heap, so it worked - which is exactly why this went unnoticed - but it worked
+/// for a reason nothing in the system ever said out loud. The next boot reported
+/// SOFTWARE_RESET+UNREACHABLE, telemetry carried UNREACHABLE, and
+/// RebootHeatmap counted a connectivity incident, on a device whose connectivity
+/// had been fine throughout: it reached the server, authenticated, and got a
+/// complete answer back. A recovery that is right about the action and wrong
+/// about the cause sends every future reader after the wrong bug, and this fleet
+/// has already lost two evenings to exactly that.
+///
+/// The other option - not counting NoMemory anywhere - was rejected. A device
+/// that cannot parse a check-in cannot receive a card policy, a debug toggle or
+/// a firmware update, which is the same unmanageable state the connection
+/// watchdog exists for, and a restart is just as much the only recovery this
+/// firmware has for it. Dropping it would have traded a wrong label for a device
+/// that stays broken indefinitely. So it is counted, acted on, and reported as
+/// what it actually is.
+uint32_t gConsecutiveResponseOom = 0;
+
+/// How many response-parse OOMs in a row before this device restarts to get its
+/// heap back.
+///
+/// Three, against the connection watchdog's five, because there is nothing here
+/// to wait out. Five buys patience for genuine ambiguity - a server deploy, an
+/// AP glitch, DNS - and a NoMemory has none of that ambiguity: the round trip
+/// completed, so the only open question is whether this device's heap recovers
+/// on its own. The one cheap remedy, Graphic::releaseRamBuffers(), is spent on
+/// the first occurrence; the second and third are confirmation that it did not
+/// take. At the server's default 60s cadence this is about three minutes of a
+/// device that is up, drawing, reachable, and unable to be told anything.
+constexpr uint32_t kMaxConsecutiveResponseOom = 3;
 
 /// When a planned server outage is expected to end no longer lives here. It is
 /// Maintenance::windowEnd(), in Maintenance.cpp, because the cards now have to
@@ -1086,6 +1133,78 @@ void checkUnreachableWatchdog() {
   // Unreachable: the call above never returns.
 }
 
+/// Restarts this device when it has repeatedly reached the server, been answered
+/// in full, and had no heap left to parse the answer.
+///
+/// A THIRD watchdog rather than a third trigger on either of the other two, for
+/// the reason checkUnreachableWatchdog() gives for not being folded into
+/// checkHeapHealth(): a device can be in any one of these three states while
+/// perfectly healthy in the other two. This one can only fire on a device whose
+/// network, TLS and credentials are all demonstrably working, which is precisely
+/// what makes it worth naming apart from the connection watchdog it used to be
+/// counted by.
+///
+/// Deliberately NOT suppressed by Maintenance::inWindow(), unlike the connection
+/// watchdog directly above. A declared window explains a server that will not
+/// answer; it explains nothing whatsoever about this device's heap, and a device
+/// that cannot parse is just as unmanageable during a deploy as outside one.
+/// Suppressing it would be applying an exemption to a condition the exemption
+/// was never about, which is the same category error this whole change is
+/// correcting.
+void checkResponseOomWatchdog() {
+  if (gConsecutiveResponseOom < kMaxConsecutiveResponseOom) {
+    return;
+  }
+
+  // The same twenty-minute floor as the connection watchdog, and deliberately
+  // the SAME timestamp rather than one of its own. The danger being guarded
+  // against is one danger - this device rebooting itself in a loop - and it does
+  // not care which of the two watchdogs pulled the trigger. A device that just
+  // restarted for unreachability and now cannot parse either is a device that
+  // should wait, not one that gets a fresh budget because the label changed.
+  const uint32_t now = millis();
+  if (gLastUnreachableRestartMs != 0 &&
+      (now - gLastUnreachableRestartMs) < kMinMsBetweenUnreachableRestarts) {
+    if (!gHoldOffLogged) {
+      gHoldOffLogged = true;
+      Log::printf("[health] %lu check-in response(s) failed to parse for lack of heap, but this "
+                  "device already restarted itself %lu ms ago - holding off (minimum gap %lu ms). "
+                  "Silent from here until this clears.",
+                  static_cast<unsigned long>(gConsecutiveResponseOom),
+                  static_cast<unsigned long>(now - gLastUnreachableRestartMs),
+                  static_cast<unsigned long>(kMinMsBetweenUnreachableRestarts));
+    }
+    return;
+  }
+
+  Log::printf(
+      "[health] %lu consecutive check-in responses (limit %lu) arrived complete and could not be "
+      "parsed for lack of heap after %lu ms uptime - the server is reachable and this device "
+      "cannot be managed anyway, so it is restarting to reclaim memory (largest 8BIT block=%u, "
+      "free heap=%u)",
+      static_cast<unsigned long>(gConsecutiveResponseOom),
+      static_cast<unsigned long>(kMaxConsecutiveResponseOom), static_cast<unsigned long>(now),
+      static_cast<unsigned>(Http::largestContiguousBytes()),
+      static_cast<unsigned>(ESP.getFreeHeap()));
+  Log::flushNow();
+  AppService::stashTimeForFastReboot();
+  // LOW_HEAP_RESPONSE, not UNREACHABLE, and not the bare LOW_HEAP the draw
+  // watchdog uses either. This is the field the whole change is for: an operator
+  // reading /diag or the reboot heatmap sees a memory incident on a device whose
+  // connection was fine, instead of a connectivity incident on a device whose
+  // connection was never in question. The token deliberately contains "LOW_HEAP"
+  // so RebootHeatmap.Classify() already sorts it as Recovery rather than as an
+  // unknown reason, with no server change needed to stop it reading as alarming.
+  BootDiag::recordRestartIntent(BootDiag::RestartCause::LowHeapResponse);
+  Identity::recordSelfRestart();
+  Display::showStatus("Refreshing", "Reclaiming memory - back in a moment");
+  gLastUnreachableRestartMs = now;
+
+  delay(1500);
+  esp_restart();
+  // Unreachable: the call above never returns.
+}
+
 /// Clears the consecutive-self-restart budget once this boot has lasted long
 /// enough to say the restart it followed actually worked.
 ///
@@ -1278,6 +1397,28 @@ void performCheckIn() {
       Loader::returnToLoaderForReprovisioning();
       // Unreachable: the call above never returns.
     }
+    // TWO COUNTERS, BECAUSE THIS BRANCH COVERS TWO UNRELATED FAILURES.
+    //
+    // responseOutOfMemory means the round trip COMPLETED - TLS came up, the
+    // secret was accepted, the server sent a whole answer - and this device then
+    // had no heap to parse it into. That is the opposite of unreachable, and
+    // feeding it to the counter below would take the correct action for a reason
+    // that is reported to the fleet as UNREACHABLE for the rest of the device's
+    // history. See gConsecutiveResponseOom.
+    if (result.responseOutOfMemory) {
+      ++gConsecutiveResponseOom;
+      Log::printf("[checkin] out of heap parsing the response, %lu of %lu before this device "
+                  "restarts to reclaim memory - the server was reached and answered, so this is "
+                  "NOT counted toward the unreachable threshold",
+                  static_cast<unsigned long>(gConsecutiveResponseOom),
+                  static_cast<unsigned long>(kMaxConsecutiveResponseOom));
+      // The one cheap remedy, and the only failure on this branch it is actually
+      // aimed at - see the note on the call below. Spent on the first
+      // occurrence so the later ones mean something.
+      Graphic::releaseRamBuffers();
+      return;
+    }
+
     // Counted, not acted on here - see checkUnreachableWatchdog() for what
     // happens when this keeps happening, and why a restart is the only
     // recovery this firmware has for it.
@@ -1288,10 +1429,11 @@ void performCheckIn() {
                 static_cast<unsigned long>(kMaxConsecutiveCheckInFailures));
 
     // Buy back contiguous heap before the next attempt, in case that is what
-    // the handshake was short of. A new TLS session needs roughly 32KB
-    // contiguous; on a device with no SD card each graphic holds its picture
-    // in a RAM buffer for the process lifetime, and two of those leave no
-    // such hole anywhere. See Graphic::releaseRamBuffers().
+    // the handshake was short of. A new TLS session needs 16,717 bytes
+    // contiguous for EACH of its two record buffers; on a device with no SD card
+    // each graphic holds its picture in a RAM buffer for the process lifetime,
+    // and two of those leave no such hole anywhere. See
+    // Graphic::releaseRamBuffers().
     //
     // Tried here, on the failure path, rather than before every request:
     // pre-emptively freeing would make a healthy card-less device re-fetch
@@ -1316,6 +1458,17 @@ void performCheckIn() {
     // So a later episode explains itself once rather than being held off in
     // silence - see gHoldOffLogged.
     gHoldOffLogged = false;
+  }
+
+  // Same contract, its own counter. A response that parsed is proof this device
+  // had the heap to parse it, which is the exact condition the OOM counter is
+  // tracking, so the first success clears it for the same reason the first
+  // success clears the one above.
+  if (gConsecutiveResponseOom > 0) {
+    Log::printf("[checkin] response parsed after %lu out-of-heap failure(s) - restart no longer "
+                "needed",
+                static_cast<unsigned long>(gConsecutiveResponseOom));
+    gConsecutiveResponseOom = 0;
   }
 
   if (result.intervalMs > 0) {
@@ -1570,10 +1723,20 @@ void setup() {
   // minutes indefinitely. Seeded this way it gets one restart, then waits
   // kMinMsBetweenUnreachableRestarts before trying that again, whether or not
   // a reboot happened in between.
-  if (BootDiag::lastRestartCause() == BootDiag::RestartCause::Unreachable) {
+  //
+  // LowHeapResponse seeds the same clock, because it restarts on the same
+  // timestamp and for the same anti-loop reason - see checkResponseOomWatchdog()
+  // on why one shared backoff rather than two: the hazard is this device
+  // rebooting in a loop, and it does not care which watchdog pulled the trigger.
+  const BootDiag::RestartCause lastCause = BootDiag::lastRestartCause();
+  if (lastCause == BootDiag::RestartCause::Unreachable ||
+      lastCause == BootDiag::RestartCause::LowHeapResponse) {
     gLastUnreachableRestartMs = millis();
-    Log::printf("[health] last restart was for unreachability - the connection watchdog will hold "
-                "off for %lu ms rather than restart again immediately",
+    Log::printf("[health] last restart was %s - the self-restart watchdogs will hold off for %lu "
+                "ms rather than restart again immediately",
+                lastCause == BootDiag::RestartCause::Unreachable
+                    ? "for unreachability"
+                    : "to reclaim heap after unparseable check-in responses",
                 static_cast<unsigned long>(kMinMsBetweenUnreachableRestarts));
   }
 
@@ -1907,7 +2070,13 @@ void loop() {
   // check-ins in a row have failed.
   checkUnreachableWatchdog();
 
-  // Beside the two watchdogs because it is their counterpart: they count this
+  // Its sibling, and separate for the reason its own header gives: this one can
+  // only fire on a device whose network, TLS and credentials are all working.
+  // Costs a comparison per iteration and does nothing until three check-in
+  // responses in a row have arrived intact and failed to parse for lack of heap.
+  checkResponseOomWatchdog();
+
+  // Beside the three watchdogs because it is their counterpart: they count this
   // device's self-restarts, and this is the one thing that ever clears the
   // count. Costs one comparison per iteration and fires at most once per boot.
   checkSelfRestartRecovery();

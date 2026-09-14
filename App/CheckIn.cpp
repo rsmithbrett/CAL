@@ -434,7 +434,29 @@ Result perform() {
   const DeserializationError err = deserializeJson(responseDoc, http.getStream());
   http.end();
   if (err) {
-    Log::line("[checkin] response was not valid JSON");
+    // The code was being thrown away, and the line that replaced it named the
+    // wrong party. DeserializationError distinguishes InvalidInput,
+    // IncompleteInput, EmptyInput, TooDeep and NoMemory, and only the first four
+    // are anything to do with what arrived: NoMemory means the bytes were fine
+    // and THIS DEVICE could not hold them. ArduinoJson needs roughly the
+    // response size again in heap while parsing, this is the largest parse the
+    // firmware does, and on a board whose contiguous heap decays all evening
+    // NoMemory is by far the likeliest of the five. "response was not valid
+    // JSON" sent every one of those to look at the server.
+    result.responseOutOfMemory = (err == DeserializationError::NoMemory);
+    if (result.responseOutOfMemory) {
+      // Both heap figures, for the reason App.ino's [health] line prints both:
+      // ESP.getMaxAllocHeap() reads a constant 32,756 on this board and has
+      // already caused wrong diagnoses, so the honest number is printed beside
+      // the misleading one rather than instead of it.
+      Log::printf("[checkin] response did not parse: %s - the server answered and the bytes were "
+                  "fine, THIS DEVICE had no heap to hold them (largest 8BIT block=%u, free heap=%u)",
+                  err.c_str(), static_cast<unsigned>(Http::largestContiguousBytes()),
+                  static_cast<unsigned>(ESP.getFreeHeap()));
+    } else {
+      Log::printf("[checkin] response did not parse: %s - the server's answer is what was wrong",
+                  err.c_str());
+    }
     return result;
   }
 

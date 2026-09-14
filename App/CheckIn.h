@@ -24,6 +24,25 @@ struct Result {
   /// Loader::returnToLoaderForReprovisioning() rather than retry the same dead
   /// secret forever.
   bool secretRejected = false;
+  /// True when the round trip COMPLETED and the response then failed to parse
+  /// with DeserializationError::NoMemory - ArduinoJson needs roughly the
+  /// response size again in heap while parsing, this is the largest parse this
+  /// firmware does, and this board's contiguous heap decays across a session.
+  ///
+  /// **A device condition, not a server fault, and that distinction is the whole
+  /// reason this field exists.** Every other way `ok` stays false means the
+  /// server could not be reached or would not answer properly. This one means it
+  /// answered perfectly, over a TLS session that worked, and this device could
+  /// not take the answer in. The two are counted separately in App.ino - see
+  /// gConsecutiveResponseOom and kMaxConsecutiveCheckInFailures for why a
+  /// NoMemory must not climb the unreachable counter when that counter's remedy
+  /// announces itself as SOFTWARE_RESET+UNREACHABLE on the following boot.
+  ///
+  /// The other four DeserializationError codes deliberately do NOT set this.
+  /// InvalidInput, IncompleteInput, EmptyInput and TooDeep all describe what
+  /// arrived; a truncated stream in particular IS a broken connection and
+  /// belongs on the unreachable counter exactly where it already was.
+  bool responseOutOfMemory = false;
   /// Server-dictated cadence for the NEXT check-in - a household's fleet size is the
   /// server's decision to make, not a constant baked into every device's firmware.
   uint32_t intervalMs = 0;
