@@ -549,6 +549,40 @@ void drawChrome(const Cards::CardSpec& card) {
   // buttons while a different number got painted over it.
   (void)card;
 
+  // A LOCAL, AND IT STAYS ONE. An unmerged branch (wip/cal-agent-heapfix,
+  // 2a9ed58) proposed lifting this array to a file-scope static so
+  // String::operator=() would reuse each element's buffer instead of building a
+  // new one on every card switch, on the same reasoning Display.cpp's
+  // gFileBuffer and Assets.h's RamAssetBuffer apply to the much larger PNG
+  // buffers. Reviewed against this tree on 2026-09-14 and declined. It is not a
+  // re-entrancy problem - drawChrome() has one caller, nothing here creates a
+  // task, and drawActionButtons() does not retain the pointer - it is that the
+  // premise does not hold and the trade runs the wrong way.
+  //
+  // The premise: this core's String has small-string optimisation. WString.h
+  // sizes it SSOSIZE = sizeof(struct _ptr) + 4 - 1, and _ptr is three 32-bit
+  // members, so SSOSIZE is 15 and anything up to 14 characters lives inside the
+  // String object itself and never touches the heap. A default-constructed
+  // String allocates nothing, and every button label short enough to be drawn
+  // in the ~100px a third of this panel gives it is inside that. The
+  // allocate/free churn the change was removing does not happen for the labels
+  // it actually handles.
+  //
+  // The trade, for a label past 14 characters: the local's malloc and free are
+  // a matched pair inside one function, so the allocator gets the hole straight
+  // back. A file-scope static holds that block for the life of the process
+  // instead - a permanent allocation of server-controlled size, planted in a
+  // heap whose binding constraint is the largest CONTIGUOUS block (see
+  // Http::kTlsRecordBufferBytes and the HeapRatchet investigation). That is the
+  // wrong direction on the exact quantity this firmware restarts itself over,
+  // and it would register as a real ratchet step in the Draw bucket.
+  //
+  // It also would not be a first copy. gButtons[] above is already file-scope
+  // and already holds each Definition's label for the device's lifetime, so a
+  // static array here is a SECOND permanent copy of the same string. And the
+  // per-draw churn that is genuinely repeated is untouched by it either way:
+  // Display::drawOneButton() does `String text = label` and then truncates with
+  // substring(), once per button per draw.
   String labels[Actions::kMaxButtonsPerCard];
   for (uint8_t i = 0; i < gButtonCount; ++i) {
     labels[i] = gButtons[i].label;
