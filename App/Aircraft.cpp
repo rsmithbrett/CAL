@@ -9,6 +9,7 @@
 #include "Http.h"
 #include "Identity.h"
 #include "Log.h"
+#include "Maintenance.h"
 
 namespace Aircraft {
 namespace {
@@ -25,6 +26,7 @@ Result parseRefusal(const String& body) {
   JsonDocument doc;
   if (deserializeJson(doc, body)) {
     result.message = "Cannot reach the aircraft service.";
+    result.serviceUnreachable = true;
     return result;
   }
 
@@ -55,6 +57,7 @@ Result fetchMine() {
   const String url = String("https://") + Config::kServiceHost + kPath;
   if (!Http::beginRequest(url)) {
     result.message = "Cannot reach the aircraft service.";
+    result.serviceUnreachable = true;
     Log::line("[aircraft] could not begin request");
     return result;
   }
@@ -83,6 +86,7 @@ Result fetchMine() {
   if (status != 200) {
     http.end();
     result.message = "Cannot reach the aircraft service.";
+    result.serviceUnreachable = true;
     Log::printf("[aircraft] unexpected http status=%d", status);
     return result;
   }
@@ -349,9 +353,13 @@ void cardDraw(uint16_t) {
   const String headline = gLast.status == Status::Empty ? "Nothing overhead right now"
                           : isRestingState              ? "Aircraft overhead is not showing yet"
                                                         : "Could not load aircraft data";
+  // Resolved on this draw rather than at fetch time - see Forecast.cpp's
+  // identical call site and Maintenance.h. The log line keeps the raw message on
+  // purpose; the debug stream wants the fault, not the reassurance.
+  const String detail = Maintenance::failureText(gLast.message, gLast.serviceUnreachable);
   Log::verbose("[aircraft] drawing status screen: %s (%s)", headline.c_str(),
               gLast.message.c_str());
-  Display::showAircraftStatus(headline, gLast.message, /*isProblem=*/!isRestingState);
+  Display::showAircraftStatus(headline, detail, /*isProblem=*/!isRestingState);
 }
 
 /// Which aircraft was overhead when somebody pressed - see Cards::DescribeFn.

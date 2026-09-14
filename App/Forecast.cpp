@@ -8,6 +8,7 @@
 #include "Http.h"
 #include "Identity.h"
 #include "Log.h"
+#include "Maintenance.h"
 
 namespace Forecast {
 
@@ -35,6 +36,7 @@ Result parseRefusal(const String& body) {
   JsonDocument doc;
   if (deserializeJson(doc, body)) {
     result.message = "Cannot reach the forecast service.";
+    result.serviceUnreachable = true;
     return result;
   }
 
@@ -82,6 +84,7 @@ Result fetch(bool useTarget) {
       String("https://") + Config::kServiceHost + (useTarget ? kPathTarget : kPathHome);
   if (!Http::beginRequest(url)) {
     result.message = "Cannot reach the forecast service.";
+    result.serviceUnreachable = true;
     Log::line("[forecast] could not begin request");
     return result;
   }
@@ -110,6 +113,7 @@ Result fetch(bool useTarget) {
   if (status != 200) {
     http.end();
     result.message = "Cannot reach the forecast service.";
+    result.serviceUnreachable = true;
     Log::printf("[forecast] unexpected http status=%d", status);
     return result;
   }
@@ -397,9 +401,17 @@ struct Instance {
     const String headline = gLast.status == Status::Empty ? "No forecast available right now"
                             : isRestingState               ? "Forecast is not showing yet"
                                                             : "Could not load the forecast";
+    // Resolved here, on this draw, rather than decided when the fetch failed -
+    // see Maintenance.h. Returns gLast.message unchanged unless this was a
+    // could-not-reach failure AND a declared window is still in force by this
+    // device's own clock, so the window elapsing is felt on the next repaint
+    // instead of waiting for a refresh cycle that may never succeed. The log
+    // line below deliberately keeps the raw message: the debug stream is for
+    // whoever is diagnosing this, and they want the fault, not the reassurance.
+    const String detail = Maintenance::failureText(gLast.message, gLast.serviceUnreachable);
     Log::verbose("[%s] drawing status screen: %s (%s)", id(), headline.c_str(),
                 gLast.message.c_str());
-    Display::showForecastStatus(headline, gLast.message, /*isProblem=*/!isRestingState);
+    Display::showForecastStatus(headline, detail, /*isProblem=*/!isRestingState);
   }
 
   /// Re-asserted once per check-in - see Cards.h's StatusFn. Names which of

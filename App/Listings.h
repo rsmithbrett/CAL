@@ -84,7 +84,23 @@ struct Result {
   /// one, in which case those screens fall back to a market-less phrasing.
   String cityState;
   /// Set on every non-Ok status, including Empty - what to put on screen.
+  ///
+  /// Always the plain, honest text, even during a declared maintenance window -
+  /// the window is applied on the way to the screen by
+  /// Maintenance::failureText() at draw time, never baked in here. Identical
+  /// contract, for identical reasons, to Forecast::Result::message; see that
+  /// field's own remarks and Maintenance.h.
   String message;
+
+  /// Whether this failure is one the words "cannot reach the service" were being
+  /// used for. True at exactly the three sites that set `message` to "Cannot
+  /// reach the listings service." and nowhere else - notably NOT at the TLS-setup
+  /// failure, which is a fault on this device's own side of the wire that a
+  /// planned server outage does not explain. Identical contract, for identical
+  /// reasons, to Forecast::Result::serviceUnreachable; see that field's own
+  /// remarks. Read only by Maintenance::failureText(); when no window is in force
+  /// it changes nothing at all.
+  bool serviceUnreachable = false;
 };
 
 /// GETs /api/mylistings/mine with the device's own secret and no id anywhere

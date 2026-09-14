@@ -112,7 +112,33 @@ struct Result {
   String location;
   /// Set on every non-Ok status, including Empty - what to put on screen.
   /// Empty on Ok, since the card itself is the message.
+  ///
+  /// Always the plain, honest text, even during a declared maintenance window.
+  /// The window is applied on the way to the screen, by
+  /// Maintenance::failureText() at draw time, never baked in here - see
+  /// serviceUnreachable below and Maintenance.h for why. That also keeps
+  /// status() precise for whoever is reading the debug stream: an operator
+  /// wants "unexpected http status", not the sentence the household is being
+  /// shown.
   String message;
+
+  /// Whether this failure is one the words "cannot reach the service" were
+  /// being used for. True at exactly the three sites that set `message` to
+  /// "Cannot reach the forecast service." - the request could not be begun, the
+  /// response was a status this card cannot use, or a refusal body would not
+  /// parse - and nowhere else. The invariant it buys is a simple one to state
+  /// and to check: that sentence never reaches the screen while a declared
+  /// window is in force.
+  ///
+  /// Deliberately narrower than `status == NetworkError`, which ALSO covers a
+  /// TLS layer that never came up ("Cannot verify the service's identity.") -
+  /// a fault on this device's own side of the wire that a planned server outage
+  /// does not explain, and that relabelling as maintenance would point whoever
+  /// eventually reads the screen at the wrong problem. AuthError and the two
+  /// resting states are likewise untouched. Read only by
+  /// Maintenance::failureText(); when no window is in force it changes nothing
+  /// at all.
+  bool serviceUnreachable = false;
 };
 
 /// GETs /api/myweather/forecast?location=home|target with the device's own

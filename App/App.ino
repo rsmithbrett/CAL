@@ -85,6 +85,11 @@ size_t getArduinoLoopTaskStackSize(void) {
 #include "IssFlyover.h"
 #include "Loader.h"
 #include "Log.h"
+// The declared-maintenance-window deadline, which used to be a plain global in
+// this file. It moved out because the cards have to honour it too and cannot see
+// an App.ino global - see Maintenance.h for the full reasoning and for why there
+// is exactly one copy of this deadline in the firmware.
+#include "Maintenance.h"
 #include "SdStorage.h"
 #include "StackWatch.h"
 // Included for setPhase()/setTimes()/setPosition()/setValue() only, not to
@@ -784,17 +789,13 @@ constexpr uint32_t kMaxConsecutiveCheckInFailures = 5;
 /// ever climbs while the device is genuinely unable to reach the server.
 uint32_t gConsecutiveCheckInFailures = 0;
 
-/// When a planned server outage is expected to end, as a UTC epoch second, or 0
-/// when none is known. Set from the last successful check-in - the only kind
-/// that can carry it, since a server that is already down cannot tell anyone
-/// anything. See CheckIn::Result::maintenanceUntilUtc.
-///
-/// Deliberately NOT persisted to NVS. A window survives only as long as this
-/// boot: if the device restarts for an unrelated reason mid-window it comes back
-/// with the watchdog armed, which is the safe direction - it will simply be told
-/// about the window again on its next successful check-in, and if there is no
-/// successful check-in then the watchdog SHOULD be armed.
-time_t gMaintenanceUntilUtc = 0;
+/// When a planned server outage is expected to end no longer lives here. It is
+/// Maintenance::windowEnd(), in Maintenance.cpp, because the cards now have to
+/// honour the same deadline this file's watchdog does and a separately-compiled
+/// card cannot read an App.ino global - see Maintenance.h for why one shared
+/// deadline beat four pushed copies. Everything the old comment here said about
+/// it still holds and is recorded there: it is set only from a check-in that
+/// SUCCEEDED, and it is deliberately never persisted to NVS.
 
 /// When this device last restarted itself for unreachability, so it cannot do
 /// it again immediately. 0 means "not since boot".
@@ -966,13 +967,18 @@ void checkUnreachableWatchdog() {
   // trusting the other. A device whose clock is unset (before the first SNTP
   // sync) reads time(nullptr) as near zero, which is below every plausible
   // window and therefore leaves the watchdog armed: the safe direction.
-  const time_t nowUtc = time(nullptr);
-  if (gMaintenanceUntilUtc > 0 && nowUtc > 0 && nowUtc < gMaintenanceUntilUtc) {
+  //
+  // Maintenance::inWindow() applies exactly the test that used to be written out
+  // here, against exactly the same clock - it was moved, not changed, so that the
+  // cards asking "is maintenance in force" get the same answer this watchdog does
+  // rather than a second implementation of the same judgement.
+  if (Maintenance::inWindow()) {
     if (gConsecutiveCheckInFailures > 0) {
       Log::printf("[health] %lu check-in(s) have failed, but the server announced maintenance for "
-                  "another %ld second(s) - NOT restarting, and cards keep drawing from cache",
+                  "another %ld second(s) - NOT restarting, and cards say so instead of claiming "
+                  "the service is unreachable",
                   static_cast<unsigned long>(gConsecutiveCheckInFailures),
-                  static_cast<long>(gMaintenanceUntilUtc - nowUtc));
+                  Maintenance::secondsRemaining());
     }
     return;
   }
@@ -1439,16 +1445,17 @@ void performCheckIn() {
   // window the operator cancels - or one that elapses server-side - disarms this
   // device on its very next check-in instead of leaving the watchdog suppressed
   // until the original deadline passes.
-  if (result.maintenanceUntilUtc != gMaintenanceUntilUtc) {
+  if (result.maintenanceUntilUtc != Maintenance::windowEnd()) {
     if (result.maintenanceUntilUtc > 0) {
       Log::printf("[checkin] server announced maintenance until %ld (epoch) - failed check-ins "
-                  "will not count as a broken connection until then, and cards keep drawing from "
-                  "cache",
+                  "will not count as a broken connection until then, and a card that cannot fetch "
+                  "will say server maintenance rather than 'cannot reach' until it elapses",
                   static_cast<long>(result.maintenanceUntilUtc));
-    } else if (gMaintenanceUntilUtc > 0) {
-      Log::line("[checkin] maintenance window cleared by the server - connection watchdog armed again");
+    } else if (Maintenance::windowEnd() > 0) {
+      Log::line("[checkin] maintenance window cleared by the server - connection watchdog armed "
+                "again and card failure text is honest again");
     }
-    gMaintenanceUntilUtc = result.maintenanceUntilUtc;
+    Maintenance::setWindowEnd(result.maintenanceUntilUtc);
   }
 
   // One-shot, like updateAvailable below - the server already cleared its

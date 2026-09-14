@@ -5304,3 +5304,104 @@ a firmware that quietly reported one extra asset per device would look like a
 caching change) and survives `wipeCache()` - a reformat discards stale pictures,
 and the moment right after somebody has been told to try one is exactly when the
 card is most likely to be in a reader.
+
+## A declared maintenance window now reaches the cards, not just the watchdog
+
+The planned-downtime feature was built from the server inward and stopped one
+step short. The server declares a window as the `maintenance_until_utc` config
+value, `CheckInGatewayService` resolves it per device and sends it as
+`maintenanceUntilUtc` on the ordinary check-in response, `CheckIn.cpp` parses it
+into `CheckIn::Result::maintenanceUntilUtc`, and App.ino carried it forward for
+the rest of the boot. Exactly one thing read it: the unreachable watchdog, which
+stopped counting failed check-ins as evidence that the device's own connection
+was broken. That was the half the fleet needed - without it, taking the server
+down gracefully guarantees a fleet-wide restart, because MaintenanceMode answers
+every request with a 503 including `/api/checkin` and five consecutive failures
+reboot the unit.
+
+**No card read it.** So a device inside a declared window drew exactly what a
+device with a genuinely broken connection drew: "Could not load the forecast /
+Cannot reach the forecast service." A photograph of device 17 doing that during a
+deploy is what surfaced this. The screen was saying the one thing the firmware
+knew for certain was not the explanation.
+
+### One helper, not a conditional in every card
+
+`Maintenance.h`/`Maintenance.cpp` now own the deadline - `App.ino`'s old
+`gMaintenanceUntilUtc` global moved there unchanged. Two reasons it had to move
+rather than be pushed out to each card the way `SunMoon::setTimes()` and
+`Tides::setNext()` are pushed: a separately-compiled card cannot see a global in
+the `.ino` at all, and four copies of a deadline updated on four code paths is
+precisely the failure worth designing against - two cards on the same rotation
+disagreeing about whether maintenance is currently in force.
+
+Every card's failure line goes through one function:
+
+```cpp
+String detail = Maintenance::failureText(gLast.message, gLast.serviceUnreachable);
+```
+
+It returns `gLast.message` completely unchanged - byte for byte - unless both
+halves hold: the failure was the specific kind the words "cannot reach the
+service" were being used for, and a window is in force right now. A device with
+no window held renders exactly the strings it rendered before this change, at
+every site, which is the property the whole change is answerable for.
+
+`serviceUnreachable` is a new `bool` on `Forecast::Result`,
+`Listings::Result` and `Aircraft::Result`, set true at exactly the three sites in
+each that hard-coded `"Cannot reach the ... service."` and nowhere else. It is
+deliberately narrower than `status == NetworkError`, which also covers a TLS
+layer that never came up ("Cannot verify the service's identity.") - a fault on
+this device's own side of the wire that a planned server outage does not explain,
+and one that relabelling as maintenance would send a reader after the wrong
+problem. `AuthError` and the resting states are untouched for the same reason.
+
+`Calendar.cpp` sets the same string and is deliberately left alone: that card
+draws nothing at all on failure (see Calendar.h's three reasons), so its copy of
+the message only ever reaches `cardStatus()` and the debug stream, where the
+precise fault is what an operator actually wants.
+
+### Expiry is enforced here, on this device's own clock, at draw time
+
+This is the part that decides whether the feature is worth having. A device told
+about a ten-minute window that then walks into a genuine three-hour outage must
+not spend three hours claiming maintenance. That is a confident lie, and it is
+strictly worse than the vague truth it replaced - the vague truth at least
+prompts somebody to check. Same for a device that never comes back at all: the
+message has to decay to the truth with no server involvement, because by
+definition there is no server left to involve.
+
+So `failureText()` is called at **draw** time, not fetch time, and recomputes
+`inWindow()` against `time(nullptr)` every single call. The cards keep the honest
+text in their own retained state and never store a decided string. The moment the
+deadline passes, the next repaint says "Cannot reach the forecast service." again
+- no refetch, no check-in, no network of any kind. Deciding it at fetch time
+instead would have left a stale maintenance claim on screen for up to a full
+refresh interval after expiry, during an outage where refreshes are exactly what
+is failing.
+
+Two smaller guards fall out of the same principle. A deadline more than twelve
+hours out gets no clock time at all ("Server maintenance in progress."), because
+"back by 2:30" is useless to someone who cannot tell which 2:30 is meant, and a
+window that long is a migration rather than a deploy. And a device whose clock is
+not yet set reads `time(nullptr)` as near zero, fails the `nowUtc > 0` test, and
+gets the honest message - every ambiguous case resolves to "no window".
+
+Inside twelve hours the card names the time, through
+`Display::formatTimeOfDay()` so it honours the household's 12-or-24-hour
+preference like every other time this device prints, rounded up to the next
+minute so "back by" is never earlier than the real deadline:
+
+> Could not load the forecast
+> Server maintenance. Back by 2:30 PM.
+
+The headline is unchanged. "Could not load the forecast" is still true during a
+window, and it is the detail line underneath that was making the false claim.
+
+### Not covered
+
+Nothing persists the window to NVS, exactly as before: a device that reboots
+mid-window comes back with the watchdog armed and its cards honest, and is simply
+told about the window again on its next successful check-in. **Unverified on
+hardware**, like every other card change in this build - checked by a clean
+compile and by reading.

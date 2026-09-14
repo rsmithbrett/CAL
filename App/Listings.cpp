@@ -8,6 +8,7 @@
 #include "Http.h"
 #include "Identity.h"
 #include "Log.h"
+#include "Maintenance.h"
 
 namespace Listings {
 namespace {
@@ -24,6 +25,7 @@ Result parseRefusal(const String& body) {
   JsonDocument doc;
   if (deserializeJson(doc, body)) {
     result.message = "Cannot reach the listings service.";
+    result.serviceUnreachable = true;
     return result;
   }
 
@@ -58,6 +60,7 @@ Result fetchMine() {
   const String url = String("https://") + Config::kServiceHost + kPath;
   if (!Http::beginRequest(url)) {
     result.message = "Cannot reach the listings service.";
+    result.serviceUnreachable = true;
     Log::line("[listings] could not begin request");
     return result;
   }
@@ -96,6 +99,7 @@ Result fetchMine() {
   if (status != 200) {
     http.end();
     result.message = "Cannot reach the listings service.";
+    result.serviceUnreachable = true;
     Log::printf("[listings] unexpected http status=%d", status);
     return result;
   }
@@ -337,9 +341,13 @@ void cardDraw(uint16_t itemIndex) {
                           : gLast.status == Status::NotConfigured ? "Listings are not set up yet"
                           : isRestingState                        ? "Listings are not showing yet"
                                                                   : "Could not load listings";
+  // Resolved on this draw rather than at fetch time - see Forecast.cpp's
+  // identical call site and Maintenance.h. The log line keeps the raw message on
+  // purpose; the debug stream wants the fault, not the reassurance.
+  const String detail = Maintenance::failureText(gLast.message, gLast.serviceUnreachable);
   Log::verbose("[listings] drawing status screen: %s (%s)", headline.c_str(),
               gLast.message.c_str());
-  Display::showListingsStatus(headline, gLast.message, /*isProblem=*/!isRestingState);
+  Display::showListingsStatus(headline, detail, /*isProblem=*/!isRestingState);
 }
 
 /// The line a press carries: which house was on screen when somebody tapped
