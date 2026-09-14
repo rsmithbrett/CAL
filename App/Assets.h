@@ -169,10 +169,21 @@ bool fetchToRam(const String& id, RamAssetBuffer& buffer);
 /// **Why this one gets an exception.** Never-freeing is right when a buffer's
 /// only competition is other allocations of its own kind. It is wrong here
 /// because of what a RamAssetBuffer competes with: a new TLS session needs
-/// roughly 32KB CONTIGUOUS, the largest 8-bit block on this board is capped
-/// near 34,804 bytes once WiFi is up, and each graphic instance in RAM-
-/// fallback mode holds its own ten-to-twenty-thousand-byte buffer for the
-/// process lifetime. Two of those and there is no 32KB hole left anywhere.
+/// 16,717 bytes CONTIGUOUS for each of mbedTLS's two record buffers
+/// (Http::kTlsRecordBufferBytes; not "roughly 32KB" once, which is how this
+/// comment read until 2026-09-14 - 33,434 is the total and the largest single
+/// demand is half of it), the largest 8-bit block on this board is capped near
+/// 34,804 bytes once WiFi is up, and each graphic instance in RAM-fallback mode
+/// holds its own ten-to-twenty-thousand-byte buffer for the process lifetime.
+///
+/// The corrected figure does NOT weaken the case, and it is worth following the
+/// arithmetic through rather than assuming it does. The measured largest8 of
+/// 21,000-26,000 below is comfortably ABOVE 16,717, so on the old framing those
+/// devices looked short and on the new one the first buffer fits. They still
+/// fail, because mbedtls_ssl_setup() needs 16,717 contiguous TWICE - either two
+/// separate holes that big or one of 33,434 - and once the first is carved out
+/// of a 26,000-byte block nothing near that size is left. Same conclusion,
+/// reached for the right reason.
 ///
 /// That is measured, not inferred: the two devices with no SD card sit at
 /// largest8 21,000-26,000 while drawing nothing at all, and their handshakes

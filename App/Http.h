@@ -85,7 +85,10 @@ HTTPClient& client();
 // keeping because the measurement behind it was sound and the conclusion was
 // not.
 //
-// It called stop() on gClient to hand back mbedTLS's ~32KB of session buffers,
+// It called stop() on gClient to hand back mbedTLS's two 16,717-byte session
+// buffers - 33,434 bytes in total, which is where the "~32KB" this file used to
+// say everywhere came from, and the figure is right as a TOTAL and wrong the
+// moment anyone reads it as a contiguity requirement -
 // and it worked exactly as advertised: on device 17 it returned 41,312 bytes
 // and moved the largest contiguous 8BIT block from 6,132 to 36,852, after
 // which an identical 10,568-byte allocation that had just failed succeeded.

@@ -21,6 +21,7 @@ constexpr const char* kKeyProvForced = "provforced";
 constexpr const char* kKeyTotBoots = "totboots";
 constexpr const char* kKeyUtcOffset = "utcoffmin";
 constexpr const char* kKeySelfRestarts = "selfrst";
+constexpr const char* kKeyRstBackoff = "rstbackoff";
 
 // Per-slot keys are built at runtime: "ssid0".."ssid2", "pass0".."pass2".
 // NVS keys are capped at 15 characters, so these stay deliberately short.
@@ -183,6 +184,35 @@ void clearSelfRestarts() {
     return;
   }
   prefs.putUChar(kKeySelfRestarts, 0);
+}
+
+uint8_t selfRestartBackoffSteps() { return prefs.getUChar(kKeyRstBackoff, 0); }
+
+void recordSelfRestartBackoffStep() {
+  const uint8_t current = selfRestartBackoffSteps();
+  // Saturate rather than wrap, for the third time in this file and with the
+  // sharpest consequence of the three: a wrap to 0 here would hand a device
+  // that has restarted itself 256 times without once reaching the server the
+  // shortest floor in the schedule, which is precisely the reboot loop the
+  // backoff exists to end.
+  if (current == UINT8_MAX) {
+    return;
+  }
+  prefs.putUChar(kKeyRstBackoff, current + 1);
+}
+
+void clearSelfRestartBackoff() {
+  // Guarded, same reasoning as clearSelfRestarts() above and with a stricter
+  // caller: this one is reached from the SUCCESS path of a check-in, which on a
+  // healthy device runs every 60 seconds forever. Unguarded it would write 0
+  // over 0 roughly 1,440 times a day on every device in the fleet. App.ino also
+  // keeps a RAM mirror and only calls in when that mirror is non-zero, so in
+  // practice this is at most one write per boot; the guard here is the half
+  // that does not depend on the caller getting that right.
+  if (selfRestartBackoffSteps() == 0) {
+    return;
+  }
+  prefs.putUChar(kKeyRstBackoff, 0);
 }
 
 }  // namespace Identity

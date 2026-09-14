@@ -103,8 +103,11 @@ extern const char* const kCardId5;
 /// **Called when a check-in has failed, to buy back contiguous heap for the
 /// TLS handshake.** On a device with no SD card every graphic falls back to
 /// holding its bytes in RAM for the process lifetime (see Assets.h's
-/// fetchToRam and RamAssetBuffer), and two such buffers are enough that no
-/// 32KB contiguous hole remains anywhere for a new TLS session. Measured: the
+/// fetchToRam and RamAssetBuffer), and two such buffers are enough that the two
+/// 16,717-byte contiguous holes a new TLS session needs
+/// (Http::kTlsRecordBufferBytes, once for each mbedTLS record buffer - this
+/// comment said "32KB" once until 2026-09-14) are no longer both available.
+/// Measured: the
 /// two card-less devices in this fleet sit at largest8 21,000-26,000 while
 /// drawing nothing at all, and their handshakes fail with SSL_ALLOC_FAILED
 /// (-32512). A device in that state cannot check in, cannot be sent a card

@@ -183,6 +183,49 @@ void recordSelfRestart();
 /// idea of healthy while still cycling on the other's.
 void clearSelfRestarts();
 
+/// How many times in a row this device has restarted itself to get back to the
+/// server WITHOUT a successful check-in in between. The exponent behind the
+/// self-restart backoff - see selfRestartFloorMs() in App.ino for the shape and
+/// the cap.
+///
+/// **Why this is not consecutiveSelfRestarts() above, which is the obvious
+/// candidate and the wrong one.** That counter answers "should this boot narrate
+/// itself", and its clearing rule is deliberately uptime-based: an hour with no
+/// further restart, whether or not the device ever reached the server. Both
+/// halves of that are wrong for a backoff. An hour of uptime is not evidence
+/// that a restart FIXED anything on a device whose whole complaint is that it
+/// cannot be reached - and worse, once the backoff grows past that hour the
+/// budget would clear itself moments before every restart it was meant to
+/// delay, capping the backoff at the narration rule's horizon by accident. The
+/// two counters also want opposite reset events: narration wants "no more
+/// restarts", backoff wants "the device got through to the server", which is
+/// the only thing that actually proves the run is over.
+///
+/// Stepped only by the two watchdogs that share the restart floor - the
+/// connection watchdog and the response-OOM watchdog. NOT by the draw-failure
+/// heap watchdog, which has no floor of its own and is not part of that
+/// hazard's accounting.
+///
+/// Saturates at 255, same reasoning as the two counters above; the floor is
+/// clamped long before then, so any value past the clamp is equivalent.
+///
+/// App-only key, like lastUtcOffsetMinutes() - CAL never reads or writes it, so
+/// it needs no mirroring into CAL's own copy of this file.
+uint8_t selfRestartBackoffSteps();
+
+/// Counted immediately before a connection or response-OOM self-restart, beside
+/// Identity::recordSelfRestart(), so the NEXT boot knows how many attempts this
+/// run has already spent. It has to be persistent for the same reason
+/// BootDiag's restart cause is: the restart is the event being counted, and
+/// nothing in RAM survives it.
+void recordSelfRestartBackoffStep();
+
+/// Called on the first successful check-in after a run of self-restarts, and
+/// nowhere else. A completed check-in - TLS up, secret accepted, whole response
+/// parsed - is the only observation that proves the condition both watchdogs
+/// fire on has actually ended.
+void clearSelfRestartBackoff();
+
 void begin();
 
 }  // namespace Identity

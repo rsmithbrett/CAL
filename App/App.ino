@@ -765,8 +765,10 @@ constexpr uint32_t kMaxConsecutiveDrawFailures = 6;
 /// How many check-ins in a row may fail before this device restarts itself to
 /// get its connection back.
 ///
-/// **Why a restart is the fix and not a workaround.** mbedTLS needs roughly
-/// 32KB contiguous for a new TLS session. Once cards have been rendering, the
+/// **Why a restart is the fix and not a workaround.** mbedTLS needs 16,717
+/// bytes contiguous for EACH of the two record buffers mbedtls_ssl_setup()
+/// allocates - Http::kTlsRecordBufferBytes, not "roughly 32KB" once, which is
+/// how this comment read until 2026-09-14. Once cards have been rendering, the
 /// largest 8-bit block settles far below that - 13,812 bytes, measured
 /// repeatedly on device 17 - and every handshake then fails with
 /// MBEDTLS_ERR_SSL_ALLOC_FAILED. Nothing in this firmware resets the shared
@@ -854,9 +856,18 @@ uint32_t gLastUnreachableRestartMs = 0;
 /// times in two minutes on a real device, burying every other line in the remote
 /// stream. Cleared on the first successful check-in so a later episode is
 /// announced again rather than silently held off.
+///
+/// ONE flag for BOTH watchdogs' hold-off lines, which is why performCheckIn()
+/// has to clear it from both of its recovery branches and not just the
+/// connection one. It shares the flag for the reason the two share a floor and a
+/// timestamp - the reader is being told once that this device is declining to
+/// reboot - but the two counters that clear it are deliberately separate, and a
+/// latch cleared by only one of them is a latch that never reopens for episodes
+/// of the other kind.
 bool gHoldOffLogged = false;
 
-/// The minimum gap between two unreachability restarts.
+/// The minimum gap between the FIRST two self-restarts of a run, and the base
+/// the backoff doubles from.
 ///
 /// This is the guard against the failure mode this whole mechanism could
 /// otherwise become: if the service is genuinely down - or this device's WiFi
@@ -866,7 +877,120 @@ bool gHoldOffLogged = false;
 /// minutes means a device that is wrong about the cause costs the household
 /// three reboots an hour rather than twelve, while a device that is right is
 /// back within five minutes.
-constexpr uint32_t kMinMsBetweenUnreachableRestarts = 20UL * 60UL * 1000UL;
+///
+/// It stays twenty minutes, unchanged, for the first repeat: everything the
+/// paragraph above says about a single wrong diagnosis is still true, and a
+/// device whose second restart would have worked should not be made to wait
+/// longer than it used to. What changed is what happens after that - see
+/// selfRestartFloorMs().
+constexpr uint32_t kBaseMsBetweenSelfRestarts = 20UL * 60UL * 1000UL;
+
+/// The longest the backoff is ever allowed to grow to.
+///
+/// FOUR HOURS, and the reason it can be this generous is the single most
+/// important property of this whole mechanism: **backing off delays restarts
+/// and nothing else.** Check-ins keep running at the server's own cadence
+/// throughout, and the first one that succeeds clears the run. So a device
+/// sitting on a four-hour floor is not four hours away from rejoining the
+/// fleet when the server comes back - it is one check-in interval away, exactly
+/// as it would be on a twenty-minute floor. The only thing a longer floor costs
+/// is the case where a restart WOULD have fixed a local fault, and that case is
+/// already excluded by construction: to be on the fourth doubling the device
+/// must have tried a restart four times and been wrong every time.
+///
+/// What it buys is the case the fixed interval got badly wrong. An overnight
+/// eight-hour server outage cost 24 reboots per device at a flat twenty
+/// minutes - 24 blank screens in a household, 24 fresh fragmentation cycles,
+/// and 24 NVS writes each from recordSelfRestart() and the backoff counter, for
+/// a fault that was never on the device. On this schedule the same outage costs
+/// four.
+///
+/// Four hours rather than "give up": a device that has stopped restarting
+/// entirely can never recover from a fault a restart WOULD fix but that its
+/// check-ins cannot detect, and the fleet has one of those - the poisoned TLS
+/// client, where DNS and TCP both keep working. Retrying a few times a day is
+/// cheap insurance against being permanently wrong.
+constexpr uint32_t kMaxMsBetweenSelfRestarts = 4UL * 60UL * 60UL * 1000UL;
+
+/// RAM mirror of Identity::selfRestartBackoffSteps(), seeded once in setup().
+///
+/// Mirrored rather than read through, because selfRestartFloorMs() is called
+/// from a per-loop()-iteration code path and an NVS read per iteration to
+/// re-answer a question that can only change at a restart is a cost with no
+/// reader. The two are written together at the one site that changes either.
+uint8_t gSelfRestartBackoffSteps = 0;
+
+/// How long this device must wait between self-restarts right now.
+///
+/// Twenty minutes doubling to a four-hour ceiling: 20, 40, 80, 160, 240, 240...
+/// (the fifth doubling would be 320 and is clamped). The exponent is the number
+/// of restarts this run has ALREADY spent, so the first hold-off of a run is
+/// the unchanged twenty minutes and a device gets four attempts inside its
+/// first five hours before settling at six a day.
+///
+/// **The defect this replaces.** The interval was fixed, so a device that could
+/// not reach the server rebooted on the same cadence forever. That is useless -
+/// the second restart having failed is strong evidence the third will too - and
+/// it is the most expensive thing the device can do to itself: each cycle costs
+/// the household a blank screen, restarts the heap fragmentation the connection
+/// watchdog exists to escape, and writes flash twice on the way out.
+///
+/// **What resets it: a successful check-in, and only that.** Not uptime (see
+/// Identity::selfRestartBackoffSteps() for why the narration counter's hour is
+/// the wrong rule), and deliberately NOT a successful DNS lookup or TCP connect
+/// short of a full check-in. That last one is not a near-miss worth crediting,
+/// it is the signature of the exact fault this watchdog was built for: a device
+/// whose contiguous heap has decayed below kTlsRecordBufferBytes resolves the
+/// name fine and connects to port 443 fine, and fails only at
+/// mbedtls_ssl_setup(). Http::diagnoseFailure() exists precisely because those
+/// three layers had to be told apart. Resetting the backoff on DNS or TCP would
+/// therefore reset it hardest on the devices that need it most, and pin them
+/// permanently at twenty minutes. The whole round trip - handshake, secret
+/// accepted, response parsed - is the only observation that proves the
+/// condition ended, and it is exactly the observation that already clears
+/// gConsecutiveCheckInFailures and gConsecutiveResponseOom.
+///
+/// **What a maintenance window does to it: almost nothing, and the exception
+/// matters.** The exponent counts restarts, not failures, and the CONNECTION
+/// watchdog cannot restart inside a declared window - so however many check-ins
+/// a three-hour deploy costs, none of them steps the schedule. That falls out of
+/// tying the exponent to restarts rather than to the failure counters, and it is
+/// the behaviour we want rather than a happy accident: a window is the server
+/// explaining itself, which is evidence about the server and none whatsoever
+/// about how many times this device has tried and failed to fix itself.
+///
+/// The exception is checkResponseOomWatchdog(), which is deliberately NOT
+/// suppressed by a window (see its own header) and which DOES step this counter.
+/// So a window is not a blanket freeze on the schedule: a device that runs out
+/// of heap parsing responses during a deploy will restart and will step, exactly
+/// as it would outside one. That is consistent rather than an oversight - the
+/// step follows the restart, and that watchdog's restart was never the window's
+/// business. It is written out here because "a window does not step the backoff"
+/// is the tempting one-line summary and it is false.
+///
+/// A window does not RESET the schedule either, for the mirror image of the
+/// first reason - an operator declaring maintenance says nothing about a device
+/// that had already restarted itself four times before the announcement, and
+/// resetting there would hand every device in a reboot loop a fresh
+/// twenty-minute budget every time somebody deployed.
+uint32_t selfRestartFloorMs() {
+  if (gSelfRestartBackoffSteps <= 1) {
+    return kBaseMsBetweenSelfRestarts;
+  }
+  uint32_t floorMs = kBaseMsBetweenSelfRestarts;
+  // Shifted in a loop with the clamp inside it rather than computed as
+  // base << (steps - 1), because that expression overflows a uint32_t at step
+  // 13 and the counter saturates at 255. An overflowed floor reads as a very
+  // short one, which would turn the backoff into the reboot loop it prevents on
+  // exactly the device that had backed off the furthest.
+  for (uint8_t step = 1; step < gSelfRestartBackoffSteps; ++step) {
+    if (floorMs >= kMaxMsBetweenSelfRestarts / 2) {
+      return kMaxMsBetweenSelfRestarts;
+    }
+    floorMs *= 2;
+  }
+  return floorMs > kMaxMsBetweenSelfRestarts ? kMaxMsBetweenSelfRestarts : floorMs;
+}
 
 /// Checked once per loop() iteration, but only actually looks at anything once
 /// every kHeapCheckIntervalMs - see the block comments above for the grace
@@ -1019,13 +1143,72 @@ void checkUnreachableWatchdog() {
   // here, against exactly the same clock - it was moved, not changed, so that the
   // cards asking "is maintenance in force" get the same answer this watchdog does
   // rather than a second implementation of the same judgement.
+  //
+  // THE BACKOFF DOES NOT CHANGE THIS JUDGEMENT, and it is worth saying why
+  // rather than leaving the reader to infer it from the code being unchanged.
+  // The response-OOM watchdog below is deliberately NOT suppressed here (see
+  // 92cc034 and that function's own header): a declared window explains a silent
+  // server and explains nothing about this device's heap. The opposite decision
+  // is made here, and it has to be argued rather than assumed to be the mirror
+  // image, because this watchdog no longer has only one trigger.
+  //
+  // The ORDINARY trigger is the easy half. Five check-ins failed, and the single
+  // fact a window announces is that the server will not answer check-ins. The
+  // window is not an excuse being stretched over an unrelated symptom; it is the
+  // answer to the only question the counter asks. Backing off is the response to
+  // an UNEXPLAINED silence this device has already failed to fix; suppression is
+  // the response to an EXPLAINED one. Different questions, so the window keeps
+  // its veto and the schedule is simply not consulted.
+  //
+  // THE HARD HALF is provablyCannotReconnect below, and it is genuinely the
+  // OOM watchdog's case in miniature: !Http::canOpenNewSession() is a fact about
+  // THIS DEVICE'S HEAP, proven locally, and a window explains none of it. By the
+  // 92cc034 argument alone that path should be exempt from the exemption. It is
+  // not, and the reason is not the category argument above but a consequence
+  // one: a restart is only worth taking if it could plausibly end the condition,
+  // and inside a declared window it cannot. The restart would buy a clean heap,
+  // the device would come back, and the very next check-in would still fail -
+  // because the server is down, which is the one thing we have been told for
+  // certain. So the restart cannot succeed, and taking it anyway would cost a
+  // blank screen, a fresh fragmentation cycle, two NVS writes AND a backoff step
+  // spent on an attempt that was doomed before it began - the last of these
+  // being new with this change and the reason the decision is re-argued here at
+  // all. Nothing is lost by waiting: gConsecutiveCheckInFailures keeps climbing,
+  // and the moment the window closes this function reaches the same conclusion
+  // with its budget intact.
+  //
+  // The difference from the OOM watchdog is therefore not "heap versus network"
+  // after all - it is that an OOM restart during a window CAN work (the server
+  // is reachable in that scenario by definition; only this device's heap is the
+  // problem) and a connection restart during a window cannot.
+  //
+  // Consequence for the schedule, stated because the tempting summary overstates
+  // it: no restart of THIS watchdog happens inside a window, so no step of the
+  // ladder comes from here however long the deploy lasts. The OOM watchdog can
+  // still restart and step during the same window. See selfRestartFloorMs().
   if (Maintenance::inWindow()) {
     if (gConsecutiveCheckInFailures > 0) {
+      // The floor is named on this line even though nothing is about to use it,
+      // because an operator reading the stream during a deploy is entitled to
+      // know what this device will do the moment the window closes - and the
+      // answer is different for a device on its first hold-off and one on its
+      // fifth.
+      //
+      // "nothing HERE steps the backoff", not "the window does not step it":
+      // the response-OOM watchdog is deliberately not suppressed by a window and
+      // can still restart and step during this same deploy. An operator who read
+      // the stronger claim off this line and then saw the ladder move would be
+      // right to think one of the two was lying.
       Log::printf("[health] %lu check-in(s) have failed, but the server announced maintenance for "
                   "another %ld second(s) - NOT restarting, and cards say so instead of claiming "
-                  "the service is unreachable",
+                  "the service is unreachable. A restart could not help anyway: the server is the "
+                  "part that is down. Nothing here steps the backoff (the response-OOM watchdog is "
+                  "not suppressed and still can): %u self-restart(s) in this run, floor %lu ms "
+                  "when the window closes",
                   static_cast<unsigned long>(gConsecutiveCheckInFailures),
-                  Maintenance::secondsRemaining());
+                  Maintenance::secondsRemaining(),
+                  static_cast<unsigned>(gSelfRestartBackoffSteps),
+                  static_cast<unsigned long>(selfRestartFloorMs()));
     }
     return;
   }
@@ -1065,8 +1248,8 @@ void checkUnreachableWatchdog() {
   // rollover - the same reasoning StackWatch's heartbeat documents. A device
   // that has never restarted for this reason has gLastUnreachableRestartMs 0,
   // and `now - 0` is simply uptime, which is what we want to compare.
-  if (gLastUnreachableRestartMs != 0 &&
-      (now - gLastUnreachableRestartMs) < kMinMsBetweenUnreachableRestarts) {
+  const uint32_t floorMs = selfRestartFloorMs();
+  if (gLastUnreachableRestartMs != 0 && (now - gLastUnreachableRestartMs) < floorMs) {
     // Logged once per hold-off, not once per loop iteration. This function runs
     // every iteration, so an unconditional line here put hundreds of identical
     // entries into the remote debug stream in a couple of minutes on a real
@@ -1080,26 +1263,54 @@ void checkUnreachableWatchdog() {
     // distinct episode announces itself once.
     if (!gHoldOffLogged) {
       gHoldOffLogged = true;
+      // The floor, the step that produced it and the base it came from, all on
+      // one line. "Holding off for 9,600,000 ms" on its own is unreadable and
+      // unfalsifiable; "restart 4 of this run, so 20 min doubled 3 times, capped
+      // at 4 h" is a claim a reader can check against the schedule and against
+      // this device's own restart history.
       Log::printf("[health] %lu check-ins have failed, but this device already restarted for that "
                   "%lu ms ago - holding off (minimum gap %lu ms) rather than entering a reboot "
-                  "loop. Silent from here until this clears.",
+                  "loop. That gap is the backoff, not a constant: %u self-restart(s) in this run "
+                  "with no successful check-in between them, so the %lu ms base is doubled %u "
+                  "time(s), capped at %lu ms. Silent from here until this clears.",
                   static_cast<unsigned long>(gConsecutiveCheckInFailures),
                   static_cast<unsigned long>(now - gLastUnreachableRestartMs),
-                  static_cast<unsigned long>(kMinMsBetweenUnreachableRestarts));
+                  static_cast<unsigned long>(floorMs),
+                  static_cast<unsigned>(gSelfRestartBackoffSteps),
+                  static_cast<unsigned long>(kBaseMsBetweenSelfRestarts),
+                  static_cast<unsigned>(gSelfRestartBackoffSteps > 0 ? gSelfRestartBackoffSteps - 1
+                                                                     : 0),
+                  static_cast<unsigned long>(kMaxMsBetweenSelfRestarts));
     }
     return;
+  }
+
+  // Stepped BEFORE the log line below, so that line can name the gap this
+  // device is committing itself to rather than the one it just left. The RAM
+  // mirror and the NVS copy are written a few lines apart and both before the
+  // restart; if power were lost between them the device comes back having taken
+  // a restart the counter does not know about, which costs one shorter floor
+  // and nothing else.
+  if (gSelfRestartBackoffSteps < UINT8_MAX) {
+    ++gSelfRestartBackoffSteps;
   }
 
   Log::printf(
       "[health] %lu consecutive check-in failures (limit %lu) after %lu ms uptime with WiFi "
       "associated - this device can render but cannot be reached, managed or updated, so it is "
       "restarting to get a working TLS session (largest 8BIT block=%u; mbedTLS needs %u "
-      "contiguous for EACH of its two record buffers, so that is the floor, not 32KB)",
+      "contiguous for EACH of its two record buffers, so that is the floor, not 32KB). This is "
+      "self-restart %u of this run; if it does not work, the next one cannot happen for %lu ms "
+      "(backing off from %lu ms toward a %lu ms cap). Only a successful check-in resets that.",
       static_cast<unsigned long>(gConsecutiveCheckInFailures),
       static_cast<unsigned long>(kMaxConsecutiveCheckInFailures),
       static_cast<unsigned long>(now),
       static_cast<unsigned>(Http::largestContiguousBytes()),
-      static_cast<unsigned>(Http::kTlsRecordBufferBytes));
+      static_cast<unsigned>(Http::kTlsRecordBufferBytes),
+      static_cast<unsigned>(gSelfRestartBackoffSteps),
+      static_cast<unsigned long>(selfRestartFloorMs()),
+      static_cast<unsigned long>(kBaseMsBetweenSelfRestarts),
+      static_cast<unsigned long>(kMaxMsBetweenSelfRestarts));
 
   // The line above has to survive the restart, and the remote stream is the
   // only channel a deployed device has - except that this is the one restart
@@ -1114,6 +1325,14 @@ void checkUnreachableWatchdog() {
   // is precisely the one that would otherwise reboot silently forever with
   // nobody - server or household - ever being told.
   Identity::recordSelfRestart();
+  // The persistent half of the increment made above. Two counters written at
+  // one site and never merged: recordSelfRestart() answers "should the next
+  // boot narrate itself" and is cleared by an hour of uptime, this one answers
+  // "how long must the next attempt wait" and is cleared only by reaching the
+  // server. See Identity::selfRestartBackoffSteps() for why sharing one counter
+  // between those two questions silently caps the backoff at the narration
+  // rule's horizon.
+  Identity::recordSelfRestartBackoffStep();
   Display::showStatus("Reconnecting", "Restoring the connection - back in a moment");
 
   // Set before the restart even though this variable does not survive one,
@@ -1156,36 +1375,57 @@ void checkResponseOomWatchdog() {
     return;
   }
 
-  // The same twenty-minute floor as the connection watchdog, and deliberately
-  // the SAME timestamp rather than one of its own. The danger being guarded
-  // against is one danger - this device rebooting itself in a loop - and it does
-  // not care which of the two watchdogs pulled the trigger. A device that just
-  // restarted for unreachability and now cannot parse either is a device that
-  // should wait, not one that gets a fresh budget because the label changed.
+  // The same floor as the connection watchdog, and deliberately the SAME
+  // timestamp rather than one of its own. The danger being guarded against is
+  // one danger - this device rebooting itself in a loop - and it does not care
+  // which of the two watchdogs pulled the trigger. A device that just restarted
+  // for unreachability and now cannot parse either is a device that should wait,
+  // not one that gets a fresh budget because the label changed.
+  //
+  // That floor is no longer a constant, and this call site inherits the backoff
+  // for exactly the reason it inherited the timestamp: one hazard, one schedule.
+  // Both watchdogs also STEP the schedule, so a device alternating between the
+  // two failures backs off on the sum of its restarts rather than pretending
+  // each label is a fresh start - which is the same loophole sharing the
+  // timestamp already closed, one level up.
   const uint32_t now = millis();
-  if (gLastUnreachableRestartMs != 0 &&
-      (now - gLastUnreachableRestartMs) < kMinMsBetweenUnreachableRestarts) {
+  const uint32_t floorMs = selfRestartFloorMs();
+  if (gLastUnreachableRestartMs != 0 && (now - gLastUnreachableRestartMs) < floorMs) {
     if (!gHoldOffLogged) {
       gHoldOffLogged = true;
       Log::printf("[health] %lu check-in response(s) failed to parse for lack of heap, but this "
-                  "device already restarted itself %lu ms ago - holding off (minimum gap %lu ms). "
-                  "Silent from here until this clears.",
+                  "device already restarted itself %lu ms ago - holding off (minimum gap %lu ms, "
+                  "the shared backoff after %u self-restart(s) in this run, base %lu ms, cap %lu "
+                  "ms). Silent from here until this clears.",
                   static_cast<unsigned long>(gConsecutiveResponseOom),
                   static_cast<unsigned long>(now - gLastUnreachableRestartMs),
-                  static_cast<unsigned long>(kMinMsBetweenUnreachableRestarts));
+                  static_cast<unsigned long>(floorMs),
+                  static_cast<unsigned>(gSelfRestartBackoffSteps),
+                  static_cast<unsigned long>(kBaseMsBetweenSelfRestarts),
+                  static_cast<unsigned long>(kMaxMsBetweenSelfRestarts));
     }
     return;
+  }
+
+  // Stepped before the line below for the same reason as in the connection
+  // watchdog: the log should name the gap being committed to, not the one just
+  // left.
+  if (gSelfRestartBackoffSteps < UINT8_MAX) {
+    ++gSelfRestartBackoffSteps;
   }
 
   Log::printf(
       "[health] %lu consecutive check-in responses (limit %lu) arrived complete and could not be "
       "parsed for lack of heap after %lu ms uptime - the server is reachable and this device "
       "cannot be managed anyway, so it is restarting to reclaim memory (largest 8BIT block=%u, "
-      "free heap=%u)",
+      "free heap=%u). This is self-restart %u of this run; the next one - by either watchdog - "
+      "cannot happen for %lu ms",
       static_cast<unsigned long>(gConsecutiveResponseOom),
       static_cast<unsigned long>(kMaxConsecutiveResponseOom), static_cast<unsigned long>(now),
       static_cast<unsigned>(Http::largestContiguousBytes()),
-      static_cast<unsigned>(ESP.getFreeHeap()));
+      static_cast<unsigned>(ESP.getFreeHeap()),
+      static_cast<unsigned>(gSelfRestartBackoffSteps),
+      static_cast<unsigned long>(selfRestartFloorMs()));
   Log::flushNow();
   AppService::stashTimeForFastReboot();
   // LOW_HEAP_RESPONSE, not UNREACHABLE, and not the bare LOW_HEAP the draw
@@ -1197,6 +1437,12 @@ void checkResponseOomWatchdog() {
   // unknown reason, with no server change needed to stop it reading as alarming.
   BootDiag::recordRestartIntent(BootDiag::RestartCause::LowHeapResponse);
   Identity::recordSelfRestart();
+  // Steps the shared backoff, exactly as the connection watchdog does. This is
+  // the half of "one shared floor" that would be easy to leave out and would
+  // quietly undo it: a device whose restarts all came through this path would
+  // otherwise sit at the twenty-minute base forever while reporting that it was
+  // backing off.
+  Identity::recordSelfRestartBackoffStep();
   Display::showStatus("Refreshing", "Reclaiming memory - back in a moment");
   gLastUnreachableRestartMs = now;
 
@@ -1469,6 +1715,41 @@ void performCheckIn() {
                 "needed",
                 static_cast<unsigned long>(gConsecutiveResponseOom));
     gConsecutiveResponseOom = 0;
+    // AND the hold-off latch, which this branch did not clear until 2026-09-14
+    // and had to. gHoldOffLogged is one flag shared by both watchdogs' hold-off
+    // lines, but only the branch above reset it - and by 92cc034's own design a
+    // NoMemory parse failure deliberately does NOT touch
+    // gConsecutiveCheckInFailures, so a device whose whole episode came through
+    // the OOM path left that branch untaken and the latch stuck at true for the
+    // rest of the boot. Every later OOM hold-off then held off in total silence,
+    // on the one channel a deployed device has, which is exactly the failure the
+    // latch itself was introduced to avoid going too far in the other direction.
+    // Worth more now than when it was written: the backoff makes hold-off
+    // episodes both longer and more numerous, so a latch that never reopens
+    // suppresses far more than one line.
+    gHoldOffLogged = false;
+  }
+
+  // THE ONE THING THAT RESETS THE BACKOFF, and it is here rather than anywhere
+  // earlier in this function on purpose. Everything above has to have happened
+  // for this line to be reached: the TLS session came up, the secret was
+  // accepted, the server answered, and this device had the heap to parse what it
+  // said. That whole round trip is the observation - not a resolved hostname,
+  // not an open socket, not an hour of uptime. See selfRestartFloorMs() for why
+  // the two weaker signals are refused, and Http::diagnoseFailure() for the fact
+  // that makes DNS and TCP actively misleading here: the poisoned-TLS-client
+  // fault passes both.
+  //
+  // Guarded on the RAM mirror, so a healthy device - which reaches this line
+  // every 60 seconds for its whole life - never touches flash. Identity's own
+  // setter guards again for the same reason.
+  if (gSelfRestartBackoffSteps > 0) {
+    Log::printf("[checkin] a complete round trip after %u self-restart(s) in this run - the "
+                "backoff is reset to its %lu ms base, and the next run starts over from there",
+                static_cast<unsigned>(gSelfRestartBackoffSteps),
+                static_cast<unsigned long>(kBaseMsBetweenSelfRestarts));
+    gSelfRestartBackoffSteps = 0;
+    Identity::clearSelfRestartBackoff();
   }
 
   if (result.intervalMs > 0) {
@@ -1740,23 +2021,64 @@ void setup() {
   // facing something a reboot cannot fix (the service genuinely down, DNS
   // moved, credentials valid but the host gone) would restart every five
   // minutes indefinitely. Seeded this way it gets one restart, then waits
-  // kMinMsBetweenUnreachableRestarts before trying that again, whether or not
-  // a reboot happened in between.
+  // selfRestartFloorMs() before trying that again, whether or not a reboot
+  // happened in between.
   //
   // LowHeapResponse seeds the same clock, because it restarts on the same
   // timestamp and for the same anti-loop reason - see checkResponseOomWatchdog()
   // on why one shared backoff rather than two: the hazard is this device
   // rebooting in a loop, and it does not care which watchdog pulled the trigger.
+  //
+  // The length of that wait is read from NVS here, and this is the line that
+  // makes the backoff work at all: the schedule has to survive the very event
+  // it is counting. gSelfRestartBackoffSteps is RAM and a restart clears it, so
+  // without this seed every boot would believe it was the first attempt of the
+  // run and the floor would be twenty minutes forever - which is precisely the
+  // fixed-interval defect this change is here to remove, reintroduced by
+  // omission.
+  gSelfRestartBackoffSteps = Identity::selfRestartBackoffSteps();
+
   const BootDiag::RestartCause lastCause = BootDiag::lastRestartCause();
   if (lastCause == BootDiag::RestartCause::Unreachable ||
       lastCause == BootDiag::RestartCause::LowHeapResponse) {
     gLastUnreachableRestartMs = millis();
     Log::printf("[health] last restart was %s - the self-restart watchdogs will hold off for %lu "
-                "ms rather than restart again immediately",
+                "ms rather than restart again immediately (%u self-restart(s) in this run with no "
+                "successful check-in between them, so the %lu ms base has been doubled toward its "
+                "%lu ms cap)",
                 lastCause == BootDiag::RestartCause::Unreachable
                     ? "for unreachability"
                     : "to reclaim heap after unparseable check-in responses",
-                static_cast<unsigned long>(kMinMsBetweenUnreachableRestarts));
+                static_cast<unsigned long>(selfRestartFloorMs()),
+                static_cast<unsigned>(gSelfRestartBackoffSteps),
+                static_cast<unsigned long>(kBaseMsBetweenSelfRestarts),
+                static_cast<unsigned long>(kMaxMsBetweenSelfRestarts));
+  } else if (gSelfRestartBackoffSteps > 0) {
+    // THE SKIPPED BRANCH, said out loud because its silence would be
+    // indistinguishable from a bug. This device has a live backoff run recorded
+    // in NVS, but the restart it just took was NOT one of the two watchdogs' -
+    // a power cut, an OTA, a reprovision, or somebody pulling the plug. So
+    // gLastUnreachableRestartMs stays 0, the floor is not consulted, and the
+    // next watchdog trigger fires immediately at its ordinary threshold.
+    //
+    // Deliberate. Somebody or something intervened, and the run's history is
+    // not good enough evidence to spend that intervention's one free attempt.
+    // The count itself is kept rather than cleared, so if that attempt also
+    // fails the device goes straight back to the long floor instead of walking
+    // the schedule up from twenty minutes again.
+    //
+    // The cause itself is not named here: BootDiag::describeCause() is private
+    // to BootDiag.cpp's anonymous namespace, and the [boot] restart-reason line
+    // it feeds has already printed the token a few lines earlier in this same
+    // stream. Repeating it would mean widening that function's visibility to
+    // say something the reader can already see.
+    Log::printf("[health] %u self-restart(s) recorded in this backoff run, but the restart that "
+                "led to this boot was neither watchdog's (see the [boot] restart reason above) - "
+                "not seeding the hold-off clock, so the next trigger acts at once. The run is "
+                "kept rather than cleared: if that attempt fails too, the backoff resumes from "
+                "this run's schedule instead of walking up from the %lu ms base again",
+                static_cast<unsigned>(gSelfRestartBackoffSteps),
+                static_cast<unsigned long>(kBaseMsBetweenSelfRestarts));
   }
 
   Display::begin();

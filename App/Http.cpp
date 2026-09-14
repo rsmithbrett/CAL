@@ -173,7 +173,8 @@ void diagnoseFailure(const char* tag) {
   // Layer 3: stop inferring and ask mbedTLS. Everything above narrows the
   // failure down to "the handshake", which is still a category rather than a
   // cause - a certificate that will not validate, a clock too far off for the
-  // validity window, an out-of-memory on the ~32KB of session buffers, and a
+  // validity window, an out-of-memory on the two 16,717-byte session buffers
+  // (33,434 in total, but never as one block - see kTlsRecordBufferBytes), and a
   // peer that closed the connection are all "the handshake" and want four
   // different fixes.
   //

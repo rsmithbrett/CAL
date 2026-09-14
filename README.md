@@ -2487,6 +2487,17 @@ checksum - kept in one script rather than only in CI config so it runs
 identically by hand or inside any CI provider. See **Shipping** below for how
 a push to `main` turns this into a published release with no further action.
 
+**A clean compile is not a test, and `TEST_PLAN.md` is where that is dealt
+with.** Nothing in this repository can be exercised by an automated test - there
+is no host-runnable target, and the behaviour that matters is a function of a
+real heap, a real TLS stack, a real NVS partition and a real server on the other
+end. `TEST_PLAN.md` carries the bench procedure for every behaviour a compile
+cannot reach, and is explicit about which of them cost hours of wall-clock time.
+Two practical notes from it, worth repeating here: report sizes against the
+**real** `ota_0` ceiling of 2,424,832 bytes from `partitions.csv`, never
+`arduino-cli`'s generic 1,966,080; and compiles on this project routinely look
+hung when they are not - check the OS process list rather than the console.
+
 Toolchain, pinned in that script and matching what this has been measured
 against:
 
@@ -2580,8 +2591,13 @@ disposable tag can no longer cost the permanent one.
 - **No automated test covers any of this, and one specific consequence is
   worth naming.** Six builds went out tonight on reading and reasoning alone
   (see the last section of this file); the measurements behind them are real
-  and the responses to them are unproven. There is no TEST_PLAN in this
-  repository.
+  and the responses to them are unproven. **Superseded in part on 2026-09-14:**
+  this bullet said "there is no TEST_PLAN in this repository", and there now is
+  one. It changes nothing about the builds described here, which went out before
+  it existed and remain unproven; what it changes is that the procedures which
+  *would* have proven them are now written down instead of being rediscovered.
+  `TEST_PLAN.md` is still a manual bench plan, not an automated suite - see the
+  bullet below, which is unchanged.
 - **No automated tests, at all.** There is no test harness in this repository
   and no obvious one to reach for: the code is inseparable from ESP32
   peripherals, NVS, WiFi and TLS, none of which have a usable stub here. The
@@ -4564,6 +4580,17 @@ more, and it is still printed everywhere, beside the real figure, for exactly
 one reason: a fleet whose whole recorded history was taken through it needs the
 gap to stay visible rather than become a claim in a commit message.
 
+> **WRONG FIGURE, KEPT ON PURPOSE.** Everything below this line that says
+> "~32KB" is the misreading corrected under "Instrumenting the ordinary
+> rotation". The real requirement is **16,717 bytes contiguous, twice over, in
+> two separate flat allocations** - total 33,434, largest single demand 16,717,
+> and it is the largest single demand a fragmented heap has to meet. This
+> section is the record of an evening's reasoning and is left standing as it was
+> written, because several of its conclusions were reached *through* the wrong
+> figure and deleting it would hide that. Read every "~32KB" below as "16,717
+> twice", and re-derive any margin judgement it led to. Nothing in the firmware
+> reads this number: `Http::kTlsRecordBufferBytes` is the single definition.
+
 **mbedTLS needs roughly 32KB contiguous to stand up a new TLS session.** That is
 the figure the rest of tonight orbits. Set it against what this device's largest
 8-bit block actually does over a boot:
@@ -4849,9 +4876,10 @@ allocation", and a new session needs the second.
 
 The same diagnostic narrowed a real failure to "the TLS handshake itself" and
 stopped there, which is a category and not a cause - a certificate that will not
-validate, a clock outside the validity window, an out-of-memory on the ~32KB of
-session buffers, and a peer that hung up are all "the handshake" and want four
-different fixes. `NetworkClientSecure::lastError()` carries mbedTLS's own answer,
+validate, a clock outside the validity window, an out-of-memory on the two
+16,717-byte session buffers (33,434 in total, but never demanded as one block -
+see `Http::kTlsRecordBufferBytes`), and a peer that hung up are all "the
+handshake" and want four different fixes. `NetworkClientSecure::lastError()` carries mbedTLS's own answer,
 already rendered to text by the library. **It was available all along and was
 never read.** It is now logged, deliberately *after* the DNS and TCP probes
 rather than before them, because those touch only a separate plain client and
@@ -5028,10 +5056,17 @@ started reading `lastError()`.
 
 ## Restarting a device that can draw but cannot be reached
 
-A device that loses its TLS session cannot get it back. mbedTLS needs roughly
-32KB contiguous for a new one; once cards have been rendering the largest 8-bit
-block settles well below that - 13,812 bytes, measured repeatedly on device 17 -
-and every handshake then fails with `MBEDTLS_ERR_SSL_ALLOC_FAILED` (`-32512`).
+A device that loses its TLS session cannot get it back. `mbedtls_ssl_setup()`
+makes two separate flat allocations of **16,717 bytes each** (13 + 320 + 16,384;
+`Http::kTlsRecordBufferBytes`), so what a fragmented heap has to satisfy is
+16,717 bytes *contiguous* - twice over, but never 33,434 at once. This paragraph
+said "roughly 32KB" until 2026-09-14; see "One correction to this document, made
+where it does damage" under "Instrumenting the ordinary rotation" below, and
+`.github/workflows/rebuild-mbedtls-libs.yml`, which was the last file still
+quoting the wrong framing. Once cards have been rendering the largest 8-bit
+block settles well below even the real figure - 13,812 bytes, measured
+repeatedly on device 17 - and every handshake then fails with
+`MBEDTLS_ERR_SSL_ALLOC_FAILED` (`-32512`).
 **`gClient` is a process-lifetime global and nothing in this firmware resets it,
 so the first failure is permanent for the life of the process.**
 
@@ -5061,7 +5096,11 @@ the cause:
   this firmware. It declines and logs that it declined, which matters: a guard
   that silently does nothing is indistinguishable from a guard that is broken.
 - **Twenty minutes minimum between restarts, and this needs two halves to work at
-  all.** The in-boot variable is the obvious half. The half that makes it real is
+  all.** *Superseded 2026-09-14: twenty minutes is now only the FIRST gap, and it
+  doubles to a four-hour ceiling on each further restart that does not reach the
+  server. See "The unreachable watchdog rebooted on the same cadence forever"
+  below; everything in this bullet still describes the machinery the backoff is
+  built on.* The in-boot variable is the obvious half. The half that makes it real is
   `setup()` seeding it from the new `BootDiag::lastRestartCause()` when the
   previous restart was `Unreachable`. Without that, a restart clears the variable
   and the device is eligible again five minutes later, forever - so the guard
@@ -5462,3 +5501,349 @@ mid-window comes back with the watchdog armed and its cards honest, and is simpl
 told about the window again on its next successful check-in. **Unverified on
 hardware**, like every other card change in this build - checked by a clean
 compile and by reading.
+
+## The unreachable watchdog rebooted on the same cadence forever
+
+`checkUnreachableWatchdog()` restarts a device that has failed five check-ins in
+a row, and a twenty-minute floor stopped that becoming a reboot loop. The floor
+was a constant, and that is the defect: **a device that cannot reach the server
+rebooted every twenty minutes for as long as the condition lasted, indefinitely,
+at a cadence that carried no information about whether rebooting was helping.**
+
+The case it is worst for is the case it is most often in. When the server is
+genuinely down - a deploy that overran, a host that moved, a certificate that
+expired - a restart on this device cannot fix anything, and the fleet pays for
+the attempt every twenty minutes per device: several seconds of blank screen in
+a household, a fresh heap-fragmentation cycle on a board whose fragmentation is
+the subject of half this document, and two NVS writes on the way out. An
+eight-hour overnight outage cost 24 of those per device, all of them futile, for
+a fault that was never on the device.
+
+### The shape: 20 minutes doubling to a four-hour ceiling
+
+`selfRestartFloorMs()` returns 20 minutes doubled once per restart already spent
+in this run, clamped at four hours: **20, 40, 80, 160, 240, 240, ...** The first
+hold-off of a run is the unchanged twenty minutes, deliberately - everything the
+original constant's reasoning said about a single wrong diagnosis is still true,
+and a device whose second restart would have worked must not be made to wait
+longer than it used to. What changed is only what happens after the evidence has
+come in that restarting is not working.
+
+A device therefore gets four attempts inside its first five hours and then
+settles at six a day, against 72 a day before.
+
+**Why four hours can be this generous**, which is the single property the whole
+design rests on: *backing off delays restarts and nothing else*. Check-ins keep
+running at the server's own cadence throughout, and the first one that succeeds
+clears the run. A device sitting on a four-hour floor is not four hours away
+from rejoining the fleet when the server comes back - it is one check-in
+interval away, exactly as it would be on a twenty-minute floor. The only thing a
+long floor costs is the case where a restart *would* have fixed a local fault,
+and that case is excluded by construction: to be on the fourth doubling a device
+must have tried a restart four times and been wrong every time.
+
+**Why it is a ceiling rather than a surrender.** A device that stopped
+restarting altogether could never recover from a fault that a restart *would*
+fix but that its own check-ins cannot detect, and this fleet has exactly one of
+those - the poisoned TLS client, where the session is unrecoverable but DNS and
+TCP keep working perfectly. Retrying a few times a day is cheap insurance
+against being permanently wrong in that direction.
+
+### What resets it: a completed check-in, and nothing weaker
+
+The run is cleared on the first check-in that completes - TLS up, secret
+accepted, whole response parsed - which is the same observation that already
+clears `gConsecutiveCheckInFailures` and `gConsecutiveResponseOom`.
+
+**A successful DNS lookup or TCP connect deliberately does not count**, and this
+is the one place the obvious generosity is actively harmful.
+`Http::diagnoseFailure()` exists precisely because those three layers had to be
+told apart, and what it established is that the fault this watchdog was built
+for *passes the first two*: a device whose largest contiguous block has decayed
+below `Http::kTlsRecordBufferBytes` resolves the hostname fine, connects to port
+443 fine, and fails only inside `mbedtls_ssl_setup()`. Crediting a reachable
+socket would therefore reset the backoff hardest on the devices that need it
+most, and pin the worst-affected units at twenty minutes forever. A near-miss is
+not partial credit when the near-miss is the signature of the disease.
+
+**Uptime does not count either**, and the reason is worth recording because the
+obvious implementation gets it wrong. `Identity::consecutiveSelfRestarts()`
+already exists and looks like the natural exponent - but it answers a different
+question ("should this boot narrate itself on the glass") and is cleared by an
+hour of uptime with no further restart. Both halves are wrong here. An hour of
+uptime is not evidence that anything was fixed on a device whose entire
+complaint is that it cannot be reached; and worse, once the backoff grew past
+that hour the narration rule would clear the exponent moments before every
+restart it was meant to delay, silently capping the backoff at 60 minutes by
+accident. So the backoff gets its own persistent counter,
+`Identity::selfRestartBackoffSteps()` (NVS key `rstbackoff`, App-only,
+saturating at 255), stepped only by the two watchdogs that share the restart
+floor and cleared only by a completed check-in.
+
+It has to be persistent for the same reason `BootDiag`'s restart cause does: the
+restart is the event being counted, and nothing in RAM survives it. `setup()`
+seeds a RAM mirror from NVS, which is the line that makes the whole thing work -
+without it every boot would believe it was the first attempt of the run and the
+floor would be twenty minutes forever, which is the fixed-interval defect
+reintroduced by omission.
+
+### Both watchdogs, one schedule
+
+`checkResponseOomWatchdog()` (added in `92cc034`) already shared the connection
+watchdog's floor *and its actual timestamp*, on the grounds that the hazard
+being guarded is one hazard - this device rebooting in a loop - and it does not
+care which watchdog pulled the trigger. It inherits the backoff for the same
+reason, and it also **steps** it. That second half would be easy to leave out
+and would quietly undo the first: a device whose restarts all came through the
+OOM path would otherwise sit at the twenty-minute base forever while reporting
+that it was backing off. A device alternating between the two failures now backs
+off on the sum of its restarts, which closes the same loophole sharing the
+timestamp already closed one level up.
+
+The draw-failure watchdog, `checkHeapHealth()`, is untouched. It has never had a
+floor of its own (its own comment accepts a roughly four-minute restart cycle as
+the price of a device that has stopped drawing entirely), it is not part of this
+hazard's accounting, and folding it in would have meant inventing a floor for it
+in the same change - a second decision smuggled into the first.
+
+### The maintenance window keeps its veto, and this is not the same question
+
+`Maintenance::inWindow()` still exempts the connection watchdog entirely, before
+everything else including the provably-cannot-reconnect fast path. `92cc034`
+deliberately did *not* extend that exemption to the OOM watchdog, on the grounds
+that a declared window explains a silent server and explains nothing about this
+device's heap. The connection watchdog keeps its exemption - but the argument for
+it is **not** simply the mirror image of `92cc034`'s, and the first draft of this
+section was written as though it were.
+
+For the **ordinary** trigger the mirror-image argument does hold. Five failed
+check-ins is precisely the fact a window announces, so the window is not an
+excuse being stretched over an unrelated symptom; it is the answer to the only
+question the counter asks.
+
+The **provably-cannot-reconnect** trigger is the awkward one, and it is
+`92cc034`'s case in miniature: `!Http::canOpenNewSession()` is a locally proven
+fact about *this device's heap*, and a declared window explains none of it. On
+the category argument alone that path should be exempt from the exemption. It is
+not, and the reason is a consequence argument rather than a category one: **a
+restart is only worth taking if it could plausibly end the condition, and inside
+a declared window it cannot.** The restart would buy a clean heap, the device
+would come back, and the next check-in would still fail - the server is down,
+which is the one thing we have been told for certain. That costs a blank screen,
+a fresh fragmentation cycle, two NVS writes and now a backoff step as well, all
+spent on an attempt doomed before it began. Nothing is lost by waiting: the
+failure counter keeps climbing, and the moment the window closes the watchdog
+reaches the same conclusion with its budget intact.
+
+So the real distinction between the two watchdogs is not "network fault versus
+heap fault". It is that **an OOM restart during a window can work** - the server
+is reachable in that scenario by definition, and only this device's heap is
+broken - **and a connection restart during a window cannot.**
+
+The backoff does not change either judgement, because suppression and backing off
+answer different questions. **Suppression is the response to an explained
+silence. Backing off is the response to an unexplained one that this device has
+already failed to fix.** So:
+
+- **A window does not step the schedule *from this watchdog*.** The exponent
+  counts restarts, not failures, and the connection watchdog cannot restart
+  inside a window - so however many check-ins a three-hour deploy costs, none of
+  them steps the ladder. That falls out of tying the exponent to restarts rather
+  than to the failure counters.
+- **"A window does not step the backoff" is false as a blanket claim**, and it is
+  the tempting one-line summary. `checkResponseOomWatchdog()` is not suppressed
+  by a window and *does* step the counter, so a device that runs out of heap
+  parsing responses during a deploy restarts and steps, exactly as it would
+  outside one. That is consistent rather than an oversight - the step follows the
+  restart, and that restart was never the window's business - but an operator who
+  believed the stronger claim and then watched the ladder move would be right to
+  think one of the two was lying. The suppression log line is worded to say
+  "nothing *here* steps the backoff" for that reason.
+- **A window does not reset the schedule**, for the mirror image of the same
+  reason. An operator declaring maintenance says nothing about a device that had
+  already restarted itself four times before the announcement, and resetting
+  there would hand every device in a reboot loop a fresh twenty-minute budget
+  every time somebody deployed.
+- **Window time counts toward the elapsed floor**, because the floor is measured
+  from the last restart and is about how often this device reboots, full stop.
+
+The suppression log line now names the current floor even though nothing is
+about to use it: an operator reading the stream during a deploy is entitled to
+know what each device will do the moment the window closes, and the answer is
+different for a device on its first hold-off and one on its fifth.
+
+### A power cycle gets one free attempt, and the run survives it
+
+`setup()` seeds the hold-off clock only when `BootDiag::lastRestartCause()` was
+`Unreachable` or `LowHeapResponse`. After a power cut, an OTA or a reprovision it
+does not - so the next watchdog trigger fires at once, at its ordinary threshold.
+That is deliberate: somebody or something intervened, and this run's history is
+not good enough evidence to spend that intervention's one attempt. The *count* is
+kept rather than cleared, so if that attempt also fails the device resumes its
+schedule instead of walking up from twenty minutes again. Both branches log,
+including the one that does nothing, because a guard that is silent when it
+declines is indistinguishable from a guard that is broken.
+
+### What the stream says
+
+The remote debug stream is the only diagnostic channel a deployed device has, so
+every decision and every declined branch names its numbers:
+
+```
+[health] last restart was for unreachability - the self-restart watchdogs will hold off for
+         4800000 ms rather than restart again immediately (3 self-restart(s) in this run with no
+         successful check-in between them, so the 1200000 ms base has been doubled toward its
+         14400000 ms cap)
+[health] 7 check-ins have failed, but this device already restarted for that 132000 ms ago -
+         holding off (minimum gap 4800000 ms) rather than entering a reboot loop. That gap is the
+         backoff, not a constant: 3 self-restart(s) in this run with no successful check-in
+         between them, so the 1200000 ms base is doubled 2 time(s), capped at 14400000 ms. Silent
+         from here until this clears.
+[checkin] a complete round trip after 3 self-restart(s) in this run - the backoff is reset to its
+         1200000 ms base, and the next run starts over from there
+```
+
+The hold-off line is still logged once per episode rather than once per loop
+iteration - `gHoldOffLogged` - for the reason it was latched in the first place:
+an unlatched version put hundreds of identical entries into the stream in two
+minutes on a real device and buried everything else.
+
+### Not covered
+
+**Unverified on hardware.** The backoff schedule is a function of a persistent
+counter and `millis()`, and the events that drive it are a restart and an
+outage; nothing about it can be exercised by a compile. `TEST_PLAN.md` section 1,
+"The self-restart backoff", is the substitute, and it is honest about which steps
+cost hours of bench time - 1a's long form is a single overnight run and is the
+only procedure that proves the shipped constants rather than the shape.
+
+One thing is knowingly imperfect. The RAM mirror and the NVS counter are written
+a few lines apart, both before `esp_restart()`; power lost between them costs
+one shorter floor and nothing else. Making that atomic would mean a transaction
+for a value whose worst-case error is twenty minutes.
+
+## An empty listings array is two different facts, and two more cards still cannot tell them apart
+
+Observed live on 2026-09-13: a device with a rejected RentCast key drew "No
+listings nearby right now" to a household in a market that has houses in it.
+Not a stale reading and not a hedge - a confident claim about somebody's local
+property market, made by a device that had been told nothing at all about that
+market.
+
+The server had said so. `lastRefreshError` has been on the wire since the
+endpoint existed and in the card's ArduinoJson filter since the card was
+written, and exactly one branch read it. So a 200 carrying `listings: []` went
+to `Status::Empty` whether the server had asked RentCast and heard "none" or had
+never got an answer out of it.
+
+### `Status::RefreshFailed` splits the two
+
+`Empty` now means what it always claimed to mean and is the only status licensed
+to say anything about the market. `RefreshFailed` means the list is empty
+because the question failed:
+
+> Could not check for listings
+> The listings near Annapolis, MD could not be refreshed just now
+
+which says what did not happen and pointedly names nothing as absent.
+
+**Deliberately not `serviceUnreachable`**, and this is where it composes with the
+maintenance work rather than fighting it. That flag means "this device could not
+reach OUR server", which is the one thing a declared window explains. This is
+our server answering perfectly well about a third party *it* could not reach. A
+window and a refresh error are different conditions, so `failureText()` passes
+this message through untouched and the flag stays false as a decision rather
+than an omission.
+
+**Resting rather than amber**, also a decision. Amber says "something is wrong
+with this device" and nothing is: the panel, the network and our server are all
+fine. What broke is a feed only an administrator can restore, which is exactly
+`ProviderDisabled`'s and `NotConfigured`'s situation and they are already muted.
+Amber in a kitchen for a fault nobody in that kitchen can fix teaches its reader
+to ignore amber.
+
+### The leak that was already there: a vendor's error message on a kitchen wall
+
+Fixing the empty-array case meant fixing something worse next to it. The
+`NotConfigured` branch was assigning `lastRefreshError` straight to
+`result.message`, so a household with no key on file had been reading
+
+> RentCast API key is not configured. Sign up at rentcast.io and set
+> MyListings:ApiKey.
+
+off their kitchen wall - a third-party vendor's name, a sign-up URL and an
+internal configuration key, drawn on a picture frame in somebody's home.
+
+That path now draws a fixed sentence. **Every value of `Result::message` is a
+literal in `Listings.cpp`**, which is the invariant to preserve rather than the
+particular fix: the server's own words go to a new `Result::refreshError`, which
+reaches the debug stream and the `/diag` status line - the readers who can act
+on "401" or "budget exhausted" - and is never drawn. Truncated to 120
+characters, because the column is `varchar(1000)`, this lives in the retained
+`gLast` for as long as the state does, and every error the server actually
+produces identifies itself in its first clause.
+
+Listings present alongside an error are left alone on purpose: the server is
+serving last-known-good rows behind a failing refresh, real rows beat a warning,
+and "Updated N min ago" already understates their age rather than overstating
+it. Only the stream is told.
+
+### Known gap: Aircraft has the same leak, and Forecast has it in softer form
+
+The pattern is not local, and the survey that established that is recorded here
+rather than left in a commit message, because **neither of these was fixed** and
+the next person to read `Listings.cpp` should not have to rediscover them.
+
+- **Aircraft has it, identically, and arguably worse.** `AircraftResult` carries
+  `LastRefreshError` on the wire, `Aircraft.cpp`'s ArduinoJson filter does not
+  whitelist the field, and the empty path draws **"No aircraft within 10 mi
+  right now"** - a flat claim about the sky, made by a device that may have been
+  told nothing about the sky. Worse than the listings case in one respect: an
+  empty sky is *plausible* far more often than an empty housing market, so the
+  false version of this claim is much less likely to be questioned by the person
+  reading it.
+- **Forecast has it in softer form.** `WeatherResult` carries the field, the
+  filter does not, and the empty path says "No forecast is available yet" -
+  which at least asserts nothing about the weather. The leak half still applies
+  if a refresh error ever reaches a drawn string.
+- **Tides and HomeValue cannot have it.** Neither fetches; both arrive flattened
+  on the check-in response with no error field on the wire, and HomeValue drops
+  its card entirely (`cardItemCount` 0) rather than drawing a claim.
+
+Neither open case is a trivially identical fix - both need a filter entry added
+before the field is readable at all, and the filter is what decides how much
+heap the parse takes on a board where that is the whole subject of this
+document. So both are left for their own change rather than smuggled into the
+listings one.
+
+## The sixth heap bucket is a wire change, and the reading end is where it breaks
+
+`02d696c` added `Phase::Boot` to `HeapRatchet` and `heapPhaseBootBytes` to the
+telemetry POST. The buckets are still exact and the identity still holds - Boot
+did not create bytes, it took them out of Idle - but this is a **firmware-to-
+server contract change** and it is filed here as one, because the symptom will
+appear on the server and the cause is in the firmware.
+
+`HeapRatchet`'s value is an identity that can catch the instrument being wrong:
+
+```
+sum(buckets) == bootLargestFreeBlockBytes - largestFreeBlock8BitBytes
+```
+
+A reader still summing the five buckets it knows about will now come up short by
+whatever `setup()` cost - which on device 17 was 45,056 bytes of splash decode
+alone, most of the session total. **The identity check will fail, and the
+firmware will be right.** The fix is on the server: the bucket set is six, and
+`heapPhaseBootBytes` is sent first on the wire because it is the one bucket that
+finishes, so everything after it reads as "since the boot cost".
+
+That work is the server's and is tracked there; nothing in this repository can
+or should do it. What this section exists for is the fifteen minutes somebody
+would otherwise spend looking for a firmware bug when the check first goes red.
+
+Old firmware keeps working against a server that knows about six buckets - the
+field is simply absent and the sum comes up short in the other direction, which
+is why the server-side check has to tolerate its absence rather than require it.
+Breaking wire changes are currently permitted on this project (the fleet is not
+in production as of 2026-09-11), so this is recorded as a fact rather than
+negotiated as a compatibility problem.

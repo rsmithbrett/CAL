@@ -608,8 +608,12 @@ direction. What this revises is the *argument*, not the number: with streaming
 in place there is no per-draw contiguity cost left to remove, so the case for
 JPEG is now specifically that it does not hold a 45KB block for the whole
 uptime — and the thing that block is measurably in the way of is a new TLS
-session, which needs ~32KB contiguous and cannot find it once cards have been
-rendering. See the README's "The numbers tonight rests on" section.
+session, which needs 16,717 bytes contiguous for each of mbedTLS's two record
+buffers (`Http::kTlsRecordBufferBytes`) and cannot find either once cards have
+been rendering. This line said "~32KB contiguous" until 2026-09-14; see the
+correction note at the head of the README's "The numbers tonight rests on"
+section, and note that a 45KB block held for the whole uptime is in the way of
+the real 16,717-byte requirement just as squarely.
 
 One more capability worth recording, because it solves a problem this firmware
 currently solves badly: `drawJpg(Stream*, ...)` exists
