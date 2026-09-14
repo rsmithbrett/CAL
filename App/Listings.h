@@ -22,7 +22,15 @@ namespace Listings {
 
 enum class Status {
   Ok,
-  Empty,             // the fetch succeeded; nothing is listed nearby right now - not an error
+  Empty,             // the fetch succeeded, the server's own upstream refresh succeeded, and
+                     // nothing is listed nearby right now - not an error. This is the ONLY
+                     // status that licenses a claim about the market, which is why
+                     // RefreshFailed below had to be split out of it.
+  RefreshFailed,     // the fetch succeeded and the list came back empty, but the server also
+                     // sent a lastRefreshError - so the emptiness is the absence of an
+                     // answer, not an answer. See the field of that name on Result, and
+                     // fetchMine()'s own remarks on why "nothing nearby" and "we could not
+                     // find out" must not share a status.
   NotConfigured,     // ListingsResult.IsConfigured == false (no RentCast key on file) - an
                      // operational resting state, not a device problem - see ListingsResult
                      // on the server for why this is a first-class value rather than an
@@ -90,7 +98,31 @@ struct Result {
   /// Maintenance::failureText() at draw time, never baked in here. Identical
   /// contract, for identical reasons, to Forecast::Result::message; see that
   /// field's own remarks and Maintenance.h.
+  ///
+  /// **Never carries text the server generated.** Every value assigned to it is
+  /// a literal in Listings.cpp, chosen for a household reading a wall display
+  /// from across a room. The server's own words go in `refreshError` below and
+  /// reach the debug stream, never the panel. This used to be violated on the
+  /// NotConfigured path, which put ListingsResult's "Sign up at rentcast.io and
+  /// set MyListings:ApiKey" straight onto somebody's kitchen wall.
   String message;
+
+  /// The server's `lastRefreshError`, when it sent one - why ITS most recent
+  /// attempt to refresh from RentCast did not produce fresh data. Populated on
+  /// any 200 that carries the field, whatever the resulting status: a rejected
+  /// key, an exhausted monthly budget, an unresolvable postal code, or a bare
+  /// exception message.
+  ///
+  /// **For the debug stream and the operator status line only. Never drawn.**
+  /// It is written for whoever administers the deployment - it names API
+  /// dashboards, config keys and upstream vendors - and none of that is for the
+  /// household whose wall this is on. The card says the listings could not be
+  /// refreshed; this says why, to someone who can act on it.
+  ///
+  /// Truncated to a length worth keeping in RAM (the column is 1000 characters
+  /// server-side, and this lives in the retained gLast for as long as the state
+  /// does). The head of the string is the part that identifies the fault.
+  String refreshError;
 
   /// Whether this failure is one the words "cannot reach the service" were being
   /// used for. True at exactly the three sites that set `message` to "Cannot

@@ -46,6 +46,24 @@ String describeMarket(const String& cityState) {
   return cityState.length() > 0 ? (" near " + cityState) : String("");
 }
 
+/// How much of the server's lastRefreshError to retain. The column is
+/// varchar(1000) and this string lives in gLast for as long as the failure
+/// does, which on a device whose scarce resource is contiguous heap is not
+/// free. Every error the server actually produces identifies itself in its
+/// first clause - "Monthly RentCast request budget exhausted", "Could not
+/// geocode postal code", the HTTP status of a rejected key - so the head is the
+/// part worth carrying and the tail is remediation prose for a web page.
+constexpr size_t kMaxRefreshErrorChars = 120;
+
+String retainRefreshError(const char* serverText) {
+  String text(serverText);
+  if (text.length() > kMaxRefreshErrorChars) {
+    text.remove(kMaxRefreshErrorChars);
+    text += "...";
+  }
+  return text;
+}
+
 }  // namespace
 
 Result fetchMine() {
@@ -158,6 +176,20 @@ Result fetchMine() {
     result.cityState = String(city);
   }
 
+  // Read once, up front, because every branch below wants to know about it and
+  // the difference it makes to each is different. The server sets it whenever
+  // ITS own refresh from RentCast did not produce fresh data - a rejected key,
+  // an exhausted monthly budget, an unresolvable postal code, a bare exception
+  // message (MyListingsService.FailAsync). It has been on the wire since this
+  // endpoint existed and this filter has whitelisted it since this card was
+  // written; nothing read it except the NotConfigured branch, which is how a
+  // rejected key came to render as a confident claim about the market.
+  const char* lastError = doc["lastRefreshError"] | "";
+  const bool hasRefreshError = strlen(lastError) > 0;
+  if (hasRefreshError) {
+    result.refreshError = retainRefreshError(lastError);
+  }
+
   // A first-class resting state, not an error - see ListingsResult on the
   // server. Checked before ever looking at the listings array: an
   // unconfigured account still gets served whatever stale listings happen to
@@ -166,19 +198,61 @@ Result fetchMine() {
   const bool isConfigured = doc["isConfigured"] | true;
   if (!isConfigured) {
     result.status = Status::NotConfigured;
-    const char* lastError = doc["lastRefreshError"] | "";
-    result.message = strlen(lastError) > 0
-        ? String(lastError)
-        : "Real-estate listings are not configured for this account yet.";
-    Log::printf("[listings] not configured: %s", result.message.c_str());
+    // A fixed sentence, not the server's. lastRefreshError on this path is
+    // NotConfiguredResult's "RentCast API key is not configured. Sign up at
+    // rentcast.io and set MyListings:ApiKey." - correct, actionable, and
+    // addressed to whoever runs the deployment rather than to the household
+    // this panel hangs in front of. It goes to the log and the operator status
+    // line instead; see Result::refreshError.
+    result.message = "Real-estate listings are not set up for this home yet.";
+    Log::printf("[listings] not configured: %s",
+                hasRefreshError ? result.refreshError.c_str() : "(no reason given)");
     return result;
   }
 
   JsonArrayConst listings = doc["listings"].as<JsonArrayConst>();
   if (listings.isNull() || listings.size() == 0) {
+    // AN EMPTY LIST IS NOT ONE FACT, IT IS TWO, and they were being told apart
+    // by nothing at all. With no refresh error the server asked RentCast, got
+    // an answer, and the answer was "nothing" - a real statement about the
+    // market. With a refresh error the server never got an answer at all and is
+    // serving the empty cache row FailAsync creates precisely so the reason is
+    // recorded somewhere; the list is empty because the question failed, not
+    // because the market is. Observed live on 2026-09-13 with a rejected
+    // RentCast key: a device drew "No listings nearby right now" to a household
+    // in a market with houses in it, and nothing anywhere said otherwise.
+    //
+    // Deliberately NOT serviceUnreachable. That flag means "this device could
+    // not reach OUR server", which is the thing a declared maintenance window
+    // explains; this is our server answering perfectly well about a third party
+    // it could not reach. A maintenance window and a refresh error are
+    // different conditions and must not be relabelled as each other - so
+    // failureText() passes this message through untouched, which is the right
+    // outcome and the reason the flag stays false rather than an oversight.
+    if (hasRefreshError) {
+      result.status = Status::RefreshFailed;
+      // Says what did not happen, and pointedly does not say what is or is not
+      // for sale. No market is named as empty and no number is implied.
+      result.message = "The listings" + describeMarket(result.cityState) +
+                       " could not be refreshed just now.";
+      Log::printf("[listings] empty list WITH a refresh error - reporting a failed refresh, not an "
+                  "empty market: %s",
+                  result.refreshError.c_str());
+      return result;
+    }
     result.status = Status::Empty;
     result.message = "No homes for sale" + describeMarket(result.cityState) + " right now.";
     return result;
+  }
+
+  // Listings AND an error: the server is serving last-known-good rows while its
+  // refresh fails behind them (RefreshCoreAsync keeps them on purpose). Drawing
+  // real listings beats drawing a warning, and the card's own "Updated N min
+  // ago" line already understates their age rather than overstating it, so the
+  // screen is left alone and only the stream is told.
+  if (hasRefreshError) {
+    Log::printf("[listings] serving %u cached listing(s) behind a failed refresh: %s",
+                static_cast<unsigned>(listings.size()), result.refreshError.c_str());
   }
 
   result.status = Status::Ok;
@@ -261,8 +335,15 @@ String cardStatus() {
       return String("ok, ") + gLast.count + " listing(s)";
     case Status::Empty:
       return "ok, none listed nearby";
+    // The one status line that carries the server's own words, because this is
+    // the reader who can act on them - an admin looking at /diag needs to see
+    // "401" or "budget exhausted", not the softened sentence the card draws.
+    case Status::RefreshFailed:
+      return String("upstream refresh failed: ") + gLast.refreshError;
     case Status::NotConfigured:
-      return "resting: no listings provider key on file";
+      return gLast.refreshError.length() > 0
+                 ? String("resting: not configured - ") + gLast.refreshError
+                 : String("resting: no listings provider key on file");
     case Status::NotActivated:
       return "refused: device not activated";
     case Status::ProviderDisabled:
@@ -333,11 +414,22 @@ void cardDraw(uint16_t itemIndex) {
   // Empty and NotConfigured are resting states - nothing wrong with the
   // device, just nothing to show or nothing set up yet - shown muted rather
   // than amber, the same isProblem split Weather's and Aircraft's cards make.
+  //
+  // RefreshFailed rests too, and that is a judgement rather than an oversight.
+  // Amber says "something is wrong with this device", and nothing is: the panel
+  // is fine, the network is fine, our server answered. What failed is a
+  // third-party feed that only an administrator can restore, exactly like
+  // ProviderDisabled and NotConfigured which are already muted. Amber in a
+  // kitchen for a fault nobody in that kitchen can fix is an alarm that trains
+  // its reader to ignore alarms. The urgency belongs in cardStatus() and the
+  // debug stream, where somebody can act on it.
   const bool isRestingState = gLast.status == Status::NotActivated ||
                               gLast.status == Status::ProviderDisabled ||
                               gLast.status == Status::NotConfigured ||
+                              gLast.status == Status::RefreshFailed ||
                               gLast.status == Status::Empty;
   const String headline = gLast.status == Status::Empty  ? "No listings nearby right now"
+                          : gLast.status == Status::RefreshFailed ? "Could not check for listings"
                           : gLast.status == Status::NotConfigured ? "Listings are not set up yet"
                           : isRestingState                        ? "Listings are not showing yet"
                                                                   : "Could not load listings";

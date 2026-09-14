@@ -337,9 +337,15 @@ void showListingsCard(const String& address, const String& propertyType, int pri
 /// account's RentCast key not configured yet (a first-class resting state
 /// mirrored from the server's own ListingsResult.IsConfigured, not inferred
 /// from an error string), a fetch that succeeded with nothing currently
-/// listed nearby, and genuine auth/network trouble. Same white/bannered card
-/// family as every other content card, mirroring showAircraftStatus()'s
-/// muted-vs-amber split.
+/// listed nearby, a fetch that succeeded while the server's own upstream
+/// refresh did not (Listings::Status::RefreshFailed - empty because the
+/// question failed rather than because the market is, and drawn as such), and
+/// genuine auth/network trouble. Same white/bannered card family as every
+/// other content card, mirroring showAircraftStatus()'s muted-vs-amber split.
+///
+/// `detail` is always one of Listings.cpp's own literals. The server's
+/// lastRefreshError text never reaches this function - see
+/// Listings::Result::refreshError for why.
 void showListingsStatus(const String& headline, const String& detail, bool isProblem);
 
 /// Up to this many calendar days show in the forecast strip below - five
