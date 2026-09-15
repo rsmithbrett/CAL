@@ -3,6 +3,8 @@
 #include <Preferences.h>
 #include <esp_mac.h>
 
+#include "Journal.h"
+
 namespace Identity {
 namespace {
 
@@ -30,7 +32,17 @@ void begin() {
   // Read-write. If this fails the partition is missing or corrupt, which is a
   // provisioning fault - CAL still runs, but with no identity it can only
   // report that.
-  prefs.begin(kNamespace, false);
+  //
+  // The return value used to be discarded. It is the difference between "this
+  // device has never been given a secret" and "this device cannot read the
+  // partition its secret is in", and every symptom downstream - enrollment
+  // looping, the manifest fetch being refused - looks identical either way.
+  if (!prefs.begin(kNamespace, false)) {
+    Journal::line("[identity] NVS namespace 'cal' would not open read-write - the nvs "
+                  "partition is missing or corrupt. Every value below reads as its "
+                  "default, which is NOT the same as the device never having been "
+                  "provisioned.");
+  }
 }
 
 String deviceSecret() { return prefs.getString(kKeySecret, ""); }

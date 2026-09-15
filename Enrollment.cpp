@@ -6,6 +6,7 @@
 
 #include "Config.h"
 #include "Identity.h"
+#include "Journal.h"
 #include "Tls.h"
 
 namespace Enrollment {
@@ -14,6 +15,7 @@ Result requestKey(const Service::Discovery& discovery) {
   Result out;
 
   if (discovery.enrollmentPath.length() == 0) {
+    Journal::line("[enroll] discovery named no enrollment path - no key can be asked for");
     return out;
   }
 
@@ -21,12 +23,15 @@ Result requestKey(const Service::Discovery& discovery) {
   if (!Tls::configure(client)) {
     // The reply carries a credential, so an unvalidated connection would hand
     // it to anything able to intercept. No trust source means no request.
+    Journal::line("[enroll] Tls::configure refused - no request made, because the reply "
+                  "would carry a credential over an unvalidated connection");
     return out;
   }
 
   HTTPClient http;
   const String url = String("https://") + Config::kServiceHost + discovery.enrollmentPath;
   if (!http.begin(client, url)) {
+    Journal::printf("[enroll] http.begin() refused %s", url.c_str());
     return out;
   }
   http.setTimeout(discovery.httpTimeoutMs);
@@ -39,6 +44,7 @@ Result requestKey(const Service::Discovery& discovery) {
 
   const int status = http.POST(payload);
   if (status != 200 && status != 202 && status != 409) {
+    Journal::printf("[enroll] POST returned %d - treated as no answer, will retry", status);
     http.end();
     return out;
   }
@@ -47,6 +53,7 @@ Result requestKey(const Service::Discovery& discovery) {
   const DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
   if (err) {
+    Journal::printf("[enroll] response did not parse: %s", err.c_str());
     return out;
   }
 
@@ -58,6 +65,8 @@ Result requestKey(const Service::Discovery& discovery) {
   if (state == "issued") {
     const String secret = doc["deviceSecret"] | "";
     if (secret.length() == 0) {
+      Journal::line("[enroll] server said 'issued' but sent no deviceSecret - nothing "
+                    "was stored");
       return out;  // claims issued but sent nothing usable
     }
     Identity::saveSecret(secret);

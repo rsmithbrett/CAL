@@ -90,14 +90,25 @@ executing. Splitting the flash unevenly satisfies that and removes the ceiling:
 | `nvs` | data | nvs | `0x9000` | `0x5000` | 20,480 | Device secret, WiFi, installed version, flags |
 | `otadata` | data | ota | `0xE000` | `0x2000` | 8,192 | Which app partition boots |
 | `factory` | app | factory | `0x10000` | `0x160000` | 1,441,792 | **CAL** — never written by OTA |
-| `ota_0` | app | ota_0 | `0x170000` | `0x250000` | 2,424,832 | The product application |
+| `ota_0` | app | ota_0 | `0x170000` | `0x240000` | 2,359,296 | The product application |
+| `callog` | data | `0x99` | `0x3B0000` | `0x10000` | 65,536 | CAL's boot journal |
 | `spiffs` | data | spiffs | `0x3C0000` | `0x30000` | 196,608 | Cached branding assets |
-| `coredump` | data | coredump | `0x3F0000` | `0x10000` | 65,536 | |
+| `coredump` | data | coredump | `0x3F0000` | `0x10000` | 65,536 | Panic backtraces — `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` |
 
 That fills 4 MB exactly, with nothing left over. `factory` was sized against a
 measured CAL build (see below) rather than a guess, with room to grow; `ota_0`
-is **2,424,832 bytes against a 2,166,784-byte build** — about 258 KB of headroom
-where there was previously a 196 KB deficit. The consequence worth stating
+is **2,359,296 bytes against a 2,166,784-byte build** — about 188 KB of headroom
+where there was previously a 196 KB deficit.
+
+**`callog` is newer than the rest of this table**, and was carved out of
+`ota_0`, which held the only real slack in the layout. `factory` was not
+touched — that is the warning this table has always carried and the one that
+cannot be walked back — and no existing partition's *offset* moved, so bringing
+an already-flashed unit onto this table is a table-only write that preserves its
+secret, its remembered networks and its installed App. The full argument, the
+four storage options that were rejected first, and the migration procedure are
+in *CAL can say why now: a boot journal in raw flash, read over USB* at the end
+of this file. The consequence worth stating
 plainly: the previously proposed remedy of dropping the ESP32-A2DP Bluetooth
 audio stack to reclaim 300–500 KB is **no longer required by the size ceiling**.
 It may still be worth doing on its own merits, but it is no longer the price of
@@ -122,13 +133,22 @@ numbers if the firmware grows meaningfully - `factory` cannot be resized for a
 unit already flashed, and there is no automated check standing between a
 future build and that exact mistake yet.
 
+**Re-measured with the boot journal in, 2026-09-15: 1,337,207 bytes** (the
+flashable `CAL.ino.bin` is 1,337,360), leaving **104,432 bytes / 7.2% spare** in
+`factory`. The journal pass cost 13,608 bytes, most of it the format strings of
+its roughly eighty new call sites rather than `Journal.cpp` itself. Worth
+restating in this exact paragraph, since it is the one that warns about it:
+`factory` cannot be resized on a unit already flashed, and that pass spent an
+eighth of the headroom that was left.
+
 **The App's own size, measured the same way.** As of tonight's ISS-pass-
 prediction / SD-mount-retry / RAM-fallback-graphics build: **1,474,960 bytes**,
-against the real 2,424,832-byte `ota_0` partition - **60.8%**, with 949,872
-bytes spare. `arduino-cli` reports this same build as "75% of 1,966,080
-bytes" - that is the stock `min_spiffs` table's own app slot, not this
-project's layout, and it is the wrong ceiling to read. `ota_0` above is the
-real one.
+against the real `ota_0` partition - which is **2,359,296** bytes since `callog`
+was carved out of it, so **62.5%**, with 884,336 bytes spare. (It was 2,424,832
+and 60.8% before that change; the App did not grow, the slot shrank.)
+`arduino-cli` reports this same build as "75% of 1,966,080 bytes" - that is the
+stock `min_spiffs` table's own app slot, not this project's layout, and it is
+the wrong ceiling to read. `ota_0` above is the real one.
 
 **Found live, the hard way, the night this paragraph was last touched:** a
 bare-chip recovery flash used `App.ino.merged.bin` - a *standalone* merged
@@ -189,6 +209,12 @@ cable at all.
 `setup()` in `CAL.ino` is the whole of CAL's control flow, and
 it is written to be read top to bottom.
 
+0. **Open the journal and dump the previous boot**, before anything else is
+   initialised — see *CAL can say why now* at the end of this file. This is
+   ahead of the display on purpose: a hang inside `lcd.init()` is one of the
+   things it exists to make visible, and it cannot record that if it runs
+   afterwards. Budgeted at under 400 ms so it does not eat into the two-second
+   rule immediately below.
 1. **Display first, within about two seconds of power.** A dark screen is
    indistinguishable from a dead device and will be unplugged mid-setup. The
    cached brand splash is shown if one exists, otherwise a neutral one. Every
@@ -2121,6 +2147,21 @@ device in someone's kitchen, with no on-screen tell and nothing in the stream:
 
 ### CAL-side (bootloader) logging is explicitly out of scope here
 
+> **Superseded, and the reasoning below is the part that was wrong.** CAL now
+> has a logger — see *CAL can say why now: a boot journal in raw flash, read
+> over USB* at the end of this file. The scoping decision recorded here held up
+> in one respect and failed in another. It was right that CAL should get no new
+> *remote-facing* surface: the journal has no network code, no secret, no TLS
+> and no `/api/debuglog` POST, exactly as this section argued. It was wrong
+> that CAL "already has no equivalent watch-it-happen need of its own", on the
+> grounds that it "either gets a device onto the network and hands over, or
+> fails loudly on-screen at the point of failure". On 2026-09-11 a device did
+> fail loudly on-screen, and the screen said `Update failed` — which named
+> neither which of TLS, download, hash or flash write had failed, nor that the
+> App partition had already been invalidated. The screen is a message for a
+> household; it was never evidence. Everything below is kept as written,
+> because the half of it that is still true is still the rule.
+
 This pass touches `App/` only. CAL's own root-level modules (`CAL.ino`,
 `Provisioning.cpp`, `Updater.cpp`, and the rest) keep their existing `Serial`
 calls untouched, and there is no `debugStreamRequested` handling, streaming
@@ -2494,9 +2535,13 @@ real heap, a real TLS stack, a real NVS partition and a real server on the other
 end. `TEST_PLAN.md` carries the bench procedure for every behaviour a compile
 cannot reach, and is explicit about which of them cost hours of wall-clock time.
 Two practical notes from it, worth repeating here: report sizes against the
-**real** `ota_0` ceiling of 2,424,832 bytes from `partitions.csv`, never
+**real** ceilings from `partitions.csv` - `ota_0` is 2,359,296 bytes since
+`callog` was added, and CAL's own `factory` is 1,441,792 - never
 `arduino-cli`'s generic 1,966,080; and compiles on this project routinely look
-hung when they are not - check the OS process list rather than the console.
+hung when they are not - check the OS process list rather than the console. On
+the machine this was last built on, a cold CAL compile took roughly 35 minutes
+and produced no console output at all until the final two lines, so an empty log
+is not a stalled build.
 
 Toolchain, pinned in that script and matching what this has been measured
 against:
@@ -5903,3 +5948,446 @@ is why the server-side check has to tolerate its absence rather than require it.
 Breaking wire changes are currently permitted on this project (the fleet is not
 in production as of 2026-09-11), so this is recorded as a fact rather than
 negotiated as a compatibility problem.
+
+## CAL can say why now: a boot journal in raw flash, read over USB
+
+**The incident this exists for.** On 2026-09-11 a device was found showing CAL's
+`Update failed / Restart the device to try again.` The only record of it is a
+photograph an operator took. Devices 7 and 19 had installed the identical
+artifact through the identical CAL path minutes earlier, so the binary was
+sound; devices 12 and 17 - the two with SD cards, and the two with badly
+fragmented heaps - did not.
+
+That screen is worse than it looks. `CAL.ino` reaches `haltWithFailure("Update
+failed", ...)` only after `Updater::haveBootableApplication()` has already
+returned false, so the device is not merely failing to update: the install got
+far enough to invalidate the App partition and then failed, leaving nothing to
+fall back to. The unit is inoperable until a human power-cycles it, and if the
+retry fails the same way it stays inoperable. CAL is USB-only. In a household
+that is a site visit.
+
+And **nothing about it is diagnosable.** Every other failure that week was
+diagnosed off `App/Log.cpp`'s stream to `/api/debuglog`. That stream belongs to
+the App, and the App is precisely what CAL failed to reach. The component that
+erases and rewrites the App partition over TLS, and that can leave a unit
+unbootable, was the one component in the system that reported nothing at all.
+No evidence exists for any of: whether the TLS handshake, the download or the
+flash write failed; whether it ran out of contiguous heap the way the App does;
+whether the SHA-256 mismatched; how far it got; or whether the partition was
+erased before or after the failure. Each of those implies a different fix.
+
+**Why CAL cannot simply reuse `App/Log.h`.** The App's logger needs a device
+secret, a synchronised clock, a TLS session and a reachable server. Every one
+of those is a rung on the ladder CAL might have fallen off - a logger whose
+first dependency is the thing that just broke is not a diagnostic. CAL's log
+has to work with no network, no clock, no secret and no heap, and it has to
+still be readable after the boot that wrote it is over. That rules out anything
+remote, and it rules out RAM.
+
+### Where a log survives a brick
+
+Five candidates, and the reasoning matters more than the answer because four of
+them are individually plausible.
+
+**RAM.** Gone on reset, which is the event we are trying to explain. Named only
+so the list is complete.
+
+**RTC slow memory (`RTC_NOINIT_ATTR`).** Survives a software reset and a panic,
+costs no flash write, and correctly does not survive a power cycle. It is also
+already known not to work here: `App/BootDiag.h` records the measurement that
+forced its own restart-cause field out of RTC memory and into NVS. Every restart
+on this device goes App -> CAL -> App, two different binaries with two different
+RTC segment layouts, and device 17 reported `SOFTWARE_RESET + NONE` twice in one
+serial capture because of it. Beyond that, a device found bricked gets unplugged
+and carried to a bench, and a power cycle is the first thing anyone does to it -
+so the one storage that a power cycle erases is the wrong one for this job.
+
+**NVS.** Proven to survive - it is how `updreq` gets from the App to CAL in the
+first place - already open in `Identity.cpp`, and needs no partition change.
+Rejected for the journal on two independent grounds:
+
+- **It shares a 20,480-byte partition with the device secret.** NVS never writes
+  in place: every `putBytes` appends new entries and marks the old ones erased,
+  and a page is reclaimed only by compaction. A 2 KB blob is 65 of the 126
+  entries a 4,096-byte page holds, so rewriting it twice fills a page and forces
+  a compaction. Appending a line per boot stage - twenty-odd writes a boot -
+  would be roughly ten sector erases per boot, and at 100,000 erases per sector
+  that is ~10,000 boots. **The failure mode being instrumented is a device that
+  keeps restarting.** A logger that wears out the partition holding the device
+  secret, fastest in exactly the scenario it was written for, is the logger that
+  bricks the device. That is the one thing this must never do.
+- **The alternative - buffer the boot in RAM and write it to NVS once at the
+  end - throws away the part that matters.** A checkpoint write covers the
+  deliberate terminal states (`haltWithFailure`, the restart in
+  `bootApplication`) and loses everything on a panic, a watchdog reset or a
+  brownout mid-download. The tail of the log is the diagnosis.
+
+**LittleFS (the `spiffs` partition).** Four reasons, any one of which is
+disqualifying:
+
+- It is mounted by `Display::begin()`, which is itself the first rung of the
+  ladder. A journal that needs the display module to have succeeded cannot
+  record the display module failing.
+- That mount is `LittleFS.begin(true)` - format on failure. The journal would be
+  erased precisely when the filesystem is what broke.
+- LittleFS writes allocate. Devices 12 and 17 had badly fragmented heaps, which
+  is a live hypothesis for the incident itself; a logger that needs heap fails in
+  the case it was built for.
+- The partition is not as empty as it looks. `brand.565` is 240x120 RGB565 =
+  57,600 bytes, and `Updater::cacheBrandAssets()` holds `/brand.tmp` and
+  `/brand.565` simultaneously during a refresh - 115,200 bytes of a 196,608-byte
+  partition, before LittleFS metadata.
+
+**The `coredump` partition.** Tempting: 65,536 bytes, and nothing in this
+repository writes it. But something does. The core's own `sdkconfig` for the
+pinned 3.3.11 build carries `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` and
+`CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y`, so panic backtraces are already being
+written there. Those cover the one case the journal structurally cannot - a
+crash that never reaches a log call - so the two diagnostics are complements,
+not competitors, and taking that partition would trade the better evidence for
+the worse.
+
+### What was built: a dedicated 64 KB `callog` partition
+
+Raw flash through `esp_partition_read/write/erase_range`. No filesystem, no
+mount, no heap, no locks, nothing initialised beforehand. It is available on the
+first instruction of `setup()`, before the display, before NVS, before WiFi.
+
+Three properties earn it the partition-table change:
+
+1. **It works when nothing else does.** No allocation on any path, so heap
+   exhaustion cannot stop it; no mount, so a corrupt filesystem cannot stop it;
+   no clock, secret or network, so the whole upper ladder can be broken.
+2. **`esp_partition_write` is bounds-checked against the partition handle.** A
+   cursor bug in the logger physically cannot reach NVS, `factory` or `ota_0`.
+   The containment is enforced by the API, not by the logger being careful.
+3. **The journal is plain ASCII at a fixed flash offset, so it is readable with
+   no firmware cooperation at all.** If CAL will not run - if the panel is dead,
+   if it hangs in `lcd.init()`, if the image is corrupt - the log still comes
+   off the chip with one `esptool read_flash`. That is what "survives a brick"
+   has to mean for a component whose failure *is* the brick.
+
+### The partition table change, and why it is cheaper than it sounds
+
+`partitions.csv` filled 4 MB exactly, so the 64 KB has to come from somewhere.
+It comes from `ota_0`, which has the only real slack in the table.
+
+| Name | Offset | Old size | New size | Change |
+|---|---|---:|---:|---|
+| `nvs` | `0x9000` | 20,480 | 20,480 | - |
+| `otadata` | `0xE000` | 8,192 | 8,192 | - |
+| `factory` | `0x10000` | 1,441,792 | 1,441,792 | **untouched** |
+| `ota_0` | `0x170000` | 2,424,832 | 2,359,296 | -65,536 |
+| `callog` | `0x3B0000` | - | 65,536 | **new** |
+| `spiffs` | `0x3C0000` | 196,608 | 196,608 | - |
+| `coredump` | `0x3F0000` | 65,536 | 65,536 | - |
+
+`factory` is not touched, which is the warning `partitions.csv` has always
+carried and the one that cannot be walked back. `ota_0` keeps 884,336 bytes
+spare against the App's last measured 1,474,960, and 192,512 spare (8.2%) even
+against the 2,166,784-byte application that forced the asymmetric split in the
+first place. Every existing offset is unchanged and the table still fills 4 MB
+exactly.
+
+**No partition's offset moves, and that is the migration story.** A unit already
+in the field is running CAL from `0x10000` and the App from `0x170000`, and both
+stay exactly where they are. Bringing an existing unit onto the new table is
+therefore a table-only write - `esptool write_flash 0x8000
+CAL.ino.partitions.bin` - which leaves `factory`, `ota_0`, `nvs`, `otadata` and
+`spiffs` byte-for-byte intact. The device keeps its secret, its remembered
+networks and its installed App, and gains a journal.
+
+**And a unit that is never reflashed is not broken by this.** `Journal::begin()`
+looks the partition up by name; on an old table it is simply absent, the journal
+disables itself, prints one line saying so, and every subsequent call is a
+Serial-only no-op. New CAL on an old table behaves exactly like old CAL plus
+better serial output. There is no flag day.
+
+### The ring: one sector per boot, oldest overwritten
+
+65,536 bytes is sixteen 4,096-byte flash sectors - the erase unit - and **one
+boot writes exactly one sector.** The sector opens with a 32-byte header,
+`CALJRNL1 boot=%010lu`; the remaining 4,064 bytes are the boot's log lines, of
+which the last 64 are held back for the truncation marker below, leaving 4,000
+bytes of ordinary logging. At a typical 70 bytes a line that is a little under
+sixty lines, which comfortably covers a verbose boot including a full download.
+At boot, `Journal::begin()` reads the 32-byte header of all sixteen sectors,
+takes the highest sequence number it finds, erases the sector after it, and
+writes the next header. Sixteen boots of history, and finding the write cursor
+costs 512 bytes of flash reads.
+
+One sector per boot is not the densest possible layout - a short healthy boot
+spends a whole sector on four lines - and that is a deliberate trade for having
+no partial-sector resume logic, no cross-sector records, and exactly one erase
+per boot at a known moment. In the module that has to work when nothing else
+does, simplicity is the feature.
+
+**It overwrites the oldest, and the argument is worth making because the
+opposite intuition is a good one.** "The first failure is the interesting one"
+is true *within an incident*, and false *across a device's life*. A
+stop-when-full journal on a unit that boots in a lab in September and bricks in
+a household the following May would have stopped recording in September: sixteen
+successful factory boots, and nothing whatsoever about May. The device arrives
+at the bench with a log that went stale before it left the building. The most
+recent boot is the one whose halt screen is on the panel, and that is the one
+that has to be there.
+
+The within-an-incident case is covered by the ring being deeper than one boot.
+A unit that bricks and gets power-cycled five times by a frustrated operator has
+consumed five of sixteen slots; the boot that first failed is still on the chip.
+It is genuinely possible to lose it - seventeen restarts would - and the honest
+mitigation is that **CAL halts rather than reboot-loops** (a deliberate,
+long-standing decision: `haltWithFailure()` sits in a `delay(1000)` loop and
+never restarts itself), so CAL does not generate restarts on its own. The
+sixteen slots are consumed by human power cycles, not by a loop.
+
+The per-boot cap falls out of the same layout for free: a boot cannot write more
+than its own sector, so no single pathological boot can evict the history. On
+hitting the cap the journal writes one `[journal] sector full - the rest of this
+boot is on serial only` line and stops writing for the rest of that boot,
+counting what it dropped so a later dump can say how much is missing. The 64
+bytes that line needs are **reserved up front**, which is the reason the write
+limit is 4,032 rather than the full 4,096: a log that simply stops mid-boot
+reads as though CAL stopped there too, and that is a worse failure than losing
+the tail. Serial output continues unaffected. It never wraps within a sector,
+never spills into the next, and never erases a second sector.
+
+### How it is read, exactly
+
+**At the bench, with the device still able to run CAL.** Plug in USB, open a
+serial monitor at 115200, press the RST button:
+
+```
+arduino-cli monitor -p COM5 -c baudrate=115200
+```
+
+The first thing CAL prints, before the display is even initialised, is the
+**whole of the previous boot** - the one that failed. Then the current boot
+narrates itself live. Nothing is typed.
+
+**To see all sixteen boots**, press `d` in the monitor at any point where CAL is
+sitting still - the `haltWithFailure()` screen, the enrollment wait, or the
+post-handover `loop()`. `?` prints the one-line key. This is also the path for
+an operator who attached the cable *after* the failure: it avoids a power cycle,
+which would both consume a ring slot and possibly disturb the state being
+examined.
+
+**If CAL will not run at all**, the journal comes off the chip directly, with no
+firmware involvement:
+
+```
+esptool --chip esp32 --port COM5 --baud 921600 read_flash 0x3B0000 0x10000 callog.bin
+```
+
+`callog.bin` is plain ASCII padded with `0xFF`; open it in any text editor, or
+`strings callog.bin`. The sectors are in ring order rather than time order - the
+`boot=` numbers in the headers sort them.
+
+**Why the auto-dump is one boot and not sixteen.** The boot ladder's first
+documented requirement is that something appears on the panel within about two
+seconds of power, or the device reads as dead and gets unplugged. 115200 8N1 is
+11,520 bytes a second, so sixteen full sectors is up to 5.7 seconds and would
+break that outright. One sector is at most 4,096 bytes - 356 ms worst case, and
+nearer 180 ms for a typical boot - which fits the budget with room to spare, and
+the boot that just failed is the one worth spending it on. Everything else is
+one keypress away.
+
+It runs *before* `Display::begin()` deliberately, so that a hang inside
+`lcd.init()` or a `LittleFS` format still yields the previous boot's complete
+record. Adding `Journal::begin()`'s own cost - 512 bytes of header reads, one
+sector erase (~25-45 ms) and a 32-byte write - the whole pre-display journal
+budget is under 400 ms worst case.
+
+### What is logged
+
+The real ladder in `CAL.ino`'s `setup()`, rung by rung, with the branches that
+were *not* taken - this project's standing verbose-logging rule, and the reason
+"did not contact the server because an App is installed and no update was
+requested" is a line rather than a silence.
+
+| Stage | Logged |
+|---|---|
+| Boot banner | `esp_reset_reason()`, free heap, largest free 8-bit block, journal sector and sequence |
+| `Display::begin()` | Brand splash used or neutral fallback, and which |
+| `Identity::begin()` | Whether a secret is held, remembered network count, installed App version, update-requested and boot-attempt counters |
+| `bootHoldRequested()` | Not held / released early / WiFi tier / identity tier, and what each tier then did |
+| `mustContactServer()` | The decision **and both inputs**, plus `haveBootableApplication()`'s own three (partition present, installed version non-empty, boot attempts vs. the cap) |
+| Handover | Boot-attempt counter before and after, `esp_ota_set_boot_partition()` result, then the restart |
+| `joinStoredNetwork()` | Scan count, which remembered SSIDs were seen and at what RSSI, which were not, each join attempt and its outcome, the blind-retry fallback and why it did or did not run |
+| `Provisioning::run()` | Portal raised, AP name, credentials accepted or abandoned at the 15-minute timeout |
+| `synchroniseTime()` | The epoch obtained, or the timeout, and the plausibility check that rejected it |
+| `fetchDiscovery()` | Heap before TLS, `Tls::configure()` result, HTTP status (negative values are `HTTPC_ERROR_*`), JSON parse result, every path the document resolved to |
+| `awaitKeyAssignment()` | Enrollment state **on change only**, plus the backoff interval |
+| `cacheBrandAssets()` | Skipped-because-no-path, or the byte count written |
+| `fetchManifest()` | `ok` / `isConfigured` / version / size / SHA prefix |
+| The install decision | All three inputs, so "already current" is distinguishable from "server said nothing is configured" |
+| `installApplication()` | See below |
+| `haltWithFailure()` | The headline and detail actually put on the panel |
+
+`installApplication()` is the whole point, so it is instrumented against the
+specific questions the incident could not answer:
+
+- Target partition offset and size, and the manifest size checked against it.
+- **Free heap and largest free 8-bit block before TLS, after the response
+  arrives, and immediately before `Update.begin()`** - the contiguous-block
+  figure, not just free bytes, because `App/HeapRatchet` established that the
+  free figure is the misleading one.
+- A line stating, in those words, that the installed application **is about to
+  be invalidated**, written immediately before `Update.begin()` erases the
+  target. That single line converts the incident's central unknown - was the
+  partition erased before or after the failure - into a recorded fact.
+- `Update.begin()` / `Update.write()` / `Update.end()` failures each carry
+  `Update.errorString()`.
+- Download progress every 10%, with bytes written, total expected, and free heap
+  at that moment - so "download aborted at 812 KB of 1445 KB" is a thing the log
+  can say.
+- Both SHA-256 digests on a mismatch, and the byte count on a short read.
+
+### Cost
+
+Flash and static RAM, measured on the pinned toolchain rather than estimated -
+`arduino-cli`'s own percentage is against the generic `min_spiffs` scheme and is
+the wrong ceiling, so these are against `factory`'s real 1,441,792 bytes from
+`partitions.csv`.
+
+Both figures below were measured the same way on the same machine: a clean
+compile of `94cd5ae` for the before column, and a compile of this change for the
+after column, `arduino-cli 1.5.1` / `esp32:esp32@3.3.11`.
+
+| | Before (`94cd5ae`) | After | Delta |
+|---|---:|---:|---:|
+| `arduino-cli` "Sketch uses" | 1,323,599 | 1,337,207 | **+13,608** |
+| flashable `CAL.ino.bin` on disk | 1,323,744 | 1,337,360 | +13,616 |
+| against `factory`'s real 1,441,792 | 91.8% | **92.8%** | +1.0 pt |
+| headroom remaining in `factory` | 118,048 | **104,432** | -13,616 |
+| static RAM (`.data` + `.bss`) | 51,524 | 52,116 | **+592** |
+
+`arduino-cli`'s own line reports 68% against 1,966,080 bytes. That is the
+generic `min_spiffs` scheme and it is the wrong ceiling; the figures above are
+against `factory` from `partitions.csv`, which is the one that can actually
+strand hardware.
+
+**Thirteen and a half KB of flash for the whole pass**, of which `Journal.cpp`
+itself is the smaller half — most of it is the roughly eighty new call sites'
+format strings and their arguments, which is the cost of the verbose-logging
+rule rather than of the mechanism. `factory` keeps 104,432 bytes spare, 7.2% of
+the partition. That is tighter than the 8.2% it had and it is worth saying
+plainly: `factory` is the partition that cannot be resized on a unit already
+flashed, and this pass spent an eighth of its remaining headroom.
+
+**592 bytes of static RAM**, against the ~610 the design predicted. It is the
+module's own buffers and nothing else: a 160-byte format scratch, a 168-byte
+flash record buffer (the line plus its padding to a 4-byte write boundary), a
+256-byte read buffer for the dump, and about two dozen bytes of cursor state.
+Nothing is allocated at any point, on any path, which is the property that makes
+the module usable on a device whose heap is the problem — and the reason the
+free-heap figure at runtime is unchanged rather than merely nearly unchanged.
+
+Flash storage cost is the 65,536-byte partition, taken from `ota_0`'s slack as
+set out above.
+
+**Verified against the binary, not inferred.** The partition table decoded out
+of the compiled `CAL.ino.partitions.bin` — the same byte-for-byte check the
+*Building* section describes, rather than trusting the CSV — reads:
+
+```
+factory,app,factory,0x10000,1408K
+ota_0,app,ota_0,0x170000,2304K
+callog,data,153,0x3b0000,64K
+spiffs,data,spiffs,0x3c0000,192K
+coredump,data,coredump,0x3f0000,64K
+```
+
+`153` is `0x99`. `1408K` is `factory` unchanged, `2304K` is `ota_0` after
+shrinking. `grep` on the image finds `CALJRNL1` and the journal's own literals,
+so the module is linked in and not discarded.
+
+### What a failure inside the logger does
+
+A logger that can brick the device is worse than no logger, so the containment
+is spelled out rather than implied:
+
+- **Serial is written first, unconditionally, on every call**, before any flash
+  work and regardless of whether the journal is enabled. This is the same rule
+  `App/Log.h` states for the same reason: a broken journal must never cost
+  anyone the USB view they had before it existed.
+- **One error disables it for the rest of the boot.** Every
+  `esp_partition_*` return is checked; the first non-`ESP_OK` sets the module
+  disabled, prints one line on Serial saying which call failed, and every later
+  call is a Serial-only no-op. It never retries, never loops, never escalates.
+- **Absent, undersized or misaligned partition is a normal state, not an
+  error.** Old table, no journal, boot continues.
+- **No allocation, anywhere.** No `String`, no `malloc`, no `new`. Fixed static
+  buffers only.
+- **No reentrancy.** Nothing the journal calls logs, so there is no path back
+  into it. It is called only from `setup()` and `loop()` on the Arduino task -
+  never from an ISR, never from a second task.
+- **Bounded work per boot**: exactly one sector erase, at most 4,064 bytes
+  written, at most one write per log line, every line length-capped.
+- **It touches nothing else.** No NVS, no LittleFS, no network, no display. It
+  cannot corrupt a resource another module depends on, and
+  `esp_partition_write`'s bounds check means a cursor bug cannot escape its own
+  65,536 bytes.
+- **It never halts, never restarts, and never changes control flow.** Every
+  entry point returns `void` and no caller branches on it.
+
+### Deliberately not built here
+
+The suggestion-box item lists four pieces of work. This is the second one, and
+naming the other three as *not done* is more useful than leaving them implied:
+
+1. **Persisting a failure reason in NVS for the App to report on the next
+   boot.** Genuinely complementary - it is the only one of the four that gets a
+   diagnosis off the device without anyone driving out to it - but it is a
+   firmware-to-server change spanning CAL, `App/Telemetry` and the server's
+   ingestion, not part of a CAL logging pass. The journal makes it *easier*: the
+   text the App would report already exists on flash.
+2. **Not invalidating the running App until the new image is verified.** This
+   prevents the brick rather than explaining it, and is the better fix. It needs
+   a second OTA slot, and `partitions.csv` cannot give one: the App is 1,474,960
+   bytes and two equal app slots on 4 MB is the exact constraint the asymmetric
+   layout exists to escape. It is a real piece of design work, not an
+   adjustment.
+3. **A bounded automatic retry before the halt screen.** Independently sensible
+   and small. Left out on purpose: it changes CAL's behaviour, and this pass
+   deliberately changes only what CAL *says*. Instrumenting a component and
+   altering it in the same unverified change would make the first hardware
+   session unable to tell which change caused what.
+
+### UNVERIFIED ON HARDWARE
+
+Nothing in `Journal.cpp` has run on a device. The owner chose to build this
+ahead of a bench session knowing that; it is recorded here because "it compiles"
+is not "it works", and this is the subsystem whose entire job is to function
+after everything else has failed.
+
+**What the compile did establish**, and it is a short list: the code builds
+against the pinned toolchain; the sizes above are real; `gen_esp32part` accepts
+the `0x99` subtype and the new offsets, and the table decoded back out of
+`CAL.ino.partitions.bin` is byte-for-byte the intended one; and `CALJRNL1` plus
+the journal's literals are present in the image, so the module is linked in
+rather than discarded. That is the whole of it.
+
+**Specifically unverified**, all of it runtime:
+
+- That `esp_partition_find_first` locates the partition **by name** with
+  `ESP_PARTITION_SUBTYPE_ANY` at run time. The table being correct on disk and
+  the lookup succeeding on the chip are two different claims, and only the first
+  has been checked.
+- That `esp_partition_erase_range` and the 4-byte-aligned
+  `esp_partition_write`s behave as documented from the Arduino task, especially
+  with the display's SPI activity in the same boot. Every write in this module
+  is padded to a 4-byte multiple specifically to stay inside the strictest
+  documented contract, but that is a precaution, not a measurement.
+- That the header scan picks the right sector after an unclean shutdown, and
+  that the ring wraps at sixteen without a gap or a repeat.
+- That the auto-dump genuinely fits inside the two-second splash budget on the
+  real panel. The 356 ms is arithmetic from the baud rate, not a stopwatch.
+- That `d` is readable at 115200 while LovyanGFX is driving the bus, and that
+  `Journal::poll()` is reached often enough to feel responsive.
+- Every single log line's content. A format specifier mismatch that
+  `__attribute__((format))` does not catch, a `c_str()` on a `String` that was
+  never populated, an `%s` fed a null - none of that shows up in a compile.
+
+`TEST_PLAN.md` section 6 carries the bench procedure for each of these, and it
+is the procedure - not this section - that decides whether any of it is true.

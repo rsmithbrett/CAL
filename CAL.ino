@@ -11,11 +11,14 @@
 // over, and it stays behind as the recovery image if that ever fails.
 
 #include <WiFi.h>
+#include <esp_heap_caps.h>
+#include <esp_system.h>
 
 #include "Config.h"
 #include "Display.h"
 #include "Enrollment.h"
 #include "Identity.h"
+#include "Journal.h"
 #include "Provisioning.h"
 #include "Service.h"
 #include "Updater.h"
@@ -29,7 +32,20 @@ namespace {
 /// application decide when to check for updates - otherwise a service outage
 /// becomes a fleet outage.
 bool mustContactServer() {
-  return Identity::updateRequested() || !Updater::haveBootableApplication();
+  // Both inputs are read into locals and logged, rather than being short-
+  // circuited inside the return. The whole point of this decision is that it
+  // is the difference between "CAL touched the network" and "CAL did not", and
+  // a reader of the journal has to be able to tell which input drove it -
+  // `haveBootableApplication()` logs its own three reasons in turn.
+  const bool updateRequested = Identity::updateRequested();
+  const bool bootable = Updater::haveBootableApplication();
+  const bool must = updateRequested || !bootable;
+  Journal::printf("[boot] contact the server? updreq=%d bootableApp=%d -> %s",
+                  updateRequested ? 1 : 0, bootable ? 1 : 0,
+                  must ? "YES"
+                       : "no - a healthy app is installed and nothing asked for an "
+                         "update, so the network is not touched at all");
+  return must;
 }
 
 /// The BOOT button - the same one already used to enter flash mode over USB,
@@ -62,14 +78,19 @@ enum class BootHoldResult { None, WifiReset, IdentityErase };
 BootHoldResult bootHoldRequested() {
   pinMode(kBootButtonPin, INPUT_PULLUP);
   if (digitalRead(kBootButtonPin) != LOW) {
+    Journal::line("[boot] BOOT not held at power-on - no WiFi reset, no identity erase");
     return BootHoldResult::None;
   }
 
+  Journal::printf("[boot] BOOT held at power-on - %lu ms more selects WiFi setup",
+                  static_cast<unsigned long>(kWifiResetHoldMs));
   Display::showStatus("Keep holding BOOT to set up WiFi", "Release now to cancel");
   uint32_t deadline = millis() + kWifiResetHoldMs;
   while (millis() < deadline) {
     if (digitalRead(kBootButtonPin) != LOW) {
       // Released before the first tier completed - a stray press, not a request.
+      Journal::line("[boot] BOOT released before the WiFi tier completed - read as a "
+                    "stray press, nothing changed");
       return BootHoldResult::None;
     }
     delay(50);
@@ -81,15 +102,20 @@ BootHoldResult bootHoldRequested() {
   // exactly kWifiResetHoldMs and kIdentityEraseHoldMs apart from each other
   // regardless of how long the first tier's own polling loop took) and a
   // message that says what continuing to hold now does.
+  Journal::printf("[boot] WiFi tier reached - %lu ms more erases this device's identity",
+                  static_cast<unsigned long>(kIdentityEraseHoldMs - kWifiResetHoldMs));
   Display::showStatus("Keep holding BOOT to erase this device's identity",
                        "Release now for WiFi setup instead");
   deadline = millis() + (kIdentityEraseHoldMs - kWifiResetHoldMs);
   while (millis() < deadline) {
     if (digitalRead(kBootButtonPin) != LOW) {
+      Journal::line("[boot] BOOT released during the identity tier - WiFi reset "
+                    "requested, the secret is kept");
       return BootHoldResult::WifiReset;
     }
     delay(50);
   }
+  Journal::line("[boot] BOOT held through both tiers - identity erase requested");
   return BootHoldResult::IdentityErase;
 }
 
@@ -99,8 +125,18 @@ BootHoldResult bootHoldRequested() {
 /// few seconds is harder to diagnose than one sitting on a screen that says
 /// what is wrong, and the message always names what to do about it.
 [[noreturn]] void haltWithFailure(const String& headline, const String& whatToDo) {
+  // Recorded before the screen is drawn, so the journal carries the terminal
+  // state even if drawing it is what fails. The panel message is written for a
+  // household and was never evidence - this line is the evidence.
+  Journal::printf("[halt] %s | %s", headline.c_str(), whatToDo.c_str());
+  Journal::line("[halt] CAL stops here and will not restart itself. Press 'd' for the "
+                "whole journal.");
   Display::showFailure(headline, whatToDo);
   while (true) {
+    // The only reason this loop is not a bare delay: an operator who plugs a
+    // cable in AFTER finding the device on this screen needs a way to read the
+    // journal that does not involve power-cycling it.
+    Journal::poll();
     delay(1000);
   }
 }
@@ -118,10 +154,32 @@ void awaitKeyAssignment(const Service::Discovery& discovery) {
   uint32_t waitMs = 10000;
   constexpr uint32_t kMaxWaitMs = 120000;
 
+  // Logged on CHANGE, not on every pass. This loop can legitimately run for
+  // hours at a two-minute interval, and a line per attempt would fill the
+  // boot's 4KB sector with nothing but "still waiting" - pushing out the
+  // context somebody opened the journal to find. Same rule the App's
+  // Graphic.cpp/SunMoon.cpp already follow.
+  Enrollment::State lastState = Enrollment::State::Unknown;
+  bool everLogged = false;
+
+  Journal::line("[enroll] no secret held - waiting for an administrator to assign one");
+
   while (true) {
     const Enrollment::Result result = Enrollment::requestKey(discovery);
 
+    if (result.state != lastState || !everLogged) {
+      Journal::printf("[enroll] state=%s message='%s' next poll in %lu ms",
+                      result.state == Enrollment::State::Issued    ? "issued"
+                      : result.state == Enrollment::State::Pending ? "pending"
+                      : result.state == Enrollment::State::Refused ? "refused"
+                                                                   : "unknown/failed",
+                      result.message.c_str(), static_cast<unsigned long>(waitMs));
+      lastState = result.state;
+      everLogged = true;
+    }
+
     if (result.state == Enrollment::State::Issued) {
+      Journal::line("[enroll] secret issued and stored - continuing the ladder");
       return;
     }
 
@@ -140,7 +198,13 @@ void awaitKeyAssignment(const Service::Discovery& discovery) {
                                                 : String("Waiting to be set up"),
                     Identity::macAddress());
 
-    delay(waitMs);
+    // Broken into short slices rather than one long delay(), purely so the
+    // serial 'd' command still answers during a wait that can last hours. The
+    // total is unchanged.
+    for (uint32_t waited = 0; waited < waitMs; waited += 100) {
+      Journal::poll();
+      delay(100);
+    }
     waitMs = waitMs * 2 > kMaxWaitMs ? kMaxWaitMs : waitMs * 2;
   }
 }
@@ -150,15 +214,46 @@ void awaitKeyAssignment(const Service::Discovery& discovery) {
 void setup() {
   Serial.begin(115200);
 
+  // Ahead of the display on purpose. A hang inside lcd.init() or a LittleFS
+  // format is one of the things the journal exists to make visible, and it
+  // cannot record that if it starts afterwards. Budgeted at well under 400 ms
+  // against the two-second rule immediately below: 512 bytes of header reads,
+  // one sector erase, and at most one sector printed to serial.
+  Journal::begin();
+  Journal::dumpLastBoot();
+
+  Journal::printf("[boot] CAL starting: resetReason=%d freeHeap=%u largest8BitBlock=%u",
+                  static_cast<int>(esp_reset_reason()),
+                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+  if (!Journal::persistent()) {
+    // Said out loud rather than inferred. Somebody reading a live serial
+    // session has to know whether what they are watching will still be there
+    // after they power-cycle the device.
+    Journal::line("[boot] journal is SERIAL ONLY this boot - nothing here will survive a "
+                  "restart");
+  }
+
   // Something must appear within about two seconds of power being applied. A
   // display that stays dark is indistinguishable from a broken device and will
   // be unplugged.
   Display::begin();
   if (!Display::showBrandSplash()) {
+    Journal::line("[display] no usable cached brand splash - drawing the neutral one");
     Display::showNeutralSplash();
+  } else {
+    Journal::line("[display] cached brand splash drawn");
   }
 
   Identity::begin();
+  Journal::printf("[identity] mac=%s secret=%s networks=%u installedApp='%s' updreq=%d "
+                  "bootAttempts=%u/%u",
+                  Identity::macAddress().c_str(), Identity::hasSecret() ? "held" : "NONE",
+                  static_cast<unsigned>(Identity::networkCount()),
+                  Identity::installedAppVersion().c_str(),
+                  Identity::updateRequested() ? 1 : 0,
+                  static_cast<unsigned>(Identity::bootAttempts()),
+                  static_cast<unsigned>(Identity::kMaxBootAttempts));
 
   // Only takes effect on a boot that goes on to actually join WiFi itself -
   // see mustContactServer() below. A device that already has a working
@@ -188,11 +283,15 @@ void setup() {
       // Identity::hasSecret() reads false - no separate flag needed the way
       // setProvisioningForced() is for the WiFi tier.
       Identity::clearSecret();
+      Journal::line("[boot] identity erased on request - the remembered networks were "
+                    "deliberately left alone");
       Display::showStatus("Identity erased", "Re-registering...");
       delay(1000);
       break;
     case BootHoldResult::WifiReset:
       Identity::setProvisioningForced(true);
+      Journal::line("[boot] provisioning forced for this boot - the secret and the "
+                    "remembered networks were deliberately left alone");
       Display::showStatus("Set up WiFi", "Opening setup...");
       delay(1000);
       break;
@@ -220,6 +319,10 @@ void setup() {
   const bool forced = Identity::provisioningForced();
   Identity::setProvisioningForced(false);
 
+  if (forced) {
+    Journal::line("[wifi] provisioning was forced - skipping the stored-network join "
+                  "entirely and opening the portal");
+  }
   if (forced || !Provisioning::joinStoredNetwork()) {
     // Repeated failure means the stored credentials are wrong or the network
     // is gone - retrying them indefinitely would look identical to an outage.
@@ -230,11 +333,9 @@ void setup() {
     }
   }
 
-  // TEMPORARY diagnostic instrumentation for the first real-hardware test -
-  // remove once discovery has succeeded at least once on real hardware.
-  Serial.printf("[wifi] joined SSID=%s IP=%s RSSI=%d dBm channel=%d\n",
-                WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
-                WiFi.RSSI(), WiFi.channel());
+  Journal::printf("[wifi] joined SSID=%s IP=%s RSSI=%d dBm channel=%d",
+                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI(),
+                  WiFi.channel());
 
   Display::showStatus("Checking the time", "Needed before a secure connection");
   if (!Service::synchroniseTime()) {
@@ -247,6 +348,8 @@ void setup() {
   Display::showStatus("Contacting service", Config::kServiceHost);
   const Service::Discovery discovery = Service::fetchDiscovery();
   if (!discovery.ok) {
+    Journal::line("[boot] discovery failed - falling back to the installed app if there "
+                  "is one, since an unreachable server is not a reason to refuse to start");
     if (Updater::haveBootableApplication()) {
       // An unreachable server is not a reason to refuse to start when a
       // working application is already installed.
@@ -260,6 +363,8 @@ void setup() {
   // cannot fetch a manifest, so this gates the rest of the ladder.
   if (!Identity::hasSecret()) {
     awaitKeyAssignment(discovery);
+  } else {
+    Journal::line("[enroll] secret already held - enrollment skipped");
   }
 
   // Cosmetic and never fatal - a failure here leaves the neutral splash.
@@ -270,11 +375,29 @@ void setup() {
       manifest.ok && manifest.isConfigured &&
       manifest.version != Identity::installedAppVersion();
 
+  // All three inputs, so the journal distinguishes "the manifest could not be
+  // fetched" from "the server has no current build marked" from "the build the
+  // server names is already the one installed". Those look identical from the
+  // outside and want three different investigations.
+  Journal::printf("[update] install? manifestOk=%d isConfigured=%d offered='%s' "
+                  "installed='%s' -> %s",
+                  manifest.ok ? 1 : 0, manifest.isConfigured ? 1 : 0,
+                  manifest.version.c_str(), Identity::installedAppVersion().c_str(),
+                  needsInstall ? "YES" : "no");
+
   if (needsInstall) {
     if (!Updater::installApplication(discovery, manifest)) {
+      Journal::line("[update] install FAILED - looking for anything still bootable to "
+                    "fall back to");
       if (Updater::haveBootableApplication()) {
         Updater::bootApplication();
       }
+      // Reaching here means haveBootableApplication() said no, which after a
+      // failed install means the app partition was invalidated and there is
+      // nothing to go back to. The install log above is the only record of how
+      // far it got before that happened.
+      Journal::line("[update] nothing bootable remains after the failed install - this "
+                    "device is stopped until a human restarts it");
       haltWithFailure("Update failed",
                       "Restart the device to try again.");
     }
@@ -288,6 +411,8 @@ void setup() {
     // even after a plain power cut - exactly the fleet-wide network
     // dependency this flag exists to avoid outside of a real update.
     Identity::setUpdateRequested(false);
+    Journal::line("[update] server confirmed the installed version is current - the "
+                  "update-requested flag has been cleared");
   }
 
   if (Updater::haveBootableApplication()) {
@@ -298,11 +423,15 @@ void setup() {
   // show: the server decides where it points - often the agent's own address,
   // which redirects onward to the service.
   if (discovery.qrUrl.length() > 0) {
+    Journal::printf("[boot] nothing to hand over to - showing the server's QR (%s)",
+                    discovery.qrUrl.c_str());
     Display::showQr(discovery.qrUrl,
                     discovery.qrCaption.length() > 0 ? discovery.qrCaption
                                                      : "Scan to get started",
                     "");
   } else {
+    Journal::line("[boot] nothing to hand over to and discovery supplied no QR URL - "
+                  "showing the not-yet-activated screen");
     Display::showStatus("Waiting for setup",
                         "This device is not yet activated.");
   }
@@ -312,5 +441,10 @@ void loop() {
   // CAL is a boot-time component. Once setup() has handed over, this is only
   // reached in the waiting states above, where there is nothing to poll for
   // until the household or the account holder acts.
+  //
+  // The journal poll is the exception: it is what lets somebody who plugged a
+  // cable in after the fact press 'd' and read the whole journal, on a device
+  // that is otherwise sitting on a QR code doing nothing.
+  Journal::poll();
   delay(1000);
 }

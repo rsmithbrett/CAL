@@ -30,6 +30,10 @@
 # factory 0x160000 = 1,441,792  ->  122,949 bytes spare over the measured build (8.5%)
 # ota_0   0x250000 = 2,424,832  ->  258,048 bytes spare over the 2,166,784 application
 #
+# Re-measured 2026-09-15, with the boot journal in: CAL is 1,337,207 bytes, so
+# factory has 104,432 bytes spare (7.2%). ota_0's figure above is superseded by
+# the callog note further down - the slot is 0x240000 now, not 0x250000.
+#
 # The application slot is still larger than the current application, so the
 # Bluetooth/A2DP stack does not have to be removed to make OTA possible. That
 # was only ever forced by the equal-slot assumption.
@@ -41,10 +45,43 @@
 # App partitions must start on a 64KB boundary. 0x10000, 0x170000 and the sizes
 # below all satisfy that, and the table fills the 4MB device exactly.
 #
+# CALLOG, ADDED AFTER THE FACT, AND WHY IT COST ALMOST NOTHING
+# ------------------------------------------------------------
+# callog is CAL's boot journal - 16 raw 4KB sectors, one boot per sector, read
+# over USB at a bench. It exists because a device found showing "Update failed"
+# left no record of anything: the App owns the remote debug stream, and the App
+# is exactly what CAL had failed to reach. See the README's "CAL can say why
+# now" for the argument, including why NVS, LittleFS, RTC memory and the
+# coredump partition were each rejected before this.
+#
+# The 64KB came out of ota_0, which held the only real slack here. factory was
+# NOT touched - that is this file's oldest warning and the one that cannot be
+# walked back - and no existing partition's OFFSET moved. ota_0 only shrank,
+# and it is still far larger than anything installed in it:
+#
+# ota_0 0x240000 = 2,359,296  ->  192,512 spare over the 2,166,784 application
+#                                 above (8.2%), and 884,336 spare over the
+#                                 App's last measured 1,474,960 build.
+#
+# Because nothing moved, an already-flashed unit is brought onto this table by
+# writing the table alone (esptool write_flash 0x8000 CAL.ino.partitions.bin).
+# factory, ota_0, nvs, otadata and spiffs survive byte-for-byte: the device
+# keeps its secret, its remembered networks and its installed App.
+#
+# A unit that is never reflashed is not broken by this either. Journal.cpp
+# looks callog up by NAME, finds nothing on an older table, disables itself and
+# says so on serial. New CAL on an old table behaves like old CAL did.
+#
+# coredump is NOT spare space, whatever it looks like: the pinned core builds
+# with CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y, so panic backtraces are already
+# written there. They cover the one case the journal structurally cannot - a
+# crash that never reaches a log call - so the two are complements.
+#
 # Name,     Type, SubType,  Offset,   Size,     Notes
 nvs,        data, nvs,      0x9000,   0x5000,
 otadata,    data, ota,      0xE000,   0x2000,
 factory,    app,  factory,  0x10000,  0x160000,
-ota_0,      app,  ota_0,    0x170000, 0x250000,
+ota_0,      app,  ota_0,    0x170000, 0x240000,
+callog,     data, 0x99,     0x3B0000, 0x10000,
 spiffs,     data, spiffs,   0x3C0000, 0x30000,
 coredump,   data, coredump, 0x3F0000, 0x10000,

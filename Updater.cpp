@@ -6,6 +6,7 @@
 #include <LittleFS.h>
 #include <NetworkClientSecure.h>
 #include <Update.h>
+#include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <mbedtls/sha256.h>
@@ -13,12 +14,27 @@
 #include "Config.h"
 #include "Display.h"
 #include "Identity.h"
+#include "Journal.h"
 #include "Tls.h"
 
 namespace Updater {
 namespace {
 
 constexpr const char* kBrandSplashPath = "/brand.565";
+
+/// Both numbers, never just the free figure.
+///
+/// `App/HeapRatchet` established that free bytes is the misleading one on this
+/// hardware: mbedTLS needs 16,717 bytes CONTIGUOUS for each of a session's two
+/// record buffers, and a device with 90KB free and a largest block of 11KB
+/// fails the handshake while looking perfectly healthy. Devices 12 and 17 in the
+/// 2026-09-11 incident were the two with badly fragmented heaps, so this is the
+/// measurement that hypothesis stands or falls on.
+void logHeap(const char* where) {
+  Journal::printf("[heap] %s: free=%u largest8BitBlock=%u", where,
+                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+}
 
 bool beginSecure(NetworkClientSecure& client) {
   return Tls::configure(client);
@@ -47,14 +63,19 @@ const esp_partition_t* applicationPartition() {
 Manifest fetchManifest(const Service::Discovery& discovery) {
   Manifest out;
 
+  logHeap("before the manifest TLS session");
+
   NetworkClientSecure client;
   if (!beginSecure(client)) {
+    Journal::line("[manifest] Tls::configure() refused - the embedded root bundle is "
+                  "empty, so no request was made");
     return out;
   }
 
   HTTPClient http;
   const String url = String("https://") + Config::kServiceHost + discovery.manifestPath;
   if (!http.begin(client, url)) {
+    Journal::printf("[manifest] http.begin() refused %s", url.c_str());
     return out;
   }
   http.setTimeout(discovery.httpTimeoutMs);
@@ -62,6 +83,9 @@ Manifest fetchManifest(const Service::Discovery& discovery) {
 
   const int status = http.GET();
   if (status != 200) {
+    // Negative values are HTTPClient's own HTTPC_ERROR_* codes - connection
+    // refused, TLS failure, DNS failure, timeout - not server status codes.
+    Journal::printf("[manifest] GET %s returned %d", url.c_str(), status);
     http.end();
     return out;
   }
@@ -70,6 +94,7 @@ Manifest fetchManifest(const Service::Discovery& discovery) {
   const DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
   if (err) {
+    Journal::printf("[manifest] response did not parse: %s", err.c_str());
     return out;
   }
 
@@ -80,29 +105,56 @@ Manifest fetchManifest(const Service::Discovery& discovery) {
   out.sha256 = doc["sha256Hash"] | "";
   out.sizeBytes = doc["sizeBytes"] | 0;
   out.ok = true;
+  Journal::printf("[manifest] ok isConfigured=%d version='%s' size=%lu sha256=%.16s...",
+                  out.isConfigured ? 1 : 0, out.version.c_str(),
+                  static_cast<unsigned long>(out.sizeBytes), out.sha256.c_str());
   return out;
 }
 
 bool installApplication(const Service::Discovery& discovery, const Manifest& manifest) {
+  // This function is the reason the journal exists. Every early return below
+  // used to be a silent `false` that surfaced on the panel as "Update failed",
+  // and each one implies a different fix.
   if (!manifest.isConfigured || manifest.sizeBytes == 0) {
+    Journal::printf("[install] refused before starting: isConfigured=%d sizeBytes=%lu",
+                    manifest.isConfigured ? 1 : 0,
+                    static_cast<unsigned long>(manifest.sizeBytes));
     return false;
   }
 
   const esp_partition_t* target = applicationPartition();
-  if (target == nullptr || manifest.sizeBytes > target->size) {
+  if (target == nullptr) {
+    Journal::line("[install] refused: no ota_0 partition in this device's table");
+    return false;
+  }
+  if (manifest.sizeBytes > target->size) {
     // The server already refuses builds over the partition ceiling, so this is
     // a belt-and-braces check against a mismatched partition table.
+    Journal::printf("[install] refused: image is %lu bytes and ota_0 holds %lu - this "
+                    "device's partition table does not match the server's ceiling",
+                    static_cast<unsigned long>(manifest.sizeBytes),
+                    static_cast<unsigned long>(target->size));
     return false;
   }
 
+  Journal::printf("[install] target ota_0 at 0x%06lx, %lu bytes; image '%s' is %lu bytes",
+                  static_cast<unsigned long>(target->address),
+                  static_cast<unsigned long>(target->size), manifest.version.c_str(),
+                  static_cast<unsigned long>(manifest.sizeBytes));
+  logHeap("before the download TLS session");
+
   NetworkClientSecure client;
   if (!beginSecure(client)) {
+    Journal::line("[install] Tls::configure() refused - empty root bundle, nothing was "
+                  "downloaded and the installed app is untouched");
     return false;
   }
 
   HTTPClient http;
   const String url = String("https://") + Config::kServiceHost + discovery.binaryPath;
   if (!http.begin(client, url)) {
+    Journal::printf("[install] http.begin() refused %s - the installed app is untouched",
+                    url.c_str());
     return false;
   }
   http.setTimeout(discovery.httpTimeoutMs);
@@ -110,11 +162,31 @@ bool installApplication(const Service::Discovery& discovery, const Manifest& man
 
   const int status = http.GET();
   if (status != 200) {
+    // A negative value here is an HTTPClient HTTPC_ERROR_* code, and -1 with a
+    // heap figure alongside it is the signature of a handshake that could not
+    // allocate its record buffers.
+    Journal::printf("[install] GET %s returned %d - the installed app is untouched",
+                    url.c_str(), status);
+    logHeap("at the failed download request");
     http.end();
     return false;
   }
+  logHeap("after the download response headers");
+
+  // THE POINT OF NO RETURN. Update.begin() erases the target partition, so from
+  // the next line onward the previously installed application no longer exists
+  // and haveBootableApplication() will say so. Recorded explicitly because
+  // "was the partition erased before or after the failure" was the single
+  // biggest unknown in the 2026-09-11 incident, and is now a fact in the log
+  // rather than an inference.
+  Journal::line("[install] about to call Update.begin() - THIS ERASES ota_0 and the "
+                "currently installed application stops existing at this point");
 
   if (!Update.begin(manifest.sizeBytes, U_FLASH)) {
+    Journal::printf("[install] Update.begin(%lu) failed: %s (error %u)",
+                    static_cast<unsigned long>(manifest.sizeBytes), Update.errorString(),
+                    static_cast<unsigned>(Update.getError()));
+    logHeap("at the failed Update.begin()");
     http.end();
     return false;
   }
@@ -127,6 +199,9 @@ bool installApplication(const Service::Discovery& discovery, const Manifest& man
   uint8_t buffer[1024];
   uint32_t written = 0;
   uint8_t lastPercent = 255;
+  // Every 10%, not every 1%: the panel wants a smooth bar, the journal wants
+  // ten lines rather than a hundred filling the boot's sector.
+  uint8_t lastLoggedDecile = 255;
 
   while (http.connected() && written < manifest.sizeBytes) {
     const size_t available = stream->available();
@@ -142,6 +217,11 @@ bool installApplication(const Service::Discovery& discovery, const Manifest& man
     }
 
     if (Update.write(buffer, read) != static_cast<size_t>(read)) {
+      Journal::printf("[install] Update.write() short at %lu of %lu bytes: %s (error %u)",
+                      static_cast<unsigned long>(written),
+                      static_cast<unsigned long>(manifest.sizeBytes),
+                      Update.errorString(), static_cast<unsigned>(Update.getError()));
+      logHeap("at the failed flash write");
       Update.abort();
       mbedtls_sha256_free(&sha);
       http.end();
@@ -155,14 +235,39 @@ bool installApplication(const Service::Discovery& discovery, const Manifest& man
       Display::showUpdateProgress(percent, manifest.version);
       lastPercent = percent;
     }
+    const uint8_t decile = percent / 10;
+    if (decile != lastLoggedDecile) {
+      Journal::printf("[install] %u%% - %lu of %lu bytes, freeHeap=%u largest8BitBlock=%u",
+                      static_cast<unsigned>(percent), static_cast<unsigned long>(written),
+                      static_cast<unsigned long>(manifest.sizeBytes),
+                      static_cast<unsigned>(ESP.getFreeHeap()),
+                      static_cast<unsigned>(
+                          heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+      lastLoggedDecile = decile;
+    }
   }
+
+  // Loop exit is not the same as success: `http.connected()` going false with
+  // bytes outstanding is an aborted download, and the short-read check further
+  // down is what catches it. Read BEFORE http.end(), which would make the
+  // answer meaningless.
+  const bool stillConnected = http.connected();
   http.end();
+
+  Journal::printf("[install] download loop ended at %lu of %lu bytes (connected=%d)",
+                  static_cast<unsigned long>(written),
+                  static_cast<unsigned long>(manifest.sizeBytes),
+                  stillConnected ? 1 : 0);
 
   uint8_t digest[32];
   mbedtls_sha256_finish(&sha, digest);
   mbedtls_sha256_free(&sha);
 
   if (written != manifest.sizeBytes) {
+    Journal::printf("[install] SHORT DOWNLOAD: %lu of %lu bytes arrived - ota_0 is "
+                    "erased and nothing bootable is in it",
+                    static_cast<unsigned long>(written),
+                    static_cast<unsigned long>(manifest.sizeBytes));
     Update.abort();
     return false;
   }
@@ -170,40 +275,60 @@ bool installApplication(const Service::Discovery& discovery, const Manifest& man
   // Verified before the image is committed. An image that does not match the
   // manifest is discarded rather than marked bootable, so a truncated or
   // tampered download can never become the running application.
-  if (!toHex(digest, sizeof(digest)).equalsIgnoreCase(manifest.sha256)) {
+  const String computed = toHex(digest, sizeof(digest));
+  if (!computed.equalsIgnoreCase(manifest.sha256)) {
+    // Both digests, because "the hash was wrong" and "the manifest carried a
+    // hash for a different artifact" are different faults with the same symptom.
+    Journal::printf("[install] SHA-256 MISMATCH after a complete %lu-byte download",
+                    static_cast<unsigned long>(written));
+    Journal::printf("[install]   computed=%s", computed.c_str());
+    Journal::printf("[install]   manifest=%s", manifest.sha256.c_str());
     Update.abort();
     return false;
   }
 
   if (!Update.end(true)) {
+    Journal::printf("[install] Update.end() refused to commit a hash-verified image: %s "
+                    "(error %u)",
+                    Update.errorString(), static_cast<unsigned>(Update.getError()));
     return false;
   }
 
   Identity::setInstalledAppVersion(manifest.version);
   Identity::clearBootAttempts();
   Identity::setUpdateRequested(false);
+  Journal::printf("[install] committed '%s' - boot attempts and the update-requested "
+                  "flag are cleared",
+                  manifest.version.c_str());
   return true;
 }
 
 bool cacheBrandAssets(const Service::Discovery& discovery) {
   if (discovery.brandAssetPath.length() == 0) {
+    Journal::line("[brand] discovery named no brand asset path - skipped, and this is "
+                  "normal for a device not yet assigned to a brand");
     return false;
   }
 
   NetworkClientSecure client;
   if (!beginSecure(client)) {
+    Journal::line("[brand] Tls::configure() refused - splash not refreshed (cosmetic, "
+                  "the boot continues)");
     return false;
   }
 
   HTTPClient http;
   const String url = String("https://") + Config::kServiceHost + discovery.brandAssetPath;
   if (!http.begin(client, url)) {
+    Journal::printf("[brand] http.begin() refused %s (cosmetic)", url.c_str());
     return false;
   }
   http.setTimeout(discovery.httpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
 
-  if (http.GET() != 200) {
+  const int status = http.GET();
+  if (status != 200) {
+    Journal::printf("[brand] GET returned %d - splash not refreshed (cosmetic)", status);
     http.end();
     return false;
   }
@@ -213,6 +338,7 @@ bool cacheBrandAssets(const Service::Discovery& discovery) {
   const char* tmp = "/brand.tmp";
   File f = LittleFS.open(tmp, "w");
   if (!f) {
+    Journal::line("[brand] could not open /brand.tmp for writing (cosmetic)");
     http.end();
     return false;
   }
@@ -222,38 +348,76 @@ bool cacheBrandAssets(const Service::Discovery& discovery) {
   http.end();
 
   if (written <= 0) {
+    Journal::printf("[brand] wrote %d bytes - discarding the temporary file (cosmetic)",
+                    written);
     LittleFS.remove(tmp);
     return false;
   }
 
   LittleFS.remove(kBrandSplashPath);
-  return LittleFS.rename(tmp, kBrandSplashPath);
+  const bool renamed = LittleFS.rename(tmp, kBrandSplashPath);
+  Journal::printf("[brand] cached %d bytes to %s (rename %s)", written, kBrandSplashPath,
+                  renamed ? "ok" : "FAILED");
+  return renamed;
 }
 
 bool haveBootableApplication() {
+  // Three separate reasons, each logged as itself. "No bootable application"
+  // covers a device that has never had one, a device whose install was
+  // invalidated, and a device whose app crashes on startup - and those want
+  // three different responses from whoever is reading the journal.
   const esp_partition_t* app = applicationPartition();
   if (app == nullptr) {
+    Journal::line("[updater] no bootable app: this device's table has no ota_0 partition");
     return false;
   }
-  if (Identity::installedAppVersion().length() == 0) {
+  const String version = Identity::installedAppVersion();
+  if (version.length() == 0) {
+    Journal::line("[updater] no bootable app: ota_0 exists but no installed version is "
+                  "recorded, so nothing has ever been installed in it");
     return false;
   }
-  // An application that has repeatedly failed to reach steady state is treated
-  // as bad. CAL re-downloads rather than handing over to it again.
-  return Identity::bootAttempts() < Identity::kMaxBootAttempts;
+  const uint8_t attempts = Identity::bootAttempts();
+  if (attempts >= Identity::kMaxBootAttempts) {
+    // An application that has repeatedly failed to reach steady state is treated
+    // as bad. CAL re-downloads rather than handing over to it again.
+    Journal::printf("[updater] no bootable app: '%s' has used %u of %u boot attempts "
+                    "without reporting itself healthy, so it is being treated as bad",
+                    version.c_str(), static_cast<unsigned>(attempts),
+                    static_cast<unsigned>(Identity::kMaxBootAttempts));
+    return false;
+  }
+  Journal::printf("[updater] bootable app '%s' present, %u of %u boot attempts used",
+                  version.c_str(), static_cast<unsigned>(attempts),
+                  static_cast<unsigned>(Identity::kMaxBootAttempts));
+  return true;
 }
 
 void bootApplication() {
   const esp_partition_t* app = applicationPartition();
   if (app == nullptr) {
+    Journal::line("[updater] handover abandoned: no ota_0 partition to hand over to");
     return;
   }
 
   Identity::recordBootAttempt();
+  Journal::printf("[updater] handing over to '%s' at 0x%06lx - boot attempts now %u of %u",
+                  Identity::installedAppVersion().c_str(),
+                  static_cast<unsigned long>(app->address),
+                  static_cast<unsigned>(Identity::bootAttempts()),
+                  static_cast<unsigned>(Identity::kMaxBootAttempts));
 
-  if (esp_ota_set_boot_partition(app) != ESP_OK) {
+  const esp_err_t err = esp_ota_set_boot_partition(app);
+  if (err != ESP_OK) {
+    Journal::printf("[updater] esp_ota_set_boot_partition failed (esp_err %d) - handover "
+                    "abandoned, returning to CAL's ladder",
+                    static_cast<int>(err));
     return;
   }
+
+  // Written to flash line by line rather than buffered, so this really is on
+  // the chip before the restart takes the RAM with it.
+  Journal::line("[updater] boot partition set - restarting into the application now");
   esp_restart();
 }
 

@@ -23,7 +23,7 @@ server-side consequence it is noted here and tracked there.
 
 ## How to observe anything at all
 
-Every procedure below depends on one of these three channels, so they are worth
+Every procedure below depends on one of these four channels, so they are worth
 stating once.
 
 1. **The remote debug stream.** The only diagnostic channel a deployed device
@@ -45,6 +45,15 @@ stating once.
 3. **`/diag` on the server**, for telemetry, the reboot heatmap and the retained
    card status line. This is where a *misreported* fault shows up, and several
    of the changes below are about the label rather than the action.
+4. **CAL's boot journal**, in the `callog` flash partition. The only channel
+   that survives the boot that wrote it, and the only one that works when CAL
+   itself is what failed - neither the stream nor `/diag` exists at that point,
+   and channel 2 above shows only what happens while the cable is attached. CAL
+   prints the previous boot automatically at power-on, `d` on the serial console
+   dumps all sixteen retained boots, and if CAL will not run at all it comes off
+   the chip with `esptool read_flash 0x3B0000 0x10000`. Section 6 below is its
+   own procedure; it is listed here because several other sections become
+   readable on a CAL-side failure that previously left nothing at all.
 
 ---
 
@@ -561,14 +570,275 @@ will fail while the firmware is right.
 
 ---
 
+## 6. CAL's boot journal (`Journal.h`/`.cpp`, `callog` partition)
+
+**Automated coverage: none, and less than usual.** Everything here is a function
+of real flash sectors, a real erase, a real partition table and a real serial
+console. A clean compile proves the module builds and that `strings
+CAL.ino.bin` contains `CALJRNL1`. It proves nothing about whether a single byte
+ever reaches flash.
+
+**Nothing in this section has run on hardware.** The owner chose to build it
+ahead of a bench session. Treat every step below as the first execution of that
+code path, and do them in order — 6a gates everything after it.
+
+### 6a. The table actually has `callog`, before anything else is believed
+
+Nothing below means anything if the partition is not there, and `Journal` is
+deliberately silent-and-harmless when it is missing, so a device with a stale
+table will look like a device with a broken journal.
+
+1. Build: `ci/build-firmware.sh`. It must succeed — the generator rejects a bad
+   subtype or a misaligned offset, so a build failure here is the table, not
+   the code.
+2. Decode the table that was actually baked in, rather than trusting the CSV.
+   The core ships a bundled binary, which is the one to use — `python` is not
+   necessarily on PATH on the build machine:
+
+   ```
+   "$ARDUINO15/packages/esp32/hardware/esp32/3.3.11/tools/gen_esp32part.exe" \
+       build/esp32.esp32.esp32/CAL.ino.partitions.bin
+   ```
+
+   Expect exactly seven rows, `factory` at `0x10000` sized `1408K`, `ota_0` at
+   `0x170000` sized `2304K`, and `callog` at `0x3B0000` sized `64K` with subtype
+   printed as `153` (decimal for `0x99`). If `callog` is absent the sketch-root
+   `partitions.csv` was not picked up and everything below will report "serial
+   only".
+
+   **This decode has been done once, on the build of this change, and it
+   produced exactly that.** The tool prints a `ValueError: I/O operation on
+   closed file` traceback *after* the table — a cosmetic artifact of the bundled
+   executable flushing stdout, not a table fault. Read the rows, not the exit
+   code.
+3. Flash the device: `esptool --chip esp32 --port COMx write_flash 0x0
+   build/esp32.esp32.esp32/CAL.ino.merged.bin`.
+
+**Migration check, on a unit that already has a working App installed** — this
+is the claim that the table change costs nothing, and it is worth proving once
+rather than assuming it on the whole lab:
+
+1. Note the device's installed App version and its WiFi behaviour first.
+2. Write the table alone: `esptool --chip esp32 --port COMx write_flash 0x8000
+   build/esp32.esp32.esp32/CAL.ino.partitions.bin`.
+3. Power-cycle. The device must still hold its secret, still rejoin WiFi without
+   the portal, and still hand over to the same App version. It will report
+   `[journal] no 'callog' partition...` **no longer** — the table now has it —
+   but the *old* CAL in `factory` does not know about the journal at all, so
+   expect no journal lines until CAL itself is also reflashed. The point of this
+   step is only that nothing was destroyed.
+
+### 6b. A first boot on a blank journal
+
+Erase just the journal so the starting state is known:
+`esptool --chip esp32 --port COMx erase_region 0x3B0000 0x10000`.
+
+Open the monitor, then reset:
+
+```
+arduino-cli monitor -p COMx -c baudrate=115200
+```
+
+Expect, in this order:
+
+- `[journal] no previous boot on record - this is the first boot to keep one`
+- `[boot] CAL starting: resetReason=... freeHeap=... largest8BitBlock=...`
+- **No** `[boot] journal is SERIAL ONLY this boot` line. If that line appears,
+  the partition was not found or the erase failed — stop and go back to 6a.
+- then the ordinary ladder: `[display]`, `[identity]`, `[boot] BOOT not held...`
+
+### 6c. The previous boot is dumped automatically, and it fits the splash budget
+
+Power-cycle the device from 6b and watch two things at once — this needs a
+person looking at the panel, not just the console.
+
+1. The console must open with
+   `[journal] ---- previous boot 1 (sector 0) - press 'd' for all 16 ----`,
+   then the entire text of the boot before it, then `---- end of previous boot
+   ----`.
+2. **The splash must still appear within about two seconds of power.** This is
+   the requirement the auto-dump was sized against and the one it could break.
+   Time it with a phone camera if it looks marginal. A visibly slower splash
+   than a pre-journal build is a failure of this design, not a tuning issue —
+   report the measured delay and the sector's byte count together.
+
+Repeat with a *long* previous boot (one that went through the captive portal and
+a full download, so its sector is near 4,064 bytes). That is the worst case the
+353 ms figure in the README claims.
+
+### 6d. The `d` and `?` commands
+
+With the device sitting still — on the halt screen, on the QR wait, or after
+hand-over has failed — type `d` in the monitor.
+
+- Expect `======== journal dump ========`, then every retained boot in
+  **ascending `boot=` order**, each headed `---- boot N (sector M) ----`, with
+  the newest marked `- this boot, still running`.
+- Type `?`. Expect exactly one line: `[journal] d = dump every retained boot, ?
+  = this line`.
+- Press Enter on its own. Expect **nothing** — stray bytes and newlines are
+  ignored deliberately, and a console that answers back to noise is a bug here.
+
+**Note the standing hazard:** opening a serial port with DTR asserted resets
+this board. That destroys the state most of this section is trying to read.
+Open the port first, then cause the condition.
+
+### 6e. The brick-proof path: reading the journal with no firmware at all
+
+This is the property the whole design is for, so it must be proved with CAL
+genuinely unable to run, not merely idle.
+
+1. Get a device into a known state with a few boots of history.
+2. Erase the application image so the device cannot boot into anything useful —
+   `esptool --chip esp32 --port COMx erase_region 0x10000 0x160000` erases
+   `factory` itself, which is the real "CAL will not run" condition.
+3. Read the journal straight off the chip:
+
+   ```
+   esptool --chip esp32 --port COMx --baud 921600 read_flash 0x3B0000 0x10000 callog.bin
+   ```
+
+4. Open `callog.bin` in a text editor. Expect readable ASCII, sixteen
+   `CALJRNL1 boot=` headers or fewer, `0xFF` padding after each boot's last
+   line, and the sectors in **ring order, not time order**.
+5. Recover the device per *Recovering a device from a bare or erased chip* in
+   the README.
+
+If step 4 does not produce readable text, the journal has failed at the only
+job that cannot be done any other way, regardless of how well 6b–6d went.
+
+### 6f. The ring wraps, and the oldest boot is the one that goes
+
+Power-cycle the device eighteen times, slowly enough that each boot completes.
+
+- Dump with `d`. Expect exactly sixteen boots, and the lowest `boot=` number
+  present to be `N-15` where `N` is the newest.
+- Expect the sector numbers to be out of order relative to the boot numbers —
+  that is the ring having wrapped, and the sort in `dumpAll()` is what hides it.
+- Expect **no** gap and no repeat in the sequence numbers. A gap means a sector
+  erase failed silently; a repeat means the header scan picked the wrong newest.
+
+### 6g. A device on the old table is not harmed
+
+The claim is that this firmware is safe on a unit that never gets reflashed.
+
+1. Write the **old** partition table (from `git show 94cd5ae:partitions.csv`,
+   built into a `.partitions.bin`) over a device running the new CAL, or simply
+   test on a lab unit that has not been reflashed since before this change.
+2. Boot. Expect exactly one line:
+   `[journal] no 'callog' partition in this device's table - serial only, nothing
+   from this boot will survive it`, followed by
+   `[boot] journal is SERIAL ONLY this boot - nothing here will survive a restart`.
+3. Expect the **entire rest of the boot to behave normally** — join WiFi, fetch
+   discovery, hand over. Every journal line still appears on serial.
+4. Press `d`. Expect `[journal] no 'callog' partition - there is nothing to
+   dump`, and nothing else.
+
+### 6h. The install path says what it did — the reason this exists
+
+This is the section the 2026-09-11 incident is about, and it needs a real OTA.
+
+**A successful install.** Mark a new build current on the server, let a device
+take it, and read the journal afterwards. It must contain, in order:
+
+- `[update] install? manifestOk=1 isConfigured=1 offered='...' installed='...' -> YES`
+- `[install] target ota_0 at 0x170000, 2359296 bytes; image '...' is N bytes`
+- `[heap] before the download TLS session: free=... largest8BitBlock=...`
+- `[install] about to call Update.begin() - THIS ERASES ota_0 ...`
+- ten `[install] NN% - X of Y bytes, freeHeap=... largest8BitBlock=...` lines
+- `[install] committed '...'`
+- `[updater] handing over to '...' at 0x170000 - boot attempts now 1 of 3`
+- `[updater] boot partition set - restarting into the application now`
+
+**Check the heap figures are actually moving.** Three or four progress lines all
+reporting an identical `largest8BitBlock` means the instrument is reading
+something static, not the heap, and the whole fragmentation hypothesis this was
+built to test would be untestable.
+
+**A failed install, deliberately.** The failure the incident describes cannot be
+reproduced to order, but three of its candidate causes can:
+
+| Induce | Expect the journal to say |
+|---|---|
+| Pull the device's WiFi mid-download (unplug the AP) | `[install] download loop ended at X of Y bytes (connected=0)` then `[install] SHORT DOWNLOAD: X of Y bytes arrived - ota_0 is erased and nothing bootable is in it` |
+| Put a wrong `sha256Hash` in the server's manifest for a good binary | `[install] SHA-256 MISMATCH after a complete N-byte download`, followed by both digests on their own lines |
+| Set the manifest `sizeBytes` larger than `ota_0` | `[install] refused: image is N bytes and ota_0 holds 2359296` — and critically, **no** `about to call Update.begin()` line, because nothing should have been erased |
+
+In the first two cases, confirm the device then shows `Update failed` **and**
+that the journal explains which one happened. That is the entire point: the
+screen is unchanged, the evidence is not.
+
+### 6i. A broken journal does not break the boot
+
+The one property that must hold no matter what.
+
+1. Make the journal fail at runtime by pointing it at a partition it cannot
+   write — the cheapest version is to build with `kPartitionLabel` changed to a
+   name that does not exist, which exercises the not-found path, and separately
+   to change it to `"coredump"`, which exercises a *present* partition that
+   another subsystem also writes.
+2. In both cases the device must complete its whole ladder and hand over
+   normally. Any change in boot outcome is a defect in the containment, not in
+   the journal.
+3. Confirm that after a write error the console carries exactly one
+   `[journal] ... failed (esp_err N) - journal is serial-only for the rest of
+   this boot` line, and **not** one per subsequent log call.
+
+Revert the label afterwards. This test edits the source; do not flash the
+modified build onto anything that leaves the bench.
+
+### 6j. A boot that overruns its sector
+
+Hard to induce naturally; the enrollment wait is the realistic route. Leave a
+device with no secret sitting in `awaitKeyAssignment()` and change the
+server-side enrollment message repeatedly so the change-gated log line fires
+each time, until roughly 4 KB has accumulated.
+
+- Expect one `[journal] sector full - the rest of this boot is on serial only`
+  line and then nothing more from that boot in flash.
+- Expect logging **on serial** to continue unaffected.
+- Expect `d` afterwards to report `N lines of this boot were dropped after its
+  sector filled`.
+- Expect the next boot to start cleanly in the next sector — a full sector must
+  not corrupt the ring.
+
+### 6k. Known gaps, stated rather than discovered later
+
+- **The `?`/`d` console is not polled everywhere.** It runs in
+  `haltWithFailure()`, in the enrollment wait, and in `loop()`. It does **not**
+  run during a WiFi join, an SNTP wait, the captive portal, or a download — so a
+  device wedged inside any of those will not answer `d`. Power-cycling and
+  reading the auto-dump is the fallback, at the cost of one ring slot.
+- **A crash before a log call is not recorded**, by definition. That case
+  belongs to the `coredump` partition, which is enabled
+  (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y`) and is a separate read with
+  `espcoredump.py`.
+- **A boot that wedges without crashing leaves a sector with no terminator.**
+  The journal will show the last line it managed to write and then stop; there
+  is nothing distinguishing that from a boot that ended tidily other than the
+  absence of a hand-over or halt line. Read the *absence* of `[updater] boot
+  partition set` or `[halt]` as the tell.
+- **Sequence numbers are `uint32_t` and the scan assumes they never wrap.** At
+  one boot per minute that is about eight thousand years, so this is recorded as
+  a known assumption rather than a risk.
+- **The journal records the SSID of a network it joins, and never the
+  passphrase.** Anyone reading a device's flash gets its network names and its
+  MAC. That is a deliberate line and worth re-checking if new log lines are
+  added.
+
+---
+
 ## What a clean compile does and does not prove
 
 Recorded once, because several commits in this repository lean on it:
 
 - It proves the code builds against the pinned core and libraries, and it
-  reports a size. Report sizes against the **real** `ota_0` ceiling from
-  `partitions.csv` - 2,424,832 bytes - never against `arduino-cli`'s generic
-  1,966,080, which is for a partition scheme this project does not use.
+  reports a size. Report sizes against the **real** ceilings from
+  `partitions.csv` - `ota_0` is **2,359,296** bytes and `factory`, which is
+  CAL's own, is **1,441,792** - never against `arduino-cli`'s generic 1,966,080,
+  which is for a partition scheme this project does not use. Note that `ota_0`
+  shrank by 65,536 bytes when `callog` was added: a figure of 2,424,832 quoted
+  anywhere is pre-`callog` and is now the wrong number.
 - `strings` on the built image proves a literal is present. That is a real check
   and worth doing when a change is "the card must now be able to say X".
 - It proves nothing about heap, TLS, NVS, timing, the panel, or any decision

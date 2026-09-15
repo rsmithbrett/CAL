@@ -7,6 +7,7 @@
 #include "Config.h"
 #include "Display.h"
 #include "Identity.h"
+#include "Journal.h"
 
 namespace Provisioning {
 namespace {
@@ -85,6 +86,9 @@ void handleSave() {
   }
   Identity::rememberNetwork(ssid, pass);
   credentialsAccepted = true;
+  // The SSID, never the passphrase. The journal is read off the flash of a
+  // device that may not belong to the person reading it.
+  Journal::printf("[portal] credentials accepted for SSID '%s'", ssid.c_str());
   server.send(200, "text/html",
               "<!doctype html><meta name=viewport content=\"width=device-width,initial-scale=1\">"
               "<body style=\"font-family:system-ui;background:#111;color:#eee;padding:24px\">"
@@ -120,10 +124,22 @@ bool attemptJoin(const Identity::Network& net) {
     const uint32_t deadline = millis() + Config::kWifiJoinTimeoutMs;
     while (millis() < deadline) {
       if (WiFi.status() == WL_CONNECTED) {
+        Journal::printf("[wifi] joined '%s' on attempt %u of %u", net.ssid.c_str(),
+                        static_cast<unsigned>(attempt),
+                        static_cast<unsigned>(Config::kWifiJoinAttempts));
         return true;
       }
       delay(250);
     }
+    // WiFi.status() at the moment of the timeout separates a wrong passphrase
+    // (WL_CONNECT_FAILED) from an AP that never answered (WL_NO_SSID_AVAIL or
+    // still WL_DISCONNECTED), which the screen cannot show and the household
+    // cannot tell apart.
+    Journal::printf("[wifi] attempt %u of %u on '%s' timed out after %lu ms, status=%d",
+                    static_cast<unsigned>(attempt),
+                    static_cast<unsigned>(Config::kWifiJoinAttempts), net.ssid.c_str(),
+                    static_cast<unsigned long>(Config::kWifiJoinTimeoutMs),
+                    static_cast<int>(WiFi.status()));
     WiFi.disconnect();
   }
   return false;
@@ -134,6 +150,8 @@ bool attemptJoin(const Identity::Network& net) {
 bool joinStoredNetwork() {
   const uint8_t known = Identity::networkCount();
   if (known == 0) {
+    Journal::line("[wifi] nothing remembered - no join attempted, going straight to the "
+                  "setup portal");
     return false;
   }
 
@@ -147,6 +165,8 @@ bool joinStoredNetwork() {
   // most recently used is not necessarily the one with usable signal.
   Display::showStatus("Looking for known networks", "");
   const int found = WiFi.scanNetworks();
+  Journal::printf("[wifi] scan saw %d networks; %u are remembered", found,
+                  static_cast<unsigned>(known));
 
   Candidate candidates[Identity::kMaxNetworks];
   uint8_t count = 0;
@@ -154,6 +174,8 @@ bool joinStoredNetwork() {
   for (uint8_t i = 0; i < known; ++i) {
     const Identity::Network net = Identity::network(i);
     if (net.ssid.length() == 0) {
+      Journal::printf("[wifi] remembered slot %u is empty - skipped",
+                      static_cast<unsigned>(i));
       continue;
     }
     int32_t best = INT32_MIN;
@@ -164,9 +186,16 @@ bool joinStoredNetwork() {
       }
     }
     if (best != INT32_MIN) {
+      Journal::printf("[wifi] remembered '%s' is in range at %d dBm", net.ssid.c_str(),
+                      static_cast<int>(best));
       candidates[count].index = i;
       candidates[count].rssi = best;
       ++count;
+    } else {
+      // Worth saying out loud: this device sees 2.4GHz only, so a network the
+      // household can plainly see on a phone can genuinely be invisible here.
+      Journal::printf("[wifi] remembered '%s' was NOT in the scan (2.4GHz only)",
+                      net.ssid.c_str());
     }
   }
   WiFi.scanDelete();
@@ -195,6 +224,8 @@ bool joinStoredNetwork() {
   // Nothing remembered was in range. Falling back to trying them blind covers
   // a network that is present but was missed by the scan, which happens.
   if (count == 0) {
+    Journal::line("[wifi] no remembered network appeared in the scan - trying all of "
+                  "them blind, in case the scan missed one");
     for (uint8_t i = 0; i < known; ++i) {
       const Identity::Network net = Identity::network(i);
       if (net.ssid.length() > 0 && attemptJoin(net)) {
@@ -202,8 +233,15 @@ bool joinStoredNetwork() {
         return true;
       }
     }
+  } else {
+    // Named explicitly so the journal distinguishes "we never tried the blind
+    // fallback" from "we tried it and it also failed".
+    Journal::printf("[wifi] %u in-range candidate(s) all failed to join - the blind "
+                    "fallback was NOT attempted, it only runs when the scan found none",
+                    static_cast<unsigned>(count));
   }
 
+  Journal::line("[wifi] could not join any remembered network");
   return false;
 }
 
@@ -231,6 +269,10 @@ bool run() {
   // device. This removes the step that fails most often: a person hunting for
   // an unfamiliar network name and typing a passphrase they cannot see.
   const String joinPayload = "WIFI:S:" + name + ";T:WPA;P:" + pass + ";;";
+  Journal::printf("[portal] access point '%s' raised at %s - waiting up to %lu ms for "
+                  "credentials",
+                  name.c_str(), ip.toString().c_str(),
+                  static_cast<unsigned long>(Config::kProvisioningAbandonTimeoutMs));
   Display::showQr(joinPayload, "Scan to set up WiFi", name);
 
   const uint32_t deadline = millis() + Config::kProvisioningAbandonTimeoutMs;
@@ -247,10 +289,14 @@ bool run() {
 
   if (!abandoned) {
     delay(400);  // let the acknowledgement page reach the handset
+  } else {
+    Journal::printf("[portal] abandoned - nobody submitted credentials within %lu ms",
+                    static_cast<unsigned long>(Config::kProvisioningAbandonTimeoutMs));
   }
   server.stop();
   dns.stop();
   WiFi.softAPdisconnect(true);
+  Journal::printf("[portal] closed, returning %s", abandoned ? "false" : "true");
   return !abandoned;
 }
 
