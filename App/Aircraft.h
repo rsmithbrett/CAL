@@ -32,7 +32,30 @@ namespace Aircraft {
 
 enum class Status {
   Ok,
-  Empty,             // the fetch succeeded; nothing is within radius right now - not an error
+  /// The fetch succeeded, the server's own refresh succeeded, and nothing is
+  /// within radius right now - not an error, and a real statement about the
+  /// sky. Reachable ONLY when `status` says the refresh worked; see
+  /// fetchMine(). An empty list on its own does not license this value.
+  Empty,
+  /// The fetch succeeded and the server's own refresh from the upstream feed
+  /// did not, with nothing cached behind it - so the list is empty because the
+  /// question failed, not because the sky is. Distinct from `Empty` because
+  /// those are two different facts and this card used to tell them apart by
+  /// nothing at all: "No aircraft within 10 mi right now" was drawn over a
+  /// question that was never answered. Mirrors Listings::Status::RefreshFailed
+  /// exactly, for the reasons in that card's own remarks - the sky is the
+  /// harder case, because an empty one is plausible far more often than an
+  /// empty housing market and so the false claim is far less likely to be
+  /// questioned by whoever reads it.
+  RefreshFailed,
+  /// No provider credential on file, so nothing was ever attempted - a
+  /// first-class resting state, not a failure, and NOT an empty sky. Read from
+  /// `status == "NotConfigured"`; this card has no `isConfigured` field of its
+  /// own the way the listings payload does. Drawn muted, alongside the two
+  /// refusals below rather than as an error - the panel, the network and our
+  /// server are all fine, and what is missing is something only an
+  /// administrator can restore.
+  NotConfigured,
   NotActivated,      // ContentGateRefusal.DeviceNotActivated
   ProviderDisabled,  // ContentGateRefusal.ProviderDisabled
   AuthError,         // the device's own secret was rejected

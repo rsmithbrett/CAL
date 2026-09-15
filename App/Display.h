@@ -344,8 +344,9 @@ void showListingsCard(const String& address, const String& propertyType, int pri
 /// other content card, mirroring showAircraftStatus()'s muted-vs-amber split.
 ///
 /// `detail` is always one of Listings.cpp's own literals. The server's
-/// lastRefreshError text never reaches this function - see
-/// Listings::Result::refreshError for why.
+/// lastRefreshError text never reaches this function, and no longer reaches
+/// the device's own operator surfaces either - see Listings::Result::message
+/// for where it went and why.
 void showListingsStatus(const String& headline, const String& detail, bool isProblem);
 
 /// Up to this many calendar days show in the forecast strip below - five

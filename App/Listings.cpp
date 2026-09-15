@@ -9,6 +9,7 @@
 #include "Identity.h"
 #include "Log.h"
 #include "Maintenance.h"
+#include "ProviderStatus.h"
 
 namespace Listings {
 namespace {
@@ -46,96 +47,20 @@ String describeMarket(const String& cityState) {
   return cityState.length() > 0 ? (" near " + cityState) : String("");
 }
 
-/// How much of the server's lastRefreshError to retain. The column is
-/// varchar(1000) and this string lives in gLast for as long as the failure
-/// does, which on a device whose scarce resource is contiguous heap is not
-/// free. Every error the server actually produces identifies itself in its
-/// first clause - "Monthly RentCast request budget exhausted", "Could not
-/// geocode postal code", the HTTP status of a rejected key - so the head is the
-/// part worth carrying and the tail is remediation prose for a web page.
-constexpr size_t kMaxRefreshErrorChars = 120;
-
-String retainRefreshError(const char* serverText) {
-  String text(serverText);
-  if (text.length() > kMaxRefreshErrorChars) {
-    text.remove(kMaxRefreshErrorChars);
-    text += "...";
-  }
-  return text;
-}
-
-/// The server's device-facing `status` vocabulary - `ProviderStatus` in
-/// DiscoverAroundMe.SharedKernel.Content, serialized by name in PascalCase
-/// (`"Ok"`, `"NotConfigured"`, `"Stale"`, `"Unavailable"`) rather than in the
-/// camelCase the property names around it use, to match the other enum already
-/// on the wire in a sibling payload.
+/// How much of the server's lastRefreshError to put in a log line, on the one
+/// wire shape that still carries one. Every error the server actually produces
+/// identifies itself in its first clause - "Monthly RentCast request budget
+/// exhausted", "Could not geocode postal code", the HTTP status of a rejected
+/// key - so the head is the part worth printing and the tail is remediation
+/// prose for a web page.
 ///
-/// It exists because `lastRefreshError` is prose written for an operator and
-/// this card was reading it as a SIGNAL. The server derives this value on the
-/// record from state it already has (is a key configured, is there a live
-/// error, is there anything cached) rather than authoring it at each failure
-/// site, so it cannot drift out of agreement with the diagnostic it replaces.
-///
-/// Two of the six values are this firmware's, not the server's, and they are
-/// deliberately distinct from each other:
-///
-///   - `Absent` - a 200 from a server that does not send the field yet. Every
-///     server this fleet talks to, until the strip below ships. This is the
-///     one value that licenses reading the old signal.
-///   - `Unrecognized` - a value a later server added that this build has never
-///     heard of. NOT the same situation as `Absent`: a newer server said
-///     something specific, and `lastRefreshError` will already be gone from
-///     its payload, so there is nothing older to fall back to. Treated as a
-///     failed refresh, because that is the reading which never invents a claim
-///     about somebody's property market.
-enum class WireStatus : uint8_t {
-  Absent,
-  Ok,
-  NotConfigured,
-  Stale,
-  Unavailable,
-  Unrecognized,
-};
-
-WireStatus parseWireStatus(const char* text) {
-  if (text == nullptr || strlen(text) == 0) {
-    return WireStatus::Absent;
-  }
-  if (strcmp(text, "Ok") == 0) {
-    return WireStatus::Ok;
-  }
-  if (strcmp(text, "NotConfigured") == 0) {
-    return WireStatus::NotConfigured;
-  }
-  if (strcmp(text, "Stale") == 0) {
-    return WireStatus::Stale;
-  }
-  if (strcmp(text, "Unavailable") == 0) {
-    return WireStatus::Unavailable;
-  }
-  return WireStatus::Unrecognized;
-}
-
-/// For the debug stream only - never drawn, and never compared against. The
-/// names double as the reason each value means what it does, because the reader
-/// of this line is somebody trying to work out why a card said what it said.
-const char* describeWireStatus(WireStatus wire) {
-  switch (wire) {
-    case WireStatus::Absent:
-      return "no status field on this payload - a server that predates the field";
-    case WireStatus::Ok:
-      return "the server's refresh succeeded; its listings are current";
-    case WireStatus::NotConfigured:
-      return "no provider credential on file, so nothing was ever attempted";
-    case WireStatus::Stale:
-      return "refresh failed, last-known-good listings still available";
-    case WireStatus::Unavailable:
-      return "refresh failed with nothing cached to fall back on";
-    case WireStatus::Unrecognized:
-      return "a status value this build does not know";
-  }
-  return "unknown";
-}
+/// Spent as printf's own `%.*s` precision at each call site rather than by
+/// building a truncated String: the text is read straight out of the parsed
+/// document, printed, and never retained, so carrying it costs no heap at all
+/// and nothing survives the call. It also keeps any one of these lines clear of
+/// Log's 256-byte scratch buffer, which would otherwise take the line's own
+/// tail - the part naming which branch was taken - rather than the prose's.
+constexpr int kLoggedRefreshErrorChars = 120;
 
 }  // namespace
 
@@ -265,7 +190,7 @@ Result fetchMine() {
   // it, and which one arrives depends on how new the server is.
   //
   // `status` is the answer given deliberately - a closed vocabulary meant to be
-  // read by a machine (see WireStatus above).
+  // read by a machine (see ProviderStatus.h).
   //
   // `lastRefreshError` is the answer read by accident. It is the operator's
   // sentence: a rejected key, an exhausted monthly budget, an unresolvable
@@ -286,43 +211,48 @@ Result fetchMine() {
   // strip, sometimes within one rolling deploy.
   //
   // WHEN THE FALLBACK CAN GO. Delete the `lastError`/`hasRefreshError` pair,
-  // `retainRefreshError()`, the `f["lastRefreshError"]` filter entry,
-  // `Result::refreshError` and its two readers in cardStatus() once no server
-  // this fleet can reach predates the strip. That is a server-side fact, not a
-  // firmware one: once the strip is deployed everywhere, `hasRefreshError` is
-  // permanently false and the `WireStatus::Absent` arm below is dead code. The
-  // firmware half is then a pure deletion with no behaviour change - nothing
-  // else reads either name.
+  // `kLoggedRefreshErrorChars`, the `f["lastRefreshError"]` filter entry and
+  // the three log sites that print the sentence, once no server this fleet can
+  // reach predates the strip. That is a server-side fact, not a firmware one:
+  // once the strip is deployed everywhere, `hasRefreshError` is permanently
+  // false and the `ProviderStatus::Value::Absent` arm below is dead code. The firmware
+  // half is then a pure deletion with no behaviour change - nothing else reads
+  // either name.
+  //
+  // `Result::refreshError` was the other name on that list and is already gone,
+  // ahead of the rest, because it was not part of the fallback at all. The
+  // fallback needs to know only WHETHER a sentence arrived, which is
+  // `hasRefreshError`, a bool; retaining the sentence ITSELF in gLast served
+  // the operator status line, and that reader is better served by the server's
+  // /diag/providers, which has the untruncated original. The presence test
+  // stays for as long as pre-strip servers do; the copy did not need to.
   const char* statusText = doc["status"] | "";
-  const WireStatus wire = parseWireStatus(statusText);
+  const ProviderStatus::Value wire = ProviderStatus::parse(statusText);
 
   const char* lastError = doc["lastRefreshError"] | "";
   const bool hasRefreshError = strlen(lastError) > 0;
-  if (hasRefreshError) {
-    result.refreshError = retainRefreshError(lastError);
-  }
 
   // The one derived fact, and the only place the two wire shapes are reconciled.
   // Everything downstream reads this boolean and never looks at either field
   // again, so there is exactly one line to delete when the fallback goes.
   bool refreshFailed = false;
   switch (wire) {
-    case WireStatus::Ok:
+    case ProviderStatus::Value::Ok:
       refreshFailed = false;
       break;
     // "Nothing was attempted" is not "an attempt failed". The branch below
     // rests on NotConfigured before the listings array is ever consulted, so
     // this value never reaches a market claim either way.
-    case WireStatus::NotConfigured:
+    case ProviderStatus::Value::NotConfigured:
       refreshFailed = false;
       break;
-    case WireStatus::Stale:
-    case WireStatus::Unavailable:
-    case WireStatus::Unrecognized:
+    case ProviderStatus::Value::Stale:
+    case ProviderStatus::Value::Unavailable:
+    case ProviderStatus::Value::Unrecognized:
       refreshFailed = true;
       break;
     // The pre-strip wire shape, and the ONLY arm that consults the old signal.
-    case WireStatus::Absent:
+    case ProviderStatus::Value::Absent:
       refreshFailed = hasRefreshError;
       break;
   }
@@ -338,10 +268,10 @@ Result fetchMine() {
   // truncates past it - a diagnostic that loses its own tail is worse than two
   // lines.
   Log::verbose("[listings] status='%s' - %s", strlen(statusText) > 0 ? statusText : "(absent)",
-               describeWireStatus(wire));
+               ProviderStatus::describe(wire));
   Log::verbose("[listings] lastRefreshError %s; refresh treated as %s, decided by %s",
                hasRefreshError ? "present" : "absent", refreshFailed ? "FAILED" : "succeeded",
-               wire == WireStatus::Absent
+               wire == ProviderStatus::Value::Absent
                    ? "lastRefreshError's presence (FALLBACK: no status on this payload)"
                    : "status (lastRefreshError not consulted)");
 
@@ -362,30 +292,30 @@ Result fetchMine() {
   // carried neither straight into the listings array and out the far side as
   // "No homes for sale", which is the exact class of confident claim this card
   // keeps having to be taught not to make.
-  const bool isConfigured = (doc["isConfigured"] | true) && wire != WireStatus::NotConfigured;
+  const bool isConfigured =
+      (doc["isConfigured"] | true) && wire != ProviderStatus::Value::NotConfigured;
   if (!isConfigured) {
     result.status = Status::NotConfigured;
     // A fixed sentence, not the server's. lastRefreshError on this path was
     // NotConfiguredResult's "RentCast API key is not configured. Sign up at
     // rentcast.io and set MyListings:ApiKey." - correct, actionable, and
     // addressed to whoever runs the deployment rather than to the household
-    // this panel hangs in front of. It went to the log and the operator status
-    // line instead; see Result::refreshError. A current server does not send it
-    // to a device at all, which makes the leak impossible rather than merely
-    // avoided - but this literal is what draws either way, so nothing here
-    // depends on which server answered.
+    // this panel hangs in front of. It goes to the log below and nowhere else.
+    // A current server does not send it to a device at all, which makes the
+    // leak impossible rather than merely avoided - but this literal is what
+    // draws either way, so nothing here depends on which server answered.
     result.message = "Real-estate listings are not set up for this home yet.";
     Log::printf("[listings] NOT CONFIGURED - resting; neither an empty market nor a failed "
                 "refresh, and the listings array was not consulted");
-    // A reason only when one was sent. Having none is the normal, correct state
-    // on a stripped payload rather than a gap: the sentence lives on the
-    // server's operator routes (/diag/providers, by-zip, for-user), which is
-    // where the person who can act on it already reads it. Logged as its own
-    // line so a 120-character reason cannot push the decision above it past
-    // Log's 256-byte scratch buffer.
+    // A reason only when one was sent, and only to the stream. Having none is
+    // the normal, correct state on a stripped payload rather than a gap: the
+    // sentence lives on the server's operator routes (/diag/providers, by-zip,
+    // for-user), which is where the person who can act on it already reads it.
+    // Logged as its own line so a 120-character reason cannot push the decision
+    // above it past Log's 256-byte scratch buffer.
     if (hasRefreshError) {
-      Log::printf("[listings] not-configured reason (operator text, never drawn): %s",
-                  result.refreshError.c_str());
+      Log::printf("[listings] not-configured reason (operator text, never drawn): %.*s",
+                  kLoggedRefreshErrorChars, lastError);
     } else {
       Log::verbose("[listings] no not-configured reason on the wire - expected on any current "
                    "server, which keeps operator diagnostics off device payloads");
@@ -431,8 +361,8 @@ Result fetchMine() {
                   "nothing here licenses a claim about the market. serviceUnreachable stays false: "
                   "our server answered, RentCast did not");
       if (hasRefreshError) {
-        Log::printf("[listings] refresh failure reason (operator text, never drawn): %s",
-                    result.refreshError.c_str());
+        Log::printf("[listings] refresh failure reason (operator text, never drawn): %.*s",
+                    kLoggedRefreshErrorChars, lastError);
       } else {
         Log::verbose("[listings] no failure reason on the wire - status alone said so, which is "
                      "the whole point of it being a status");
@@ -467,8 +397,8 @@ Result fetchMine() {
                 "and 'Updated N min ago' already understates their age",
                 static_cast<unsigned>(listings.size()));
     if (hasRefreshError) {
-      Log::printf("[listings] stale-rows reason (operator text, never drawn): %s",
-                  result.refreshError.c_str());
+      Log::printf("[listings] stale-rows reason (operator text, never drawn): %.*s",
+                  kLoggedRefreshErrorChars, lastError);
     }
   } else {
     Log::verbose("[listings] %u listing(s) behind a refresh the server reported as successful - "
@@ -556,21 +486,23 @@ String cardStatus() {
       return String("ok, ") + gLast.count + " listing(s)";
     case Status::Empty:
       return "ok, none listed nearby";
-    // The one status line that carries the server's own words WHEN IT HAS THEM,
-    // because this is the reader who can act on them - an admin looking at
-    // /diag wants "401" or "budget exhausted", not the softened sentence the
-    // card draws. Post-strip it has none: the words no longer reach a device at
-    // all, and the admin reads them on the server's own operator routes
-    // instead. Both cases already had a no-words form; RefreshFailed did not
-    // and would have rendered a line ending in ": " with nothing after it.
+    // These two lines used to carry the server's own sentence when the payload
+    // happened to include one. They no longer do, and the reason is not that
+    // the sentence stopped being useful to this reader - an admin at /diag does
+    // want "401" or "budget exhausted" - but that it was never this device's to
+    // hold. It is an operator diagnostic; the server's own /diag/providers
+    // serves it to the same admin, untruncated, from the record it was written
+    // on. A device that keeps a 120-character copy of it in a retained Result
+    // for as long as the failure lasts is paying contiguous heap to duplicate,
+    // badly, a surface that already exists elsewhere.
+    //
+    // So the no-words form is now the only form. Both of these already had one
+    // for the post-strip payload, and they say where the reason went rather
+    // than reading as a value that went missing.
     case Status::RefreshFailed:
-      return gLast.refreshError.length() > 0
-                 ? String("upstream refresh failed: ") + gLast.refreshError
-                 : String("upstream refresh failed (reason is on the server, not the device)");
+      return "upstream refresh failed (reason is on the server, not the device)";
     case Status::NotConfigured:
-      return gLast.refreshError.length() > 0
-                 ? String("resting: not configured - ") + gLast.refreshError
-                 : String("resting: no listings provider key on file");
+      return "resting: no listings provider key on file";
     case Status::NotActivated:
       return "refused: device not activated";
     case Status::ProviderDisabled:

@@ -104,37 +104,31 @@ struct Result {
   ///
   /// **Never carries text the server generated.** Every value assigned to it is
   /// a literal in Listings.cpp, chosen for a household reading a wall display
-  /// from across a room. The server's own words go in `refreshError` below and
-  /// reach the debug stream, never the panel. This used to be violated on the
-  /// NotConfigured path, which put ListingsResult's "Sign up at rentcast.io and
-  /// set MyListings:ApiKey" straight onto somebody's kitchen wall.
+  /// from across a room. This used to be violated on the NotConfigured path,
+  /// which put ListingsResult's "Sign up at rentcast.io and set
+  /// MyListings:ApiKey" straight onto somebody's kitchen wall.
   String message;
 
-  /// The server's `lastRefreshError`, when it sent one - why ITS most recent
-  /// attempt to refresh from RentCast did not produce fresh data. Populated on
-  /// any 200 that carries the field, whatever the resulting status: a rejected
-  /// key, an exhausted monthly budget, an unresolvable postal code, or a bare
-  /// exception message.
-  ///
-  /// **For the debug stream and the operator status line only. Never drawn.**
-  /// It is written for whoever administers the deployment - it names API
-  /// dashboards, config keys and upstream vendors - and none of that is for the
-  /// household whose wall this is on. The card says the listings could not be
-  /// refreshed; this says why, to someone who can act on it.
-  ///
-  /// Truncated to a length worth keeping in RAM (the column is 1000 characters
-  /// server-side, and this lives in the retained gLast for as long as the state
-  /// does). The head of the string is the part that identifies the fault.
-  ///
-  /// **Expected to be permanently empty, and that is not a regression.** The
-  /// server marks `LastRefreshError` `[OperatorDiagnostic]` and strips every
-  /// marked property from device-facing payloads, so a current server sends no
-  /// such field to a device at all - the reason now lives only on the server's
-  /// operator routes, which is where the reader who can act on it already was.
-  /// This field stays for as long as any reachable server predates that strip;
-  /// the status it used to be inferred from comes from `status` instead (see
-  /// fetchMine()). Every reader of it must tolerate empty - `cardStatus()` does.
-  String refreshError;
+  // NO FIELD ON THIS RESULT CARRIES THE SERVER'S WORDS, to any surface. There
+  // was one - `refreshError`, a 120-character copy of `lastRefreshError` kept
+  // here for the debug stream and the /diag status line - and it is gone.
+  //
+  // Not because that reader was wrong to want it. An admin at /diag does want
+  // "401" or "budget exhausted". It is that the sentence is an operator
+  // diagnostic and was never this device's to hold: the server marks
+  // `LastRefreshError` `[OperatorDiagnostic]`, `DeviceJsonResult` strips every
+  // marked property from device-facing payloads, and /diag/providers serves the
+  // untruncated original to that same admin from the record it was written on.
+  // Keeping a truncated copy in a retained Result, for as long as the failure
+  // lasted, spent contiguous heap on a worse version of a surface that already
+  // existed - and on the wire shape this fleet is moving to, spent it on a
+  // field that is never sent.
+  //
+  // What the device still needs from `lastRefreshError` is not its text but
+  // whether it arrived at all, and only on the pre-strip wire shape: see
+  // fetchMine()'s `hasRefreshError`, which is a bool, is read once, and is
+  // retained nowhere. The state this card draws comes from `status`
+  // (ProviderStatus) instead.
 
   /// Whether this failure is one the words "cannot reach the service" were being
   /// used for. True at exactly the three sites that set `message` to "Cannot
