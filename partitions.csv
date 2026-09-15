@@ -21,28 +21,72 @@
 #
 # SIZING, MEASURED RATHER THAN ESTIMATED
 # --------------------------------------
-# CAL compiled to 1,318,891 bytes on 2026-09-02 (esp32 core 3.3.11, LovyanGFX,
-# NetworkClientSecure/mbedTLS, LittleFS, WebServer, ArduinoJson). An earlier
-# draft of this table gave factory 0x130000 = 1,245,184 bytes, which CAL exceeded
-# by roughly 72KB. The split below was moved to fit the measured figure with room
-# to grow, not the other way round.
+# CAL compiled to 1,318,891 bytes on 2026-09-02 and 1,337,360 on 2026-09-15 with
+# the boot journal in (esp32 core 3.3.11, LovyanGFX, NetworkClientSecure/mbedTLS,
+# LittleFS, WebServer, ArduinoJson). An earlier draft of this table gave factory
+# 0x130000 = 1,245,184, which CAL exceeded by roughly 72KB - the split was moved
+# to fit the measured figure, not the other way round. That 72KB miss is the
+# reason every number here is measured and not estimated.
 #
-# factory 0x160000 = 1,441,792  ->  122,949 bytes spare over the measured build (8.5%)
-# ota_0   0x250000 = 2,424,832  ->  258,048 bytes spare over the 2,166,784 application
+# THE 2026-09-15 REBALANCE, AND WHY IT HAD TO HAPPEN NOW
+# ------------------------------------------------------
+# factory was 0x160000 = 1,441,792, leaving 104,432 bytes over the measured CAL
+# (7.2%). That is roughly one core upgrade of margin: mbedTLS or the esp32 core
+# can move a binary by tens of KB with no source change here at all.
 #
-# Re-measured 2026-09-15, with the boot journal in: CAL is 1,337,207 bytes, so
-# factory has 104,432 bytes spare (7.2%). ota_0's figure above is superseded by
-# the callog note further down - the slot is 0x240000 now, not 0x250000.
+# Running out of factory is the worst of the available failures, because factory
+# holds the RECOVERY image. Losing it means keeping the ability to break the
+# application while losing the ability to ship the thing that rescues it.
 #
-# The application slot is still larger than the current application, so the
-# Bluetooth/A2DP stack does not have to be removed to make OTA possible. That
-# was only ever forced by the equal-slot assumption.
+# The space came from ota_0, whose reservation was sized for an application of
+# 2,166,784 bytes - a figure that existed to keep the Bluetooth/A2DP stack
+# possible. BLUETOOTH IS NO LONGER PLANNED (confirmed 2026-09-15), so that
+# reservation was holding 682KB against a requirement that no longer exists. The
+# application last measured 1,484,976.
+#
+# factory 0x1A0000 = 1,703,936  ->  366,576 bytes spare over CAL      (21.5%)
+# ota_0   0x200000 = 2,097,152  ->  612,176 bytes spare over the App  (29.2%)
+#
+# The App keeps the larger absolute cushion deliberately: it is where features
+# land, so it is the faster grower. CAL is fixed-purpose - provisioning, OTA
+# download, splash, journal - and grows mainly from library bloat.
+#
+# ONLY ota_0 MOVES. nvs, otadata, callog, spiffs and coredump keep their exact
+# offsets, which is the point rather than a coincidence: nvs holds the device
+# secret and its remembered networks, so a unit brought onto this table by
+# writing the table and CAL alone stays enrolled and stays on its WiFi.
+# factory's OFFSET is unchanged too - only its far wall moves - so the CAL image
+# already at 0x10000 remains valid, because an app image declares its own length
+# and a larger partition still contains it.
+#
+# WHY THIS CANNOT BE DONE OVER THE AIR, so nobody re-opens the question:
+#   1. The pinned core is built CONFIG_SPI_FLASH_DANGEROUS_WRITE_ABORTS=y. The
+#      flash driver treats the partition table as off-limits to raw writes and
+#      ABORTS - panics - rather than returning an error. Writing 0x8000 from
+#      firmware crashes the device instead of working. Changing that means
+#      building a custom esp32 core, not flipping a sketch-level flag.
+#   2. Even if it were permitted, writing the table is one sector erase followed
+#      by one write, and in between the table is blank. With
+#      CONFIG_PARTITION_TABLE_MD5=y a partially written table fails its checksum
+#      and is rejected outright, so the bootloader finds nothing at all - not
+#      even CAL. There is no redundant copy. The window is milliseconds and the
+#      outcome is unrecoverable without a cable.
+#   3. Over USB the same operation has a safety net that cannot be removed: the
+#      first-stage bootloader is in ROM, in silicon. A flash interrupted at any
+#      point still leaves a chip that enters download mode, so the fix for a
+#      failed attempt is to run it again.
+# The cable risks nothing permanent. The radio risks the one outcome that cannot
+# be repaired remotely. Re-table units while somebody can still reach them.
 #
 # Re-measure both figures before trusting this table again. CAL is the partition
 # that cannot be resized in the field: every unit already flashed keeps whatever
 # table it was given, so growing factory later means recovering hardware.
 #
-# App partitions must start on a 64KB boundary. 0x10000, 0x170000 and the sizes
+# A unit left on the OLD table is not broken. It has less factory headroom and
+# nothing else changes - and since CAL is installed over USB only, a device that
+# nobody can physically reach could never take a new CAL regardless of its table.
+#
+# App partitions must start on a 64KB boundary. 0x10000, 0x1B0000 and the sizes
 # below all satisfy that, and the table fills the 4MB device exactly.
 #
 # CALLOG, ADDED AFTER THE FACT, AND WHY IT COST ALMOST NOTHING
@@ -59,9 +103,9 @@
 # walked back - and no existing partition's OFFSET moved. ota_0 only shrank,
 # and it is still far larger than anything installed in it:
 #
-# ota_0 0x240000 = 2,359,296  ->  192,512 spare over the 2,166,784 application
-#                                 above (8.2%), and 884,336 spare over the
-#                                 App's last measured 1,474,960 build.
+# ota_0 was 0x240000 = 2,359,296 when callog was carved out of it. The 2026-09-15
+# rebalance above took a further 262,144 for factory, leaving 0x200000 =
+# 2,097,152. callog itself did not move and is unaffected by that change.
 #
 # Because nothing moved, an already-flashed unit is brought onto this table by
 # writing the table alone (esptool write_flash 0x8000 CAL.ino.partitions.bin).
@@ -80,8 +124,8 @@
 # Name,     Type, SubType,  Offset,   Size,     Notes
 nvs,        data, nvs,      0x9000,   0x5000,
 otadata,    data, ota,      0xE000,   0x2000,
-factory,    app,  factory,  0x10000,  0x160000,
-ota_0,      app,  ota_0,    0x170000, 0x240000,
+factory,    app,  factory,  0x10000,  0x1A0000,
+ota_0,      app,  ota_0,    0x1B0000, 0x200000,
 callog,     data, 0x99,     0x3B0000, 0x10000,
 spiffs,     data, spiffs,   0x3C0000, 0x30000,
 coredump,   data, coredump, 0x3F0000, 0x10000,
