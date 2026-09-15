@@ -24,6 +24,25 @@ void begin();
 /// sensibly before any check-in has ever completed.
 void setEnvironment(int utcOffsetMinutes, bool isDaytime);
 
+/// Sets panel brightness as a percentage, 0-100.
+///
+/// GOES THROUGH LovyanGFX, NOT GPIO21 DIRECTLY. The requirements name GPIO21 as
+/// the backlight pin, and it is - but LGFX_AUTODETECT already claims and
+/// configures it for this board, which is how begin()'s setBrightness(255) works
+/// at all. Driving the pin with our own ledc channel would give it two owners
+/// with different duty registers, and whichever wrote last would win
+/// unpredictably. So this wraps what already works rather than competing with it.
+///
+/// Zero means the backlight only. Nothing about the ESP32, WiFi, check-in or
+/// content refresh is affected - see BL 05. A dark panel here is still a working
+/// device, and that distinction is the whole reason this is a brightness call and
+/// not a sleep call.
+void setBrightness(uint8_t percent);
+
+/// The percentage last given to setBrightness(), or 100 before anything has.
+/// Read for telemetry and for deciding whether a fade is needed at all.
+uint8_t brightness();
+
 /// Reads back the UTC offset most recently given to setEnvironment() - the
 /// same value drawClock()'s corner clock already uses on every card. A read
 /// accessor rather than a second pushed copy (the way SunMoon::setTimes()

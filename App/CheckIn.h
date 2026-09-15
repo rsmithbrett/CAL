@@ -4,6 +4,7 @@
 
 #include "Actions.h"
 #include "Cards.h"
+#include "Motion.h"
 
 /// The device's regular heartbeat - what CheckInGatewayEndpoints/CheckInGatewayService
 /// actually answer, distinct from both Weather's content fetch and AppUpdater's own
@@ -261,6 +262,12 @@ struct Result {
   /// already had" - explicitly not "show nothing". See
   /// CardManager::applyPolicy().
   Cards::Policy cardPolicy;
+
+  /// The motion and backlight policy, or `present == false` when the server sent
+  /// none - which is the ordinary case for any device it does not believe has a
+  /// sensor. Absent means "carry on", never "show nothing", exactly like
+  /// cardPolicy above.
+  Motion::Policy motionPolicy;
 
   /// The buttons this device's cards should draw, resolved server-side from
   /// the account's action bindings. An empty set is completely normal and

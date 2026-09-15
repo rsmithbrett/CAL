@@ -823,6 +823,8 @@ String formatDaysOnMarket(int days) {
   return String(days) + " days";
 }
 
+uint8_t gBrightnessPercent = 100;
+
 }  // namespace
 
 void begin() {
@@ -831,6 +833,20 @@ void begin() {
   lcd.setBrightness(255);
   clear();
 }
+
+void setBrightness(uint8_t percent) {
+  if (percent > 100) {
+    percent = 100;
+  }
+  gBrightnessPercent = percent;
+
+  // 100% maps to 255 exactly rather than 254 from integer division, because the
+  // pre-existing begin() sets 255 and a device that has never dimmed must look
+  // identical to one that has dimmed and come back.
+  lcd.setBrightness(percent == 100 ? 255 : static_cast<uint8_t>((percent * 255) / 100));
+}
+
+uint8_t brightness() { return gBrightnessPercent; }
 
 void setEnvironment(int utcOffsetMinutes, bool isDaytime) {
   gUtcOffsetMinutes = utcOffsetMinutes;

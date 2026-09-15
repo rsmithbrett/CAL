@@ -148,6 +148,32 @@ time_t parseMaintenanceUntil(JsonVariantConst value) {
 /// already had. That is the firmware half of the standing six-month
 /// backward-compatibility mandate: new response fields must never be
 /// required.
+void parseMotionPolicy(JsonVariantConst source, Motion::Policy& policy) {
+  // Same contract as parseCardPolicy below: absent or null leaves present false,
+  // and the module reads that as "keep doing what you do". An omitted policy must
+  // never be able to darken a screen that was working.
+  if (source.isNull()) {
+    return;
+  }
+  policy.present = true;
+  policy.enabled = source["enabled"] | false;
+  policy.fallbackMode = String(source["fallbackMode"] | "legacyAlwaysOn");
+
+  // Defaults matter here as much as the values: a server that sends a partial
+  // object must not leave a 0% active brightness behind, which would read to a
+  // household as a dead panel. The server clamps before sending (CFG 03), so
+  // these are the second of two guards.
+  policy.activePercent = static_cast<uint8_t>(source["activePercent"] | 100);
+  policy.dimPercent = static_cast<uint8_t>(source["dimPercent"] | 25);
+  policy.activeTimeoutSeconds = static_cast<uint32_t>(source["activeTimeoutSeconds"] | 120);
+  policy.dimTimeoutSeconds = static_cast<uint32_t>(source["dimTimeoutSeconds"] | 180);
+
+  if (policy.activePercent > 100) policy.activePercent = 100;
+  if (policy.dimPercent > policy.activePercent) policy.dimPercent = policy.activePercent;
+  if (policy.activeTimeoutSeconds == 0) policy.activeTimeoutSeconds = 120;
+  if (policy.dimTimeoutSeconds == 0) policy.dimTimeoutSeconds = 180;
+}
+
 void parseCardPolicy(JsonVariantConst source, Cards::Policy& policy) {
   if (source.isNull()) {
     return;
@@ -565,6 +591,7 @@ Result perform() {
   result.intervalMs = static_cast<uint32_t>(intervalSeconds) * 1000UL;
 
   parseCardPolicy(responseDoc["cardPolicy"], result.cardPolicy);
+  parseMotionPolicy(responseDoc["motionPolicy"], result.motionPolicy);
   parseCardActions(responseDoc["cardActions"], result);
   parseAcceptedActionIds(responseDoc["acceptedActionIds"], result);
   parseAnnouncements(responseDoc["announcements"], result);

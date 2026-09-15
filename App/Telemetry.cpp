@@ -16,6 +16,7 @@
 #include "Identity.h"
 #include "Log.h"
 #include "PowerProbe.h"
+#include "Motion.h"
 #include "SdStorage.h"
 
 namespace Telemetry {
@@ -211,6 +212,45 @@ void report(const char* lastCheckInOutcome) {
   // batteryPercent can start carrying a real number and these can go.
   requestDoc["adc34Millivolts"] = PowerProbe::millivoltsGpio34();
   requestDoc["adc35Millivolts"] = PowerProbe::millivoltsGpio35();
+
+  // --- Motion sensor health, aggregate only -------------------------------------
+  //
+  // NOTE ON adc35Millivolts ABOVE: that probe and the PIR now share GPIO35, so on a
+  // device with a sensor fitted that figure reports the sensor's output level, not a
+  // battery voltage. It answered its question - four devices read ~150mV and device
+  // 17, which has an AM312, swung between 142 and 3155 - so there is no divider on
+  // 35 and the probe's remaining value there is nil. Retire it in its own change,
+  // rather than silently here where a reader would not find the reasoning.
+  //
+  // capabilityToReport() returns an EMPTY STRING for "say nothing", which is the
+  // normal case: an idle sensor and an absent one read identically at this pin, so
+  // this device can honestly report Present once it has seen motion and can never
+  // report Absent. Omitting the field leaves the server's record and the operator's
+  // declaration untouched, which is what silence has to mean (CAP 05).
+  const String motionCapability = Motion::capabilityToReport();
+  if (motionCapability.length() > 0) {
+    requestDoc["motionCapability"] = motionCapability;
+  }
+  requestDoc["motionOperatingState"] = Motion::operatingState();
+  requestDoc["motionEventsSinceReport"] = Motion::eventsSinceReport();
+
+  // An AGE, never a timestamp, and -1 means "never" rather than "0 seconds ago" -
+  // a zero age would claim motion at this instant. Omitted entirely in that case so
+  // the server stores null.
+  const int32_t lastDetectedAge = Motion::lastDetectedAgeSeconds();
+  if (lastDetectedAge >= 0) {
+    requestDoc["motionLastDetectedAgeSeconds"] = lastDetectedAge;
+  }
+
+  requestDoc["backlightState"] =
+      Motion::state() == Motion::BacklightState::Active ? "active"
+      : Motion::state() == Motion::BacklightState::Dim  ? "dim"
+      : Motion::state() == Motion::BacklightState::Off  ? "off"
+                                                        : "fallback";
+  requestDoc["sensorFaultCode"] =
+      Motion::fault() == Motion::FaultCode::StuckHigh   ? "stuckHigh"
+      : Motion::fault() == Motion::FaultCode::InitFailed ? "initFailed"
+                                                         : "none";
   // The two figures that turn the heap ratchet from something somebody has to
   // sit and watch into arithmetic the server does on every report.
   //

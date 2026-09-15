@@ -48,6 +48,32 @@ arduino-cli lib install "LovyanGFX@${LOVYANGFX_VERSION}" "ArduinoJson@${ARDUINOJ
 # binary's own partition table (magic 0xAA50 entries) rather than trusted
 # from the CLI's summary line, which reports against the FQBN's static
 # memory map and not against the table actually baked into the binary.
+# THE TWO PARTITION TABLES MUST BE THE SAME FILE'S CONTENTS.
+#
+# Each sketch takes the partitions.csv sitting beside it, so App/ has its own
+# copy - and on 2026-09-15 that copy was found to be two revisions stale: it
+# still had factory at 0x160000, ota_0 at 0x250000 (the size from before callog
+# was carved out) and no callog partition at all.
+#
+# That is not cosmetic, because App.ino.merged.bin is a published release asset
+# and bakes its table in at 0x8000. Flashing it would have silently reverted a
+# device to a layout with no callog and an ota_0 running straight through where
+# callog now lives - undoing a re-table that can only be done over USB, using an
+# artifact whose whole purpose is to be flashable.
+#
+# Checked rather than copied here on purpose: copying would fix the build and
+# leave the repository lying, so the next person reading App/partitions.csv would
+# still see the wrong numbers.
+echo "==> Checking the two partition tables agree"
+if ! diff -q partitions.csv App/partitions.csv >/dev/null; then
+  echo "ERROR: partitions.csv and App/partitions.csv differ." >&2
+  echo "       Both sketches must be built against the same layout, and App.ino.merged.bin" >&2
+  echo "       bakes its copy into the published image - a stale one silently re-tables any" >&2
+  echo "       device it is flashed to. Make them identical and re-run." >&2
+  diff partitions.csv App/partitions.csv >&2 || true
+  exit 1
+fi
+
 echo "==> Compiling CAL"
 arduino-cli compile --fqbn "$FQBN" --export-binaries .
 

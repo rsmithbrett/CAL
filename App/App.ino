@@ -85,6 +85,7 @@ size_t getArduinoLoopTaskStackSize(void) {
 #include "IssFlyover.h"
 #include "Loader.h"
 #include "Log.h"
+#include "Motion.h"
 // The declared-maintenance-window deadline, which used to be a plain global in
 // this file. It moved out because the cards have to honour it too and cannot see
 // an App.ino global - see Maintenance.h for the full reasoning and for why there
@@ -1844,6 +1845,7 @@ void performCheckIn() {
   // Then the rotation itself. A response with no cardPolicy leaves whatever
   // is already in force alone - see CardManager::applyPolicy().
   CardManager::applyPolicy(result.cardPolicy);
+  Motion::applyPolicy(result.motionPolicy);
 
   // And the announcements those cards may carry. Unlike the policy, an empty
   // set here IS applied rather than ignored: the response is a complete
@@ -2082,6 +2084,9 @@ void setup() {
   }
 
   Display::begin();
+  // After Display::begin(), because Motion drives brightness THROUGH the display
+  // layer rather than owning GPIO21 itself - LovyanGFX already claims that pin.
+  Motion::begin();
 
   // Drawn on every boot, quiet ones included, and deliberately BEFORE
   // decideBootNarration() exists to suppress anything. See the "What a boot is
@@ -2396,6 +2401,13 @@ void loop() {
   // largest thing in this loop that none of the four named phases cover, and if
   // the carving turns out to be theirs it has to show up somewhere legible.
   HeapRatchet::observe();
+
+  // Every iteration, and cheap by construction: one digitalRead, some integer
+  // comparisons, and at most one brightness write. There is no delay() and no
+  // busy-wait anywhere in it (BL 03), because this loop's own instrumentation
+  // already reports iterations long enough to drop a tap and a fade must never
+  // become one of them.
+  Motion::service();
 
   ensureWifiConnected();
 
