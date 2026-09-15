@@ -24,12 +24,21 @@ Python, Arduino, or anything installed. Send them this and nothing else:
 >    (Safari and Firefox cannot talk to USB devices — it has to be one of those two.)
 > 3. Click **Connect and Flash**. Pick the device from the list that appears.
 > 4. Wait. It takes a few minutes and shows a progress bar. **Do not unplug it.**
-> 5. When it says Finished, the screen will come up asking to be set up. Follow
->    the on-screen setup to join it to your WiFi.
-> 6. It will then say something about an administrator needing to re-issue a key.
+> 5. When it says the firmware is written, **unplug the USB cable and plug it back
+>    in** (or press the reset button). The device does NOT restart by itself after
+>    flashing - nothing happens until you do this.
+> 6. It will then come up asking to be set up. Follow the on-screen setup to join
+>    it to your WiFi.
+> 7. It will then say something about an administrator needing to re-issue a key.
 >    **That is expected — you are done. Tell me and I will finish it from here.**
 
-Two things worth telling them in advance, because both look like failure:
+Three things worth telling them in advance, because all three look like failure:
+
+- **When the flash finishes, nothing visible happens.** The device stays halted
+  until it is power-cycled - screen dark, or frozen on whatever was there before.
+  This is the one that gets reported as "the flash didn't work", and it is the
+  normal end state. Confirmed on the bench 2026-09-15: the page asks the adapter
+  for a hard reset and this hardware ignores it.
 
 - **If the device list is empty**, they need the USB driver. The page's own
   "If something isn't working" section links it (Silicon Labs CP210x). Install,
