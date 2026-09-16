@@ -10,6 +10,7 @@
 #include "Http.h"
 #include "Identity.h"
 #include "Log.h"
+#include "Motion.h"
 
 namespace CheckIn {
 namespace {
@@ -402,6 +403,44 @@ Result perform() {
   // No battery on this board - see CheckIn.h's own remarks.
   requestDoc["batteryPercent"] = 100;
   requestDoc["charging"] = true;
+
+  // CAPABILITY RIDES THE CHECK-IN REQUEST. It also rides telemetry, and only one of
+  // those two reaches the thing that uses it.
+  //
+  // MOTION_AWARE_DISPLAY_DESIGN.md section 2 says capability travels on check-in and
+  // not on telemetry, and it is right for a concrete reason: the policy gate resolves
+  // at check-in time. Server-side, RecordMotionCapabilityAsync - the only writer of
+  // Device.MotionCapability, which is the field ResolveMotionPolicyAsync gates on - is
+  // called from CheckInGatewayService and from nowhere else. The telemetry path copies
+  // the same value onto the telemetry report row, which is a diagnostic snapshot and
+  // feeds no decision.
+  //
+  // Until 2026-09-16 this firmware sent it on telemetry ONLY. The effect was that a
+  // device could never retire the operator's declaration: Device.MotionCapability
+  // stayed null forever, the declared value did all the work permanently, and device
+  // 17 reported "motion detected 4 seconds ago" on telemetry while the server's own
+  // record of whether it had a sensor was still empty. The device was telling the
+  // truth into a field nothing read.
+  //
+  // The caller gate in ci/build-firmware.sh did not catch it, and could not:
+  // capabilityToReport() HAD a caller, just the wrong one. That gate counts call sites
+  // and says so in its own comment - it knows wired from unwired, not right place from
+  // wrong place.
+  //
+  // Sent on both paths deliberately rather than moved. Telemetry's copy is a
+  // diagnostic worth keeping - it is how the contradiction above became visible at all
+  // - and the two cannot disagree, because both call the same function in the same
+  // loop iteration.
+  //
+  // EMPTY STRING MEANS SAY NOTHING, and the field is omitted rather than sent blank:
+  // an idle sensor and an absent one are electrically identical at this pin, so this
+  // device can honestly claim Present once it has seen motion and can never claim
+  // Absent. Omission leaves the server's record and the operator's declaration exactly
+  // as they are, which is what silence has to mean (CAP 05).
+  const String motionCapability = Motion::capabilityToReport();
+  if (motionCapability.length() > 0) {
+    requestDoc["motionCapability"] = motionCapability;
+  }
   addPendingActions(requestDoc);
 
   // Reports how the *previous* policy this device received actually turned

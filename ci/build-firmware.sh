@@ -124,6 +124,32 @@ if [ "$MOTION_UNWIRED" -ne 0 ]; then
   exit 1
 fi
 
+# CAPABILITY MUST BE ON THE CHECK-IN REQUEST, NOT ONLY ON TELEMETRY.
+#
+# The caller count above proves a function is wired to something. It cannot prove it
+# is wired to the RIGHT something, and on 2026-09-16 that gap cost a real defect:
+# Motion::capabilityToReport() was called from Telemetry.cpp only, so the value
+# landed on a diagnostic row while the server's policy gate - which reads
+# Device.MotionCapability, written exclusively by CheckInGatewayService - stayed
+# empty forever. A device could never retire an operator's declaration. It reported
+# "motion 4 seconds ago" on telemetry while the server still did not know it had a
+# sensor.
+#
+# So this is the design rule as a check rather than as a paragraph:
+# MOTION_AWARE_DISPLAY_DESIGN.md section 2, "capability rides the check-in request,
+# not telemetry". Telemetry may ALSO carry it - it is a useful diagnostic and it is
+# how the contradiction became visible - but check-in must.
+echo "==> Checking motion capability is sent on the check-in request"
+if ! grep -q 'requestDoc\["motionCapability"\]' App/CheckIn.cpp 2>/dev/null; then
+  echo "ERROR: App/CheckIn.cpp does not send motionCapability." >&2
+  echo "       The server gates motion policy on Device.MotionCapability, which is only" >&2
+  echo "       ever written from the check-in path (CheckInGatewayService). Reporting" >&2
+  echo "       capability on telemetry alone writes it to a diagnostic row that feeds no" >&2
+  echo "       decision, and a device can then never retire an operator's declaration." >&2
+  echo "       See MOTION_AWARE_DISPLAY_DESIGN.md section 2." >&2
+  exit 1
+fi
+
 echo "==> Compiling CAL"
 arduino-cli compile --fqbn "$FQBN" --export-binaries .
 
