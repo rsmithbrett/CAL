@@ -263,6 +263,13 @@ struct CardSpec {
   uint16_t dwellSeconds = 0;
   /// 0 means "no override"; list cards only.
   uint16_t notableDwellSeconds = 0;
+  /// The most items of this card the rotation will show before moving on.
+  /// List cards only, and 0 means the server said nothing - which resolves to
+  /// kDefaultMaxItems, NOT to unlimited. Unbounded is the defect this exists
+  /// to stop: device 17's listings card paged 1/5 through 5/5 at twelve
+  /// seconds each and took a full minute of a rotation holding twelve other
+  /// cards, because the count was whatever the provider happened to return.
+  uint16_t maxItems = 0;
   /// Show after every N other cards. 0 means never interleaves;
   /// interstitials only.
   uint16_t interleaveEvery = 0;
@@ -444,6 +451,21 @@ int8_t indexOf(const char* id);
 // per registered card, so the registry's own cap is the right bound here too.
 static constexpr uint8_t kMaxPolicyCards = kMaxCards;
 
+/// How many items a list card cycles when its policy says nothing.
+///
+/// THREE, and absence means this rather than "unlimited" - the asymmetry is
+/// deliberate and is documented on the server's CardPolicyEntry.MaxItems. Every
+/// other optional field on a policy entry means "no opinion" when omitted; this
+/// one cannot, because unbounded IS the bug. A policy written before the field
+/// existed has to land on the safe side of it.
+///
+/// The server clamps an explicit value to 1..50 before it reaches the wire, and
+/// sends it as-is even when it equals this default - stripping it would cost more
+/// bytes than it saved, because the response serializer writes nulls. So a device
+/// applies this number only when the policy genuinely never set one, and this
+/// constant and CardPolicyLimits.DefaultMaxItems must not drift apart.
+static constexpr uint16_t kDefaultMaxItems = 3;
+
 struct PolicyEntry {
   String id;
   /// "list" or "interstitial". Anything else leaves the card's built-in kind
@@ -455,6 +477,10 @@ struct PolicyEntry {
   int interleaveEvery = 0;
   /// List cards only; 0 when the server omitted it.
   int notableDwellSeconds = 0;
+  /// List cards only. 0 means the server said nothing, which resolves to
+  /// Cards::kDefaultMaxItems (3) rather than to "unlimited" - the one field on
+  /// this wire shape whose absence is a value. See CardManager::applyPolicy().
+  int maxItems = 0;
   /// Optional on the wire, and empty for the cards that draw no picture. One
   /// longer than kMaxAssetIdLength is dropped rather than truncated when it
   /// reaches the descriptor - a truncated id is a perfectly well-formed id

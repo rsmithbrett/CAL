@@ -16,6 +16,40 @@ constexpr uint8_t kPin = 35;
 /// because somebody walked past would otherwise wake on its own noise.
 constexpr uint32_t kStabilizeMs = 30000;
 
+/// Millivolts at or above which GPIO35 counts as HIGH.
+///
+/// 1500, sitting in the empty middle of a gap the fleet measured for us rather
+/// than in the middle of the supply rail. Device 17's AM312 reads 3155 mV when
+/// triggered; four devices with nothing attached to that pin read 142, 147, 152
+/// and 205 mV, and 17 itself reads 142 when idle. So the real signal is a factor
+/// of fifteen away from the noise floor and any threshold from roughly 400 to
+/// 3000 would separate them - 1500 is chosen for being far from BOTH ends, so
+/// neither a weak sensor nor a noisier pin can reach across it.
+///
+/// This is a threshold and not a comparison to 3.3V because the reading is taken
+/// at 11dB attenuation, where the ESP32's ADC saturates well below the rail and
+/// cannot resolve below about 140 mV. 3155 is what "3.3V" actually looks like
+/// through this path, and 142 is what 0V looks like - which is also why an absent
+/// sensor and an idle one are indistinguishable here. See Motion.h.
+constexpr uint32_t kHighThresholdMillivolts = 1500;
+
+/// Minimum gap between ADC reads of the sensor pin.
+///
+/// service() is called every loop iteration, and an analogReadMilliVolts() on
+/// every one of those would be pure waste: the debounce below already requires
+/// two HIGH readings kDebounceMs (150ms) apart, so sampling faster than that
+/// cannot make a detection happen any sooner. 50ms gives three samples inside
+/// every debounce window - enough that the pair is always found promptly - at a
+/// fraction of the reads.
+///
+/// The reason to care is loop latency rather than CPU. This project has a filed,
+/// reproduced defect about card advance/rewind taps being dropped when an
+/// iteration runs long, and the fade in this very module was written
+/// non-blocking for the same reason. Adding an unbounded per-iteration hardware
+/// read to the hot loop to service a sensor that changes on human timescales
+/// would be trading a real thing for nothing.
+constexpr uint32_t kSampleIntervalMs = 50;
+
 /// Two HIGH samples this far apart to confirm an event (MOT 02). Rejects
 /// electrical noise without needing a timer or an interrupt - the loop already
 /// turns far faster than this.
@@ -52,6 +86,11 @@ uint32_t gBootMs = 0;
 
 /// Debounce state: when the first HIGH of a candidate pair was seen, 0 for none.
 uint32_t gFirstHighMs = 0;
+/// When the ADC was last read, so kSampleIntervalMs can be honoured. 0 = never.
+uint32_t gLastSampleMs = 0;
+/// The last reading taken, reused on the iterations that skip the ADC so the
+/// stuck-high and debounce logic see a continuous signal rather than gaps.
+uint32_t gLastMillivolts = 0;
 /// When the pin was first seen continuously HIGH, for the stuck check. Cleared on
 /// any LOW reading.
 uint32_t gHighSinceMs = 0;
@@ -118,7 +157,38 @@ bool sampleSensor() {
     return false;
   }
 
-  const bool high = digitalRead(kPin) == HIGH;
+  // READ THROUGH THE ADC, NOT digitalRead(), AND THIS IS NOT A STYLE CHOICE.
+  //
+  // The first version of this file used digitalRead(35) and never once saw the
+  // PIR on device 17 - which has a working AM312, proven by PowerProbe's own
+  // telemetry reporting 3155 mV on motion against a 142 mV idle floor, at the
+  // same times this module was reporting nothing at all.
+  //
+  // The cause is that GPIO35 has two claimants. PowerProbe::begin() calls
+  // analogReadMilliVolts(35) - and does it again on every telemetry report -
+  // which routes that pad to ADC1_CH7 and takes the digital input path away with
+  // it. PowerProbe::begin() runs at App.ino:2193, a hundred lines AFTER
+  // Motion::begin()'s pinMode at 2089, so the ADC claim always lands last and
+  // digitalRead() is reading a pad that is no longer wired to it.
+  //
+  // Two modules sharing one pin, where one silently disables the other, is the
+  // kind of bug that cannot be found by reading either module. It cost a night of
+  // black screen on a bench device and would have been invisible in a household -
+  // the panel would simply never have woken.
+  //
+  // So this now reads the pin the ONE way that is demonstrated to work on this
+  // hardware, which also ends the conflict rather than papering over it: there is
+  // a single access mode for GPIO35 in this firmware, and it is the ADC. A
+  // consequence worth having is that Motion and PowerProbe can no longer disagree
+  // about the same pin, because they are now reading the same number.
+  // Throttled to kSampleIntervalMs - see that constant. Between reads the last
+  // value is reused rather than treating the gap as LOW, which would shred the
+  // debounce pair and the stuck-high timer both.
+  if (gLastSampleMs == 0 || now - gLastSampleMs >= kSampleIntervalMs) {
+    gLastMillivolts = analogReadMilliVolts(kPin);
+    gLastSampleMs = now;
+  }
+  const bool high = gLastMillivolts >= kHighThresholdMillivolts;
 
   if (!high) {
     gFirstHighMs = 0;
@@ -188,10 +258,23 @@ void begin() {
   gBootMs = millis();
   gLastActivityMs = gBootMs;
 
-  // No pull configured, and none is available: GPIO35 is in the input-only
-  // 34-39 range, which has no internal pull resistors on this part. That is
-  // precisely why absent and idle read the same - see Motion.h.
-  pinMode(kPin, INPUT);
+  // NO pinMode, and its absence is the fix rather than an omission.
+  //
+  // This used to call pinMode(kPin, INPUT) to set up a digital read. That read
+  // never worked, because PowerProbe::begin() runs later in setup() and claims
+  // the same pad for ADC1_CH7 - see sampleSensor() for the full account. Setting
+  // a digital mode here would now be worse than useless: it would be a line of
+  // code asserting an access mode this module no longer uses, for a pin another
+  // module reconfigures a hundred lines later anyway.
+  //
+  // analogReadMilliVolts() needs no per-pin setup. Attenuation is the one thing
+  // that does need setting and PowerProbe::begin() already does it globally
+  // (analogSetAttenuation(ADC_11db)), which is also why the figures in
+  // kHighThresholdMillivolts are the figures this module will actually see.
+  //
+  // There is still no pull resistor and there cannot be: GPIO35 is in the
+  // input-only 34-39 range, which has none on this part. That is precisely why
+  // absent and idle read the same - see Motion.h.
   gBegun = true;
 
   Log::printf("[motion] watching GPIO35, stabilising for %lu ms before any reading counts. "
@@ -258,8 +341,36 @@ void service() {
 
   if (idleMs < activeMs) {
     enterState(BacklightState::Active, gPolicy.activePercent, "activity");
-  } else if (idleMs < activeMs + dimMs) {
-    enterState(BacklightState::Dim, gPolicy.dimPercent, "active timeout expired");
+  } else if (idleMs < activeMs + dimMs || !gEverDetected) {
+    // THE FLOOR IS DIM, NOT OFF, UNTIL THIS DEVICE HAS SEEN REAL MOTION ONCE.
+    //
+    // Blacking out a panel is only defensible on evidence that something will
+    // turn it back on. Before the first confirmed event this module has no such
+    // evidence: an operator declared a sensor, and a declaration is a belief
+    // about hardware, not an observation of it. The whole design already refuses
+    // to let the SERVER assert hardware it cannot see (Motion.h, and
+    // MOTION_AWARE_DISPLAY_DESIGN.md's governing rule) - this applies the same
+    // rule to the actuator instead of the reporter, which the first version of
+    // this file did not do.
+    //
+    // Learned the expensive way on 2026-09-16. Device 17 ran with a declared
+    // sensor that had never fired, went to 0% on the dim timeout, and sat black
+    // for eight hours; touch could not wake it because that wiring was missing
+    // too. Either bug alone would have been recoverable. Together they produced a
+    // panel with no way back except a power cycle, which is exactly what a
+    // remotely-deployed device does not have available.
+    //
+    // Dim is the honest middle: it still saves most of the backlight, it is
+    // visibly alive rather than apparently dead, and it cannot strand anybody. A
+    // device that confirms motion once this boot gets the full behaviour from
+    // that moment on, and the transition is logged so the unlock is visible on
+    // the stream rather than inferred.
+    const char* why = idleMs < activeMs + dimMs
+                          ? "active timeout expired"
+                          : "dim timeout expired, but no motion has ever been confirmed on this "
+                            "device - holding dim rather than going dark, because nothing has "
+                            "yet proved anything can wake it";
+    enterState(BacklightState::Dim, gPolicy.dimPercent, why);
   } else {
     // Zero is the BACKLIGHT only. Check-in, content fetch, WiFi and card rotation
     // all continue - BL 05, and the reason this is not a sleep mode.

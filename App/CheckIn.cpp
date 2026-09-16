@@ -199,6 +199,12 @@ void parseCardPolicy(JsonVariantConst source, Cards::Policy& policy) {
     entry.dwellSeconds = card["dwellSeconds"] | 0;
     entry.interleaveEvery = card["interleaveEvery"] | 0;
     entry.notableDwellSeconds = card["notableDwellSeconds"] | 0;
+    // Absent is the ordinary case and is NOT "no cap" - applyPolicy() resolves a
+    // zero to Cards::kDefaultMaxItems. Absent means the operator never set one,
+    // not that the server economised: an explicit 3 arrives as 3, because
+    // stripping it would have cost more bytes than it saved (the response
+    // serializer writes nulls) without changing what this device does.
+    entry.maxItems = card["maxItems"] | 0;
     // Optional, and absent from every card that draws no picture. Empty is
     // the ordinary case, not a fault: the card it names simply reports
     // itself as having nothing to show and the scheduler passes over it.

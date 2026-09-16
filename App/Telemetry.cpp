@@ -394,6 +394,21 @@ void report(const char* lastCheckInOutcome) {
     return;
   }
 
+  // Cleared only AFTER the server accepted the report, never before building it.
+  // Motion::eventsSinceReport() is a count SINCE the last accepted report, so a
+  // failed POST must leave it intact and let the next attempt carry the same
+  // sessions - clearing on send would silently drop every event whenever the
+  // network hiccuped.
+  //
+  // This call was missing entirely until 2026-09-16, which meant the count only
+  // ever grew: a device reporting "14 sessions" had seen fourteen since BOOT, not
+  // since its last report, and the field's own contract said otherwise. Found by
+  // the caller check in ci/build-firmware.sh on that gate's first run, which was
+  // written after the touch-wake function shipped with no caller at all - so the
+  // gate earned its place immediately by finding a second instance of exactly the
+  // bug it was built for.
+  Motion::clearReportedCounters();
+
   // freeHeap and free8Bit are both printed, in that order, for the same reason
   // both are sent: a log line that quoted only one of them would be the thing
   // that hid this for months all over again. Whoever reads this line should see

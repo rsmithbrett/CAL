@@ -5,6 +5,7 @@
 #include "Display.h"
 #include "HeapRatchet.h"
 #include "Log.h"
+#include "Motion.h"
 #include "Touch.h"
 
 // ---------------------------------------------------------------------------
@@ -350,8 +351,38 @@ bool isEffectiveNow(const Cards::CardSpec& card) {
   return true;
 }
 
+/// How many items of this card the rotation will actually walk: what the card
+/// reports, held down to its policy cap.
+///
+/// The cap applies to list cards only - an interstitial takes one turn whatever
+/// it reports - and a zero cap means no policy has named this card yet, which
+/// resolves to kDefaultMaxItems rather than to unlimited. That matters at boot:
+/// a device that has never completed a check-in runs its built-in registration
+/// defaults, and leaving it uncapped there would reproduce the exact defect on
+/// the one screen nobody is watching.
+///
+/// Every rotation decision goes through this rather than calling itemCount()
+/// directly, which is the point of it existing: a cap honoured in three places
+/// out of four is a card that advances past items it never showed.
+uint16_t effectiveItemCount(const Cards::CardSpec& card) {
+  if (card.itemCount == nullptr) {
+    return 0;
+  }
+  const uint16_t reported = card.itemCount();
+  if (card.kind != Cards::Kind::List) {
+    return reported;
+  }
+  const uint16_t cap = card.maxItems > 0 ? card.maxItems : Cards::kDefaultMaxItems;
+  return reported < cap ? reported : cap;
+}
+
 bool showable(uint8_t index) {
   const Cards::CardSpec& card = gCards[index];
+  // itemCount() raw, not effectiveItemCount(), and deliberately: this asks
+  // whether the card has anything at all, which is a different question from how
+  // many turns it is allowed. The two agree here anyway - a cap is never below 1,
+  // so capping cannot turn a card that has something into a card that has
+  // nothing - but routing this through the cap would read as though it could.
   return card.active && card.itemCount != nullptr && card.draw != nullptr &&
          isEffectiveNow(card) && card.itemCount() > 0;
 }
@@ -452,7 +483,7 @@ Position computeNext() {
   const int8_t current = gListCursor.card;
   if (current >= 0 && showable(static_cast<uint8_t>(current)) &&
       gCards[current].kind == Cards::Kind::List) {
-    const uint16_t total = gCards[current].itemCount();
+    const uint16_t total = effectiveItemCount(gCards[current]);
     if (static_cast<uint32_t>(gListCursor.item) + 1 < total) {
       gListCursor.item++;
       return gListCursor;
@@ -635,7 +666,7 @@ void drawCurrent() {
   }
 
   Cards::CardSpec& card = gCards[gCurrent.card];
-  const uint16_t total = card.itemCount();
+  const uint16_t total = effectiveItemCount(card);
   if (gCurrent.item >= total) {
     gCurrent.item = 0;
   }
@@ -914,9 +945,30 @@ void refreshOneDueCard() {
 
 void pollTouch() {
   Touch::Tap tap;
-  if (Touch::poll(tap)) {
-    handleTap(tap);
+  if (!Touch::poll(tap)) {
+    return;
   }
+
+  // EVERY tap goes to Motion first, and the answer decides whether the card
+  // underneath ever hears about it.
+  //
+  // This call was missing for the whole of v2026.09.15.0004, and the cost was not
+  // subtle: device 17 dimmed to nothing after its two timeouts and then could not
+  // be woken by touching it, because nothing was telling the motion module a
+  // finger had arrived. It sat black for eight hours on a bench and only came back
+  // when somebody power-cycled it. A display feature whose only recovery is a
+  // power cycle is worse than not having the feature.
+  //
+  // The swallow is the other half and is equally load-bearing (BL 07): the first
+  // tap on a dark panel wakes it and is NOT delivered. A household cannot aim at a
+  // control they cannot see, so passing that tap through would fire whichever
+  // button the rotation happened to be showing - a phone call, an email - chosen at
+  // random by timing.
+  if (Motion::noteTouchAndShouldSwallow()) {
+    return;
+  }
+
+  handleTap(tap);
 }
 
 void begin() {
@@ -1037,6 +1089,24 @@ void applyPolicy(const Cards::Policy& policy) {
         static_cast<uint16_t>(entry.interleaveEvery > 0 ? entry.interleaveEvery : 0);
     card.notableDwellSeconds =
         static_cast<uint16_t>(entry.notableDwellSeconds > 0 ? entry.notableDwellSeconds : 0);
+    // Resolved to a real number HERE rather than left at zero and defaulted at
+    // the point of use, so every reader of the descriptor sees the same cap and
+    // no future caller can forget the "0 means three" rule. Clamped as well as
+    // defaulted: the server clamps on the way out, but a device must not depend
+    // on the other end having done so - a 5000 arriving from an older or
+    // mis-patched server would otherwise hand one card eleven hours of the glass.
+    if (card.kind != Cards::Kind::List) {
+      card.maxItems = 0;
+    } else if (entry.maxItems <= 0) {
+      card.maxItems = Cards::kDefaultMaxItems;
+    } else if (entry.maxItems > 50) {
+      Log::printf("[cards] policy caps '%s' at %d items, which is beyond the 1-50 the "
+                  "contract allows - holding it at 50",
+                  entry.id.c_str(), entry.maxItems);
+      card.maxItems = 50;
+    } else {
+      card.maxItems = static_cast<uint16_t>(entry.maxItems);
+    }
 
     // The picture this card draws, for the cards that draw one. Rewritten on
     // every policy - including back to empty, which is how the server takes a

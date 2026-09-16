@@ -74,6 +74,56 @@ if ! diff -q partitions.csv App/partitions.csv >/dev/null; then
   exit 1
 fi
 
+# EVERY PUBLIC MOTION ENTRY POINT MUST HAVE A CALLER.
+#
+# Motion::noteTouchAndShouldSwallow() shipped in v2026.09.15.0004 declared,
+# defined, documented, and called from nowhere at all. begin(), applyPolicy() and
+# service() were wired into App.ino; the touch wake was not. The consequence was
+# not a missing feature but an unrecoverable one: device 17 faded to 0% on its dim
+# timeout and could not be woken by touching the glass, because nothing told the
+# motion module a finger had arrived. Eight hours of black screen, ending in a
+# power cycle - which is precisely what a deployed panel in somebody's lobby does
+# not have available.
+#
+# A compiler cannot catch this. An uncalled non-static function in a module that
+# is linked anyway is perfectly legal C++ and warns about nothing. The firmware
+# has no unit-test harness to catch it either. So it is checked the only way it
+# can be: the header declares the contract, and something outside the module has
+# to use it.
+#
+# Deliberately a call-site count and nothing cleverer. It does not know whether
+# the call is in the right place, or reached on the right branch - it knows the
+# difference between "wired" and "not wired at all", which is the failure that
+# actually happened and the one worth a gate.
+echo "==> Checking every public Motion entry point is called from somewhere"
+MOTION_UNWIRED=0
+while read -r FN; do
+  [ -z "$FN" ] && continue
+  # Call sites anywhere in App/ other than Motion's own two files. grep -w so
+  # state() does not match operatingState(), and the Motion.* exclusion so a
+  # function calling itself, or its own declaration, never counts as a caller.
+  CALLERS=$(grep -rl --include='*.cpp' --include='*.ino' -w "$FN" App/ 2>/dev/null \
+            | grep -v 'App/Motion\.' | wc -l)
+  if [ "$CALLERS" -eq 0 ]; then
+    echo "ERROR: Motion::$FN() is declared in App/Motion.h but called from nowhere." >&2
+    MOTION_UNWIRED=1
+  fi
+done <<'FNLIST'
+begin
+applyPolicy
+service
+noteTouchAndShouldSwallow
+capabilityToReport
+clearReportedCounters
+FNLIST
+
+if [ "$MOTION_UNWIRED" -ne 0 ]; then
+  echo "       A motion entry point with no caller is a feature that silently does not run," >&2
+  echo "       and in the touch-wake case it is a panel a household cannot recover. Wire it" >&2
+  echo "       (see MOTION_AWARE_DISPLAY_DESIGN.md section 9) or remove it from the header." >&2
+  exit 1
+fi
+
 echo "==> Compiling CAL"
 arduino-cli compile --fqbn "$FQBN" --export-binaries .
 
