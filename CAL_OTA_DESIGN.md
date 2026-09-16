@@ -322,16 +322,19 @@ conventional dual-slot OTA work, and in this repository `CAL.ino.bin` and
 correctly at `0x10000` and `0x1B0000` respectively. **It has still never been
 observed for CAL specifically, and it is cheap to observe.**
 
+Write a CAL image into `ota_0` — note the offset is `0x1B0000` on the current
+table and `0x170000` on the old one, so read it off §3.1's decode for the unit in
+hand rather than typing it from memory:
+
 ```
 esptool --chip esp32 --port COM5 write_flash 0x1B0000 CAL.ino.bin
-esptool --chip esp32 --port COM5 read_flash 0xE000 0x2000 /dev/null   # sanity: port alive
 ```
 
-Then point the boot pointer at `ota_0`. The clean way is from a serial console on
-the unit if one exists; failing that, write an `otadata` entry naming sequence 1.
-The pragmatic bench alternative, which needs no crafted `otadata` at all, is to
-combine it with Test A: leave `factory` corrupt from §2.1 step 3 and let the
-fallthrough deliver control to `ota_0` — which now holds **CAL**, not the App.
+Then point the boot pointer at `ota_0`. Crafting an `otadata` entry by hand means
+getting its CRC right, so the pragmatic bench route is to **combine this with
+Test A**: leave `factory` corrupt from §2.1 step 3, and let the fallthrough
+deliver control to `ota_0` — which now holds **CAL**, not the App. One power
+cycle answers both questions at once.
 
 **What to look for:** CAL's own splash and its journal lines, from a unit whose
 `factory` is broken. If CAL renders and reaches its ladder, the image is
@@ -380,36 +383,88 @@ esptool --chip esp32 --port COM5 write_flash 0x0 bench-backup-full.bin
 
 ---
 
-## 3. Sizes: NOT re-measured by this pass
+## 3. Sizes: NOT re-compiled by this pass
 
 `partitions.csv` says *"Re-measure both figures before trusting this table
-again"*, and this pass did not. The compile was started, then stopped on
-instruction: this machine has 2 cores and ~3.9GB of RAM, a second agent needs the
-toolchain to verify its own change, and this project has a recorded history of
-agents dying at exit 127 when free memory drops near 130MB. Both builds are
-deferred rather than skipped.
+again"*, and this pass did not re-compile. The build was started and then stopped
+on instruction: this machine has 2 cores and ~3.9GB of RAM, a second agent needs
+the toolchain to verify its own change, and this project has a recorded history
+of agents dying at exit 127 — a memory abort that reads as a code failure — when
+free memory approaches 130MB. Both compiles are deferred rather than abandoned.
 
-So the arithmetic in §5 runs on figures that are **all** second-hand, and the
-spread between them is itself worth recording:
+### 3.1 What could be measured without a compiler, and was
+
+**The table this branch's `partitions.csv` actually produces.** The core ships
+`tools/gen_esp32part.exe`, so the CSV can be turned into its binary table and the
+binary decoded — the same byte-for-byte check `ci/build-firmware.sh` describes as
+a one-time manual diagnosis, done here from the CSV rather than from a compiled
+image. Generated from this branch's root `partitions.csv` and decoded entry by
+entry (magic `0xAA50`, 32-byte records):
+
+```
+NAME       TYPE  SUBTYPE  OFFSET     SIZE         END
+nvs        data  0x02     0x009000        20480   0x00e000
+otadata    data  0x00     0x00e000         8192   0x010000
+factory    app   0x00     0x010000      1703936   0x1b0000
+ota_0      app   0x10     0x1b0000      2097152   0x3b0000
+callog     data  0x99     0x3b0000        65536   0x3c0000
+spiffs     data  0x82     0x3c0000       196608   0x3f0000
+coredump   data  0x03     0x3f0000        65536   0x400000
+md5 checksum entry present
+highest end: 0x400000 = 4194304 bytes
+```
+
+**Measured, this pass.** The table in §4 is what the CSV really encodes, it fills
+4MB exactly, and the MD5 entry `partitions.csv` warns about is present. Two
+details confirm §1's reading: `factory` carries subtype `0x00`, which is the
+value `esp_ota_set_boot_partition` branches on to erase `otadata` (§1.5(a)), and
+`ota_0` carries `0x10`, which is the single entry `bs->ota[]` that makes
+`app_count == 1` (§1.2).
+
+**Artifacts already on disk, with honest provenance.** The main working tree
+holds exported binaries from earlier builds. These were **not produced by this
+pass** and their tree state at build time cannot be proven, so they are evidence,
+not measurements:
+
+| Artifact | `stat` size | mtime | What can be established |
+|---|---:|---|---|
+| `CAL/build/.../CAL.ino.bin` | 1,337,360 | 09-15 00:26 | matches the figure `partitions.csv` and `README.md` both record for the with-journal build; no commit since has touched a CAL root source (`51f3883` at 00:32 was the last, and `370a207`/`785d442`/`6166fb7`/`fa8d06a` touched only `partitions.csv`, the runbook, `App/` and `ci/`) |
+| `CAL/App/build/.../App.ino.bin` | 1,489,744 | 09-16 07:03 | six minutes before `fa8d06a` was committed at 07:09 |
+
+The CAL artifact's own `CAL.ino.partitions.bin` decodes to `factory` 1,441,792 at
+`0x170000` and `ota_0` 2,359,296 — the **pre-rebalance** table — which
+independently dates that build to before `370a207` and corroborates the
+timeline above. It does not affect the image size: an app image does not depend
+on the table it is flashed beside. It also confirms `build-firmware.sh`'s claim
+that a sketch-root `partitions.csv` overrides the FQBN's `min_spiffs` scheme —
+the baked table is this project's asymmetric one, not the stock scheme named on
+the command line.
+
+### 3.2 Every figure in circulation
 
 | Figure | Value | Provenance | Status |
 |---|---:|---|---|
-| `CAL.ino.bin` | 1,337,360 | `partitions.csv`, measured 2026-09-15 | not re-measured |
-| `App.ino.bin` | 1,489,587 | reported at `fa8d06a` | not re-measured |
+| `CAL.ino.bin` | 1,337,360 | on-disk artifact; `partitions.csv`; `README.md` | three sources agree, **not re-compiled** |
+| `App.ino.bin` | 1,489,744 | on-disk artifact, `stat`-ed this pass | **not re-compiled** |
+| `App.ino.bin` | 1,489,587 | reported at `fa8d06a` | 157 bytes off the artifact |
 | `App.ino.bin` | 1,484,976 | `partitions.csv` | superseded |
 | `App.ino.bin` | 1,474,960 | `README.md` | superseded |
-| CAL (stale) | 1,318,891 | the suggestion | **superseded — do not use** |
-| App (stale) | 1,445,152 | the suggestion | **superseded — do not use** |
+| CAL | 1,318,891 | the suggestion | **superseded — do not use** |
+| App | 1,445,152 | the suggestion | **superseded — do not use** |
 
-Three live figures for one binary, none verified today. The design below is
-written so that **no conclusion depends on which of them is right** — §5.2's
-rejection holds by more than 400KB, and §5.4 needs only that a CAL image fits in
-`ota_0`, which it does by three-quarters of a megabyte. When the compiler is free,
-the numbers to capture are `stat -c%s` on
-`build/esp32.esp32.esp32/CAL.ino.bin` and `App/build/esp32.esp32.esp32/App.ino.bin`,
-which is what `ci/build-firmware.sh`'s own `check_size` reads.
+Four live figures for one binary. §4's arithmetic uses **1,489,744**, because it
+is the only one this pass observed directly, and the design is written so that
+**no conclusion depends on which is right**: §5.2's rejection holds by more than
+400KB and §5.4 needs only that a CAL image fits in `ota_0`, which it does by
+three-quarters of a megabyte. The entire spread between the four App figures is
+14,784 bytes.
 
-### 3.1 What `build-firmware.sh` already gets right, and should keep
+When the compiler is free, the numbers to capture are `stat -c%s` on
+`build/esp32.esp32.esp32/CAL.ino.bin` and
+`App/build/esp32.esp32.esp32/App.ino.bin`, which is exactly what
+`ci/build-firmware.sh`'s own `check_size` reads.
+
+### 3.3 What `build-firmware.sh` already gets right, and should keep
 
 Two things in that script are load-bearing for this feature and must not be
 lost when it grows a CAL-image step.
@@ -455,15 +510,16 @@ partitions, forever, on this hardware: 3,801,088 bytes.**
 ### 4.1 Free space in `ota_0` today
 
 ```
-ota_0                      2,097,152
-App.ino.bin (§3, unverified) 1,489,587
-                           ---------
-slack                        607,565
+ota_0                          2,097,152
+App.ino.bin (§3.1, on disk)    1,489,744
+                               ---------
+slack                            607,408
 ```
 
 The suggestion said ~980KB, which was measured against an `ota_0` of 2,424,832 —
-a size that stopped being true when `callog` was carved out and again at the
-2026-09-15 rebalance. The real figure is **607,565 bytes**, about 40% less.
+a size that stopped being true when `callog` was carved out of it and again at
+the 2026-09-15 rebalance. The real figure is **607,408 bytes**, about 40% less.
+Picking any of §3.2's other App figures moves this by at most 14,784 bytes.
 
 ### 4.2 What a staging partition would have to be
 
@@ -474,7 +530,7 @@ partition it needs 4KB alignment, not the 64KB an app partition needs:
 ceil(1,337,360 / 4,096) = 327 sectors  =  1,339,392 bytes   (0x147000)
 ```
 
-`607,565 < 1,339,392`. **Short by 731,827 bytes** — the slack is not half of
+`607,408 < 1,339,392`. **Short by 731,984 bytes** — the slack is not half of
 what is needed.
 
 ### 4.3 And there is no rearrangement that fixes it
@@ -484,7 +540,7 @@ partition cut to exactly what it holds.
 
 ```
 factory  ceil(1,337,360 / 65,536) = 21 × 65,536 = 1,376,256
-ota_0    ceil(1,489,587 / 65,536) = 23 × 65,536 = 1,507,328
+ota_0    ceil(1,489,744 / 65,536) = 23 × 65,536 = 1,507,328
 stage                                             1,339,392
                                                  ----------
                                                   4,222,976
@@ -552,7 +608,7 @@ as its bench harness.)*
 
 ### 5.2 Rejected — carve a staging partition out of `ota_0`
 
-Arithmetically impossible: §4.2 and §4.3. Short by 731,827 bytes against today's
+Arithmetically impossible: §4.2 and §4.3. Short by 731,984 bytes against today's
 slack; short by 421,888 against the entire flash with zero headroom; short by
 94,208 even after deleting `callog`, `spiffs` and `coredump`.
 
