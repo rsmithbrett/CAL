@@ -127,6 +127,47 @@ bool installApplication(const Service::Discovery& discovery, const Manifest& man
     Journal::line("[install] refused: no ota_0 partition in this device's table");
     return false;
   }
+
+  // REFUSE TO INSTALL INTO THE PARTITION WE ARE EXECUTING FROM.
+  //
+  // Normally CAL runs from `factory` and ota_0 is somewhere else, so this cannot
+  // happen. It happens when CAL is running from ota_0 itself - which is not
+  // hypothetical, it is the whole mechanism of CAL_OTA_DESIGN.md section 5.4,
+  // where a candidate CAL is downloaded into ota_0, booted there, and copies
+  // itself into factory.
+  //
+  // Observed on device 17 on 2026-09-16, with CAL deliberately written to ota_0:
+  //
+  //   [install] Update.begin(1492144) failed: Partition Could Not be Found (error 10)
+  //   [update] nothing bootable remains after the failed install
+  //   [halt] Update failed | Restart the device to try again.
+  //
+  // Arduino's Update asks esp_ota_get_next_update_partition() for a slot that is
+  // not the running one; on a table with a single ota_0 there is no answer, so it
+  // fails with a message about a partition not being found. Accurate from its own
+  // point of view and useless from here: the operator sees "Update failed" with
+  // no hint that the device is running from the wrong place, and CAL halts.
+  //
+  // Checked BEFORE the download rather than after, which is the point. Reaching
+  // Update.begin() means a 1.5MB TLS transfer has already been spent to learn
+  // something knowable at the start, and on a metered or slow connection that is
+  // not free.
+  //
+  // This refusal is not the feature - phase 2 of section 5.4 is, and it copies to
+  // factory instead of downloading. Until that exists, refusing clearly beats
+  // failing obscurely: the journal names the situation, and a device in this state
+  // is one power cycle from normality because factory still holds a working CAL.
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  if (running != nullptr && running->address == target->address) {
+    Journal::printf("[install] refused: CAL is itself running from ota_0 at 0x%06lx, so "
+                    "installing there would overwrite the code doing the installing. "
+                    "factory still holds a bootable CAL - power-cycle to return to it. "
+                    "See CAL_OTA_DESIGN.md 5.4: a CAL running from ota_0 must COPY "
+                    "itself into factory, not download into its own partition",
+                    static_cast<unsigned long>(running->address));
+    return false;
+  }
+
   if (manifest.sizeBytes > target->size) {
     // The server already refuses builds over the partition ceiling, so this is
     // a belt-and-braces check against a mismatched partition table.

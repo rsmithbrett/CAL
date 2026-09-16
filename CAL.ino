@@ -402,18 +402,24 @@ void setup() {
       manifest.ok && manifest.isConfigured &&
       (manifest.version != Identity::installedAppVersion() || !haveApp);
 
-  // All four inputs, so the journal distinguishes "the manifest could not be
-  // fetched" from "the server has no current build marked" from "the build the
-  // server names is already the one installed" from "the versions match but
-  // there is nothing on the flash to run". Those look identical from the
-  // outside and want four different investigations.
+  // Four inputs, so the journal distinguishes "the manifest could not be fetched"
+  // from "the server has no current build marked" from "the build the server
+  // names is already installed" from "the versions match but there is nothing on
+  // the flash to run". Those look identical from outside and want four different
+  // investigations.
+  //
+  // KEPT SHORT ON PURPOSE. Log::printf formats into a fixed 256-byte scratch and
+  // truncates past it. A first version of this line spelled out "(same version,
+  // but nothing bootable is installed)" and was cut mid-sentence on device 17 -
+  // the verdict survived and the explanation did not, which was luck rather than
+  // design. "noApp" carries the same fact in five characters.
   Journal::printf("[update] install? manifestOk=%d isConfigured=%d bootableApp=%d "
                   "offered='%s' installed='%s' -> %s%s",
                   manifest.ok ? 1 : 0, manifest.isConfigured ? 1 : 0, haveApp ? 1 : 0,
                   manifest.version.c_str(), Identity::installedAppVersion().c_str(),
                   needsInstall ? "YES" : "no",
                   (needsInstall && manifest.version == Identity::installedAppVersion())
-                      ? " (same version, but nothing bootable is installed)" : "");
+                      ? " (noApp)" : "");
 
   if (needsInstall) {
     if (!Updater::installApplication(discovery, manifest)) {

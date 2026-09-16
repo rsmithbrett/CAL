@@ -1076,3 +1076,63 @@ at 100%, and after. Phase 1 of the timeshare design is getting an image into
 `ota_0` and handing control to it, and that is now demonstrated end to end with
 margin. What remains untested is CAL executing *from* `ota_0` and writing
 `factory`.
+
+## 9. The bench tests were run. Both pass, and one answered itself.
+
+Device 17, 2026-09-16. §2's procedure was followed with corrected addresses read
+off the device. Everything below was observed, not inferred.
+
+### Test B passes, and the proof is better than the procedure asked for
+
+CAL was written to `ota_0` at `0x170000` and the device power-cycled. It ran: the
+panel came up, WiFi joined, SNTP settled, two TLS sessions opened, the manifest
+was fetched. All from a partition CAL was never linked for, with
+`largest8BitBlock` flat at 110,580 the whole way.
+
+**The identifying evidence is the failure, not the success:**
+
+    [install] Update.begin(1492144) failed: Partition Could Not be Found (error 10)
+
+That error can only occur from `ota_0`. Arduino's `Update` asks
+`esp_ota_get_next_update_partition()` for a slot that is not the running one;
+from `factory` the answer is `ota_0`, and from `ota_0` on a single-slot table
+there is no answer at all. So the error names the partition CAL was executing
+from. No separate confirmation was needed.
+
+**§1.5(b) predicted the refusal and got the mechanism slightly wrong.** It said
+`Update.begin()` would refuse because the target and the running partition are
+the same. It actually fails earlier, at the lookup, before any comparison. Same
+outcome; the interlock §5.4 needs is therefore *"do not call `Update.begin()`
+from `ota_0` - copy to `factory` instead"*, which is a different statement from
+*"handle Update.begin() refusing"*.
+
+### Test A passes, observed in both directions
+
+    factory invalid  -> "OTA app partition slot 0 is not bootable" tried first, then factory
+    ota_0   invalid  -> "image at 0x170000 has invalid magic byte", CAL ran from factory
+
+The bootloader walks the table rather than stopping at a bad entry, in both
+directions, on this silicon and this core version. §1's reading of the compiled
+bootloader is confirmed on hardware.
+
+### The interlock is now in, and it is a refusal rather than the feature
+
+`Updater::installApplication` compares `esp_ota_get_running_partition()` against
+its target and refuses when they match, naming the situation and pointing at
+`factory` as the way back. Checked BEFORE the download: reaching
+`Update.begin()` spends a 1.5MB TLS transfer to learn something knowable at the
+start.
+
+This is not phase 2. Phase 2 copies `ota_0` to `factory` and is still to be
+built. Until it exists, refusing clearly beats failing obscurely - a device in
+this state is one power cycle from normality, because `factory` still holds a
+working CAL.
+
+### What phase 1 looked like, four times over
+
+The ordinary update path ran clean on the same unit four times: App requests,
+reboots into CAL, CAL downloads 1,492,144 bytes over TLS, commits, hands over.
+`largest8BitBlock=110580` at 0%, at 50%, at 100%, and after. **Getting an image
+into `ota_0` and handing control to it - phase 1 of §5.4 - is demonstrated with
+margin.** What remains is the copy back into `factory`, which is the half no
+hardware has exercised.
