@@ -911,6 +911,32 @@ interfaces above.
 
 ---
 
+
+### Re-measured 2026-09-16, and the arithmetic holds
+
+Section 3's figures were labelled not-re-measured. They now are, compiled from
+this branch with the pinned toolchain:
+
+| Binary | Measured | Ceiling | Used | Headroom |
+|---|---|---|---|---|
+| `CAL.ino.bin` | **1,337,360** | 1,703,936 (`factory`) | 78.5% | 366,576 |
+| `App.ino.bin` | **1,492,224** | 2,097,152 (`ota_0`) | 71.2% | 604,928 |
+
+Both conclusions survive:
+
+- **CAL fits `ota_0` with 759,792 bytes spare**, which is the single arithmetic
+  requirement of the timeshare design in §5.4.
+- **A staging partition is short by 732,432 bytes** against `ota_0`'s real slack
+  of 604,928 — close to the 731,984 estimated before measuring, the difference
+  being the App growing by today's four builds.
+
+`ci/build-firmware.sh` now carries a third `check_size`: CAL against `ota_0`, not
+only against `factory`. That invariant had no guard, and it is the one the whole
+feature rests on. Note which way round the risk runs — `factory` (1,703,936) is
+the SMALLER partition, so a CAL that comfortably fits its own home would still
+break staging if the table were ever rebalanced the other way. The build now says
+so instead of a device finding out mid-update.
+
 ## 7. Open questions that need hardware
 
 Listed as open rather than resolved, because each one can only be answered by a

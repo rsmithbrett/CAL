@@ -194,6 +194,29 @@ check_size() {
 check_size "CAL (factory)" "${BUILD_DIR}/CAL.ino.bin" "$(partition_size factory)"
 check_size "App (ota_0)" "App/${BUILD_DIR}/App.ino.bin" "$(partition_size ota_0)"
 
+# CAL MUST ALSO FIT ota_0, WHICH IS NOT WHERE IT RUNS.
+#
+# This is the one arithmetic requirement of the CAL-over-the-air design
+# (CAL_OTA_DESIGN.md section 5.4). That design timeshares ota_0 rather than
+# carving a staging partition out of it: CAL is downloaded into ota_0, booted
+# there, and the candidate copies itself into factory. Nothing ever writes the
+# partition it is executing from, and otadata always names a partition that is
+# whole.
+#
+# Carving a staging partition was rejected on measurement, not preference. A CAL
+# image needs 1,337,360 bytes; ota_0's slack after the App is 604,928 - short by
+# 732,432. It is short by 421,888 against the ENTIRE 4MB with zero headroom
+# anywhere, and still short by 94,208 after deleting callog, spiffs and coredump.
+# There is no version of this table with room for a second app-sized partition.
+#
+# So the whole feature rests on CAL fitting a partition it was never sized for,
+# and that invariant has no other guard. factory is 1,703,936 and ota_0 is
+# 2,097,152, so today CAL fits both comfortably - but factory is the SMALLER of
+# the two, which means a CAL that fits its own home could still be the one that
+# breaks this if the table is ever rebalanced the other way. Checked here so the
+# build says so rather than a device discovering it during an update.
+check_size "CAL (must also fit ota_0, for OTA staging)" "${BUILD_DIR}/CAL.ino.bin" "$(partition_size ota_0)"
+
 echo "==> Computing checksums"
 (
   cd "$BUILD_DIR"
