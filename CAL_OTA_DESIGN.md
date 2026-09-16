@@ -994,3 +994,85 @@ board.
   differently from `main`; no firmware was built, flashed or run. §1 is
   disassembly, §4 is arithmetic, §3 is not measured, and §7 lists what remains
   unknown.
+
+## 8. Corrections from the bench, 2026-09-16
+
+Three things in this document were wrong, and one of them cost a destroyed App
+partition. Recorded here rather than silently edited, because the reason each was
+wrong is more useful than the corrected number.
+
+### The fleet is not on the table this document assumes
+
+Device 17's flash was read at `0x8000`. It reports:
+
+    nvs       0x009000     20,480
+    otadata   0x00E000      8,192
+    factory   0x010000  1,441,792
+    ota_0     0x170000  2,424,832
+    spiffs    0x3C0000    196,608
+    coredump  0x3F0000     65,536
+
+No `callog`. That is the OLD layout. `partitions.csv` describes the INTENDED one
+and the re-table was never applied - consistent with its own constraint, since a
+table change needs USB and the CAL reflash went out through the browser flasher.
+
+**Every figure in §3 describes a layout no device is running.** The conclusions
+survive, and in fact improve, because the old `ota_0` is *larger*:
+
+| | Old table (real) | New table (intended) |
+|---|---|---|
+| CAL into `ota_0` | fits, 1,087,433 spare | fits, 759,753 spare |
+| Staging partition shortfall | 404,752 | 732,432 |
+
+Timeshare works on both. A staging partition is impossible on both.
+
+**`factory` headroom was quoted as 366,576 and is really 104,393** - 92.8% used.
+That thin margin is the whole reason the re-table was planned, and it is the
+live constraint on every CAL change until the USB pass happens.
+`ci/build-firmware.sh` now checks the field ceiling explicitly and says to delete
+that check only once the fleet is re-tabled.
+
+### §2's Test B instructed the wrong address
+
+The procedure said `write_flash 0x1B0000`, taken from `partitions.csv`. On the
+device in hand that address is 0x40000 *inside* `ota_0`, so the write dropped
+1.3MB of CAL into the middle of the App. The next boot reported `invalid segment
+length 0x5d746f6f` - which is ASCII, `"oot]"`, App bytes read as an image header.
+
+The procedure's own text warned against exactly this: *"read it off §3.1's decode
+for the unit in hand rather than typing it from memory."* It was not followed.
+**§2 now begins by reading the table off the device**, and no address in it is
+quoted from this repository.
+
+### What the recovery attempt found instead
+
+The corrupted App turned out to be more informative than the test would have
+been. Three separate refusals to self-heal, none of them caused by the day's
+changes:
+
+1. **CAL would not reinstall, because the version matched.** `ota_0` erased,
+   `nvs` still recording the current version, and the install decision was
+   version inequality alone. CAL printed `bootableApp=0` and `install? -> no`
+   two lines apart and acted on the second. **Fixed** - the decision now consults
+   `haveBootableApplication()`, because `installedAppVersion()` is what nvs
+   RECORDS and the two part company precisely when recovery is needed.
+2. **A failed handover halts.** `Cannot start application`, and CAL stops.
+3. **A 30-second SNTP timeout halts.** `Cannot reach the internet`. Transient -
+   it succeeded two boots later on the same network - but a slow NTP response at
+   boot leaves the device on an error screen until a human intervenes.
+
+**This is the finding that matters for §5.4.** Its safety argument is that the
+survivor of a failed update can always retry. Defect 1 meant the survivor did not
+believe anything was wrong; defects 2 and 3 mean the survivor stops rather than
+retries. A remote CAL update cannot be built on a recovery path with three
+hand-rescue states in it, and settling Test B is worth less than closing those.
+
+### What did work, and it is the half §5.4 needs most
+
+The full update path ran clean on the same unit, twice: App requests, reboots
+into CAL, CAL downloads 1,492,144 bytes over TLS, commits, hands over. The
+contiguous-heap figure did not move - `largest8BitBlock=110580` at 0%, at 50%,
+at 100%, and after. Phase 1 of the timeshare design is getting an image into
+`ota_0` and handing control to it, and that is now demonstrated end to end with
+margin. What remains untested is CAL executing *from* `ota_0` and writing
+`factory`.

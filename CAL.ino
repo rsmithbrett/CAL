@@ -371,19 +371,49 @@ void setup() {
   Updater::cacheBrandAssets(discovery);
 
   const Updater::Manifest manifest = Updater::fetchManifest(discovery);
+
+  // A DEVICE WITH NOTHING TO RUN NEEDS AN INSTALL EVEN IF THE VERSION MATCHES.
+  //
+  // This used to be version inequality alone, and that made CAL refuse to
+  // rescue the one device it exists to rescue. Observed on device 17 on
+  // 2026-09-16, with ota_0 erased and nvs still recording the current version:
+  //
+  //   [updater] no bootable app: 'v2026.09.16.0003' has used 3 of 3 boot
+  //             attempts without reporting itself healthy, treated as bad
+  //   [boot] contact the server? updreq=0 bootableApp=0 -> YES
+  //   [update] install? offered='v2026.09.16.0003' installed='v2026.09.16.0003' -> no
+  //   [boot] nothing to hand over to ... showing the not-yet-activated screen
+  //
+  // CAL printed "there is no bootable app" and "no update needed" two lines
+  // apart and acted on the second. The device was then stuck permanently: only
+  // a USB cable, or a server changing the version it offers, could move it.
+  // Recovering it took both.
+  //
+  // installedAppVersion() is what nvs RECORDS, not what the flash CONTAINS, and
+  // the two part company exactly when recovery is needed - a half-written OTA, a
+  // corrupted partition, a failed handover. Comparing records to records cannot
+  // see that. haveBootableApplication() asks the flash.
+  //
+  // This matters most for the over-the-air CAL work in CAL_OTA_DESIGN.md, whose
+  // entire safety argument is that the survivor of a failed update can retry.
+  // The survivor could not retry, because it did not believe anything was wrong.
+  const bool haveApp = Updater::haveBootableApplication();
   const bool needsInstall =
       manifest.ok && manifest.isConfigured &&
-      manifest.version != Identity::installedAppVersion();
+      (manifest.version != Identity::installedAppVersion() || !haveApp);
 
-  // All three inputs, so the journal distinguishes "the manifest could not be
+  // All four inputs, so the journal distinguishes "the manifest could not be
   // fetched" from "the server has no current build marked" from "the build the
-  // server names is already the one installed". Those look identical from the
-  // outside and want three different investigations.
-  Journal::printf("[update] install? manifestOk=%d isConfigured=%d offered='%s' "
-                  "installed='%s' -> %s",
-                  manifest.ok ? 1 : 0, manifest.isConfigured ? 1 : 0,
+  // server names is already the one installed" from "the versions match but
+  // there is nothing on the flash to run". Those look identical from the
+  // outside and want four different investigations.
+  Journal::printf("[update] install? manifestOk=%d isConfigured=%d bootableApp=%d "
+                  "offered='%s' installed='%s' -> %s%s",
+                  manifest.ok ? 1 : 0, manifest.isConfigured ? 1 : 0, haveApp ? 1 : 0,
                   manifest.version.c_str(), Identity::installedAppVersion().c_str(),
-                  needsInstall ? "YES" : "no");
+                  needsInstall ? "YES" : "no",
+                  (needsInstall && manifest.version == Identity::installedAppVersion())
+                      ? " (same version, but nothing bootable is installed)" : "");
 
   if (needsInstall) {
     if (!Updater::installApplication(discovery, manifest)) {

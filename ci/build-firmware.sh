@@ -217,6 +217,31 @@ check_size "App (ota_0)" "App/${BUILD_DIR}/App.ino.bin" "$(partition_size ota_0)
 # build says so rather than a device discovering it during an update.
 check_size "CAL (must also fit ota_0, for OTA staging)" "${BUILD_DIR}/CAL.ino.bin" "$(partition_size ota_0)"
 
+# AND AGAINST THE TABLE THE FLEET IS ACTUALLY RUNNING, WHICH IS NOT THIS ONE.
+#
+# partitions.csv describes the INTENDED layout - factory 1,703,936, ota_0 at
+# 0x1B0000, with a callog partition. Device 17's flash was read directly on
+# 2026-09-16 and reports the OLD layout: factory 1,441,792, ota_0 at 0x170000,
+# no callog. The re-table was prepared but never applied, and that is not an
+# oversight - changing a partition table requires USB, and the CAL reflash went
+# out through the browser flasher, which cannot rewrite one.
+#
+# So every check above validates against a ceiling that does not exist in the
+# field. A CAL between 1,441,792 and 1,703,936 bytes would pass this script and
+# then not fit the flash of any device currently deployed. The build would be
+# green and the flashing would fail.
+#
+# 1,441,792 is hardcoded rather than read from a file on purpose: there is no
+# file in this repository that describes the field layout, and inventing one
+# would just be a second thing to drift. Nothing server-side records a device's
+# table either - filed separately - so this number came from reading 0x8000 on a
+# real unit and is the only evidence there is.
+#
+# DELETE THIS CHECK when the USB pass has re-tabled the fleet, and not before.
+# Until then it is the binding constraint and the other one is aspirational.
+FIELD_FACTORY_CEILING=1441792
+check_size "CAL (field factory, pre-re-table)" "${BUILD_DIR}/CAL.ino.bin" "$FIELD_FACTORY_CEILING"
+
 echo "==> Computing checksums"
 (
   cd "$BUILD_DIR"
