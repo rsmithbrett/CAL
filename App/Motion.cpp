@@ -70,12 +70,25 @@ constexpr uint32_t kSessionGapMs = 5UL * 60UL * 1000UL;
 /// reason, so it is set well beyond plausible occupancy rather than close to it.
 constexpr uint32_t kStuckHighMs = 10UL * 60UL * 1000UL;
 
-/// Fade step, applied one step per loop iteration (BL 03). Non-blocking by
-/// construction - there is no loop here that could hold the main loop, and
-/// therefore no way for a brightness change to cost a dropped tap. The App's own
-/// instrumentation already reports iterations long enough to lose a touch, and a
-/// fade must never be one of them.
-constexpr uint8_t kFadeStepPercent = 5;
+/// Fade speed, in percentage points per second (BL 03).
+///
+/// TIME-BASED, NOT PER-ITERATION, and that is the fix rather than the style. The
+/// first version moved a fixed 5% on every loop iteration, which tied the fade's
+/// duration to the loop's speed - and this loop is not steady: measured on device
+/// 17 on 2026-09-16, iterations ran 360ms in the quiet case and 3.7 to 6.0
+/// SECONDS during the check-in and telemetry pair. So a 100-to-25 fade took
+/// anywhere from three seconds to over a minute depending on where it started,
+/// and a single step could hang for six seconds mid-fade, which reads as a stuck
+/// screen rather than a dimming one.
+///
+/// 40 points per second puts a full 100-to-0 sweep at 2.5 seconds and a typical
+/// 100-to-25 at under two, regardless of what the loop is doing.
+///
+/// Still non-blocking, which is the requirement this constant serves: there is no
+/// loop here that could hold the main loop, and therefore no way for a brightness
+/// change to cost a dropped tap. The App's own instrumentation already reports
+/// iterations long enough to lose a touch; a fade must never be one of them.
+constexpr uint32_t kFadePercentPerSecond = 40;
 
 Policy gPolicy;
 BacklightState gState = BacklightState::Fallback;
@@ -104,6 +117,9 @@ uint32_t gLastActivityMs = 0;
 
 uint8_t gTargetPercent = 100;
 
+/// When stepFade last moved the brightness, for the time-based fade. 0 = never.
+uint32_t gLastFadeMs = 0;
+
 uint8_t fallbackPercent() {
   // An unrecognised mode reads as legacyAlwaysOn, which is exactly today's
   // behaviour. A typo in a config row must not decide how a screen behaves
@@ -129,24 +145,40 @@ void enterState(BacklightState next, uint8_t percent, const char* why) {
               static_cast<unsigned>(percent), why);
 }
 
-/// One fade step toward the target. Deliberately the only place brightness is
-/// written, so no path can set a level the state machine does not know about.
+/// One fade step toward the target, sized by elapsed time. Deliberately the only
+/// place brightness is written, so no path can set a level the state machine does
+/// not know about.
 void stepFade() {
+  const uint32_t now = millis();
+  if (gLastFadeMs == 0) {
+    gLastFadeMs = now;
+    return;
+  }
+
   const uint8_t current = Display::brightness();
   if (current == gTargetPercent) {
+    // Keep the clock current while settled, so arriving at a new target does not
+    // jump by however long the display sat still beforehand.
+    gLastFadeMs = now;
     return;
   }
-  if (current < gTargetPercent) {
-    const uint8_t next = (gTargetPercent - current) <= kFadeStepPercent
-                             ? gTargetPercent
-                             : static_cast<uint8_t>(current + kFadeStepPercent);
-    Display::setBrightness(next);
+
+  const uint32_t step = ((now - gLastFadeMs) * kFadePercentPerSecond) / 1000UL;
+  if (step == 0) {
+    // NOT advancing the clock is the point: the remainder accumulates instead of
+    // being discarded. Rounded away every call, a fast loop would move 0% forever
+    // and the display would never reach its target at all.
     return;
   }
-  const uint8_t next = (current - gTargetPercent) <= kFadeStepPercent
-                           ? gTargetPercent
-                           : static_cast<uint8_t>(current - kFadeStepPercent);
-  Display::setBrightness(next);
+  gLastFadeMs = now;
+
+  const uint32_t distance = current < gTargetPercent
+                                ? static_cast<uint32_t>(gTargetPercent - current)
+                                : static_cast<uint32_t>(current - gTargetPercent);
+  const uint8_t moved = static_cast<uint8_t>(step < distance ? step : distance);
+  Display::setBrightness(current < gTargetPercent
+                             ? static_cast<uint8_t>(current + moved)
+                             : static_cast<uint8_t>(current - moved));
 }
 
 /// True when a confirmed motion event has just occurred.

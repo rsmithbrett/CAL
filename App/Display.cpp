@@ -834,16 +834,57 @@ void begin() {
   clear();
 }
 
+/// Perceptual exponent for the backlight. 2.2 is the standard display gamma and
+/// it is what makes a configured percentage mean what an operator expects.
+///
+/// WITHOUT THIS, THE NUMBERS LIE. A linear 25% PWM duty reads to the eye as
+/// roughly half brightness, because human brightness perception is close to
+/// logarithmic rather than linear. Observed directly on device 17 on 2026-09-16:
+/// BacklightDimPercent was set to 25, the arithmetic was exactly right (duty
+/// 63/255), and the operator's reaction was "I thought it would dim to 25% not
+/// 75% on". The code was correct and the field was misleading, which is worse
+/// than a bug because nothing looks wrong.
+///
+/// A second, quieter benefit: Motion's fade steps in PERCENT. Once percent is
+/// perceptual, evenly-spaced percent steps are evenly-spaced to the eye as well,
+/// so the fade stops crawling at the bottom of its range and jumping at the top
+/// without needing any gamma logic of its own.
+constexpr float kBacklightGamma = 2.2f;
+
 void setBrightness(uint8_t percent) {
   if (percent > 100) {
     percent = 100;
   }
   gBrightnessPercent = percent;
 
-  // 100% maps to 255 exactly rather than 254 from integer division, because the
-  // pre-existing begin() sets 255 and a device that has never dimmed must look
-  // identical to one that has dimmed and come back.
-  lcd.setBrightness(percent == 100 ? 255 : static_cast<uint8_t>((percent * 255) / 100));
+  // 100% maps to 255 exactly rather than to whatever the curve rounds to, because
+  // the pre-existing begin() sets 255 and a device that has never dimmed must look
+  // identical to one that has dimmed and come back. 0 is likewise exact - the
+  // backlight is genuinely off, not almost off.
+  if (percent == 100) {
+    lcd.setBrightness(255);
+    return;
+  }
+  if (percent == 0) {
+    lcd.setBrightness(0);
+    return;
+  }
+
+  // powf rather than a lookup table: the ESP32 has hardware single-precision
+  // floating point, this is called at most once per loop iteration during a fade,
+  // and a 101-entry table would be the same numbers with somewhere else to drift.
+  const float duty = powf(static_cast<float>(percent) / 100.0f, kBacklightGamma) * 255.0f;
+  uint8_t level = static_cast<uint8_t>(duty + 0.5f);
+
+  // A NON-ZERO PERCENT MUST LIGHT SOMETHING. The curve sends 1% to 255 * 0.0001,
+  // which rounds to zero - and a panel asked for 1% that goes completely dark is
+  // indistinguishable from a panel that was turned off, which is the exact
+  // ambiguity that cost eight hours on this project the day before this was
+  // written. Anything above zero gets at least one step of backlight.
+  if (level == 0) {
+    level = 1;
+  }
+  lcd.setBrightness(level);
 }
 
 uint8_t brightness() { return gBrightnessPercent; }
