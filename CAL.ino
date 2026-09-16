@@ -21,6 +21,7 @@
 #include "Journal.h"
 #include "Provisioning.h"
 #include "Service.h"
+#include "SelfInstall.h"
 #include "Updater.h"
 
 namespace {
@@ -254,6 +255,38 @@ void setup() {
                   Identity::updateRequested() ? 1 : 0,
                   static_cast<unsigned>(Identity::bootAttempts()),
                   static_cast<unsigned>(Identity::kMaxBootAttempts));
+
+  // TWO ROLES, DECIDED BY WHERE THIS CODE IS EXECUTING FROM.
+  //
+  // A CAL running from ota_0 is a CANDIDATE - it arrived there the way a new App
+  // does, downloaded by the CAL already running, and its only job is to copy
+  // itself into factory and get out of the way. It does not serve cards, does not
+  // download anything and does not hand over. See CAL_OTA_DESIGN.md section 10.
+  //
+  // This fork is placed AFTER Identity::begin() because the candidate reads the
+  // size and hash phase 1 recorded, and BEFORE anything touching the network,
+  // because the copy needs nothing but power. That is the design's central
+  // safety property: the survivor of an interrupted update can always finish
+  // without a network, TLS, or a card.
+  if (SelfInstall::runningAsCandidate()) {
+    Journal::line("[boot] this CAL is running from ota_0, so it is a candidate: its job is "
+                  "to copy itself into factory, not to start an application");
+    if (SelfInstall::applyCandidate()) {
+      return;  // not reached - applyCandidate restarts on success
+    }
+    // Refused or failed, with otadata untouched. factory still holds whichever
+    // CAL was there before, so a power cycle returns this device to normality -
+    // which is why this halts rather than falling through into a ladder that
+    // would try to install an App into the partition it is running from.
+    haltWithFailure("Cannot finish update",
+                    "Restart the device. If this persists, contact support.");
+  }
+
+  // Running from factory. If the previous boot was a candidate that finished,
+  // ota_0 still holds a copy of CAL - and the ladder below would mistake it for
+  // an installable App and hand over to it, producing another candidate and a
+  // boot loop. Cleared here, where nothing is executing from ota_0.
+  SelfInstall::cleanUpAfterCandidate();
 
   // Only takes effect on a boot that goes on to actually join WiFi itself -
   // see mustContactServer() below. A device that already has a working

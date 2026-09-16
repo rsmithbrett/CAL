@@ -20,6 +20,14 @@ constexpr const char* kKeyAppVer = "appver";
 constexpr const char* kKeyUpdReq = "updreq";
 constexpr const char* kKeyBootAtt = "bootatt";
 constexpr const char* kKeyProvForced = "provforced";
+// Phase 2 of the CAL-over-the-air design. A candidate CAL sitting in ota_0
+// cannot measure its own length - the partition is larger than the image - so
+// phase 1 records what it downloaded and the candidate is told. See
+// CAL_OTA_DESIGN.md section 10.
+constexpr const char* kKeyCalSize = "calsize";
+constexpr const char* kKeyCalSha = "calsha";
+constexpr const char* kKeyCalClean = "calclean";
+constexpr const char* kKeyCalTries = "caltries";
 
 // Per-slot keys are built at runtime: "ssid0".."ssid2", "pass0".."pass2".
 // NVS keys are capped at 15 characters, so these stay deliberately short.
@@ -148,5 +156,33 @@ void recordBootAttempt() {
 }
 
 void clearBootAttempts() { prefs.putUChar(kKeyBootAtt, 0); }
+
+// --- Phase 2 candidate state (CAL_OTA_DESIGN.md section 10) ------------------
+
+void recordCalCandidate(uint32_t sizeBytes, const String& sha256) {
+  prefs.putULong(kKeyCalSize, sizeBytes);
+  prefs.putString(kKeyCalSha, sha256);
+  prefs.putUChar(kKeyCalTries, 0);
+}
+
+uint32_t calCandidateSize() { return prefs.getULong(kKeyCalSize, 0); }
+String calCandidateSha() { return prefs.getString(kKeyCalSha, ""); }
+
+void clearCalCandidate() {
+  prefs.remove(kKeyCalSize);
+  prefs.remove(kKeyCalSha);
+  prefs.remove(kKeyCalTries);
+}
+
+// Set by the candidate immediately before it erases otadata, and acted on by the
+// NEXT boot - the new CAL running from factory. The candidate cannot erase ota_0
+// itself because it is executing from it. This marker is what stops a boot loop:
+// a factory CAL that found a valid CAL image in ota_0 would hand over to it, and
+// that candidate would copy and reboot forever.
+void setCalCleanupPending(bool pending) { prefs.putUChar(kKeyCalClean, pending ? 1 : 0); }
+bool calCleanupPending() { return prefs.getUChar(kKeyCalClean, 0) != 0; }
+
+uint8_t calCopyAttempts() { return prefs.getUChar(kKeyCalTries, 0); }
+void recordCalCopyAttempt() { prefs.putUChar(kKeyCalTries, calCopyAttempts() + 1); }
 
 }  // namespace Identity

@@ -93,6 +93,32 @@ void setUpdateRequested(bool requested);
 uint8_t bootAttempts();
 void recordBootAttempt();
 void clearBootAttempts();
+
+/// Phase 2 of the CAL-over-the-air design - see CAL_OTA_DESIGN.md section 10.
+///
+/// A CAL running from ota_0 is a CANDIDATE: its job is to copy itself into
+/// factory and get out of the way. It cannot measure its own length, because the
+/// partition is larger than the image, so phase 1 records the size and hash of
+/// what it downloaded and the candidate reads them back here. No recorded values
+/// means this CAL is in ota_0 for a reason nobody wrote down, and it refuses
+/// rather than guessing.
+void recordCalCandidate(uint32_t sizeBytes, const String& sha256);
+uint32_t calCandidateSize();
+String calCandidateSha();
+void clearCalCandidate();
+
+/// Set by the candidate immediately before erasing otadata; acted on by the next
+/// boot, which runs from factory and can therefore safely erase ota_0. This is
+/// the boot-loop guard, not housekeeping: ota_0 holds a valid CAL image, and a
+/// factory CAL that hands over to it gets another candidate, forever.
+void setCalCleanupPending(bool pending);
+bool calCleanupPending();
+
+/// Bounds the one failure this design cannot otherwise escape: a copy that keeps
+/// failing on hardware. After three attempts the candidate stops rather than
+/// looping, which is the only state here that needs a cable.
+uint8_t calCopyAttempts();
+void recordCalCopyAttempt();
 static constexpr uint8_t kMaxBootAttempts = 3;
 
 void begin();

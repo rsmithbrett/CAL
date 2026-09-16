@@ -1136,3 +1136,101 @@ reboots into CAL, CAL downloads 1,492,144 bytes over TLS, commits, hands over.
 into `ota_0` and handing control to it - phase 1 of §5.4 - is demonstrated with
 margin.** What remains is the copy back into `factory`, which is the half no
 hardware has exercised.
+
+## 10. Phase 2: the trampoline, designed to survive a power cut at every step
+
+Phase 1 is done and proven. This is the half that writes `factory`, and the only
+thing that matters in its design is what a power cut leaves behind.
+
+### The invariant, stated once
+
+**`otadata` names a partition holding a whole, bootable image at every instant.**
+
+Everything below follows from that. It is why the copy happens before `otadata`
+moves, why `ota_0` is cleaned up by a different boot than the one that copied,
+and why the survivor of any interruption needs nothing but power.
+
+### The two roles a CAL can boot into
+
+CAL now behaves differently depending on where it is executing, and it can tell:
+`esp_ota_get_running_partition()`.
+
+**Running from `factory`** - the ordinary case, unchanged, plus one new duty: if
+`nvs` holds the cleanup marker, erase `ota_0`'s first sector and clear the
+marker. That is the *other* boot referred to above.
+
+**Running from `ota_0`** - this CAL is a *candidate*. It does not serve cards, it
+does not download anything, and it does not hand over. Its whole job is to copy
+itself into `factory` and get out of the way.
+
+### The candidate's sequence
+
+1. **Read the expected size and SHA-256 from `nvs`**, written by phase 1 when it
+   downloaded this candidate. A candidate cannot measure its own length - the
+   partition is bigger than the image - so it is told. No values means this
+   CAL is in `ota_0` for a reason nobody recorded, and it refuses rather than
+   guessing.
+2. **Verify itself first**, by hashing `ota_0` over that length. A candidate that
+   does not match what phase 1 recorded is not copied anywhere.
+3. **Refuse if the image will not fit `factory`.** On the field table that is
+   1,441,792 bytes against a 1,337,711-byte CAL - 104,081 spare. Checked, not
+   assumed, because `factory` is the smaller partition and this is the one
+   direction where that bites.
+4. **Erase `factory`, then copy in 4KB blocks, reading back and comparing each
+   block as it goes.** `otadata` is untouched throughout. From here until step 6,
+   `factory` is invalid - and that is survivable precisely because `otadata`
+   still names `ota_0`, which still holds this candidate.
+5. **Re-hash `factory` from flash** and compare against the recorded SHA-256.
+   Block-by-block comparison catches a bad write; this catches a bad plan.
+6. **Set the cleanup marker, erase `otadata`, reboot.** Erasing `otadata` makes
+   the next boot choose `factory`, which now holds the new CAL.
+
+### Why `ota_0` is not erased by the candidate
+
+Because the candidate is executing from it. Erasing sectors of the running
+partition risks the flash cache faulting on code that has not been paged in yet.
+So the candidate only sets a marker, and the *next* boot - the new CAL, running
+from `factory` - does the erase. By then nothing is executing from `ota_0`.
+
+That erase matters and is not tidying: `ota_0` holds a valid CAL image, and a
+`factory` CAL that finds a bootable app there would hand over to it, which is a
+candidate, which would copy and reboot, forever. **The cleanup marker is what
+stops a boot loop, not what keeps the flash neat.**
+
+### Every interruption, and what boots next
+
+| Power cut at | `otadata` says | `factory` | `ota_0` | Next boot |
+|---|---|---|---|---|
+| During the copy (step 4) | `ota_0` | invalid | candidate | the candidate, which retries |
+| After the copy, before `otadata` (step 5/6) | `ota_0` | new CAL, verified | candidate | the candidate, which re-hashes `factory`, finds it already correct, skips to step 6 |
+| After `otadata` erase, before reboot | blank | new CAL | candidate | `factory`, marker set, erases `ota_0` |
+| After reboot, before cleanup | blank | new CAL | candidate | `factory` again, marker still set, erases `ota_0` |
+
+**No row produces a device that needs a human.** Every one either retries or
+completes, and the step that retries needs only power - no network, no TLS, no
+card. That is the property §5.3's in-place alternative could not offer and the
+reason this design was chosen over it.
+
+### The one bound: a retry counter
+
+Step 4 failing repeatedly - a wearing-out sector, a genuinely bad candidate that
+somehow passed step 2 - would loop forever. `nvs` carries an attempt count;
+after three, the candidate stops copying, says so loudly, and boots nothing. That
+is a device needing a cable, and it is the only such state in this design. It is
+reachable only by hardware failure, not by interruption.
+
+### What phase 1 has to start recording
+
+Nothing about phase 1's mechanics changes. It gains one duty: when the image it
+downloaded is a CAL rather than an App, write the size, the SHA-256 and a
+"candidate pending" marker to `nvs` before handing over. Those three values are
+what the candidate reads in step 1.
+
+### Still not exercised by any hardware
+
+**Writing `factory` from firmware has never executed.** `esp_partition_write`
+permits it - only the `readonly` flag blocks, and this table sets no flags - and
+CAL writes `ota_0` through the same stack daily. But the `factory` case is new
+code against a partition the bootloader treats specially, and it is the one
+remaining place where this design could be wrong in a way no reading of the
+source will reveal.
