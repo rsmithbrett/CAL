@@ -43,6 +43,47 @@ void clear() {
   lcd.fillScreen(kBg);
 }
 
+// Whether the panel has actually been brought up this boot. See startPanel().
+bool gPanelStarted = false;
+
+/// Brings the panel up if it is not up yet, and does nothing if it is.
+///
+/// **Why this is not simply `begin()`'s body.** CAL now has one path - the
+/// immediate handover on a therapeutic restart - where it deliberately draws
+/// nothing at all and therefore never calls `begin()`. See
+/// BOOT_SCREEN_OWNERSHIP.md section 6. On that path CAL can still need the
+/// panel afterwards, for the one reason that matters: `bootApplication()` can
+/// return instead of restarting, and the `haltWithFailure()` that follows is
+/// exactly the screen a recoverable-but-not-starting device is rescued by. A
+/// display that was skipped and cannot be brought back would turn the quiet
+/// path into the dark-and-apparently-dead failure this whole design exists to
+/// avoid.
+///
+/// So every public entry point below calls this first, and the property that
+/// buys is worth stating: there is no reachable state in which CAL wants to
+/// draw and cannot. It costs one bool and one branch per draw.
+///
+/// Deliberately NOT exposed in Display.h. Nothing outside this file needs to
+/// ask - CAL.ino expresses "stay quiet" by not calling a draw function, not by
+/// managing display state - and a public entry point with no caller is its own
+/// class of bug here (see ci/build-firmware.sh's Motion gate).
+void startPanel() {
+  if (gPanelStarted) {
+    return;
+  }
+  gPanelStarted = true;
+
+  lcd.init();
+  lcd.setRotation(1);  // 320x240 landscape
+  lcd.setBrightness(255);
+  clear();
+
+  // Non-fatal: without it the brand splash simply never appears and CAL falls
+  // back to the neutral one. Formatting on failure so a fresh unit ends up with
+  // a usable filesystem rather than a permanently broken one.
+  LittleFS.begin(true);
+}
+
 void centeredText(const String& text, int y, uint32_t colour, uint8_t size) {
   lcd.setTextColor(colour, kBg);
   lcd.setTextSize(size);
@@ -113,18 +154,15 @@ int wrappedCenteredText(const String& text, int y, uint32_t colour, uint8_t size
 }  // namespace
 
 void begin() {
-  lcd.init();
-  lcd.setRotation(1);  // 320x240 landscape
-  lcd.setBrightness(255);
-  clear();
-
-  // Non-fatal: without it the brand splash simply never appears and CAL falls
-  // back to the neutral one. Formatting on failure so a fresh unit ends up with
-  // a usable filesystem rather than a permanently broken one.
-  LittleFS.begin(true);
+  // Still means exactly what it always meant - "light the panel now" - and is
+  // still called from the top of CAL's ladder on every boot that is going to
+  // draw anything. What changed is that it is no longer the only thing that
+  // can bring the panel up; see startPanel() above.
+  startPanel();
 }
 
 void showNeutralSplash() {
+  startPanel();
   clear();
   centeredText("Discover", 70, kInk, 4);
   centeredText("Around Me", 110, kAccent, 4);
@@ -195,6 +233,7 @@ void drawSplashBackdrop() {
 }
 
 void showStatus(const String& headline, const String& detail) {
+  startPanel();
   drawSplashBackdrop();
   // Both wrapped, not just positioned with fixed offsets: headline in particular
   // can be a server-supplied sentence (see the enrollment "waiting"/"refused"
@@ -210,17 +249,20 @@ void showStatus(const String& headline, const String& detail) {
 }
 
 bool showBrandSplash() {
+  startPanel();
   clear();
   return drawBrandImage(40);
 }
 
 void showFailure(const String& headline, const String& whatToDo) {
+  startPanel();
   clear();
   const int headlineLines = wrappedCenteredText(headline, 75, kWarn, 2, 22, 3);
   wrappedCenteredText(whatToDo, 75 + headlineLines * 22 + 12, kMuted, 1, 14, 3);
 }
 
 void showQr(const String& url, const String& caption, const String& subCaption) {
+  startPanel();
   clear();
 
   // Version 6 at ECC LOW holds ~134 alphanumeric characters, comfortably more
@@ -267,6 +309,7 @@ void showQr(const String& url, const String& caption, const String& subCaption) 
 }
 
 void showUpdateProgress(uint8_t percent, const String& version) {
+  startPanel();
   clear();
   centeredText("Updating", 70, kInk, 3);
   centeredText(version, 105, kMuted, 1);

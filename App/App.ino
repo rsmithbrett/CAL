@@ -164,6 +164,17 @@ void releaseBluetoothMemory() {
 // ---------------------------------------------------------------------------
 // What a boot is allowed to say on the glass.
 //
+// CAL HAS A RULE TOO, AND IT IS WRITTEN DOWN: BOOT_SCREEN_OWNERSHIP.md in the
+// repository root. Everything in this block is about what the App draws once it
+// owns the panel; that document settles WHICH BINARY owns the panel at a given
+// instant, which is the prior question and the one this block cannot answer on
+// its own. In short: CAL is loud by default and goes silent on exactly one
+// branch - an immediate handover to an app that has already proved it boots -
+// so on a therapeutic restart the screens below are the only ones drawn, and on
+// every other path CAL's splash precedes them. Read that document before adding
+// a message to any boot path in either binary, because "which binary should say
+// this" comes before "how should it be worded".
+//
 // This device restarts itself far more often than its boot screens were
 // designed for. Measured across the fleet on 2026-09-11: restarts every 13-27
 // minutes, one unit 24 times in five hours. The boot sequence is therefore not
@@ -190,13 +201,20 @@ void releaseBluetoothMemory() {
 // wall display reads as "the screen died", which is a worse lie than the one
 // being fixed, and it would land every 13 minutes on exactly the devices
 // already behaving worst. Redrawing the last card was also considered and is
-// not possible - the card's content does not survive the restart, and by the
-// time the App is running CAL has already repainted the panel anyway (every
-// restart goes App -> CAL -> App; see BootDiag.h). So the rule is not "show
-// nothing", it is "show one thing and stop changing it": a single static
-// screen is indistinguishable from a picture that paused for a moment, which
-// is the honest reading of a self-heal. A four-step ladder of network jargon
-// is what makes it look like a fault.
+// not possible - the card's content does not survive the restart. So the rule
+// is not "show nothing", it is "show one thing and stop changing it": a single
+// static screen is indistinguishable from a picture that paused for a moment,
+// which is the honest reading of a self-heal. A four-step ladder of network
+// jargon is what makes it look like a fault.
+//
+// (This paragraph used to add "and by the time the App is running CAL has
+// already repainted the panel anyway". That was true when it was written and is
+// no longer: on precisely the restarts this block is about, CAL now paints
+// nothing at all and the App's first screen is the restart's first screen. See
+// BOOT_SCREEN_OWNERSHIP.md. The conclusion is unaffected - a card's content
+// still does not survive a restart - but the stated reason was load-bearing for
+// a reader, and a comment that argues from a fact that has since changed is how
+// this project's documentation defects start.)
 //
 // The "Starting" screen at the top of setup() is deliberately NOT suppressed,
 // on a therapeutic boot or any other. It is not one of the messages this

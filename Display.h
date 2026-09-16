@@ -9,6 +9,16 @@
 /// status and hands off - it does not attempt to render product content.
 namespace Display {
 
+/// Brings the panel up. Idempotent, and not actually required before the draw
+/// functions below - each one brings the panel up itself if this has not been
+/// called. That is deliberate rather than defensive tidiness: CAL has one path
+/// (the immediate handover on a therapeutic restart) where it draws nothing at
+/// all and never calls this, and it must still be able to put a failure screen
+/// on the glass if the handover then fails. See BOOT_SCREEN_OWNERSHIP.md.
+///
+/// Still call it explicitly at the top of any boot that is going to draw: it is
+/// what satisfies the two-second rule, and "light the panel now" is worth
+/// saying out loud where the ladder can be read top to bottom.
 void begin();
 
 /// The neutral first-boot splash. CAL is flashed before the device is assigned
