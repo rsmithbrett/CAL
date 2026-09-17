@@ -436,7 +436,7 @@ void setup() {
         Journal::line("[update] CAL candidate staged in ota_0 - booting it so it can copy "
                       "itself into factory. The App will be re-downloaded afterwards, "
                       "because ota_0 was the only place to stage this");
-        Updater::bootApplication();
+        Updater::bootApplication("the staged CAL candidate, which is NOT an App");
       }
       // Failed before anything was committed. ota_0 may be erased, which the App
       // decision below handles the same way it handles any missing app: by

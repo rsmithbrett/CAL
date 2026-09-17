@@ -6,6 +6,7 @@
 #include <LittleFS.h>
 #include <NetworkClientSecure.h>
 #include <Update.h>
+#include <esp_app_format.h>
 #include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
@@ -433,11 +434,42 @@ bool cacheBrandAssets(const Service::Discovery& discovery) {
   return renamed;
 }
 
+/// Whether `ota_0` actually begins with an ESP32 image header.
+///
+/// One byte, read out of flash. It exists because every other question this file
+/// asks about the installed application is answered from nvs, and nvs is
+/// bookkeeping ABOUT the flash rather than the flash itself. The two disagree
+/// more often than the design assumed, and both known cases were expensive:
+///
+///   - 2026-09-15: a recovery attempt wrote an App image 262,144 bytes past
+///     where the bootloader looks. nvs went on naming a version that was no
+///     longer anywhere on the chip.
+///   - 2026-09-16: SelfInstall::cleanUpAfterCandidate() erased ota_0's header on
+///     purpose and left nvs alone on purpose, on the written assumption that the
+///     ladder would then see no bootable app and download one. It did not. CAL
+///     announced "bootable app 'v2026.09.16.0003' present", handed over, and the
+///     ROM rejected the image CAL had erased seconds earlier.
+///
+/// The second one is why this reads. nvs can only say what CAL last believed;
+/// the magic byte says what the bootloader is going to find.
+static bool otaPartitionHoldsAnImage(const esp_partition_t* app) {
+  uint8_t magic = 0;
+  const esp_err_t err = esp_partition_read(app, 0, &magic, sizeof(magic));
+  if (err != ESP_OK) {
+    Journal::printf("[updater] could not read ota_0's first byte (esp_err %d) - treating it "
+                    "as holding nothing, which costs a download and risks nothing",
+                    static_cast<int>(err));
+    return false;
+  }
+  return magic == ESP_IMAGE_HEADER_MAGIC;
+}
+
 bool haveBootableApplication() {
-  // Three separate reasons, each logged as itself. "No bootable application"
+  // Four separate reasons, each logged as itself. "No bootable application"
   // covers a device that has never had one, a device whose install was
-  // invalidated, and a device whose app crashes on startup - and those want
-  // three different responses from whoever is reading the journal.
+  // invalidated, a device whose partition does not hold what nvs claims, and a
+  // device whose app crashes on startup - and those want four different
+  // responses from whoever is reading the journal.
   const esp_partition_t* app = applicationPartition();
   if (app == nullptr) {
     Journal::line("[updater] no bootable app: this device's table has no ota_0 partition");
@@ -447,6 +479,20 @@ bool haveBootableApplication() {
   if (version.length() == 0) {
     Journal::line("[updater] no bootable app: ota_0 exists but no installed version is "
                   "recorded, so nothing has ever been installed in it");
+    return false;
+  }
+  // ASKED BEFORE THE BOOT-ATTEMPT COUNTER, and the order is the fix rather than a
+  // detail. An empty partition is not a flaky application and must not be made to
+  // look like one: with the counter first, a device with nothing in ota_0 has to
+  // burn three halted boots - two of them requiring a human to reach over and
+  // power-cycle - before CAL will consider downloading. Observed on device 17 on
+  // 2026-09-16, sitting at "Cannot start application" with an erased ota_0 and a
+  // working network it had decided not to touch.
+  if (!otaPartitionHoldsAnImage(app)) {
+    Journal::printf("[updater] no bootable app: nvs records '%s' but ota_0 does not begin "
+                    "with an image header, so there is nothing at 0x%06lx to hand over to - "
+                    "nvs was describing an install that is no longer on the chip",
+                    version.c_str(), static_cast<unsigned long>(app->address));
     return false;
   }
   const uint8_t attempts = Identity::bootAttempts();
@@ -465,17 +511,22 @@ bool haveBootableApplication() {
   return true;
 }
 
-void bootApplication() {
+void bootApplication(const char* describedAs) {
   const esp_partition_t* app = applicationPartition();
   if (app == nullptr) {
     Journal::line("[updater] handover abandoned: no ota_0 partition to hand over to");
     return;
   }
 
+  // nvs only when the caller did not say. See the header: during a CAL update the
+  // App version in nvs describes an image the candidate has already overwritten.
+  const String what = describedAs != nullptr
+                          ? String(describedAs)
+                          : "the installed App '" + Identity::installedAppVersion() + "'";
+
   Identity::recordBootAttempt();
-  Journal::printf("[updater] handing over to '%s' at 0x%06lx - boot attempts now %u of %u",
-                  Identity::installedAppVersion().c_str(),
-                  static_cast<unsigned long>(app->address),
+  Journal::printf("[updater] handing over to %s at 0x%06lx - boot attempts now %u of %u",
+                  what.c_str(), static_cast<unsigned long>(app->address),
                   static_cast<unsigned>(Identity::bootAttempts()),
                   static_cast<unsigned>(Identity::kMaxBootAttempts));
 

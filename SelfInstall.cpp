@@ -201,9 +201,26 @@ void cleanUpAfterCandidate() {
   }
   Identity::setCalCleanupPending(false);
   Identity::clearCalCandidate();
-  Journal::line("[selfinstall] ota_0 header cleared and candidate state forgotten - this "
-                "device is back to an ordinary CAL with no App installed, and the ladder "
-                "below will download one");
+
+  // AND SAY SO IN NVS, not only in flash. The line below used to be printed
+  // without this, and it was wrong: erasing the header makes ota_0 unbootable,
+  // but haveBootableApplication() decides from nvs, so CAL read back the version
+  // this function had just invalidated, announced the App as present, handed
+  // over, and was refused by the ROM. The device then halted - three times, two
+  // of them needing a human to power-cycle - before the boot-attempt counter
+  // finally let it reach the download this line promises.
+  //
+  // Updater.cpp now also reads ota_0's magic byte, so either of these two changes
+  // alone would close the hole. Both are kept deliberately: this one makes the
+  // bookkeeping honest at the moment it stops being true, and that one stops CAL
+  // trusting bookkeeping about flash it can simply look at. The 2026-09-15
+  // incident was the same disagreement arriving from the other direction.
+  Identity::setInstalledAppVersion("");
+  Identity::clearBootAttempts();
+
+  Journal::line("[selfinstall] ota_0 header cleared, candidate state forgotten and the "
+                "installed-App record cleared - this device is back to an ordinary CAL with "
+                "no App installed, and the ladder below will download one");
 }
 
 bool applyCandidate() {

@@ -31,10 +31,17 @@ bool installApplication(const Service::Discovery& discovery, const Manifest& man
 /// failure leaves the neutral splash in place.
 bool cacheBrandAssets(const Service::Discovery& discovery);
 
-/// Hands control to the installed application. Records a boot attempt first,
-/// so an application that never reaches steady state is eventually recognised
-/// as bad rather than retried forever. Does not return on success.
-void bootApplication();
+/// Hands control to whatever is in `ota_0`. Records a boot attempt first, so an
+/// application that never reaches steady state is eventually recognised as bad
+/// rather than retried forever. Does not return on success.
+///
+/// `describedAs` names what is actually being booted, for the journal only. It
+/// exists because this is also how a staged CAL candidate is started, and with
+/// nothing passed the log line reads the App version out of nvs - which during a
+/// CAL update names an App that was overwritten by the candidate a moment
+/// earlier. On 2026-09-16 that produced "handing over to 'v2026.09.16.0003'"
+/// immediately before a CAL booted, in the one log anybody was reading.
+void bootApplication(const char* describedAs = nullptr);
 
 /// True when an application image is present and has not exhausted its boot
 /// attempts.
