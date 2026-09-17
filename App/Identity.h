@@ -83,6 +83,12 @@ void setProvisioningForced(bool forced);
 /// The application version currently installed in ota_0, as reported by the
 /// manifest that installed it. Empty means nothing is installed yet.
 String installedAppVersion();
+
+/// Which CAL is in factory, as CAL recorded it in the shared "cal" NVS namespace.
+/// Read only - the App never installs a CAL and never writes this. Empty means the
+/// CAL predates recording itself, which is every device until the USB pass, and that
+/// emptiness is reported rather than hidden.
+String installedCalVersion();
 void setInstalledAppVersion(const String& version);
 
 /// Set by the application to ask CAL to perform an update on next boot. The

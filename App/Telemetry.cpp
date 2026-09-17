@@ -1,6 +1,7 @@
 #include "Telemetry.h"
 
 #include <ArduinoJson.h>
+#include <esp_partition.h>
 #include <WiFi.h>
 // For the per-capability heap figures reported alongside ESP.getFreeHeap()
 // below. See the block above free8Bit for why the Arduino wrappers are not
@@ -21,6 +22,38 @@
 
 namespace Telemetry {
 namespace {
+
+/// The device's real app partition layout, read off the flash rather than assumed.
+///
+/// ADDED BECAUSE ITS ABSENCE CAUSED THE WORST MISTAKE OF 2026-09-16. Nothing
+/// server-side recorded which table a device ran, so a bench procedure quoted
+/// ota_0 at 0x1B0000 from the repository's partitions.csv when device 17 has it at
+/// 0x170000 - and the write landed 0x40000 inside the App, destroying it. The
+/// repository describes the INTENDED table; the fleet is on the old one, because a
+/// table change needs USB and the CAL reflash went out through the browser flasher.
+///
+/// One compact string rather than five fields: it is read by humans and by "which
+/// devices are on which table" queries, not by anything doing arithmetic on it.
+static String partitionLayoutSummary() {
+  const esp_partition_t* factory = esp_partition_find_first(
+      ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, nullptr);
+  const esp_partition_t* ota0 = esp_partition_find_first(
+      ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, nullptr);
+  // callog is this project's own data partition, subtype 0x99 - its presence is the
+  // one-bit answer to "has this device been re-tabled", because the old layout has
+  // no such partition at all.
+  const esp_partition_t* callog = esp_partition_find_first(
+      ESP_PARTITION_TYPE_DATA, static_cast<esp_partition_subtype_t>(0x99), nullptr);
+
+  char buf[128];
+  snprintf(buf, sizeof(buf), "factory@0x%06lx+0x%06lx,ota_0@0x%06lx+0x%06lx,callog=%d",
+           static_cast<unsigned long>(factory ? factory->address : 0),
+           static_cast<unsigned long>(factory ? factory->size : 0),
+           static_cast<unsigned long>(ota0 ? ota0->address : 0),
+           static_cast<unsigned long>(ota0 ? ota0->size : 0),
+           callog != nullptr ? 1 : 0);
+  return String(buf);
+}
 
 constexpr const char* kPath = "/api/telemetry";
 
@@ -251,6 +284,23 @@ void report(const char* lastCheckInOutcome) {
       Motion::fault() == Motion::FaultCode::StuckHigh   ? "stuckHigh"
       : Motion::fault() == Motion::FaultCode::InitFailed ? "initFailed"
                                                          : "none";
+
+  // Which CAL is in factory, and what this device's partition table actually is.
+  // Both come from the device rather than from anything the server assumed, which
+  // is the entire point - see TelemetryReport.CalVersion and .PartitionLayout.
+  //
+  // calVersion is OMITTED when empty rather than sent blank, the same convention
+  // motionCapability follows: an empty string would be a claim about a CAL, and the
+  // honest thing to say about a CAL too old to name itself is nothing. The server
+  // renders a missing value as "unknown - pre-OTA CAL".
+  const String calVersion = Identity::installedCalVersion();
+  if (calVersion.length() > 0) {
+    requestDoc["calVersion"] = calVersion;
+  }
+  // The layout is ALWAYS sent. Unlike a version it is never unknowable - the table
+  // is right there in flash - so there is no honest reason to omit it, and it is
+  // the field that would have prevented a destroyed App partition.
+  requestDoc["partitionLayout"] = partitionLayoutSummary();
   // The two figures that turn the heap ratchet from something somebody has to
   // sit and watch into arithmetic the server does on every report.
   //

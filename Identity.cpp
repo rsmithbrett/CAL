@@ -28,6 +28,13 @@ constexpr const char* kKeyCalSize = "calsize";
 constexpr const char* kKeyCalSha = "calsha";
 constexpr const char* kKeyCalClean = "calclean";
 constexpr const char* kKeyCalTries = "caltries";
+// Which CAL is installed in factory, written by the trampoline when it commits -
+// the exact mirror of kKeyAppVer, which installApplication writes for the App.
+// The App reads this back and puts it on telemetry, because CAL does not check in.
+constexpr const char* kKeyCalVer = "calver";
+// The version string of the candidate sitting in ota_0, recorded by phase 1 beside
+// its size and hash. Becomes kKeyCalVer once the trampoline commits it.
+constexpr const char* kKeyCalCandVer = "calcandver";
 
 // Per-slot keys are built at runtime: "ssid0".."ssid2", "pass0".."pass2".
 // NVS keys are capped at 15 characters, so these stay deliberately short.
@@ -159,7 +166,8 @@ void clearBootAttempts() { prefs.putUChar(kKeyBootAtt, 0); }
 
 // --- Phase 2 candidate state (CAL_OTA_DESIGN.md section 10) ------------------
 
-void recordCalCandidate(uint32_t sizeBytes, const String& sha256) {
+void recordCalCandidate(uint32_t sizeBytes, const String& sha256, const String& version) {
+  prefs.putString(kKeyCalCandVer, version);
   prefs.putULong(kKeyCalSize, sizeBytes);
   prefs.putString(kKeyCalSha, sha256);
   prefs.putUChar(kKeyCalTries, 0);
@@ -167,10 +175,12 @@ void recordCalCandidate(uint32_t sizeBytes, const String& sha256) {
 
 uint32_t calCandidateSize() { return prefs.getULong(kKeyCalSize, 0); }
 String calCandidateSha() { return prefs.getString(kKeyCalSha, ""); }
+String calCandidateVersion() { return prefs.getString(kKeyCalCandVer, ""); }
 
 void clearCalCandidate() {
   prefs.remove(kKeyCalSize);
   prefs.remove(kKeyCalSha);
+  prefs.remove(kKeyCalCandVer);
   prefs.remove(kKeyCalTries);
 }
 
@@ -184,5 +194,8 @@ bool calCleanupPending() { return prefs.getUChar(kKeyCalClean, 0) != 0; }
 
 uint8_t calCopyAttempts() { return prefs.getUChar(kKeyCalTries, 0); }
 void recordCalCopyAttempt() { prefs.putUChar(kKeyCalTries, calCopyAttempts() + 1); }
+
+String installedCalVersion() { return prefs.getString(kKeyCalVer, ""); }
+void setInstalledCalVersion(const String& version) { prefs.putString(kKeyCalVer, version); }
 
 }  // namespace Identity

@@ -306,6 +306,19 @@ bool applyCandidate() {
   // BEFORE otadata is erased, so a cut between the two still leaves the next boot
   // able to clean up. Erasing otadata is the commit: from the instant it
   // succeeds, the next boot is factory, and factory is verified.
+  // RECORD WHAT WE JUST BECAME, before the marker and before otadata moves. The
+  // exact mirror of installApplication writing the App's version, and for the same
+  // reason: the App reads this out of the shared nvs namespace and puts it on
+  // telemetry, because CAL never checks in and cannot report anything about itself.
+  //
+  // Written here rather than by the next boot, because the next boot is a different
+  // binary and would have to be told - and the candidate is the only code that knows
+  // for certain which version it is.
+  Identity::setInstalledCalVersion(Identity::calCandidateVersion());
+  Journal::printf("[selfinstall] factory now holds CAL '%s' - recorded so the App can "
+                  "report it, since CAL itself never checks in",
+                  Identity::calCandidateVersion().c_str());
+
   Identity::setCalCleanupPending(true);
 
   const esp_partition_t* otadata =

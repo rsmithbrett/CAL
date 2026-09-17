@@ -102,9 +102,10 @@ void clearBootAttempts();
 /// what it downloaded and the candidate reads them back here. No recorded values
 /// means this CAL is in ota_0 for a reason nobody wrote down, and it refuses
 /// rather than guessing.
-void recordCalCandidate(uint32_t sizeBytes, const String& sha256);
+void recordCalCandidate(uint32_t sizeBytes, const String& sha256, const String& version);
 uint32_t calCandidateSize();
 String calCandidateSha();
+String calCandidateVersion();
 void clearCalCandidate();
 
 /// Set by the candidate immediately before erasing otadata; acted on by the next
@@ -119,6 +120,16 @@ bool calCleanupPending();
 /// looping, which is the only state here that needs a cable.
 uint8_t calCopyAttempts();
 void recordCalCopyAttempt();
+
+/// Which CAL is installed in factory. Written by the trampoline when it commits -
+/// the exact mirror of installedAppVersion(), which installApplication writes.
+///
+/// Empty on every device until an OTA-capable CAL has installed one, and that
+/// emptiness is a real answer rather than a gap: it means "running a CAL too old
+/// to say". The App reads this and puts it on telemetry, because CAL never checks
+/// in and cannot report anything about itself.
+String installedCalVersion();
+void setInstalledCalVersion(const String& version);
 static constexpr uint8_t kMaxBootAttempts = 3;
 
 void begin();

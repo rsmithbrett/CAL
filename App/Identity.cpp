@@ -121,6 +121,19 @@ void setProvisioningForced(bool forced) { prefs.putBool(kKeyProvForced, forced);
 
 String installedAppVersion() { return prefs.getString(kKeyAppVer, ""); }
 
+/// Which CAL is in factory, as CAL recorded it. READ ONLY from here - the App never
+/// writes it, because the App never installs a CAL.
+///
+/// This works because both binaries share the "cal" NVS namespace and always have:
+/// the App already reads appver and bootatt out of it. So reporting CAL's version
+/// costs no new channel and no handshake - CAL writes it once on install, the App
+/// reads it on every boot.
+///
+/// Empty means the CAL in factory predates recording it, which is every device until
+/// the USB pass. That is a fact worth sending rather than a blank: the server renders
+/// it as "unknown - pre-OTA CAL" so nobody reads it as a fault.
+String installedCalVersion() { return prefs.getString("calver", ""); }
+
 void setInstalledAppVersion(const String& version) {
   prefs.putString(kKeyAppVer, version);
 }
