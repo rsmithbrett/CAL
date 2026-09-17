@@ -1234,3 +1234,104 @@ CAL writes `ota_0` through the same stack daily. But the `factory` case is new
 code against a partition the bootloader treats specially, and it is the one
 remaining place where this design could be wrong in a way no reading of the
 source will reveal.
+
+## 11. The bench procedure for the one operation that has never run
+
+Written down because §10's closing paragraph is a statement of risk and this is
+what retires it, and because the procedure needs a cable, a running server and a
+deliberately relaxed database constraint all at once — three things that are
+never simultaneously true by accident. Everything below is for **device 17**,
+the test unit.
+
+### 11.1 Use this unit's real addresses, not `partitions.csv`
+
+`partitions.csv` describes the table the fleet has **not** been flashed with.
+Device 17 is on the field table and its numbers are different:
+
+| | offset | size | |
+|---|---|---|---|
+| `otadata` | `0xE000` | `0x2000` | 8,192 |
+| `factory` | `0x10000` | `0x160000` | 1,441,792 — CAL is 1,346,736, so 95,056 spare |
+| `ota_0` | `0x170000` | `0x250000` | 2,424,832 |
+
+On 2026-09-15 a recovery attempt took `ota_0`'s offset from `partitions.csv`
+(`0x1B0000`) instead of from this unit's decoded table (`0x170000`) and wrote an
+App image 262,144 bytes past where the bootloader looks for one. The unit lost
+its App partition. **Read §3.1's decode for the unit in front of you.** That is
+the whole lesson and it has already been paid for once.
+
+### 11.2 Why the database has to be relaxed, and how far
+
+The device asks `/api/firmware/cal/manifest`, which answers from
+`IsCurrent && Kind == Cal`. Two separate things refuse to put a row in that
+state, and they are not duplicates of each other:
+
+- `FirmwareService.SetCurrentAsync` refuses, with a reason carrying an expiry
+  date. This is the one that holds the argument and it stays.
+- `CK_FirmwareBuilds_SelfTestNeverCurrent` refuses at the database. This one
+  cannot be lifted from the application at all.
+
+For the bench the CHECK is recreated covering `SelfTest` only and the row is set
+current by hand. `SetCurrentAsync` is left untouched, so the relaxation is
+reachable only by someone who went looking for it.
+
+**Marking a CAL current is fleet-wide** — `GetCurrentCalManifestAsync` has no
+per-device pin and `PinBuildToDeviceAsync` refuses `Cal` builds outright, for
+the reason in §5.4. It is safe here anyway, because the only client of that
+endpoint is a CAL that knows the endpoint exists, and device 17 will be the only
+unit carrying one. That stops being true the moment a second unit is flashed,
+which is why the disarm script exists and why it should be run the same evening.
+
+### 11.3 The sequence
+
+1. **Arm the server.** Recreate the CHECK for `SelfTest` only; set the `Cal` row
+   current. One transaction.
+2. **Write CAL to `factory` over USB**, at `0x10000`.
+3. **Erase `otadata`** (`0xE000`, `0x2000`). Without this the bootloader follows
+   `otadata` to `ota_0`, the App runs, and CAL never gets a turn — the CAL
+   update check lives in CAL, so a device that boots straight to its App will
+   never notice that a new CAL exists. This is also why the fleet path needs the
+   App to reboot into CAL on request, not just on failure.
+4. **Open serial at 115200 and power-cycle.** There is no `callog` on the field
+   table, so `Journal` is serial-only: what is not watched live is not recorded.
+5. **Disarm** afterwards, pass or fail.
+
+### 11.4 What the serial output should say, in order
+
+```
+[update] CAL install? manifestOk=1 isConfigured=1 offered='cal-v…' running='(unrecorded)' -> YES
+[install] committed CAL candidate 'cal-v…' into ota_0 (1346736 bytes, sha256 recorded)
+  -- reboot, now running from ota_0 --
+[selfinstall] candidate verified in ota_0: 1346736 bytes, sha256 …
+[selfinstall] erasing factory at 0x010000 (1441792 bytes)
+[selfinstall] copy attempt 1 of 3
+[selfinstall] 10% - … 100% - 1346736 of 1346736 bytes copied into factory
+  -- reboot, now running from factory --
+[selfinstall] previous boot was a candidate that finished - erasing ota_0
+[update] CAL install? … running='cal-v…' -> no
+  -- no bootable app, downloads one --
+```
+
+`running='(unrecorded)'` on the first line is not a fault. Every CAL predating
+this work records no version, and empty differs from any offered version, which
+is exactly the mechanism that lets a fleet become self-updating once.
+
+**`copy attempt 1 of 3` followed by percentages is the result this whole
+document is waiting for.** The two failures to watch for are
+`write to factory failed at offset %lu` and `factory does not read back what was
+written at offset %lu`; both leave `otadata` erased, so the next boot is the same
+candidate trying again, three times in total before it stops.
+
+### 11.5 Two consequences worth expecting rather than discovering
+
+**The App in `ota_0` is destroyed.** `ota_0` is the only staging area there is
+(§4 did the arithmetic: a dedicated one is short by 404,752 bytes), so a CAL
+update costs roughly 3MB of traffic and three reboots rather than one. CAL
+re-downloads the App on the third boot without being asked, because
+`haveBootableApplication()` returns false and the install decision no longer
+gates on version equality alone.
+
+**The unit lands on whatever App is `IsCurrent`**, which is not necessarily the
+App it was running. Check that before starting; a bench test that silently rolls
+a device back two releases will be mistaken for a regression by whoever finds it
+next.
