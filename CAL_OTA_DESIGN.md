@@ -1335,3 +1335,95 @@ gates on version equality alone.
 App it was running. Check that before starting; a bench test that silently rolls
 a device back two releases will be mistaken for a regression by whoever finds it
 next.
+
+## 12. It ran. 2026-09-17, device 17, over the air, no cable.
+
+`esp_partition_write` into `factory` has now executed on real hardware. It was
+the last thing in this document that had never happened, and §10 closed by
+saying no amount of reading the source would settle it.
+
+```
+[selfinstall] candidate verified in ota_0: 1347536 bytes, sha256 cabd7707…
+[selfinstall] copy attempt 1 of 3
+[selfinstall] erasing factory at 0x010000 (1703936 bytes)
+[selfinstall] 0% … 100% - 1347536 of 1347536 bytes copied into factory
+[selfinstall] factory verified byte-for-byte and by hash
+[selfinstall] factory now holds CAL 'cal-v2026.09.16.0002'
+[selfinstall] otadata cleared - the next boot runs the new CAL from factory
+```
+
+Device 17, MAC `8C:94:DF:4E:E6:34`, on the post-rebalance table, `factory`
+0x10000/1,703,936 and `ota_0` 0x1B0000/2,097,152. First attempt, no retry. The
+write succeeded, the read-back comparison succeeded, and the re-hash matched.
+
+**No cable was involved in the update itself.** The unit was flashed over USB
+earlier that evening with `cal-v2026.09.16.0001`; `0002` arrived by radio, staged
+itself in `ota_0`, booted there, copied itself into `factory`, cleaned up after
+itself on the following boot and pulled an App down behind it. Three reboots and
+roughly 2.8MB. That is the whole feature, demonstrated end to end.
+
+### 12.1 The first attempt proved nothing, and the reason is a trap
+
+The first run that evening put `cal-v2026.09.16.0001` in `factory` over USB and
+then offered the device **the same image** over the air. The candidate hashed
+`factory`, found its own hash already there, and took the idempotent re-entry
+path:
+
+```
+[selfinstall] factory already holds this exact candidate - a previous boot
+completed the copy and was interrupted before it could repoint otadata
+```
+
+Correct behaviour, firing for a reason that had nothing to do with a power cut.
+The copy never ran and the run looked like a pass.
+
+**A CAL-OTA test is only a test when the candidate differs in bytes from what is
+in `factory`.** Bump the version, rebuild, register, and check that the manifest
+sha differs from the running one before drawing any conclusion from a green log.
+
+### 12.2 What it cost to find out: the halt
+
+The first run also found a real defect, which is the argument for running it at
+all. Three lines apart, on the boot after the trampoline:
+
+```
+[selfinstall] ota_0 header cleared … the ladder below will download one
+[updater] bootable app 'v2026.09.16.0003' present, 1 of 3 boot attempts used
+E (616) esp_image: image at 0x1b0000 has invalid magic byte
+[halt] Cannot start application
+```
+
+`haveBootableApplication()` never read a byte of `ota_0`. It answered from three
+nvs records, and `cleanUpAfterCandidate()` left the App version among them on
+purpose, on the assumption - written into its own comment - that the ladder
+would then see nothing and download. It saw the opposite, handed over to an
+image CAL had erased seconds earlier, and halted. The boot-attempt counter
+eventually rescued it, but only after **two more human power-cycles**. In a
+household that is a dead screen reading "Cannot start application" on a device
+with a working network it had decided not to touch.
+
+Fixed on both sides in `cal-v2026.09.16.0002`, and the fix is visible in the
+second run's log, which went straight to the download with no halt at all:
+
+```
+[selfinstall] ota_0 header cleared, candidate state forgotten and the
+              installed-App record cleared
+[updater] no bootable app: ota_0 exists but no installed version is recorded
+[boot] contact the server? updreq=0 bootableApp=0 -> YES
+```
+
+This is the 2026-09-15 disagreement arriving from the other direction. Then the
+flash was empty and nvs named a version; now nvs named a version and the flash
+was empty. Both times CAL believed its own notes over the chip in front of it.
+`Updater::otaPartitionHoldsAnImage()` exists so it stops doing that.
+
+### 12.3 Still not demonstrated
+
+**The power-cut table in §10.** Every row of it is reasoned, none of it is
+observed. The copy has now been interrupted zero times. What §12 establishes is
+that the mechanism works when nothing goes wrong, which was the larger unknown
+but is not the same claim.
+
+The cheapest next evidence is pulling power during the `erasing factory` window
+and confirming the unit comes back as a candidate and retries - the survivor
+needs no network, no TLS and no card, so it can be done at a bench in minutes.
