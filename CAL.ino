@@ -403,6 +403,49 @@ void setup() {
   // Cosmetic and never fatal - a failure here leaves the neutral splash.
   Updater::cacheBrandAssets(discovery);
 
+  // DOES CAL ITSELF NEED REPLACING? Asked BEFORE the App decision, and the order is
+  // not arbitrary: a CAL update stages through ota_0, which destroys whatever App is
+  // there. Downloading an App first and then immediately overwriting it would cost
+  // 1.5MB for nothing.
+  //
+  // Skipped entirely when the server offered no CAL path. An installation that does
+  // not do CAL updates says nothing about them, and a device must not invent a path
+  // to the one partition it cannot recover from remotely.
+  if (discovery.calManifestPath.length() > 0) {
+    const Updater::Manifest calManifest =
+        Updater::fetchManifest(discovery, discovery.calManifestPath);
+    const String runningCal = Identity::installedCalVersion();
+    const bool calNeedsInstall =
+        calManifest.ok && calManifest.isConfigured && calManifest.version != runningCal;
+
+    // runningCal is EMPTY on any device whose CAL predates recording itself, which is
+    // every device before the USB pass. Empty therefore differs from any offered
+    // version and would trigger an install - which is correct and is the mechanism by
+    // which a fleet becomes self-updating, but only ever fires once an operator has
+    // marked a CAL current. The server refuses to do that until every device can
+    // trampoline, so this stays dormant until then. See FirmwareService.SetCurrentAsync.
+    Journal::printf("[update] CAL install? manifestOk=%d isConfigured=%d offered='%s' "
+                    "running='%s' -> %s",
+                    calManifest.ok ? 1 : 0, calManifest.isConfigured ? 1 : 0,
+                    calManifest.version.c_str(),
+                    runningCal.length() > 0 ? runningCal.c_str() : "(unrecorded)",
+                    calNeedsInstall ? "YES" : "no");
+
+    if (calNeedsInstall) {
+      if (Updater::installApplication(discovery, calManifest, /*asCalCandidate=*/true)) {
+        Journal::line("[update] CAL candidate staged in ota_0 - booting it so it can copy "
+                      "itself into factory. The App will be re-downloaded afterwards, "
+                      "because ota_0 was the only place to stage this");
+        Updater::bootApplication();
+      }
+      // Failed before anything was committed. ota_0 may be erased, which the App
+      // decision below handles the same way it handles any missing app: by
+      // downloading one. Nothing about factory was touched.
+      Journal::line("[update] CAL candidate download FAILED - factory is untouched and "
+                    "this device still runs the CAL it booted with");
+    }
+  }
+
   const Updater::Manifest manifest = Updater::fetchManifest(discovery);
 
   // A DEVICE WITH NOTHING TO RUN NEEDS AN INSTALL EVEN IF THE VERSION MATCHES.

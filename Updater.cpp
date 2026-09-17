@@ -60,7 +60,7 @@ const esp_partition_t* applicationPartition() {
 
 }  // namespace
 
-Manifest fetchManifest(const Service::Discovery& discovery) {
+Manifest fetchManifest(const Service::Discovery& discovery, const String& pathOverride) {
   Manifest out;
 
   logHeap("before the manifest TLS session");
@@ -73,7 +73,8 @@ Manifest fetchManifest(const Service::Discovery& discovery) {
   }
 
   HTTPClient http;
-  const String url = String("https://") + Config::kServiceHost + discovery.manifestPath;
+  const String path = pathOverride.length() > 0 ? pathOverride : discovery.manifestPath;
+  const String url = String("https://") + Config::kServiceHost + path;
   if (!http.begin(client, url)) {
     Journal::printf("[manifest] http.begin() refused %s", url.c_str());
     return out;
@@ -111,7 +112,8 @@ Manifest fetchManifest(const Service::Discovery& discovery) {
   return out;
 }
 
-bool installApplication(const Service::Discovery& discovery, const Manifest& manifest) {
+bool installApplication(const Service::Discovery& discovery, const Manifest& manifest,
+                        bool asCalCandidate) {
   // This function is the reason the journal exists. Every early return below
   // used to be a silent `false` that surfaced on the panel as "Update failed",
   // and each one implies a different fix.
@@ -192,7 +194,12 @@ bool installApplication(const Service::Discovery& discovery, const Manifest& man
   }
 
   HTTPClient http;
-  const String url = String("https://") + Config::kServiceHost + discovery.binaryPath;
+  // A candidate fetches from the CAL route. Both land in ota_0 - that is the only
+  // partition firmware can write - but what happens next differs entirely: an App
+  // is handed control and keeps it, whereas a CAL image boots once as a candidate
+  // and copies itself into factory. See SelfInstall.
+  const String binPath = asCalCandidate ? discovery.calBinaryPath : discovery.binaryPath;
+  const String url = String("https://") + Config::kServiceHost + binPath;
   if (!http.begin(client, url)) {
     Journal::printf("[install] http.begin() refused %s - the installed app is untouched",
                     url.c_str());
@@ -333,6 +340,30 @@ bool installApplication(const Service::Discovery& discovery, const Manifest& man
                     "(error %u)",
                     Update.errorString(), static_cast<unsigned>(Update.getError()));
     return false;
+  }
+
+  if (asCalCandidate) {
+    // RECORD WHAT IS NOW SITTING IN ota_0, and record nothing about the App - the
+    // App's version in nvs still describes whatever was in ota_0 before this
+    // overwrote it, and that is now a lie. It is left alone deliberately: the
+    // trampoline erases ota_0's header on the next boot, after which CAL sees no
+    // bootable app and downloads one, which rewrites it correctly. Correcting it
+    // here would only make the intervening boot look tidier.
+    //
+    // A CAL UPDATE THEREFORE COSTS AN APP RE-DOWNLOAD. ota_0 is the staging area
+    // and there is nowhere else - CAL_OTA_DESIGN.md rejected carving a staging
+    // partition on arithmetic, short by 404,752 bytes on this table. So a CAL
+    // update is roughly 3MB of traffic and two reboots rather than one. That is
+    // acceptable because CAL changes rarely, and it is why this is gated on an
+    // operator marking a CAL current rather than on a version differing.
+    Identity::recordCalCandidate(manifest.sizeBytes, manifest.sha256, manifest.version);
+    Identity::clearBootAttempts();
+    Journal::printf("[install] committed CAL candidate '%s' into ota_0 (%lu bytes, sha256 "
+                    "recorded). The next boot runs it from there, and its only job will be "
+                    "to copy itself into factory - see SelfInstall",
+                    manifest.version.c_str(),
+                    static_cast<unsigned long>(manifest.sizeBytes));
+    return true;
   }
 
   Identity::setInstalledAppVersion(manifest.version);

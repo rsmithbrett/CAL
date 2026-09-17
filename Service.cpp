@@ -101,6 +101,11 @@ Discovery fetchDiscovery() {
 
   out.manifestPath = doc["manifestPath"] | "/api/firmware/manifest";
   out.binaryPath = doc["binaryPath"] | "/api/firmware/current/binary";
+  // NO DEFAULT, deliberately - see Discovery::calManifestPath. A server that does
+  // not offer these is one that cannot update CAL, and a device inventing a path
+  // would be guessing about the partition it cannot recover remotely.
+  out.calManifestPath = doc["calManifestPath"] | "";
+  out.calBinaryPath = doc["calBinaryPath"] | "";
   out.pairingPath = doc["pairingPath"] | "/api/enrollment/pairing-code";
   out.brandAssetPath = doc["brandAssetPath"] | "";
   out.enrollmentPath = doc["enrollmentPath"] | "/api/enrollment/bootstrap";

@@ -19,12 +19,13 @@ struct Manifest {
   uint32_t sizeBytes = 0;
 };
 
-Manifest fetchManifest(const Service::Discovery& discovery);
+Manifest fetchManifest(const Service::Discovery& discovery, const String& pathOverride = String());
 
 /// Downloads into the OTA partition and verifies the manifest's hash before
 /// committing. Returns false without disturbing the installed image on any
 /// failure - a half-written partition is never marked bootable.
-bool installApplication(const Service::Discovery& discovery, const Manifest& manifest);
+bool installApplication(const Service::Discovery& discovery, const Manifest& manifest,
+                        bool asCalCandidate = false);
 
 /// Caches the brand splash into LittleFS. Purely cosmetic and never fatal:
 /// failure leaves the neutral splash in place.
