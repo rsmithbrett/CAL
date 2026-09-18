@@ -1916,7 +1916,63 @@ void performCheckIn() {
   // threshold on /diag/telemetry meaningful. Sent here, before the
   // updateAvailable branch below, so a device about to reboot for an update
   // still leaves a fresh snapshot behind.
-  Telemetry::report(result.updateAvailable ? "updateAvailable" : "ok");
+  Telemetry::report(result.calUpdateAvailable ? "calUpdateAvailable"
+                    : result.updateAvailable  ? "updateAvailable"
+                                              : "ok");
+
+  // CAL BEFORE THE APP, and the order is not arbitrary - it is the same reason
+  // CAL.ino asks the same question before its own App decision. A CAL update
+  // stages through ota_0, which destroys whatever App is sitting there. Taking
+  // an App update first and then immediately overwriting it would spend 1.5MB
+  // and a download for nothing.
+  //
+  // In practice both branches end at the same call: Loader::requestUpdate() sets
+  // one flag, and CAL decides what to do once it has the network. The order here
+  // buys an accurate log line and an accurate screen rather than different
+  // behaviour - which is worth having when the next thing the device does is
+  // disappear for several minutes.
+  if (result.calUpdateAvailable) {
+    const uint8_t attempts = Identity::calUpdateAttempts();
+    constexpr uint8_t kMaxCalAttempts = 3;
+
+    if (attempts >= kMaxCalAttempts) {
+      // Refused, and LOUDLY. The remote debug stream is the only diagnostic
+      // channel a wall-mounted device has, and a unit that silently declines
+      // the loader it is being offered looks identical to one the server never
+      // asked - which is the shape of every bug this project has paid for
+      // twice. Says what it will not do, why, and what clears it.
+      Log::printf(
+          "[checkin] server wants a CAL update but this device has already tried %u time(s) "
+          "on CAL '%s' without it taking - REFUSING to reboot again. Something is failing "
+          "inside CAL's own install path, not here. This clears itself as soon as calver "
+          "changes; until then the App keeps running normally",
+          attempts, Identity::installedCalVersion().length() > 0
+                        ? Identity::installedCalVersion().c_str()
+                        : "(unrecorded)");
+    } else {
+      Log::printf(
+          "[checkin] server says a newer CAL is current (running '%s', attempt %u of %u) - "
+          "rebooting into CAL so it can fetch and trampoline its own replacement",
+          Identity::installedCalVersion().length() > 0
+              ? Identity::installedCalVersion().c_str()
+              : "(unrecorded)",
+          attempts + 1, kMaxCalAttempts);
+      Display::showStatus("Updating", "Installing a new loader");
+
+      // Counted BEFORE the reboot, because there is no after. A device that
+      // crashes mid-trampoline must come back having spent the attempt.
+      Identity::noteCalUpdateAttempt();
+
+      // RestartCause::Ota rather than a cause of its own: this genuinely is an
+      // over-the-air update, the log line above already says which kind, and
+      // BootDiag's enum values are explicit and never renumbered - adding one
+      // is a deliberate act, not a side effect of a caller needing a label.
+      BootDiag::recordRestartIntent(BootDiag::RestartCause::Ota);
+
+      Loader::requestUpdate();
+      // Unreachable: the call above never returns.
+    }
+  }
 
   if (result.updateAvailable) {
     Log::line("[checkin] server requested an update - rebooting into CAL");

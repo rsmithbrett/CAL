@@ -772,6 +772,63 @@ image, not the App, and the App version was cleared in phase 1. So
 "no application installed" path downloads the App into `ota_0`. Clear the phase
 marker. Done.
 
+#### Phase 0 as built, 2026-09-18 — and the loop it can cause
+
+The sequence above describes phase 0 in one sentence: the App "must be the one
+that learns a newer CAL is current". Building it turned that sentence into two
+findings the design had not settled.
+
+**The App cannot learn it by asking.** `AppService.h` is explicit that the App
+has no discovery document — it talks to fixed endpoints by convention — so it
+has no `calManifestPath` and cannot fetch a CAL manifest to compare against.
+Giving it discovery to solve this would have added a fetch, a parse and a failure
+mode to the healthy path, for one boolean. **So the server answers instead.** The
+device sends `calVersion` on the check-in REQUEST and the server replies
+`calUpdateAvailable`, comparing what the device runs against the build marked
+current. Capability rides the check-in request for the same reason (§2 of
+MOTION_AWARE_DISPLAY_DESIGN.md): the thing that must act on the answer is there,
+and a value that arrives by telemetry arrives at the wrong place and time.
+
+`calVersion` is sent **even when empty**, which is the opposite of what telemetry
+does with the same value. Here the emptiness is the whole signal: it means the
+CAL in `factory` predates recording itself, it differs from every version a
+server can offer, and that difference is exactly what makes a pre-USB device
+eligible for the first loader it is ever offered. Null — the field absent
+entirely — is a different fact, meaning firmware too old to act on the answer,
+and the server offers such a device nothing.
+
+**The comparison is difference, never "newer than".** These versions are
+CI-assigned date strings with no ordering contract, and the operator marking a
+build current IS the decision. A server that refused to move a device
+"backwards" could not roll a fleet off a bad loader, which is the one move
+actually worth having once a loader turns out to be bad.
+
+**The loop, and where the brake had to go.** `calUpdateAvailable` is derived on
+every check-in rather than consumed once, so it stops being true exactly when the
+device starts running the new loader and no stale flag can strand a device that
+already complied. The cost of that choice is precise: if CAL cannot install the
+candidate — the download fails, the manifest is unconfigured, the image is
+rejected at commit — the server goes on truthfully saying yes, and the App goes
+on rebooting. That is an unattended reboot loop on a wall-mounted panel, and
+nothing in the sequence above would stop it.
+
+The brake is on the DEVICE, not the server. The server's job is to answer the
+question truthfully; declining to act on a true answer is the device's.
+`Identity::calUpdateAttempts()` counts attempts against **the CAL the device was
+running when it asked**, caps them at three, and resets when `calver` changes —
+so a successful trampoline restores the full allowance rather than leaving a unit
+one failure short of silence forever. On refusal it logs loudly, naming what it
+will not do, why, and what clears it: a device that quietly stops accepting
+loaders is indistinguishable from one the server never asked, and that ambiguity
+is the shape of every bug this project has paid for twice.
+
+**What is still unproven.** Phase 0 has never run on hardware. The trampoline it
+triggers has (device 17, 2026-09-17), but the trigger itself has only been tested
+server-side, where six tests cover the decision including the bootstrap case (an
+empty `calVersion` is offered the current CAL) and the rollback case (a device on
+a newer-looking string is still moved). The first real exercise will be the first
+CAL marked current, and it will fire on every device at once — see §12.
+
 #### Why this is the safest of the four
 
 **The invariant of §1.6 holds by construction, not by luck.** Exactly one app

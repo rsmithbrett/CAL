@@ -18,6 +18,24 @@ struct Result {
   bool ok = false;
   bool acknowledged = false;
   bool updateAvailable = false;
+  /// True when the server says a newer CAL is current and this device is not
+  /// running it. Phase 0 of the trampoline in CAL_OTA_DESIGN.md §5.4.
+  ///
+  /// <b>Why the server has to be the one to say so.</b> CAL checks for its own
+  /// replacement (CAL.ino, right after discovery), but a healthy device never
+  /// gets there: `mustContactServer()` returns false when a bootable App is
+  /// installed and nothing requested an update, so CAL hands straight over
+  /// without touching the network. Left alone, a CAL marked current would only
+  /// ever reach devices that happened to need an App install for some other
+  /// reason. The App is the only thing talking to the server on a healthy unit,
+  /// and it has no discovery document of its own (see AppService.h) — so it
+  /// cannot fetch a CAL manifest and compare versions itself. One boolean the
+  /// server computes is the whole mechanism.
+  ///
+  /// Acting on it means rebooting into CAL via Loader::requestUpdate(), exactly
+  /// as `updateAvailable` does. The App never downloads CAL; it only hands back
+  /// to the one thing that can.
+  bool calUpdateAvailable = false;
   /// True only when the server answered 401 - this device's secret no longer
   /// authenticates (an admin's "Allow re-registration" or a secret regeneration
   /// while this device was mid-run, not a network problem). The App cannot

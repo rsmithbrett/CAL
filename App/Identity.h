@@ -89,6 +89,26 @@ String installedAppVersion();
 /// CAL predates recording itself, which is every device until the USB pass, and that
 /// emptiness is reported rather than hidden.
 String installedCalVersion();
+
+/// How many times this App has already rebooted into CAL asking for a CAL
+/// update, while running the CAL it is running now.
+///
+/// The circuit breaker for phase 0 of CAL_OTA_DESIGN.md §5.4. The server asserts
+/// `calUpdateAvailable` by comparing the CAL version this device last reported
+/// against the one marked current, which is self-healing but NOT one-shot: if
+/// CAL cannot install the candidate - the download fails, the manifest is
+/// unconfigured, the image is rejected - the server goes on saying yes and the
+/// App goes on rebooting. That is an unattended reboot loop on a wall-mounted
+/// panel, and nothing on the device would stop it.
+///
+/// Resets itself when calver changes, so a successful trampoline restores the
+/// full allowance rather than leaving the unit one failure away from silence.
+uint8_t calUpdateAttempts();
+
+/// Records that this App is about to hand back to CAL for a CAL update. Call
+/// immediately BEFORE rebooting, never after - there is no "after".
+void noteCalUpdateAttempt();
+
 void setInstalledAppVersion(const String& version);
 
 /// Set by the application to ask CAL to perform an update on next boot. The
