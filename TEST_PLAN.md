@@ -958,6 +958,35 @@ deferring:
 `CAL_INSTALLED_APP` because the last hop overwrote the first. Somebody reading a
 reboot heatmap must get one sentence for the burst, not three.
 
+#### 7e(ii). The same burst, but the App asked for it
+
+The variant that exercises Phase 0's call site rather than CAL's. Set up a newer
+CAL on the server so the App learns about it at check-in (`calUpdateAvailable`)
+rather than letting CAL discover it on its own initiative.
+
+Expect the **same** final token, `SOFTWARE_RESET + CAL_SELF_INSTALL`, reached by
+a different first writer. The App writes the cause from `performCheckIn()` before
+`Loader::requestUpdate()`, so the journal on the later hops should show CAL
+deferring to a record it did not write:
+
+```
+[checkin] server says a newer CAL is current (running '...', attempt 1 of 3) -
+          rebooting into CAL so it can fetch and trampoline its own replacement
+[boot] restart cause CAL_SELF_INSTALL already recorded - kept, not replaced by
+       CAL_SELF_INSTALL
+```
+
+**What would be wrong:** a final boot reporting `OTA`. That was the behaviour
+before the release merge and it is the specific defect this case guards - `OTA`
+makes a three-restart, minutes-dark CAL replacement indistinguishable on
+telemetry from a routine single-restart App update. See CAL_OTA_DESIGN.md §13.7.
+
+Worth confirming in the same run: this path is *not* therapeutic, so the App
+should narrate its boot normally rather than going quiet
+(`restartWasTherapeutic()` returns false for `CalSelfInstall`, exactly as it did
+for `Ota`) - the change must move the telemetry label without changing anything
+the household sees.
+
 ### 7f. Power cut between recording and restarting
 
 The failure mode the placement in §13.5 is chosen against.

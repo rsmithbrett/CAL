@@ -717,7 +717,29 @@ toolchain with one linker script). **So CAL can run from `ota_0`, and CAL runnin
 from `ota_0` can write `factory`.** Nothing has to overwrite the partition it is
 executing from at any point.
 
-**This is the linchpin and it is unverified.** §2 Test B is a go/no-go on it.
+**This is the linchpin, and it is now verified on real fleet hardware.** It was
+unverified when this section was written, and §2 Test B was specified as the
+go/no-go on it. Test B has since passed (§9), and the trampoline has since run
+end to end in the field.
+
+**The evidence: device 12 is running the armed CAL, it received it over the air,
+and no cable has ever been attached to that unit.** That last clause is the whole
+weight of the claim. Device 17 in §12 proved the *mechanism* — the copy into
+`factory` executed, verified byte-for-byte and by hash — but device 17 had been
+flashed over USB earlier that same evening to put the first CAL in place, so it
+does not by itself rule out a bench-only dependency. Device 12 closes that gap:
+it took the armed CAL by radio, ran the `ota_0` trampoline unattended, and came
+back running it, with nobody present and nothing plugged in. CAL executing from
+`ota_0` and writing `factory` is therefore an observed property of this design,
+not an inference from the ESP32 image format.
+
+Two limits on that, kept here so this correction does not overstate itself:
+
+- **It says the mechanism works when nothing goes wrong.** The power-cut table in
+  §10 remains entirely reasoned and unobserved — see §12.3, which is still
+  accurate and is not superseded by this paragraph.
+- **It is a claim about the trampoline, not about everything built on top of it.**
+  The boot-cause reporting in §13 has been compiled and not run — see §13.8.
 
 #### The sequence
 
@@ -1290,6 +1312,13 @@ for the whole burst of three reboots rather than none. See §13.
 
 ### Still not exercised by any hardware
 
+> **Superseded — kept as written for the record.** This was true when §10 was
+> drafted. `esp_partition_write` into `factory` has since executed on real
+> hardware (§12, device 17, 2026-09-17) and the whole trampoline has since run
+> unattended over the air (§5.4, device 12). Read the paragraph below as the
+> statement of risk that §11's procedure was written to retire, not as a current
+> description of what has been demonstrated.
+
 **Writing `factory` from firmware has never executed.** `esp_partition_write`
 permits it - only the `readonly` flag blocks, and this table sets no flags - and
 CAL writes `ota_0` through the same stack daily. But the `factory` case is new
@@ -1658,16 +1687,47 @@ written for somebody holding a cable.
 
 ### 13.7 Interaction with Phase 0
 
-`feature/app-requests-cal-update` has the App set `RestartCause::Ota` before
-handing back for a CAL update, and explicitly declines to add an enum value of
-its own. That is consistent with §13.4 rather than in tension with it: on an
-App-requested CAL update the App is the first writer, so the chain reports `OTA`
-and CAL's `CalSelfInstall` correctly stands down. `CAL_SELF_INSTALL` is
-therefore the token for a CAL update **CAL decided on**, which is the case that
-otherwise has no explanation at all.
+**Resolved on the release branch: an App-requested CAL update records
+`CAL_SELF_INSTALL`, not `OTA`.**
 
-Phase 0 adds no enum values, so there is no numbering collision to resolve when
-the two land.
+As written on its own branch, `feature/app-requests-cal-update` set
+`RestartCause::Ota` before handing back for a CAL update, and explicitly declined
+to add an enum value of its own — on the stated grounds that adding one is a
+deliberate act rather than a side effect of a caller wanting a label. That
+reasoning was correct in isolation and it expired the moment these two branches
+were merged: `CalSelfInstall = 9` now exists, added deliberately by the work in
+this section, so the premise that no better cause was available no longer holds.
+
+The reason the distinction is worth an enum value at all: **a CAL
+self-replacement is a three-restart event and the display is dark for minutes**
+while it runs (§10). An ordinary App update is one restart and a few seconds of
+"Updating". Recorded as `OTA` the two are indistinguishable on telemetry, so the
+longest deliberate outage this firmware can produce arrives on the heatmap
+looking exactly like its most routine one. That is precisely the failure §13.1
+set out to end — a cause that does not distinguish is barely better than no cause
+at all.
+
+This does **not** disturb §13.4. The App is still the first writer on this path;
+it simply now writes a truer value. The App's own
+`recordRestartIntent()` is a plain last-writer-wins store, and
+`Loader::requestUpdate()` is `[[noreturn]]`, so nothing in the App overwrites it
+afterwards. CAL's `recordRestartIntentIfNoneRecorded()` then finds the key
+already set and keeps it — logging `already recorded - kept, not replaced` — and
+since only the App clears the key (`takeRecordedCause()`) and no App runs again
+until the chain completes, the value survives all three restarts. Both the
+App-requested and the CAL-initiated paths therefore converge on
+`CAL_SELF_INSTALL`, which is the correct outcome: the *token* names what happened
+to the device, and what happened was a CAL self-install either way.
+
+What is lost by this, stated honestly: `CAL_SELF_INSTALL` no longer distinguishes
+"CAL decided" from "the App asked". That distinction was never the point of the
+token — §13.3 reserves the who-asked distinction for `CAL_INSTALLED_APP` vs
+`OTA`, which is about *App images* — and the check-in log line at the call site
+records which branch fired. Telemetry now answers the question that actually
+drives an investigation: was this device dark for seconds, or for minutes.
+
+Phase 0 adds no enum values, so there was no numbering collision to resolve when
+the two landed.
 
 ### 13.8 What this does not do
 

@@ -1972,11 +1972,33 @@ void performCheckIn() {
       // crashes mid-trampoline must come back having spent the attempt.
       Identity::noteCalUpdateAttempt();
 
-      // RestartCause::Ota rather than a cause of its own: this genuinely is an
-      // over-the-air update, the log line above already says which kind, and
-      // BootDiag's enum values are explicit and never renumbered - adding one
-      // is a deliberate act, not a side effect of a caller needing a label.
-      BootDiag::recordRestartIntent(BootDiag::RestartCause::Ota);
+      // CalSelfInstall, NOT Ota. This used to record Ota, on the stated grounds
+      // that no better cause existed and that adding one was a deliberate act
+      // rather than a side effect of a caller wanting a label. That reasoning
+      // was sound and it has simply expired: CalSelfInstall = 9 now exists, put
+      // there deliberately by the CAL BootDiag work, so the argument that once
+      // justified Ota no longer describes the situation.
+      //
+      // Why the distinction earns its place: a CAL self-replacement is a
+      // THREE-restart event - CAL -> staged candidate -> new CAL -> re-downloaded
+      // App - and the display is dark for minutes while it runs. An ordinary App
+      // update is one restart and a few seconds of "Updating". Recorded as Ota
+      // the two are indistinguishable on telemetry, so the longest and most
+      // alarming outage this firmware can produce on purpose arrives looking
+      // exactly like its most routine one. That defeats the entire purpose of
+      // recording a cause: the reboot heatmap exists to tell a household's
+      // minutes of blank screen apart from a fault, and it cannot do that if the
+      // two share a label.
+      //
+      // This is the App side of the pair, and the App writes LAST-writer-wins
+      // (App/BootDiag.cpp's recordRestartIntent() overwrites unconditionally).
+      // CAL's copy is the first-writer-wins one - it reads before writing, so
+      // when CAL reaches SelfInstall::applyCandidate() and offers CalSelfInstall
+      // itself, it finds this value already present and keeps it. Both paths
+      // therefore land on CalSelfInstall, and nothing between here and the
+      // eventual App boot clears the key: only the App clears it, in
+      // takeRecordedCause(), and no App runs again until the chain completes.
+      BootDiag::recordRestartIntent(BootDiag::RestartCause::CalSelfInstall);
 
       Loader::requestUpdate();
       // Unreachable: the call above never returns.
