@@ -316,6 +316,15 @@ bool restartWasTherapeutic() {
     case BootDiag::RestartCause::Ota:
     case BootDiag::RestartCause::Reprovision:
     case BootDiag::RestartCause::SelfTest:
+    // The CAL-written causes, on this side for the same reason Ota is: CAL has
+    // just run its boot ladder in front of the household, with its own progress
+    // screens, and a wait is expected and legitimate. Going quiet after that
+    // would hide the one visible evidence of how far a new build got. None of
+    // them is therapy either - nothing was wrong with this device and nothing
+    // was trying to fix itself.
+    case BootDiag::RestartCause::CalHandover:
+    case BootDiag::RestartCause::CalInstalledApp:
+    case BootDiag::RestartCause::CalSelfInstall:
       return false;
   }
   // Unreachable with the enum as it stands. Present so a cause added to

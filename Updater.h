@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include "BootDiag.h"
 #include "Service.h"
 
 /// Fetching and installing the application image.
@@ -41,7 +42,26 @@ bool cacheBrandAssets(const Service::Discovery& discovery);
 /// CAL update names an App that was overwritten by the candidate a moment
 /// earlier. On 2026-09-16 that produced "handing over to 'v2026.09.16.0003'"
 /// immediately before a CAL booted, in the one log anybody was reading.
-void bootApplication(const char* describedAs = nullptr);
+///
+/// `cause` is the other half of that, and it goes somewhere `describedAs` never
+/// could. The journal line is on flash and needs a USB cable to read; the cause
+/// is written to NVS, read by the App on the boot this restart produces, and
+/// carried on every telemetry report from then on - so it is how a device that
+/// rebooted in somebody's hallway gets diagnosed without anybody visiting it.
+/// The default is deliberately the ordinary case rather than no cause at all:
+/// this function is the only `esp_restart()` in CAL's handover path, so
+/// recording HERE rather than at each call site is what makes it impossible for
+/// a future caller to restart the device without saying why. That was the
+/// actual defect - device 17 reported `SOFTWARE_RESET + NONE` on 2026-09-17
+/// because CAL installed an App on its own initiative and handed over silently.
+///
+/// Pass something more specific when the caller knows more (an install just
+/// happened, or this is a CAL candidate rather than an App). Passing the App's
+/// own causes is neither needed nor possible to get wrong: see
+/// BootDiag::recordRestartIntentIfNoneRecorded() for why an intent the App
+/// already recorded is left exactly as it is.
+void bootApplication(const char* describedAs = nullptr,
+                     BootDiag::RestartCause cause = BootDiag::RestartCause::CalHandover);
 
 /// True when an application image is present and has not exhausted its boot
 /// attempts.

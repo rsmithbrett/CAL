@@ -12,6 +12,7 @@
 #include <esp_partition.h>
 #include <mbedtls/sha256.h>
 
+#include "BootDiag.h"
 #include "Config.h"
 #include "Display.h"
 #include "Identity.h"
@@ -511,7 +512,7 @@ bool haveBootableApplication() {
   return true;
 }
 
-void bootApplication(const char* describedAs) {
+void bootApplication(const char* describedAs, BootDiag::RestartCause cause) {
   const esp_partition_t* app = applicationPartition();
   if (app == nullptr) {
     Journal::line("[updater] handover abandoned: no ota_0 partition to hand over to");
@@ -537,6 +538,18 @@ void bootApplication(const char* describedAs) {
                     static_cast<int>(err));
     return;
   }
+
+  // AFTER the boot partition is set and BEFORE the restart, and both halves of
+  // that placement are deliberate. After, because every `return` above leaves
+  // this device running CAL with no restart at all, and an intent recorded for
+  // a restart that never happens gets attributed to whatever restart comes next
+  // - which could be an unrelated panic hours later. Before, because once
+  // esp_restart() runs there is no later.
+  //
+  // Nothing branches on the result: a device that cannot record why it is
+  // restarting must still restart. Losing the diagnostic is a worse log; not
+  // handing over is a device showing a household nothing.
+  BootDiag::recordRestartIntentIfNoneRecorded(cause);
 
   // Written to flash line by line rather than buffered, so this really is on
   // the chip before the restart takes the RAM with it.

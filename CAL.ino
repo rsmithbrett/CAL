@@ -14,6 +14,7 @@
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 
+#include "BootDiag.h"
 #include "Config.h"
 #include "Display.h"
 #include "Enrollment.h"
@@ -436,7 +437,16 @@ void setup() {
         Journal::line("[update] CAL candidate staged in ota_0 - booting it so it can copy "
                       "itself into factory. The App will be re-downloaded afterwards, "
                       "because ota_0 was the only place to stage this");
-        Updater::bootApplication("the staged CAL candidate, which is NOT an App");
+        // CalSelfInstall rather than the default CalHandover, and it is recorded
+        // HERE - at the first restart of the trampoline - rather than at the end
+        // of it. The chain from this line is CAL -> candidate -> new CAL ->
+        // downloaded App: three restarts before an App runs again. Because the
+        // cause is only ever taken by the first writer (see BootDiag.h), the one
+        // recorded here is the one the App finally reports, and "CAL updated
+        // itself" is the single sentence that explains the whole burst of
+        // reboots to somebody reading a heatmap.
+        Updater::bootApplication("the staged CAL candidate, which is NOT an App",
+                                 BootDiag::RestartCause::CalSelfInstall);
       }
       // Failed before anything was committed. ota_0 may be erased, which the App
       // decision below handles the same way it handles any missing app: by
@@ -527,8 +537,19 @@ void setup() {
                   "update-requested flag has been cleared");
   }
 
+  // `needsInstall` is still true here only if the install SUCCEEDED - every
+  // failure above either handed over at the fallback or halted, neither of which
+  // returns to this line. So it is a sound reading of "CAL replaced the binary
+  // before starting it", which is the distinction worth carrying: an App boot
+  // reporting CAL_INSTALLED_APP came back running something different, and one
+  // reporting CAL_HANDOVER came back running the same thing it had before.
+  //
+  // This is the exact restart device 17 could not account for on 2026-09-17 -
+  // CAL found ota_0 empty, fetched an App nobody had asked for, and handed over
+  // without recording anything, so the App reported SOFTWARE_RESET + NONE.
   if (Updater::haveBootableApplication()) {
-    Updater::bootApplication();
+    Updater::bootApplication(nullptr, needsInstall ? BootDiag::RestartCause::CalInstalledApp
+                                                   : BootDiag::RestartCause::CalHandover);
   }
 
   // No application installed and none available. The QR is the useful thing to
