@@ -404,6 +404,22 @@ Result perform() {
   requestDoc["batteryPercent"] = 100;
   requestDoc["charging"] = true;
 
+  // THE CAL VERSION RIDES THE CHECK-IN REQUEST, for the same reason capability does
+  // a few lines below: the thing that has to act on it is here, not in telemetry.
+  // The server answers `calUpdateAvailable` by comparing this against the CAL build
+  // marked current, and it has to make that comparison while composing THIS response
+  // - not from whatever a telemetry post happened to leave behind earlier.
+  //
+  // SENT EVEN WHEN EMPTY, which is the opposite of what telemetry does with the same
+  // value (Telemetry.cpp omits it when blank, so a pre-OTA CAL is reported as absent
+  // rather than as a blank string). Here the empty string is the whole signal: it
+  // means "the CAL in factory predates recording itself", it differs from every
+  // version a server can offer, and that difference is precisely what makes a device
+  // eligible for the first loader it is ever offered. Omitting it would make the
+  // server unable to distinguish "no CAL recorded" from "firmware too old to say",
+  // and those want opposite answers.
+  requestDoc["calVersion"] = Identity::installedCalVersion();
+
   // CAPABILITY RIDES THE CHECK-IN REQUEST. It also rides telemetry, and only one of
   // those two reaches the thing that uses it.
   //
@@ -559,6 +575,11 @@ Result perform() {
 
   result.acknowledged = responseDoc["acknowledged"] | false;
   result.updateAvailable = responseDoc["updateAvailable"] | false;
+  // Absent reads as false, which is the only safe default for a field whose
+  // effect is a reboot: a server that has never heard of CAL updates asks for
+  // nothing. Firmware predating the field and a server predating it both
+  // degrade to today's behaviour rather than to a reboot loop.
+  result.calUpdateAvailable = responseDoc["calUpdateAvailable"] | false;
   result.debugStreamRequested = responseDoc["debugStreamRequested"] | false;
   result.sdReformatRequested = responseDoc["sdReformatRequested"] | false;
   // An ISO-8601 instant on the wire, converted to an epoch second here so the
@@ -642,10 +663,12 @@ Result perform() {
   parseAnnouncements(responseDoc["announcements"], result);
 
   Log::printf(
-      "[checkin] ok (acknowledged=%d updateAvailable=%d debugStream=%d sdReformat=%d "
+      "[checkin] ok (acknowledged=%d updateAvailable=%d calUpdateAvailable=%d debugStream=%d "
+      "sdReformat=%d "
       "intervalSeconds=%d utcOffsetMinutes=%d isDaytime=%d cardPolicy=%d cards=%u actions=%u "
       "accepted=%u splashAssetId=%s)",
-      result.acknowledged, result.updateAvailable, result.debugStreamRequested,
+      result.acknowledged, result.updateAvailable, result.calUpdateAvailable,
+      result.debugStreamRequested,
       result.sdReformatRequested, intervalSeconds, result.utcOffsetMinutes, result.isDaytime,
       result.cardPolicy.present, result.cardPolicy.entryCount, result.cardActionCount,
       result.acceptedActionCount,

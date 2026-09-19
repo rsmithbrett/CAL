@@ -33,8 +33,8 @@ RestartCause gLastCause = RestartCause::None;
 /// heap, not flash - see the fragmentation measurements in BootDiag.h.
 ///
 /// 48 bytes covers the longest pair this firmware can produce
-/// ("DEEPSLEEP_RESET+REPROVISION", 27) with room for a longer cause name later.
-/// snprintf truncates rather than overruns if that is ever wrong.
+/// ("DEEPSLEEP_RESET+CAL_INSTALLED_APP", 33) with room for a longer cause name
+/// later. snprintf truncates rather than overruns if that is ever wrong.
 char gReasonToken[48] = "UNREPORTED+NONE";
 
 // This boot's largest contiguous 8-bit block, captured once by recordBootHeap().
@@ -118,6 +118,19 @@ const char* describeCause(RestartCause cause) {
     // this ships rather than after a matching server change.
     case RestartCause::LowHeapResponse:
       return "LOW_HEAP_RESPONSE";
+    // The three CAL-written causes. None contains "UNREACHABLE" or "LOW_HEAP",
+    // so RebootHeatmap.Classify() falls through to its SOFTWARE_RESET branch and
+    // - because none of them ends in "+NONE" - sorts them as Deliberate. That is
+    // the correction this whole change makes on the server side without the
+    // server changing at all: these restarts used to arrive as
+    // "SOFTWARE_RESET+NONE" and be counted as Unexpected, the most alarming kind
+    // there is, on devices that were doing exactly what they were built to do.
+    case RestartCause::CalHandover:
+      return "CAL_HANDOVER";
+    case RestartCause::CalInstalledApp:
+      return "CAL_INSTALLED_APP";
+    case RestartCause::CalSelfInstall:
+      return "CAL_SELF_INSTALL";
   }
   return "UNRECOGNISED";
 }
@@ -151,6 +164,9 @@ RestartCause takeRecordedCause() {
     case RestartCause::SelfTest:
     case RestartCause::Unreachable:
     case RestartCause::LowHeapResponse:
+    case RestartCause::CalHandover:
+    case RestartCause::CalInstalledApp:
+    case RestartCause::CalSelfInstall:
       return static_cast<RestartCause>(stored);
   }
   // A value this build does not recognise - most likely an older or newer

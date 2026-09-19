@@ -4,6 +4,7 @@
 #include <esp_partition.h>
 #include <mbedtls/sha256.h>
 
+#include "BootDiag.h"
 #include "Display.h"
 #include "Identity.h"
 #include "Journal.h"
@@ -350,6 +351,19 @@ bool applyCandidate() {
 
   Journal::line("[selfinstall] otadata cleared - the next boot runs the new CAL from "
                 "factory, which will erase ota_0's header and download an App. Restarting");
+  // Ordinarily a no-op, and worth having anyway. The CAL that booted this
+  // candidate already recorded CalSelfInstall (CAL.ino, at the bootApplication()
+  // that started it), and first-writer-wins means that record stands - this call
+  // just reads it and says so. It matters on the path where it is NOT already
+  // set: a candidate can also be reached without that line running, by an
+  // interrupted update whose next boot lands here directly, and on that path
+  // this is the only thing standing between the eventual App boot and a
+  // SOFTWARE_RESET + NONE with no explanation for a burst of three reboots.
+  //
+  // Placed after otadata is committed, so the cause is recorded only once this
+  // restart is certain - the same rule every other call site follows, and the
+  // reason the failure returns above deliberately sit in front of it.
+  BootDiag::recordRestartIntentIfNoneRecorded(BootDiag::RestartCause::CalSelfInstall);
   delay(100);
   esp_restart();
   return true;  // not reached

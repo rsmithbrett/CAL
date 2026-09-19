@@ -316,6 +316,15 @@ bool restartWasTherapeutic() {
     case BootDiag::RestartCause::Ota:
     case BootDiag::RestartCause::Reprovision:
     case BootDiag::RestartCause::SelfTest:
+    // The CAL-written causes, on this side for the same reason Ota is: CAL has
+    // just run its boot ladder in front of the household, with its own progress
+    // screens, and a wait is expected and legitimate. Going quiet after that
+    // would hide the one visible evidence of how far a new build got. None of
+    // them is therapy either - nothing was wrong with this device and nothing
+    // was trying to fix itself.
+    case BootDiag::RestartCause::CalHandover:
+    case BootDiag::RestartCause::CalInstalledApp:
+    case BootDiag::RestartCause::CalSelfInstall:
       return false;
   }
   // Unreachable with the enum as it stands. Present so a cause added to
@@ -1916,7 +1925,85 @@ void performCheckIn() {
   // threshold on /diag/telemetry meaningful. Sent here, before the
   // updateAvailable branch below, so a device about to reboot for an update
   // still leaves a fresh snapshot behind.
-  Telemetry::report(result.updateAvailable ? "updateAvailable" : "ok");
+  Telemetry::report(result.calUpdateAvailable ? "calUpdateAvailable"
+                    : result.updateAvailable  ? "updateAvailable"
+                                              : "ok");
+
+  // CAL BEFORE THE APP, and the order is not arbitrary - it is the same reason
+  // CAL.ino asks the same question before its own App decision. A CAL update
+  // stages through ota_0, which destroys whatever App is sitting there. Taking
+  // an App update first and then immediately overwriting it would spend 1.5MB
+  // and a download for nothing.
+  //
+  // In practice both branches end at the same call: Loader::requestUpdate() sets
+  // one flag, and CAL decides what to do once it has the network. The order here
+  // buys an accurate log line and an accurate screen rather than different
+  // behaviour - which is worth having when the next thing the device does is
+  // disappear for several minutes.
+  if (result.calUpdateAvailable) {
+    const uint8_t attempts = Identity::calUpdateAttempts();
+    constexpr uint8_t kMaxCalAttempts = 3;
+
+    if (attempts >= kMaxCalAttempts) {
+      // Refused, and LOUDLY. The remote debug stream is the only diagnostic
+      // channel a wall-mounted device has, and a unit that silently declines
+      // the loader it is being offered looks identical to one the server never
+      // asked - which is the shape of every bug this project has paid for
+      // twice. Says what it will not do, why, and what clears it.
+      Log::printf(
+          "[checkin] server wants a CAL update but this device has already tried %u time(s) "
+          "on CAL '%s' without it taking - REFUSING to reboot again. Something is failing "
+          "inside CAL's own install path, not here. This clears itself as soon as calver "
+          "changes; until then the App keeps running normally",
+          attempts, Identity::installedCalVersion().length() > 0
+                        ? Identity::installedCalVersion().c_str()
+                        : "(unrecorded)");
+    } else {
+      Log::printf(
+          "[checkin] server says a newer CAL is current (running '%s', attempt %u of %u) - "
+          "rebooting into CAL so it can fetch and trampoline its own replacement",
+          Identity::installedCalVersion().length() > 0
+              ? Identity::installedCalVersion().c_str()
+              : "(unrecorded)",
+          attempts + 1, kMaxCalAttempts);
+      Display::showStatus("Updating", "Installing a new loader");
+
+      // Counted BEFORE the reboot, because there is no after. A device that
+      // crashes mid-trampoline must come back having spent the attempt.
+      Identity::noteCalUpdateAttempt();
+
+      // CalSelfInstall, NOT Ota. This used to record Ota, on the stated grounds
+      // that no better cause existed and that adding one was a deliberate act
+      // rather than a side effect of a caller wanting a label. That reasoning
+      // was sound and it has simply expired: CalSelfInstall = 9 now exists, put
+      // there deliberately by the CAL BootDiag work, so the argument that once
+      // justified Ota no longer describes the situation.
+      //
+      // Why the distinction earns its place: a CAL self-replacement is a
+      // THREE-restart event - CAL -> staged candidate -> new CAL -> re-downloaded
+      // App - and the display is dark for minutes while it runs. An ordinary App
+      // update is one restart and a few seconds of "Updating". Recorded as Ota
+      // the two are indistinguishable on telemetry, so the longest and most
+      // alarming outage this firmware can produce on purpose arrives looking
+      // exactly like its most routine one. That defeats the entire purpose of
+      // recording a cause: the reboot heatmap exists to tell a household's
+      // minutes of blank screen apart from a fault, and it cannot do that if the
+      // two share a label.
+      //
+      // This is the App side of the pair, and the App writes LAST-writer-wins
+      // (App/BootDiag.cpp's recordRestartIntent() overwrites unconditionally).
+      // CAL's copy is the first-writer-wins one - it reads before writing, so
+      // when CAL reaches SelfInstall::applyCandidate() and offers CalSelfInstall
+      // itself, it finds this value already present and keeps it. Both paths
+      // therefore land on CalSelfInstall, and nothing between here and the
+      // eventual App boot clears the key: only the App clears it, in
+      // takeRecordedCause(), and no App runs again until the chain completes.
+      BootDiag::recordRestartIntent(BootDiag::RestartCause::CalSelfInstall);
+
+      Loader::requestUpdate();
+      // Unreachable: the call above never returns.
+    }
+  }
 
   if (result.updateAvailable) {
     Log::line("[checkin] server requested an update - rebooting into CAL");

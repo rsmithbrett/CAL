@@ -134,6 +134,35 @@ String installedAppVersion() { return prefs.getString(kKeyAppVer, ""); }
 /// it as "unknown - pre-OTA CAL" so nobody reads it as a fault.
 String installedCalVersion() { return prefs.getString("calver", ""); }
 
+namespace {
+// NVS keys are capped at 15 characters, so these stay deliberately short - same
+// constraint the ssidN/passN builders above are shaped by.
+constexpr const char* kKeyCalReqVer = "calreqver";
+constexpr const char* kKeyCalReqTries = "calreqtry";
+}  // namespace
+
+uint8_t calUpdateAttempts() {
+  // Attempts are counted against the CAL THIS DEVICE WAS RUNNING WHEN IT ASKED,
+  // not against all time. If calver has changed since, the trampoline worked -
+  // possibly by this very sequence - so that history is spent and the count
+  // starts again. Without the version check, three failed attempts would
+  // silence CAL updates on that unit permanently, including a later CAL that
+  // would have installed cleanly. A device that quietly stops accepting loaders
+  // is exactly the state this whole feature exists to avoid.
+  if (prefs.getString(kKeyCalReqVer, "") != installedCalVersion()) {
+    return 0;
+  }
+  return prefs.getUChar(kKeyCalReqTries, 0);
+}
+
+void noteCalUpdateAttempt() {
+  const String running = installedCalVersion();
+  const uint8_t previous =
+      prefs.getString(kKeyCalReqVer, "") == running ? prefs.getUChar(kKeyCalReqTries, 0) : 0;
+  prefs.putString(kKeyCalReqVer, running);
+  prefs.putUChar(kKeyCalReqTries, previous + 1);
+}
+
 void setInstalledAppVersion(const String& version) {
   prefs.putString(kKeyAppVer, version);
 }
