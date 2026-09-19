@@ -1226,6 +1226,11 @@ downloaded is a CAL rather than an App, write the size, the SHA-256 and a
 "candidate pending" marker to `nvs` before handing over. Those three values are
 what the candidate reads in step 1.
 
+It also gains a fourth write, in a different `nvs` namespace and for a different
+reader: the restart cause `CAL_SELF_INSTALL`, recorded at the *first* restart of
+this chain so that the App which eventually boots at the far end has one sentence
+for the whole burst of three reboots rather than none. See §13.
+
 ### Still not exercised by any hardware
 
 **Writing `factory` from firmware has never executed.** `esp_partition_write`
@@ -1427,3 +1432,193 @@ but is not the same claim.
 The cheapest next evidence is pulling power during the `erasing factory` window
 and confirming the unit comes back as a candidate and retries - the survivor
 needs no network, no TLS and no card, so it can be done at a bench in minutes.
+
+## 13. Boot-cause reporting: CAL says why it restarted the device
+
+Every section above is about moving bytes between partitions. This one is about
+the sentence a device gets to say afterwards, and it exists because on
+2026-09-17 the device that had just completed §12's install could not say
+anything at all.
+
+### 13.1 The defect, exactly as observed
+
+Device 17, about 02:03 UTC on 2026-09-17, on the App boot immediately after CAL
+installed `v2026.09.16.0003` and handed over:
+
+```
+[boot] restart reason: SOFTWARE_RESET + NONE
+[boot] a deliberate restart recorded no cause - some restart path is not
+       calling BootDiag::recordRestartIntent()
+```
+
+That second line is `App/BootDiag.h`'s own self-check firing correctly. A
+`SOFTWARE_RESET` with no recorded intent means something restarted this device
+on purpose without saying why, and something had: CAL. The App had asked for
+nothing on that boot - CAL found `ota_0` empty, fetched an App on its own
+initiative, and handed over - so there was nothing in `nvs` to find.
+
+**The shape of this is worth naming once, because this diagnostic will keep
+producing it.** The cause is written by one boot and read by the next, so the
+binary that reports a gap is never the binary that left it. The complaint
+surfaced in the App; the hole was in CAL.
+
+The consequence was not only a missing log line. The server's
+`RebootHeatmap.Classify()` sorts `SOFTWARE_RESET+NONE` as **Unexpected**, the
+most alarming category it has. Every successful CAL handover in the fleet's
+history - the single most ordinary thing this firmware does - was being counted
+as an unexplained restart.
+
+### 13.2 Why CAL needs a `BootDiag` of its own, and why it is a copy
+
+CAL and App are two sketches that compile independently. Each takes only the
+sources sitting beside it (see `ci/build-firmware.sh`), which is why `Identity`,
+`Display` and `Tls` already exist twice in this repository. There is no shared
+header and no mechanism to add one without restructuring both builds.
+
+So `BootDiag.h` at the repository root is a **deliberate partial copy** of
+`App/BootDiag.h`. CAL takes only the write side: it never checks in, never
+reports telemetry, and has no use for reading a cause back. What CAL has is
+restarts.
+
+**The enum values are the wire format between the two binaries.** One build
+writes the byte into `nvs`; a different build, running from a different
+partition minutes later, reads it back. This is not a server-compatibility
+question that the "not in production yet" rule can waive - it is two binaries on
+the *same device* having to agree, and a mismatch misreports exactly the restart
+that installed it.
+
+The rule, stated where both copies can see it:
+
+> **Adding a value means adding it in both places, with the same number.
+> Neither copy may ever renumber.**
+
+The App-only causes (`LowHeap`, `Ota`, `Reprovision`, `SelfTest`, `Unreachable`,
+`LowHeapResponse`) are listed in CAL's copy rather than omitted, for the same
+reason: leaving a numeric gap invites the next person to fill it.
+
+Both copies share one `nvs` namespace and key - `"bootdiag"` / `"cause"` -
+character for character. CAL's own `"cal"` namespace is deliberately not reused,
+because the App cannot open it by that name and the whole value of the record is
+that the App can read it.
+
+### 13.3 The three causes CAL writes
+
+| # | Name | Means |
+|---|---|---|
+| 7 | `CAL_HANDOVER` | CAL finished its boot ladder and started the App that was already installed. Nothing was downloaded and nothing was wrong. |
+| 8 | `CAL_INSTALLED_APP` | CAL downloaded and installed an application image, then started it. The device came back running something different. |
+| 9 | `CAL_SELF_INSTALL` | CAL replaced *itself* - the §10 trampoline. Recorded at the first of the three restarts, so the whole burst has one explanation. |
+
+`CAL_INSTALLED_APP` is **not** the same as `OTA`, and the difference is who
+asked. `OTA` means the App found an update at check-in and went back to CAL for
+it, so `OTA` is already in `nvs` before CAL ever runs. `CAL_INSTALLED_APP` means
+CAL installed on its own initiative - no bootable image, boot attempts
+exhausted, or a version mismatch on a boot the App never requested. Device 17's
+silent restart was exactly that case.
+
+None of the three tokens contains `UNREACHABLE` or `LOW_HEAP`, and none ends in
+`+NONE`, so `RebootHeatmap.Classify()` falls through to its `SOFTWARE_RESET`
+branch and sorts all three as **Deliberate**. That is the correction §13.1 asks
+for, and it lands **with no server change at all**.
+
+### 13.4 First-writer-wins, and why it is not a plain write
+
+CAL's entry point is `recordRestartIntentIfNoneRecorded()`, not
+`recordRestartIntent()`. The difference is the whole design.
+
+A restart the App asked for is `App -> CAL -> App`. The App records `OTA`,
+reboots into CAL, CAL does the work, and **CAL's** `esp_restart()` is what
+finally starts the App again. CAL is the last writer on that path but the App is
+the only one that knows why any of it is happening. A plain write would replace
+`OTA` with `CAL_INSTALLED_APP` on every single update and throw away the more
+specific answer - turning a working diagnostic into a worse one while appearing
+to fix something.
+
+The rule reads as a sentence:
+
+> **The cause names what STARTED the restart chain, not the last hop of it.**
+
+Everything downstream of the first `esp_restart()` is mechanism. When nothing has
+been recorded, CAL started the chain and CAL is where the cause comes from.
+
+The App clears the record when it reads it (`takeRecordedCause()`), so "already
+recorded" can only ever mean an intent from a chain still in progress, never a
+stale one from last week.
+
+### 13.5 Where the calls are, and why they are placed there
+
+There are exactly two `esp_restart()` calls in CAL, and both are now
+instrumented.
+
+**`Updater::bootApplication()`** - the only restart in the handover path. The
+cause is recorded **after** `esp_ota_set_boot_partition()` has succeeded and
+**before** the restart. Both halves are deliberate:
+
+- *After*, because every early `return` in that function leaves the device
+  running CAL with no restart at all. An intent recorded for a restart that never
+  happens gets attributed to whatever restart comes next, which could be an
+  unrelated panic hours later.
+- *Before*, because once `esp_restart()` runs there is no later.
+
+The `cause` parameter defaults to `CalHandover` rather than to nothing. Recording
+*here* rather than at each call site is what makes it impossible for a future
+caller to restart the device without saying why - which was the actual defect.
+
+**`SelfInstall::applyCandidate()`** - records `CalSelfInstall` after `otadata` is
+committed. Ordinarily a no-op, because the CAL that booted the candidate already
+recorded `CalSelfInstall` and first-writer-wins means that record stands. It
+matters on the path where it is *not* already set: a candidate reached by an
+interrupted update whose next boot lands there directly. On that path it is the
+only thing between the eventual App boot and an unexplained burst of three
+reboots.
+
+**Nothing branches on the result.** A device that cannot record why it is
+restarting must still restart. Losing the diagnostic is a worse log; refusing to
+hand over is a device showing a household nothing.
+
+### 13.6 Verbose by requirement, not by taste
+
+Every outcome is spoken, including the ones that did nothing:
+
+- recorded: `[boot] restart cause recorded as X - the App's next boot reports
+  that rather than an unexplained software reset`
+- deferred to an earlier writer: `[boot] restart cause X already recorded -
+  kept, not replaced by Y`
+- storage refused: `[boot] NVS would not open to record restart cause X - the
+  App's next boot will wrongly report NONE`
+
+That last one is the important one. Without it, a failed `nvs` open would make
+the App's next boot report `+ NONE` and send whoever read it hunting for a
+missing call site - when the call was made and the storage refused it. A new
+boot cause that is never logged is useless; a silent failure in the thing that
+explains failures is worse than useless.
+
+These are `Journal::` lines, so they reach the `callog` partition and survive to
+be read over USB. They are deliberately **not** put on the glass: everything in
+this file happens in the last moments before a restart, and a diagnostic about
+diagnostics would replace a household's "Starting" message with a sentence
+written for somebody holding a cable.
+
+### 13.7 Interaction with Phase 0
+
+`feature/app-requests-cal-update` has the App set `RestartCause::Ota` before
+handing back for a CAL update, and explicitly declines to add an enum value of
+its own. That is consistent with §13.4 rather than in tension with it: on an
+App-requested CAL update the App is the first writer, so the chain reports `OTA`
+and CAL's `CalSelfInstall` correctly stands down. `CAL_SELF_INSTALL` is
+therefore the token for a CAL update **CAL decided on**, which is the case that
+otherwise has no explanation at all.
+
+Phase 0 adds no enum values, so there is no numbering collision to resolve when
+the two land.
+
+### 13.8 What this does not do
+
+- **Nothing here has run on hardware.** It compiles; that is the whole claim.
+  See TEST_PLAN.md §7 for what has to be observed on a real device.
+- **CAL still cannot report anything about itself.** It has no check-in and no
+  telemetry. Every cause written here is read, cleared and reported by the *App*,
+  on the boot after. A device that never reaches a working App reports nothing,
+  and the `callog` journal is the only record.
+- **The `nvs` write costs a flash write per deliberate restart.** Bounded -
+  nothing is written on an ordinary power-on boot - but it is not free.

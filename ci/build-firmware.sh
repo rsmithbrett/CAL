@@ -150,6 +150,44 @@ if ! grep -q 'requestDoc\["motionCapability"\]' App/CheckIn.cpp 2>/dev/null; the
   exit 1
 fi
 
+# THE TWO RestartCause ENUMS ARE A WIRE FORMAT, AND NO COMPILER CHECKS THEM.
+#
+# BootDiag.h and App/BootDiag.h each declare RestartCause. They are deliberately
+# separate files - the two sketches compile independently and share no headers,
+# which is the same reason Identity, Display and Tls exist twice here. CAL writes
+# the numeric value into the "bootdiag" NVS namespace immediately before
+# esp_restart(); the App reads it back on the boot that follows and reports it on
+# every telemetry row from then on.
+#
+# So this is two binaries on the SAME device agreeing on a number, and nothing in
+# either build can notice if they stop agreeing. The two sketches are never
+# compiled together, so a value that means CAL_HANDOVER in one and
+# CAL_INSTALLED_APP in the other is perfectly legal C++ on both sides. The device
+# would then confidently report the wrong cause for exactly the restart that
+# installed the drift - a diagnostic that lies is worse than one that is missing,
+# because the missing one at least says so (see CAL_OTA_DESIGN.md section 13).
+#
+# Checked the same way the partition tables above are checked, and for the same
+# reason: the invariant is real, the failure is silent, and a comment in each file
+# asking the next person to be careful is not a mechanism.
+echo "==> Checking the two RestartCause enums agree"
+restart_causes() {
+  # $1: path to a BootDiag.h. Emits "Name = N" per line, in declaration order,
+  # from that file's enum body only.
+  sed -n '/enum class RestartCause/,/^};/p' "$1" | grep -oE '^  [A-Za-z]+ = [0-9]+'
+}
+if ! diff -q <(restart_causes BootDiag.h) <(restart_causes App/BootDiag.h) >/dev/null; then
+  echo "ERROR: BootDiag.h and App/BootDiag.h disagree on RestartCause." >&2
+  echo "       These values are the wire format between two binaries on one device:" >&2
+  echo "       CAL writes the number to NVS before restarting, the App reads it on the" >&2
+  echo "       next boot and reports it as the restart cause. A mismatch misreports" >&2
+  echo "       exactly the restart that installed it, and no compiler will catch it." >&2
+  echo "       Add the value in BOTH files with the SAME number, and never renumber." >&2
+  echo "       See CAL_OTA_DESIGN.md section 13 and TEST_PLAN.md section 7a." >&2
+  diff <(restart_causes BootDiag.h) <(restart_causes App/BootDiag.h) >&2 || true
+  exit 1
+fi
+
 echo "==> Compiling CAL"
 arduino-cli compile --fqbn "$FQBN" --export-binaries .
 

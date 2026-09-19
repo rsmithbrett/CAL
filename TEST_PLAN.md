@@ -826,6 +826,186 @@ each time, until roughly 4 KB has accumulated.
   MAC. That is a deliberate line and worth re-checking if new log lines are
   added.
 
+
+---
+
+## 7. CAL records why it restarted the device (`BootDiag.h`/`.cpp` at the repo root)
+
+The thing being tested is a sentence, not a behaviour: after this change an App
+boot that followed a CAL handover must say **which** handover it was, and the
+server must sort it as deliberate rather than unexpected. See
+CAL_OTA_DESIGN.md §13 for the design and for why CAL's `BootDiag.h` is a
+deliberate partial copy of the App's.
+
+**Nothing below has been run.** The change compiles and that is all that is
+established.
+
+### 7a. The two enum copies agree — check this before anything else
+
+The numbers in `BootDiag.h` and `App/BootDiag.h` are the wire format between two
+binaries on the same device. They are not compared by any compiler, because the
+two sketches are never compiled together.
+
+```
+grep -A30 'enum class RestartCause' BootDiag.h     | grep -oE '[A-Za-z]+ = [0-9]+'
+grep -A80 'enum class RestartCause' App/BootDiag.h | grep -oE '[A-Za-z]+ = [0-9]+'
+```
+
+Both must print, in order and identically:
+
+```
+None = 0, LowHeap = 1, Ota = 2, Reprovision = 3, SelfTest = 4,
+Unreachable = 5, LowHeapResponse = 6, CalHandover = 7,
+CalInstalledApp = 8, CalSelfInstall = 9
+```
+
+A difference here is not a style issue. CAL writes the number and the App reads
+it, so a drifted value makes the device confidently report the wrong cause for
+exactly the restart that installed the drift.
+
+Check the spellings agree too — CAL's `describe()` and the App's
+`describeCause()` must produce the same token for the same value, or a journal
+read over USB and a telemetry row on the server will name one restart two ways.
+
+### 7b. The ordinary handover — `CAL_HANDOVER`
+
+The most common boot in the fleet, and the one that used to be filed as
+unexplained.
+
+1. A device with a healthy App already installed. Power-cycle it.
+2. CAL runs its ladder and hands over.
+
+**In the journal (USB), before the restart:**
+
+```
+[boot] restart cause recorded as CAL_HANDOVER - the App's next boot reports
+       that rather than an unexplained software reset
+[updater] boot partition set - restarting into the application now
+```
+
+**In the App's log on the boot that follows:**
+
+```
+[boot] restart reason: SOFTWARE_RESET + CAL_HANDOVER
+```
+
+and **no** `a deliberate restart recorded no cause` line. That line disappearing
+is the pass condition for this entire section.
+
+**On the server:** the telemetry row carries `SOFTWARE_RESET+CAL_HANDOVER` and
+`RebootHeatmap.Classify()` sorts it **Deliberate**. Confirm against the heatmap,
+not against the log — §13.1's whole point is that the log was never the
+delivery mechanism.
+
+### 7c. CAL installs on its own initiative — `CAL_INSTALLED_APP`
+
+This is device 17's 2026-09-17 restart, the one with no cause at all.
+
+1. Erase `ota_0`'s header so `haveBootableApplication()` says no, leaving a
+   device CAL must fetch an App for without anybody asking.
+2. Let it boot with a network.
+
+Expect `[boot] restart cause recorded as CAL_INSTALLED_APP`, then
+`SOFTWARE_RESET + CAL_INSTALLED_APP` on the App side.
+
+**The distinction from 7b is the whole value here.** A device reporting
+`CAL_HANDOVER` came back running the same binary; one reporting
+`CAL_INSTALLED_APP` came back running something different. If both cases report
+the same token, this test has failed even though nothing looks wrong.
+
+### 7d. An App-requested update still reports `OTA`, not CAL's cause
+
+The regression this change could most easily cause, and the reason
+`recordRestartIntentIfNoneRecorded()` exists.
+
+1. Mark a new App build current on the server.
+2. Let a running App take it at check-in. The App records `OTA` and reboots
+   into CAL; CAL installs and hands over.
+
+**Expect the journal to show CAL standing down:**
+
+```
+[boot] restart cause OTA already recorded - kept, not replaced by
+       CAL_INSTALLED_APP
+```
+
+and the App to report `SOFTWARE_RESET + OTA`.
+
+If it reports `CAL_INSTALLED_APP`, first-writer-wins is broken and every OTA in
+the fleet has lost its more specific cause — a diagnostic made worse by the
+change meant to improve it.
+
+Repeat for `Reprovision` and `SelfTest`, which reach CAL the same way.
+
+### 7e. The trampoline — `CAL_SELF_INSTALL` explains all three restarts
+
+Needs §11's bench procedure and a CAL update.
+
+The chain is CAL → staged candidate → new CAL → re-downloaded App: three
+restarts before an App runs again. The cause is recorded at the **first** of
+them.
+
+Expect exactly one App boot at the end of the burst reporting
+`SOFTWARE_RESET + CAL_SELF_INSTALL`, and the journal to show the later hops
+deferring:
+
+```
+[boot] restart cause CAL_SELF_INSTALL already recorded - kept, not replaced by
+       CAL_SELF_INSTALL
+```
+
+**What would be wrong:** three separate causes, or a final boot reporting
+`CAL_INSTALLED_APP` because the last hop overwrote the first. Somebody reading a
+reboot heatmap must get one sentence for the burst, not three.
+
+### 7f. Power cut between recording and restarting
+
+The failure mode the placement in §13.5 is chosen against.
+
+1. Pull power in the window after `[boot] restart cause recorded as ...` and
+   before the device comes back.
+2. Restore power.
+
+The App must report `POWERON_RESET + NONE`, **not** `POWERON_RESET +
+CAL_HANDOVER`. The App's read side suppresses a stored intent on a power-on
+boot, because an intent a power cut interrupted is not the reason the device
+came back up. The stored value is still cleared.
+
+### 7g. NVS refuses to open
+
+The case that must be loud rather than silent.
+
+1. Make `Preferences.begin("bootdiag")` fail — fill `nvs`, or point CAL at a
+   table with no `nvs` partition.
+2. Boot and let CAL hand over.
+
+Expect `[boot] NVS would not open to record restart cause CAL_HANDOVER - the
+App's next boot will wrongly report NONE`, **and the handover to happen
+anyway.** A device that cannot record why it is restarting must still restart.
+
+Without that line the App reports `+ NONE` and its own message sends the reader
+after a missing call site that is not missing.
+
+### 7h. Known gaps, stated rather than discovered later
+
+- **An older App with a newer CAL reports nothing useful.** A CAL writing `9`
+  to an App whose enum stops at `6` hits the App's `takeRecordedCause()`
+  fallthrough and is reported as `None` — which reads exactly like the defect
+  this change fixes. Acceptable only because the two binaries ship together and
+  the project is not in production; it stops being acceptable the moment a
+  device can run mismatched halves.
+- **No automated test covers 7a.** The agreement between the two enums is held
+  by a comment in each file and by this section. `ci/build-firmware.sh` already
+  gates on `partitions.csv` matching between the two sketches for the same class
+  of reason, and this invariant has no equivalent gate.
+- **CAL's own restarts are invisible unless an App eventually runs.** A device
+  that never reaches a working App reports no cause to the server at all; the
+  `callog` journal is the only record and it needs a cable.
+- **`CAL_HANDOVER` is recorded on the failed-install fallback path too.** When
+  an install fails and CAL falls back to the previously installed App, the cause
+  reads `CAL_HANDOVER` — true, because the device did come back running what it
+  had before, but it does not say that an install was attempted and failed. The
+  journal says so; the telemetry token does not.
 ---
 
 ## What a clean compile does and does not prove

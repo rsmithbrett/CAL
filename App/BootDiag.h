@@ -61,6 +61,13 @@ namespace BootDiag {
 /// Values are explicit and never renumbered: they are written to NVS by one
 /// boot and read by the next, so a build that renumbers them mid-upgrade would
 /// misreport the reason for exactly the restart that installed it.
+///
+/// AND THEY ARE MIRRORED IN CAL/BootDiag.h, which is not the same file. The two
+/// sketches compile independently - each takes only the sources sitting beside
+/// it - so CAL keeps a write-only copy of this enum, and CAL is the binary that
+/// records the cause for every handover restart. The numbers are the wire
+/// format between the two: one build writes the byte, the other reads it.
+/// Adding a value means adding it in both places, with the same number.
 enum class RestartCause : uint32_t {
   None = 0,
   /// The heap-health watchdog in App.ino decided the device could no longer
@@ -123,6 +130,42 @@ enum class RestartCause : uint32_t {
   /// recovery restart rather than as an unrecognised reason, with no server
   /// change required for it to read correctly on day one.
   LowHeapResponse = 6,
+  /// CAL finished its boot ladder and started this App, which was already
+  /// installed. Nothing was downloaded and nothing was wrong.
+  ///
+  /// **The three causes from here down are written by CAL, not by this
+  /// firmware, and that is the point.** Every restart above is one the App
+  /// decided on and recorded itself. These are the ones where the App is the
+  /// only binary that can REPORT the restart and the last binary that could
+  /// possibly have recorded it - a handover is CAL's `esp_restart()`, and the
+  /// boot it produces is this App's. Until CAL had a BootDiag of its own
+  /// (CAL/BootDiag.h, a deliberate partial copy - the two sketches compile
+  /// separately and share no headers) those restarts recorded nothing, and this
+  /// file's own "a deliberate restart recorded no cause" line fired on them.
+  /// Observed on device 17 on 2026-09-17 at about 02:03 UTC, on the boot right
+  /// after CAL installed v2026.09.16.0003 and handed over.
+  ///
+  /// Which is worth remembering when this diagnostic next complains: the cause
+  /// is written by one boot and read by the next, so the binary that reports a
+  /// gap is never the binary that left it.
+  CalHandover = 7,
+  /// CAL downloaded and installed an application image, then started it. The
+  /// App that reports this came back running something other than what it was
+  /// running before, which CalHandover above does not say.
+  ///
+  /// NOT the same as `Ota`, and the difference is who asked. `Ota` means this
+  /// App found an update at check-in and went back to CAL for it - so `Ota` is
+  /// already recorded before CAL ever runs, and CAL leaves it alone. This one
+  /// means CAL installed on its own initiative: no bootable image on the flash,
+  /// boot attempts exhausted, or a version mismatch found on a boot the App
+  /// never requested. Device 17's silent restart was exactly that case.
+  CalInstalledApp = 8,
+  /// CAL replaced ITSELF - the factory partition - and this App boot is the far
+  /// side of that. See CAL_OTA_DESIGN.md section 10: the chain is CAL -> staged
+  /// candidate -> new CAL -> re-downloaded App, three restarts before an App
+  /// runs again, and this cause is recorded at the first of them so the whole
+  /// burst has one explanation rather than none.
+  CalSelfInstall = 9,
 };
 
 /// Records what this restart is FOR, immediately before calling
