@@ -214,8 +214,31 @@ it is written to be read top to bottom.
    ahead of the display on purpose: a hang inside `lcd.init()` is one of the
    things it exists to make visible, and it cannot record that if it runs
    afterwards. Budgeted at under 400 ms so it does not eat into the two-second
-   rule immediately below.
-1. **Display first, within about two seconds of power.** A dark screen is
+   rule in step 4.
+1. **Load identity from NVS.** No device secret means the unit was never
+   provisioned. That is a manufacturing fault, not something a household can
+   resolve, so CAL says exactly that and stops rather than starting a setup
+   flow that cannot succeed. This runs *ahead of the display*, and only because
+   step 3 needs `bootAttempts` and `updreq` to decide who owns the panel. It is
+   `prefs.begin()` and a handful of NVS reads — milliseconds, no flash erase, no
+   network — so step 4's two-second rule is unaffected, and anything inserted
+   here has to keep that true.
+2. **Check the BOOT button.** Two tiers on one gesture — see *Two BOOT-button
+   gestures* below. When it is held, this draws its own prompt straight away,
+   which is also what stops step 3 from ever handing over with an abandoned
+   "keep holding" prompt left on the glass.
+3. **Decide whether to contact the server at all, and who draws this boot's
+   loading screen.** If a healthy application is installed and no update was
+   requested, CAL hands over immediately — see *CAL must not need the network to
+   boot* immediately below. On that branch **and only that branch**, if three
+   further conditions also hold, CAL paints nothing at all and lets the App draw
+   the restart's single loading screen; every other path, CAL is loud. The
+   conditions, the reasoning, and the convention for anybody adding a message to
+   a boot path in *either* binary are in
+   **[`BOOT_SCREEN_OWNERSHIP.md`](BOOT_SCREEN_OWNERSHIP.md)**. Read it before
+   adding a boot message: the question is which binary owns the panel at that
+   instant, before it is a question about wording.
+4. **Display, within about two seconds of power.** A dark screen is
    indistinguishable from a dead device and will be unplugged mid-setup. The
    cached brand splash is shown if one exists, otherwise a neutral one. Every
    `showStatus()` screen for the rest of this ladder now draws that same
@@ -223,25 +246,25 @@ it is written to be read top to bottom.
    status line under it) rather than clearing to a blank screen and retyping
    text - so a boot that works through several status lines in a row reads as
    one continuous branded screen, not the brand flashing once and vanishing.
-2. **Load identity from NVS.** No device secret means the unit was never
-   provisioned. That is a manufacturing fault, not something a household can
-   resolve, so CAL says exactly that and stops rather than starting a setup
-   flow that cannot succeed.
-3. **Decide whether to contact the server at all.** If a healthy application is
-   installed and no update was requested, CAL hands over immediately — see
-   below.
-4. **Join WiFi** with stored credentials, retrying, and fall back to the
+   Skipped *only* on step 3's quiet handover. `Display::begin()` is idempotent
+   and every draw function brings the panel up itself if it has not been called,
+   so that skip is the absence of a draw rather than a disabled display — there
+   is no reachable state in which CAL wants to draw and cannot.
+5. **Hand over immediately** if step 3 found a healthy application and no reason
+   to contact the server. This is where the overwhelming majority of this
+   device's boots end.
+6. **Join WiFi** with stored credentials, retrying, and fall back to the
    captive-portal provisioning flow if that fails.
-5. **Synchronise the clock over SNTP.** Mandatory, and mandatory *in this
+7. **Synchronise the clock over SNTP.** Mandatory, and mandatory *in this
    position*. The device has no RTC and boots believing it is 1970, so every
    certificate it is offered looks not-yet-valid and TLS fails. A result earlier
    than `Config::kEarliestPlausibleTime` is treated as a failure rather than an
    answer, because SNTP itself is unauthenticated. The failure is reported to the
    household as "cannot reach the internet", which is what they can act on — not
    as a certificate error.
-6. **Fetch the discovery document**, cache brand assets (cosmetic, never fatal),
+8. **Fetch the discovery document**, cache brand assets (cosmetic, never fatal),
    compare the manifest against the installed version, install if they differ.
-7. **Hand over**, or — if there is no application to hand over to — show the
+9. **Hand over**, or — if there is no application to hand over to — show the
    server-supplied QR and wait.
 
 ### CAL must not need the network to boot
@@ -3471,19 +3494,52 @@ half of the section above work at all.
 
 The second half is `showBootSplash()` returning `bool` rather than `void`
 (`Assets.h`/`Assets.cpp`), which `setup()` uses to decide what happens next.
-When the logo actually reached the screen, the "Checking the time" and
-"Loading" status screens are skipped, so it stays up through the WiFi join,
-the SNTP sync, and right until the first real card replaces it -
-`CardManager::poll()` holds whatever is on screen until a real policy arrives,
-so nothing has to be redrawn to keep it there. That is what a branded boot was
-always supposed to look like: the logo first, the network connecting
-underneath it, rather than the brand flashing once and being painted over a
-moment later. When there is no splash - no card, nothing configured, or a
-decode that failed anyway - `false` comes back and both status screens appear
-exactly as before, because silence on a blank panel while WiFi retries is a
-worse boot than a plain status line. Failure screens are never suppressed
-either way: a household that has to hold BOOT to fix its WiFi has to be told
-so.
+When the logo actually reached the screen, the boot's progress screens are
+skipped, so it stays up through the WiFi join, the SNTP sync, and right until
+the first real card replaces it - `CardManager::poll()` holds whatever is on
+screen until a real policy arrives, so nothing has to be redrawn to keep it
+there. That is what a branded boot was always supposed to look like: the logo
+first, the network connecting underneath it, rather than the brand flashing
+once and being painted over a moment later. When there is no splash - no card,
+nothing configured, or a decode that failed anyway - `false` comes back and the
+status screens appear exactly as before, because silence on a blank panel while
+WiFi retries is a worse boot than a plain status line. Failure screens are never
+suppressed either way: a household that has to hold BOOT to fix its WiFi has to
+be told so.
+
+### Correction: the paragraph above described an intention, not the binary
+
+Kept rather than quietly reworded, because the gap between the two is the
+finding. Until 2026-09-15 the sentence above read "the *'Checking the time'* and
+*'Loading'* status screens are skipped, so it stays up through the WiFi join" —
+and the logo had **never** stayed up through the WiFi join, on any device, in
+any shipped build, for the whole life of the feature.
+
+The hold was implemented as exactly two `if (!splashOnScreen)` guards, around
+`App.ino`'s *own* two status calls. `WifiJoin::joinStoredNetwork()` draws two
+status screens of its own from a different translation unit, unconditionally,
+and neither guard could ever reach them. They land a few hundred milliseconds
+after the splash appears. So the real sequence on every boot was: logo for one
+frame, then "Looking for known networks". Precisely the household report — "the
+splash is on screen for a split second" — and the reason it took a while to
+believe was that the documentation said otherwise and nobody re-derived it from
+the code.
+
+Two changes make the paragraph above true as written. The skip is now one
+decision (`decideBootNarration()`) pushed into every module that draws during
+boot via `WifiJoin::setProgressVisible()`, so it actually reaches WifiJoin; and
+`kMinSplashOnScreenMs` guarantees the logo three seconds regardless, because
+with the join silenced the splash's lifetime was otherwise whatever the network
+happened to cost, which is a race the brand keeps losing on a fast boot.
+
+Two lessons worth more than the fix. A documented claim about what reaches the
+screen is not evidence of what reaches the screen — a compiler checks neither
+`if` guard against a draw call in another translation unit. And a suppression
+expressed as N local guards will be wrong the moment there are N+1 places that
+draw; expressing it as one decision that modules *ask* is the shape that does
+not rot. The same reasoning is why CAL's side of the handoff is one function
+with one journal line rather than a guard at each of its own draw sites — see
+[`BOOT_SCREEN_OWNERSHIP.md`](BOOT_SCREEN_OWNERSHIP.md).
 
 ## The heap-fragmentation watchdog had become the reboot loop it was written to prevent
 

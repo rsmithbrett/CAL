@@ -77,6 +77,18 @@ constexpr uint32_t kIdentityEraseHoldMs = 10000;
 
 enum class BootHoldResult { None, WifiReset, IdentityErase };
 
+/// Whether the gesture check below has put anything on the glass this boot.
+///
+/// Read only by appOwnsThePanelThisBoot(). A finger on the BOOT button means a
+/// human is present and acting, and the prompt this draws is left on screen
+/// when the household releases early - so a boot that painted for a gesture
+/// must go on being loud, or it hands over with "Keep holding BOOT" still up,
+/// telling somebody to keep holding a button they already let go of. Nothing
+/// used to clear that because the splash and the WiFi ladder landed on top of
+/// it milliseconds later; a quiet handover removes exactly that accident. The
+/// App hit the same defect and fixed it in restoreHeldBootScreen().
+bool gPanelUsedForGesture = false;
+
 BootHoldResult bootHoldRequested() {
   pinMode(kBootButtonPin, INPUT_PULLUP);
   if (digitalRead(kBootButtonPin) != LOW) {
@@ -86,6 +98,10 @@ BootHoldResult bootHoldRequested() {
 
   Journal::printf("[boot] BOOT held at power-on - %lu ms more selects WiFi setup",
                   static_cast<unsigned long>(kWifiResetHoldMs));
+  // Set before the draw, not after: what matters downstream is that the panel
+  // has been claimed for a gesture, and recording it first means an exception
+  // or a hang inside the draw cannot leave the flag lying about it.
+  gPanelUsedForGesture = true;
   Display::showStatus("Keep holding BOOT to set up WiFi", "Release now to cancel");
   uint32_t deadline = millis() + kWifiResetHoldMs;
   while (millis() < deadline) {
@@ -119,6 +135,93 @@ BootHoldResult bootHoldRequested() {
   }
   Journal::line("[boot] BOOT held through both tiers - identity erase requested");
   return BootHoldResult::IdentityErase;
+}
+
+/// Whether the App - not CAL - draws this restart's one and only boot screen.
+///
+/// **The one circumstance in which CAL is allowed to paint nothing at all.**
+/// Every restart on this hardware runs App -> CAL -> App, so both binaries used
+/// to draw a brand mark and a "Starting" line on every restart. Harmless at one
+/// boot a week; on 2026-09-11 the fleet was restarting every 13-27 minutes
+/// (devices 12 and 17: 12 and 24 self-restarts in five hours), at which point
+/// four screen clears and three brand marks per restart are not the boot
+/// experience, they are the product experience. The App half of the fix already
+/// shipped - see its "What a boot is allowed to say on the glass" block. This is
+/// CAL's half, and BOOT_SCREEN_OWNERSHIP.md is the whole argument.
+///
+/// **Why this is written as four things that must all be TRUE.** CAL is the
+/// recovery image: a device whose App will not boot is rescued by what CAL puts
+/// on the glass, and these units cannot be serviced remotely. The costs are
+/// nowhere near symmetric. A redundant splash annoys somebody; a dark panel on
+/// a device that cannot start its App is a unit boxed and returned as dead when
+/// it was recoverable over USB in two minutes - against a binary that cannot be
+/// patched over the air. So silence is never inferred from the absence of a
+/// problem. It requires positive evidence on all four counts, and anything
+/// missing, unreadable or unexpected lands on "loud", which costs a splash
+/// rather than a device.
+///
+/// All four inputs are logged on every boot, including the boots that return
+/// false, because "CAL decided to stay quiet" has to be distinguishable in the
+/// journal from "CAL never got that far". A silent skip is the thing that cost
+/// this project the night of 2026-09-15.
+bool appOwnsThePanelThisBoot(esp_reset_reason_t resetReason, bool contactServer) {
+  // (1) The restart was asked for by software. Equality against ESP_RST_SW, not
+  // a list of excluded reasons, so every value this does not know about - a
+  // future ESP-IDF addition included - is loud by construction. What that
+  // excludes on purpose: POWERON, because somebody just plugged it in and is
+  // standing there waiting to find out whether it works, which is the exact
+  // case the two-second rule exists for; BROWNOUT, because the supply sagged
+  // and the firmware has no basis for claiming the device is fine; and PANIC
+  // and the three watchdogs, because a crash is not therapy - this firmware
+  // did not choose it and cannot vouch for a boot it did not intend. The App
+  // reached the same conclusion about unexpected resets independently.
+  const bool deliberateRestart = (resetReason == ESP_RST_SW);
+
+  // (2) CAL's very next statement is Updater::bootApplication() and nothing
+  // else - no WiFi join, no SNTP wait, no enrollment poll, no download, no QR.
+  // This is what makes "a successor is about to draw" true rather than hopeful,
+  // and it excludes three cases for free: an OTA restart and a reprovision both
+  // set updreq, and a device with no bootable app fails
+  // haveBootableApplication() - which is the bricked-device case this whole
+  // function is written around.
+  const bool handingOverImmediately = !contactServer;
+
+  // (3) The App cleared the boot-attempt ledger last time, which is an
+  // OBSERVATION that this app boots on this device rather than a belief that it
+  // should. bootApplication() increments it immediately before esp_restart();
+  // the App zeroes it only once it has reached steady state.
+  //
+  // **This is what bounds the risk, and it is the core of the safety
+  // argument.** Suppose all four conditions hold, CAL goes quiet, and the App
+  // then panics before its first draw - the worst case for this design. The
+  // counter is ALREADY at 1, because CAL incremented it on the way out. So the
+  // next boot fails this check, CAL is loud again, and it stays loud for every
+  // later attempt; at kMaxBootAttempts haveBootableApplication() turns false
+  // and CAL stops handing over at all and re-downloads. A device cannot be
+  // silently dark - it can only be briefly dark once.
+  const uint8_t attempts = Identity::bootAttempts();
+  const bool appProvenHealthy = (attempts == 0);
+
+  // (4) Nothing has been painted for a BOOT-button gesture this boot. See
+  // gPanelUsedForGesture.
+  const bool panelFree = !gPanelUsedForGesture;
+
+  const bool quiet =
+      deliberateRestart && handingOverImmediately && appProvenHealthy && panelFree;
+
+  // Kept under the journal's 160-byte line cap, deliberately and with the
+  // verdict last-but-short: Journal::printf() truncates past that and marks it,
+  // so a line long enough to explain itself in prose is a line whose conclusion
+  // gets cut off. All four inputs and the answer, on one line that fits. The
+  // reasoning lives in BOOT_SCREEN_OWNERSHIP.md, where it has room.
+  Journal::printf("[display] loading screen: swReset=%d(rst=%d) handover=%d bootAtt=%u "
+                  "panelFree=%d -> %s",
+                  deliberateRestart ? 1 : 0, static_cast<int>(resetReason),
+                  handingOverImmediately ? 1 : 0, static_cast<unsigned>(attempts),
+                  panelFree ? 1 : 0,
+                  quiet ? "THE APP - CAL paints nothing, one screen not two"
+                        : "CAL - splash and narration, the default");
+  return quiet;
 }
 
 /// Shows a terminal condition and stops.
@@ -219,13 +322,21 @@ void setup() {
   // Ahead of the display on purpose. A hang inside lcd.init() or a LittleFS
   // format is one of the things the journal exists to make visible, and it
   // cannot record that if it starts afterwards. Budgeted at well under 400 ms
-  // against the two-second rule immediately below: 512 bytes of header reads,
-  // one sector erase, and at most one sector printed to serial.
+  // against the two-second rule further down (the display now comes up after
+  // identity and the panel-ownership decision rather than immediately here -
+  // see Identity::begin()'s own note below): 512 bytes of header reads, one
+  // sector erase, and at most one sector printed to serial.
   Journal::begin();
   Journal::dumpLastBoot();
 
+  // Read once into a local rather than called twice. It is the boot banner's
+  // most useful field AND the first of appOwnsThePanelThisBoot()'s four inputs,
+  // and a decision this consequential must not be able to disagree with the
+  // line printed above it.
+  const esp_reset_reason_t resetReason = esp_reset_reason();
+
   Journal::printf("[boot] CAL starting: resetReason=%d freeHeap=%u largest8BitBlock=%u",
-                  static_cast<int>(esp_reset_reason()),
+                  static_cast<int>(resetReason),
                   static_cast<unsigned>(ESP.getFreeHeap()),
                   static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
   if (!Journal::persistent()) {
@@ -236,17 +347,14 @@ void setup() {
                   "restart");
   }
 
-  // Something must appear within about two seconds of power being applied. A
-  // display that stays dark is indistinguishable from a broken device and will
-  // be unplugged.
-  Display::begin();
-  if (!Display::showBrandSplash()) {
-    Journal::line("[display] no usable cached brand splash - drawing the neutral one");
-    Display::showNeutralSplash();
-  } else {
-    Journal::line("[display] cached brand splash drawn");
-  }
-
+  // MOVED AHEAD OF THE DISPLAY, and the two-second rule below is why that is
+  // safe rather than merely convenient. Deciding who owns this boot's loading
+  // screen needs bootAttempts() and updreq out of NVS, so identity has to be up
+  // before the panel instead of after it. All of this is prefs.begin() and a
+  // handful of NVS reads - milliseconds, no flash erase, no network - so on
+  // every path that goes on to draw, the splash still lands far inside the two
+  // seconds. Anything added between here and Display::begin() below has to keep
+  // that true.
   Identity::begin();
   Journal::printf("[identity] mac=%s secret=%s networks=%u installedApp='%s' updreq=%d "
                   "bootAttempts=%u/%u",
@@ -333,13 +441,70 @@ void setup() {
       break;
   }
 
+  // Hoisted into a local and computed once. It used to be called inline at the
+  // handover branch below; it is now also the second input to the panel
+  // ownership decision, and calling it twice would both run
+  // haveBootableApplication()'s three-reason logging twice and leave open the
+  // possibility of the two calls disagreeing. The only visible change is that
+  // its journal lines now appear a few lines earlier in the boot.
+  const bool contactServer = mustContactServer();
+
+  // Who draws this boot's loading screen. False on all but one narrow branch -
+  // see the function's own remarks and BOOT_SCREEN_OWNERSHIP.md.
+  const bool appDrawsTheLoadingScreen = appOwnsThePanelThisBoot(resetReason, contactServer);
+
+  if (!appDrawsTheLoadingScreen) {
+    // Something must appear within about two seconds of power being applied. A
+    // display that stays dark is indistinguishable from a broken device and will
+    // be unplugged.
+    Display::begin();
+    if (!Display::showBrandSplash()) {
+      Journal::line("[display] no usable cached brand splash - drawing the neutral one");
+      Display::showNeutralSplash();
+    } else {
+      Journal::line("[display] cached brand splash drawn");
+    }
+  } else {
+    // The panel is deliberately not touched at all on this path: no lcd.init(),
+    // no LittleFS mount, no splash. Said out loud - and in two lines, because
+    // the journal truncates at 160 bytes - because a reader finding no
+    // [display] draw in a journal has to be able to tell "CAL chose not to
+    // draw" from "CAL never reached the display". Those want completely
+    // different investigations, and this journal is the whole diagnostic
+    // channel for a device whose other one belongs to the App.
+    Journal::line("[display] panel deliberately untouched: no lcd.init(), no LittleFS, no "
+                  "splash - CAL chose not to draw, it did not fail to get there");
+    Journal::line("[display] the App's own \"Starting\" screen is about a second away, and any "
+                  "screen CAL still needs brings the panel up by itself");
+  }
+
   // A unit holding no secret is newly flashed, not faulty. Every device is
   // written with the identical image; which device it is gets established
   // below, once it is on a network and can report its hardware address.
-  if (!mustContactServer()) {
-    Display::showStatus("Starting", Identity::installedAppVersion());
+  if (!contactServer) {
+    if (appDrawsTheLoadingScreen) {
+      // The line this replaces. It drew the SAME brand mark the splash above
+      // had just drawn, moved 20px up, with "Starting" and the version under
+      // it - and then the App cleared the screen and drew its own "Starting"
+      // about a second later. That duplicate pair is the whole complaint this
+      // change answers, and skipping it here is the change: the App's
+      // "Starting" is the one that survives into the rest of the uptime, so
+      // the App's is the one that gets to be drawn.
+      Journal::printf("[boot] not drawing \"Starting %s\" - the App draws this restart's "
+                      "only loading screen",
+                      Identity::installedAppVersion().c_str());
+    } else {
+      Display::showStatus("Starting", Identity::installedAppVersion());
+    }
     Updater::bootApplication();
-    // Only reached if handing over failed outright.
+    // Only reached if handing over failed outright - which on a quiet boot is
+    // exactly the moment the silence has to end, because nothing else is ever
+    // going to paint this panel. haltWithFailure() -> Display::showFailure()
+    // brings the display up on its own if CAL skipped it above.
+    if (appDrawsTheLoadingScreen) {
+      Journal::line("[display] handover FAILED - breaking this boot's silence. Nothing else "
+                    "will paint this panel and dark reads as dead, not recoverable");
+    }
     haltWithFailure("Cannot start application",
                     "Restart the device. If this persists, contact support.");
   }

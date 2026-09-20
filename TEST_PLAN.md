@@ -1037,17 +1037,178 @@ after a missing call site that is not missing.
   journal says so; the telemetry token does not.
 ---
 
+## 7. One loading screen across the CAL → App handoff
+
+Design and reasoning: `BOOT_SCREEN_OWNERSHIP.md`. The change is CAL-side: on an
+immediate handover to an app that has already proved it boots, CAL paints
+nothing at all and the App's "Starting" screen becomes the restart's only
+loading screen. **Every item here needs hardware.** A clean compile proves none
+of it, and the thing it would be most embarrassing to get wrong — a panel that
+stays dark because CAL went quiet on the wrong branch — is by definition
+invisible to a compiler.
+
+Watch the serial console throughout for the one line that reports the decision:
+
+```
+[display] loading screen: swReset=? (rst=?) handover=? bootAtt=? panelFree=? -> ...
+```
+
+All four inputs are printed on every boot, including the boots where CAL stays
+loud. If that line is missing altogether, CAL never reached the decision, which
+is a different finding from CAL deciding to draw. It is worded tightly on
+purpose: `Journal::printf()` truncates at 160 bytes and marks it, so a line
+discursive enough to explain itself would have its verdict cut off — the prose
+lives in `BOOT_SCREEN_OWNERSHIP.md` instead. If you see `...(truncated)` on this
+line, a later edit has grown it past the cap.
+
+### 7a. A therapeutic restart shows one screen, not two — the point of the change
+
+- Drive a device into `RestartCause::LowHeap` or `::Unreachable` (see 1a/1b for
+  how each is produced) and watch the panel across the whole hop, rather than
+  glancing at the end state.
+- Expect: the App's "Refreshing — Reclaiming memory, back in a moment" (or
+  "Reconnecting"), a brief blank, the App's "Starting", the splash held for its
+  three-second minimum, then the first card.
+- Expect **no brand mark from CAL and no second "Starting &lt;version&gt;"**. One
+  brand mark and one "Starting" for the whole restart is a pass; two of either
+  means the bug is still present.
+- Expect the decision line to read `-> THE APP`, with `swReset=1 handover=1
+  bootAtt=0 panelFree=1`, and to be preceded by the two `[display] panel
+  deliberately untouched` / `[display] the App's own "Starting"` lines.
+- Time the blank between the App's last frame and the App's "Starting". §5.3 of
+  the design trades a bounded dark window for the entire benefit, so the bound
+  should be measured rather than asserted. Under about a second is expected.
+
+### 7b. A cold power-on is still loud — deliberately
+
+- Pull the plug and reapply power, on a device with a healthy app installed.
+- Expect CAL's brand splash within about two seconds, then "Starting
+  &lt;version&gt;", then the App's own screens — i.e. **unchanged from before
+  this change.** `bootAttempts` is 0 here too, so this case is separated from
+  7a only by the reset reason, and it is the case where somebody is standing
+  there holding the plug.
+- Expect the decision line to read `-> CAL` with `swReset=0`.
+- This is also the check that the two-second rule survived moving
+  `Identity::begin()` ahead of the display. If the splash is visibly later than
+  it used to be, something between the journal and `Display::begin()` is doing
+  more work than the reordering assumed.
+
+### 7c. The panel comes up correctly when CAL never initialised it
+
+The step where a surprise would be most visible, and the one nothing in the
+source can settle: on a quiet boot CAL never calls `lcd.init()`, and the App
+calls it about a second later, alone.
+
+- Perform 7a and look hard at the App's first frame for garbling, a wrong
+  rotation, wrong brightness, or a panel that stays dark.
+- Expected to be identical to today, since the App's `Display::begin()` is
+  unconditional and has always re-initialised a panel CAL had already
+  initialised. But "expected" is not "observed" — run this item first.
+
+### 7d. A failed handover breaks the silence — the recovery path
+
+The item the whole design is defensive about. It verifies that a CAL which chose
+to stay quiet can still get a screen onto the glass.
+
+- Force `Updater::bootApplication()` to return instead of restarting. The
+  practical way is to make `esp_ota_set_boot_partition()` fail, or to return
+  early from `bootApplication()` just after `recordBootAttempt()`, on a device
+  that otherwise satisfies all four quiet conditions.
+- Expect `[display] handover FAILED - breaking this boot's silence`, immediately
+  followed by **"Cannot start application / Restart the device. If this
+  persists, contact support." visible on the panel.**
+- A dark panel here is a **failing result and a blocker**, not a cosmetic
+  defect: it is precisely the bricked-looking-but-recoverable device the design
+  exists to prevent, and it would mean the lazy panel start-up in `Display.cpp`
+  does not work.
+
+### 7e. An app that will not boot makes CAL loud again within one cycle
+
+- Install a build that panics early in `setup()`, before its first `Display`
+  call, on a device whose `bootAttempts` is 0.
+- Expect the first boot to be quiet (roughly a second of black), and **every
+  subsequent boot to be loud** — splash, "Starting &lt;version&gt;", the full
+  ladder — because `bootAttempts` is no longer 0.
+- Expect the third attempt to stop handing over at all:
+  `[updater] no bootable app: ... has used 3 of 3 boot attempts`, then CAL's
+  download ladder.
+- The claim under test is "a device cannot be silently dark; it can only be
+  briefly dark once". Count the dark boots. More than one is a failure.
+
+### 7f. BOOT pressed and released during a therapeutic restart
+
+- During CAL's window on a therapeutic restart, press BOOT and release it before
+  three seconds.
+- Expect "Keep holding BOOT to set up WiFi" to appear and then be **covered by
+  CAL's brand splash** — CAL goes loud for the rest of that boot.
+- Expect the decision line to read `-> CAL` with `panelFree=0`.
+- Handing over with the abandoned prompt still on screen is the failure mode
+  here. It is the same defect the App had to fix separately in
+  `restoreHeldBootScreen()`.
+
+### 7g. The loud paths are untouched
+
+Regression cover for the branches that must not have changed. Each should look
+exactly as it did before:
+
+- **OTA install** (`updreq` set): splash, WiFi, "Checking the time",
+  "Contacting service", the download progress bar, "Do not unplug".
+- **Reprovision** (`returnToLoaderForReprovisioning()`): splash, then the ladder.
+- **No app installed**: splash, then the enrollment QR with the hardware
+  address, or the not-yet-activated screen.
+- **BOOT held through both tiers**: both gesture prompts, the identity erase,
+  then the ladder.
+
+### 7h. Known gaps, stated rather than discovered later
+
+- **CAL still clears to black before its splash on every loud path.**
+  `Display::begin()` does `lcd.init()` then `fillScreen`. Removing that frame
+  would mean reasoning about what an ILI9341's GRAM holds after a chip reset
+  plus a panel software reset, which is not something to guess at in the binary
+  that cannot be patched over the air. Not fixed, deliberately.
+- **CAL knows nothing about the App's `kMaxSilentSelfRestarts` budget.** Past
+  three self-restarts the App starts saying "This device keeps restarting
+  itself" on the one screen it holds, while CAL stays quiet on that same boot.
+  The split is intended — the message belongs to the binary that owns the panel
+  when it is read — but it means that case is now narrated by the App alone.
+  Worth confirming on hardware that the message is legible for long enough,
+  since CAL no longer contributes a frame ahead of it.
+- **`bootAttempts` is a one-bit signal for this purpose.** CAL treats 1 and 2
+  identically (loud). Deliberate, but it means a device alternating healthy and
+  unhealthy boots alternates loud and quiet ones. Not observed; recorded so it
+  is not mistaken for a new fault.
+- **`RestartCause::SelfTest` is declared in `App/BootDiag.h` and recorded by
+  nothing** in `App.ino`. Unrelated to this change and harmless to it — a
+  self-test build is requested through `updreq`, so that path is loud either way
+  — but it is the same declared-with-no-caller shape as the `Motion::` gate in
+  `ci/build-firmware.sh`, and worth either wiring or removing.
+
+---
+
 ## What a clean compile does and does not prove
 
 Recorded once, because several commits in this repository lean on it:
 
 - It proves the code builds against the pinned core and libraries, and it
   reports a size. Report sizes against the **real** ceilings from
-  `partitions.csv` - `ota_0` is **2,359,296** bytes and `factory`, which is
-  CAL's own, is **1,441,792** - never against `arduino-cli`'s generic 1,966,080,
-  which is for a partition scheme this project does not use. Note that `ota_0`
-  shrank by 65,536 bytes when `callog` was added: a figure of 2,424,832 quoted
-  anywhere is pre-`callog` and is now the wrong number.
+  `partitions.csv` — `factory`, which is CAL's own, is **1,703,936** bytes
+  (`0x1A0000`) and `ota_0` is **2,097,152** (`0x200000`) — never against
+  `arduino-cli`'s generic 1,966,080, which is for a partition scheme this
+  project does not use. **Do not quote these figures from memory; read
+  `partitions.csv`.** They have now moved twice, and every stale version of them
+  is still quoted somewhere:
+  - pre-`callog`: `ota_0` 2,424,832.
+  - after `callog` was carved out: `ota_0` 2,359,296, `factory` 1,441,792.
+    This document itself carried that pair until 2026-09-16.
+  - current, after *Give the partition that cannot be resized in the field some
+    room*: `factory` grew to 1,703,936 and `ota_0` shrank to 2,097,152. That
+    trade was made deliberately — `factory` cannot be re-sized without a USB
+    cable, and `ota_0` can be refilled over the air — so `factory` is the number
+    with headroom and `ota_0` is the one to watch.
+
+  `ci/build-firmware.sh` reads the table rather than holding constants, for
+  exactly this reason. A number typed into prose is a number that will be wrong
+  the next time somebody re-tables a device.
 - `strings` on the built image proves a literal is present. That is a real check
   and worth doing when a change is "the card must now be able to say X".
 - It proves nothing about heap, TLS, NVS, timing, the panel, or any decision
