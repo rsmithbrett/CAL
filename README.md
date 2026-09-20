@@ -5940,10 +5940,54 @@ characters, because the column is `varchar(1000)`, this lives in the retained
 `gLast` for as long as the state does, and every error the server actually
 produces identifies itself in its first clause.
 
+> `Result::refreshError` no longer exists. The invariant above is unchanged and
+> the paragraph is left as the history of how it was first met; see "The
+> operator's sentence stopped being kept here at all" below for where those
+> words went and why the device stopped holding a copy.
+
 Listings present alongside an error are left alone on purpose: the server is
 serving last-known-good rows behind a failing refresh, real rows beat a warning,
 and "Updated N min ago" already understates their age rather than overstating
 it. Only the stream is told.
+
+### The operator's sentence stopped being kept here at all
+
+Moving the signal to `status` left `Result::refreshError` holding nothing the
+card's behaviour depended on. It was a 120-character copy of `lastRefreshError`,
+retained in `gLast` for as long as a failure lasted, feeding two readers: three
+lines of the debug stream, and the `/diag` status line. It is now deleted.
+
+The reader was never wrong to want it - an admin at `/diag` does want "401" or
+"budget exhausted" rather than the softened sentence the card draws. The point
+is that **the device was the wrong place to keep it.** The sentence is an
+operator diagnostic; the server marks it `[OperatorDiagnostic]`, strips it at
+`DeviceJsonResult`, and serves the untruncated original on `/diag/providers`, to
+that same admin, from the record it was written on. The device's copy was
+shorter, harder to reach, and cost contiguous heap on the machine that has the
+least of it - and on the wire shape the fleet is moving to, that field is never
+sent, so the copy would soon have been of nothing.
+
+**The presence test is not the copy, and only the copy went.** The fallback for
+pre-strip servers needs to know *whether* a sentence arrived, never what it
+said: that is `hasRefreshError`, a `bool`, read once and retained nowhere. It
+stays, along with its filter entry, for exactly as long as a reachable server
+predates the strip - which is still, as of this change, all of them, since the
+server half has not merged. Deleting the presence test along with the copy would
+have put the original defect straight back for every un-upgraded server: no
+`status` to read, no `lastRefreshError` to fall back on, and every empty list
+drawn as an answered question again.
+
+The three stream lines survive and now print straight from the parsed document
+via `%.*s`, bounded by `kLoggedRefreshErrorChars`. Same 120 characters, same
+reasoning (an error identifies itself in its first clause), no allocation and
+nothing retained past the call - and the bound keeps a long sentence from
+pushing the line past `Log`'s 256-byte scratch buffer, which would take the
+line's own tail, the part naming which branch was taken, rather than the prose's.
+
+`cardStatus()`'s two readers lose their words and keep their no-words form,
+which already existed for the post-strip payload: "upstream refresh failed
+(reason is on the server, not the device)" says where the reason went, rather
+than reading as a value that went missing.
 
 ### Known gap: Aircraft has the same leak, and Forecast has it in softer form
 
@@ -5972,6 +6016,84 @@ before the field is readable at all, and the filter is what decides how much
 heap the parse takes on a board where that is the whole subject of this
 document. So both are left for their own change rather than smuggled into the
 listings one.
+
+**What changed since that survey: the field to read is `status`, not
+`LastRefreshError`.** The two bullets above still describe the defect correctly,
+but the fix they imply is now the wrong one - reading an operator's sentence is
+the mistake the listings card had to be moved off, and nothing should be moved
+*onto* it. Both should read `ProviderStatus` instead, for the reasons in "The
+signal moved to `status`" above.
+
+**Aircraft is now closed; Forecast is still open.** `AircraftResult` carries
+`status` on the wire, so that card was unblocked and is done - see the next
+section. Forecast is not: the weather device routes hand-project their payload
+and do not include `status` in the projection, so there is nothing to whitelist
+yet. It needs roughly twenty bytes added server-side first, which is recorded as
+open in the server's own README. **Until that lands, `Forecast.cpp` draws "No
+forecast is available yet" over what may be a failed refresh** - softer than the
+other two, because it asserts nothing about the weather itself, but still a card
+that cannot tell "nothing to report" from "never found out".
+
+The filter trap is the part to carry over verbatim. An un-whitelisted key never
+reaches the parsed document, so adding that read without adding the filter entry
+in the *same* edit compiles, ships, and silently does nothing - which is no
+longer a predicted failure mode but a demonstrated one, and the reason Forecast
+will need the stream to name the parsed value the way the other two now do.
+
+### Aircraft reads `status`, and does not get a fallback
+
+Same defect, same fix, one deliberate difference.
+
+The card now whitelists `status`, derives one `refreshFailed` boolean from it,
+and splits the empty path: `Aircraft::Status::Empty` keeps "No aircraft within N
+mi right now" and is now reachable **only** when the server reports its own
+refresh succeeded, while `RefreshFailed` draws "Couldn't check overhead just
+now" and states nothing about the sky. `Stale` leaves the cached sightings on
+screen and tells only the stream, exactly as the listings card does. A new
+`NotConfigured` rests muted rather than claiming an empty sky - this payload has
+no `isConfigured` of its own, so `status` is the only thing that can say so.
+
+**The difference: no `lastRefreshError` fallback.** The listings card reads that
+field's presence when `status` is absent, because it had correct behaviour built
+on the inference and deleting it would regress a shipped card. Aircraft never
+read the field at all - it was on the wire and was never whitelisted - so there
+is nothing to preserve, and adding the read now would newly teach a card to
+treat an operator's prose as a protocol element in the very change that exists
+to stop doing that. It would also pull that prose into the parsed document on a
+card that has never had it there.
+
+The cost is stated rather than hidden: **against a pre-strip server this card
+behaves exactly as it did before, empty-sky claim included.** It becomes correct
+when the server sends `status` and draws nothing worse in the meantime. That is
+the whole of the trade - a transitional benefit declined to avoid adopting the
+pattern being retired.
+
+`RefreshFailed` reads muted, not amber, for the reason the listings card's
+equivalent does: the panel, the network and our server are all fine, and amber
+in a kitchen for a fault nobody in that kitchen can fix teaches its reader to
+ignore amber. And as everywhere else, none of this raises `serviceUnreachable` -
+every `ProviderStatus` value arrives on a well-formed 200 from a server that
+answered.
+
+### One parser, not one per card
+
+`WireStatus` started as an anonymous-namespace enum plus two functions inside
+`Listings.cpp`. Aircraft needed the identical thing and Forecast will be third,
+so it moved to `ProviderStatus.h` instead of being copied.
+
+This is the opposite of what `describeFreshness()` does in three of these same
+files, and the difference is the point. That helper is duplicated because each
+copy reads a different card's unrelated `Result`, and sharing it would mean a
+new file to hold one function. This one touches no `Result` at all - it parses a
+wire vocabulary into a wire vocabulary - and three cards need the *same* answer.
+Copies of a parser are how one card learns about a fifth status value while
+another silently keeps calling it `Unrecognized`, and this is a closed
+vocabulary specifically so that cannot happen. The precedent is
+`Maintenance::failureText()`: one helper, not a conditional in every card.
+
+What deliberately did **not** move is the policy for `Absent`. That is per-card,
+not a property of the vocabulary, and the two callers answer it differently on
+purpose - each at its own call site, each saying why.
 
 ## The sixth heap bucket is a wire change, and the reading end is where it breaks
 

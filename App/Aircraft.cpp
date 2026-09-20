@@ -10,6 +10,7 @@
 #include "Identity.h"
 #include "Log.h"
 #include "Maintenance.h"
+#include "ProviderStatus.h"
 
 namespace Aircraft {
 namespace {
@@ -113,9 +114,22 @@ Result fetchMine() {
   //
   // Function-local static, so it is constructed on first use rather than
   // during static init where the heap is in no state to be relied on.
+  //
+  // THE FILTER IS NOT A DOCUMENTATION DETAIL, IT IS THE READ ITSELF. An
+  // un-whitelisted key is dropped during deserialization and never reaches
+  // `doc` at all, so `doc["status"]` on a filter without a `status` entry is
+  // indistinguishable from a server that never sent one - a silent, permanent
+  // fallback to "the refresh was fine" no matter what the server does. That is
+  // not hypothetical: it is why `lastRefreshError` was invisible to this card
+  // for its whole life, and why Listings.cpp calls the filter the load-bearing
+  // half of the same change. Adding a field to this card means adding it here
+  // in the same edit.
   static const JsonDocument filter = [] {
     JsonDocument f;
     f["radiusMiles"] = true;
+    // A top-level sibling of the array, not part of it, so it gets its own
+    // entry. See the empty-list branch below for what it decides.
+    f["status"] = true;
     f["aircraft"][0]["callsign"] = true;
     f["aircraft"][0]["altitudeFeet"] = true;
     f["aircraft"][0]["speedKnots"] = true;
@@ -143,13 +157,123 @@ Result fetchMine() {
 
   result.radiusMiles = doc["radiusMiles"] | 10.0;
 
+  // THE SIGNAL, AND THE ONE FIELD THIS CARD READS TO GET IT. `ProviderStatus`
+  // on the server - a closed vocabulary derived on the record, meant to be read
+  // by a machine. See ProviderStatus.h for what each value means and why a card
+  // reads this rather than the operator's sentence sitting next to it.
+  //
+  // WHY THERE IS NO `lastRefreshError` FALLBACK HERE, unlike Listings.cpp.
+  // That card reads the old field's PRESENCE when `status` is absent, because
+  // it already had correct behaviour built on that inference and deleting it
+  // would regress a shipped card against a server predating the strip. This
+  // card never read the field at all - it was on the wire and was never
+  // whitelisted - so there is no behaviour to preserve, and adding the read now
+  // would newly teach a card to treat an operator's prose as a protocol
+  // element, in the very change that exists to stop doing that. It would also
+  // pull that prose into the parsed document on a card that has never had it
+  // there, which is leak surface bought for a purely transitional benefit.
+  //
+  // The consequence is stated plainly rather than buried: against a pre-strip
+  // server this card behaves exactly as it does today, empty-sky claim and all.
+  // It becomes correct the moment the server sends `status`, and draws nothing
+  // worse in the meantime.
+  const char* statusText = doc["status"] | "";
+  const ProviderStatus::Value wire = ProviderStatus::parse(statusText);
+
+  // The one derived fact. Everything downstream reads this boolean.
+  bool refreshFailed = false;
+  switch (wire) {
+    case ProviderStatus::Value::Ok:
+      refreshFailed = false;
+      break;
+    // "Nothing was attempted" is not "an attempt failed". The branch below
+    // rests on NotConfigured before the aircraft array is ever consulted, so
+    // this value never reaches a claim about the sky either way.
+    case ProviderStatus::Value::NotConfigured:
+      refreshFailed = false;
+      break;
+    case ProviderStatus::Value::Stale:
+    case ProviderStatus::Value::Unavailable:
+    case ProviderStatus::Value::Unrecognized:
+      refreshFailed = true;
+      break;
+    // No status on this payload and, per the reasoning above, nothing else to
+    // consult. Reads as "the refresh was fine", which is this card's behaviour
+    // today and the only reading that does not start calling a genuinely empty
+    // sky a failure on every server currently deployed.
+    case ProviderStatus::Value::Absent:
+      refreshFailed = false;
+      break;
+  }
+
+  Log::verbose("[aircraft] status='%s' - %s", strlen(statusText) > 0 ? statusText : "(absent)",
+               ProviderStatus::describe(wire));
+
+  // A resting state, checked before the array is ever looked at - an account
+  // with no provider on file should read as "not set up", never as "nothing
+  // overhead". This card has no `isConfigured` of its own, so `status` is the
+  // only thing that can say so.
+  if (wire == ProviderStatus::Value::NotConfigured) {
+    result.status = Status::NotConfigured;
+    // A literal chosen for whoever this panel hangs in front of, never the
+    // server's own words - the same contract Result::message carries on every
+    // other card, and the one the listings card had to be taught after it put
+    // a vendor's sign-up instructions on a kitchen wall.
+    result.message = "Aircraft tracking is not set up for this home yet.";
+    Log::printf("[aircraft] NOT CONFIGURED - resting; neither an empty sky nor a failed refresh, "
+                "and the aircraft array was not consulted");
+    return result;
+  }
+
   JsonArrayConst aircraft = doc["aircraft"].as<JsonArrayConst>();
   if (aircraft.isNull() || aircraft.size() == 0) {
+    // AN EMPTY LIST IS NOT ONE FACT, IT IS TWO - identical in shape to the
+    // listings card's own empty-array split, and worse here in one respect: an
+    // empty sky is PLAUSIBLE far more often than an empty housing market, so
+    // the false version of this claim is much less likely to be questioned by
+    // whoever reads it. "No aircraft within 10 mi right now" is a flat
+    // statement about the sky, and until now this card made it whether or not
+    // anybody had actually looked.
+    //
+    // Deliberately NOT serviceUnreachable. That flag means "this device could
+    // not reach OUR server", which is what a declared maintenance window
+    // explains; this is our server answering perfectly well about an upstream
+    // feed it could not reach. None of the ProviderStatus values means our
+    // server is unreachable - every one arrives on a well-formed 200 - so
+    // nothing read out of that field may ever raise it, and failureText() keeps
+    // passing this message through untouched.
+    if (refreshFailed) {
+      result.status = Status::RefreshFailed;
+      // Says what did not happen, and pointedly does not say what is or is not
+      // overhead. No claim about the sky, and no count implied.
+      result.message = "Aircraft overhead could not be checked just now.";
+      Log::printf("[aircraft] empty list AND a failed refresh -> RefreshFailed; Empty NOT taken - "
+                  "nothing here licenses a claim about the sky. serviceUnreachable stays false: "
+                  "our server answered, the upstream feed did not");
+      return result;
+    }
     result.status = Status::Empty;
     char buffer[48];
     snprintf(buffer, sizeof(buffer), "No aircraft within %.0f mi right now.", result.radiusMiles);
     result.message = String(buffer);
+    // The one branch on this card that makes a positive claim about the sky,
+    // and until now the only one that logged nothing at all. It says so now,
+    // and says what it relied on to be allowed to.
+    Log::printf("[aircraft] empty list and a refresh not reported as failed -> Empty; "
+                "RefreshFailed NOT taken - drawn as a real statement about the sky within %.0f mi",
+                result.radiusMiles);
     return result;
+  }
+
+  // Sightings AND a failed refresh - `status: "Stale"`, the value that case
+  // exists to name. The server is serving last-known-good rows while its
+  // refresh fails behind them. Drawing real sightings beats drawing a warning,
+  // exactly as the listings card decides for its own cached rows, so the screen
+  // is left alone and only the stream is told.
+  if (refreshFailed) {
+    Log::printf("[aircraft] serving %u cached sighting(s) behind a failed refresh - drawing them "
+                "rather than a warning, and NOT taking RefreshFailed",
+                static_cast<unsigned>(aircraft.size()));
   }
 
   JsonVariantConst nearest = aircraft[0];
@@ -237,6 +361,15 @@ String cardStatus() {
              String(gLast.nearest.distanceMiles, 1) + " mi";
     case Status::Empty:
       return String("ok, nothing within ") + String(gLast.radiusMiles, 0) + " mi";
+    // Distinct from Empty on purpose, and this line is where an admin sees the
+    // difference: "nothing within 10 mi" is an answer, "could not check" is the
+    // absence of one. Carries no reason - that is an operator diagnostic and
+    // lives on the server's own /diag/providers, never on a device. See
+    // Listings::Result::message for the full argument.
+    case Status::RefreshFailed:
+      return "upstream refresh failed (reason is on the server, not the device)";
+    case Status::NotConfigured:
+      return "resting: no aircraft provider on file";
     case Status::NotActivated:
       return "refused: device not activated";
     case Status::ProviderDisabled:
@@ -347,12 +480,24 @@ void cardDraw(uint16_t) {
   // states read as ordinary/muted; auth and network trouble read amber -
   // same isProblem split Weather's card makes, just with a third muted case
   // this card has and weather doesn't.
+  // RefreshFailed joins the muted set rather than the amber one. Amber says
+  // "something is wrong with this device" and nothing is: the panel, the
+  // network and our server are all fine - an upstream feed our server talks to
+  // is not. Same reasoning, and the same resting-vs-amber split, that the
+  // listings card applies to its own RefreshFailed; amber in a kitchen for a
+  // fault nobody in that kitchen can fix teaches its reader to ignore amber.
   const bool isRestingState = gLast.status == Status::NotActivated ||
                               gLast.status == Status::ProviderDisabled ||
+                              gLast.status == Status::NotConfigured ||
+                              gLast.status == Status::RefreshFailed ||
                               gLast.status == Status::Empty;
-  const String headline = gLast.status == Status::Empty ? "Nothing overhead right now"
-                          : isRestingState              ? "Aircraft overhead is not showing yet"
-                                                        : "Could not load aircraft data";
+  // Empty and RefreshFailed get DIFFERENT headlines, which is the whole point:
+  // one states the sky is clear, the other declines to state anything about it.
+  const String headline = gLast.status == Status::Empty  ? "Nothing overhead right now"
+                          : gLast.status == Status::RefreshFailed
+                              ? "Couldn't check overhead just now"
+                          : isRestingState ? "Aircraft overhead is not showing yet"
+                                           : "Could not load aircraft data";
   // Resolved on this draw rather than at fetch time - see Forecast.cpp's
   // identical call site and Maintenance.h. The log line keeps the raw message on
   // purpose; the debug stream wants the fault, not the reassurance.

@@ -260,10 +260,13 @@ wrong figure routes a reader to the wrong work.
 
 ---
 
-## 3. Listings tells "none for sale" apart from "could not ask" (`902fc69`)
+## 3. A card tells "nothing to report" apart from "could not ask" (`902fc69`)
 
-`Status::RefreshFailed` on `Listings::Result`, plus the removal of a raw
-upstream error from a drawn string.
+`Status::RefreshFailed` on `Listings::Result` and now on `Aircraft::Result`,
+plus the removal of a raw upstream error from a drawn string and then from the
+device entirely. Listings is the card this started on and 3a-3c are its
+procedure; 3d is the same split on Aircraft, where the false claim is the harder
+one to catch.
 
 **Automated coverage:** the server side of this is covered by
 `Providers.Tests` / `MyListingsServiceTests` and `DeviceFacingPayloadTests` in
@@ -302,8 +305,16 @@ of the RentCast key.
    at all, so the text is *absent* from the stream by design and the card's
    `/diag` line reads "upstream refresh failed (reason is on the server, not the
    device)". The reason has not been lost - it moved to the server's own
-   operator routes. Against a pre-strip server the original wording still
-   applies, which is the only reason it is struck through rather than deleted.
+   operator routes.
+
+   Against a **pre-strip** server the two surfaces now differ, so check them
+   separately: the sentence is still in the **debug stream** (bounded to 120
+   characters, printed straight from the response and retained nowhere), and it
+   is **never** on the `/diag` status line, on either wire shape. The device
+   stopped keeping a copy of it at all - `Result::refreshError` is deleted - so
+   that line has only its no-words form now. This is the only part of the
+   original step that still applies anywhere, which is why it is struck through
+   rather than deleted.
 6. Declare a maintenance window while the key is invalid. The card must keep
    saying "could not be refreshed" - **not** "server maintenance". Our server is
    answering fine; it is RentCast that is not, and relabelling that as our
@@ -313,32 +324,36 @@ of the RentCast key.
 
 ### 3b. Known gaps, unfixed, verified as still present
 
-These are the two findings from the survey done alongside `902fc69`. **Both are
-open.** Each step below is expected to FAIL today; they are written as tests so
-the fix, when it comes, has an acceptance criterion, and so nobody rediscovers
-them from scratch.
+These are the findings from the survey done alongside `902fc69`. **One is now
+closed, one is still open.** They are written as tests so a fix has an
+acceptance criterion and nobody rediscovers the gap from scratch.
 
-- **Aircraft, same leak, arguably worse.** `AircraftResult` carries
-  `LastRefreshError` on the wire; `Aircraft.cpp`'s ArduinoJson filter does not
-  whitelist it, so the card cannot read it even to log it; and the empty path
-  draws **"No aircraft within 10 mi right now"** - a flat claim about the sky
+- **Aircraft, same leak, arguably worse - NOW FIXED, see 3d.** The empty path
+  drew **"No aircraft within 10 mi right now"** - a flat claim about the sky
   made by a device that may have been told nothing about the sky. Worse than the
   listings case in one respect: an empty sky is plausible far more often than an
-  empty housing market, so nobody in the room will question it. *Test, once
-  fixed:* break the aircraft feed server-side and confirm the card stops
-  claiming the sky is empty.
-- **Forecast, softer form.** `WeatherResult` carries the field, the filter does
-  not, and the empty path says "No forecast is available yet" - which asserts
-  nothing about the weather, so only the diagnostic half is missing. *Test, once
-  fixed:* break the weather feed and confirm the reason reaches the stream.
+  empty housing market, so nobody in the room will question it. The card reads
+  `status` now and splits that path; 3d is the procedure. **Note the fix is
+  conditional on the server:** against a pre-strip server that sends no `status`
+  this card still behaves exactly as described above, deliberately and for the
+  reasons in `Aircraft.cpp`'s own remarks. 3d step 3 is that case.
+- **Forecast, softer form - STILL OPEN, and blocked server-side.**
+  `WeatherResult` carries `status`, but the weather *device* routes hand-project
+  their payload and do not include it, so there is nothing to whitelist yet. The
+  empty path says "No forecast is available yet", which asserts nothing about
+  the weather, so only the diagnostic half is missing. This step is expected to
+  FAIL today. *Test, once the server sends the field:* break the weather feed
+  and confirm the card stops saying "not available yet" over a failed refresh,
+  and that `status` names the value in the stream.
 - **Tides and HomeValue cannot have this.** Neither fetches; both arrive
   flattened on the check-in response with no error field on the wire, and
   HomeValue drops its card entirely rather than drawing a claim. No test needed,
   recorded so the survey is not repeated.
 
-Note both open fixes need a filter entry added before the field is readable at
+The remaining fix needs a filter entry added before the field is readable at
 all, and the filter is what decides how much heap the parse takes. That is why
-neither was smuggled into the listings change.
+neither was smuggled into the listings change, and it is the first thing to
+check if the Forecast fix ever appears to do nothing.
 
 ### 3c. The card reads `status`, and still works on a server that does not send it
 
@@ -481,6 +496,85 @@ payload will have no `lastRefreshError` to fall back to anyway. The consequence
 is that a future fifth value degrades to "could not check for listings" - never
 to a claim about the market. If a fifth value is ever added and that is the wrong
 default for it, this is the line to change.
+
+### 3d. Aircraft tells "clear sky" apart from "could not look"
+
+The same split as 3a/3c, on the card where the false claim is hardest to catch:
+an empty sky is plausible most of the time, so "No aircraft within 10 mi right
+now" drawn over a failed refresh is unlikely to be questioned by anyone in the
+room. Drive these the way 3c drives the listings card - the server derives
+`status` from the provider record, so breaking the upstream feed is what
+produces each value.
+
+#### 1. The filter, first, because it is the whole read
+
+Before anything else, confirm the stream names a parsed value:
+
+```
+[aircraft] status='Ok' - the server's refresh succeeded; its data is current
+```
+
+`status='(absent)'` against a server known to send the field means the
+ArduinoJson filter is dropping it, and **every check below will pass for the
+wrong reason** - the card falls back to "the refresh was fine" and looks
+correct. This is the same trap as 3c step 1 and is the first thing to rule out.
+
+#### 2. Each value, and the branch it must produce
+
+| `status` | sightings | expected screen |
+|---|---|---|
+| `Ok` | some | the normal card, unchanged |
+| `Ok` | none | "Nothing overhead right now" - the only state allowed to say so |
+| `Unavailable` | none | "Couldn't check overhead just now" - **no** claim about the sky |
+| `Stale` | some | the normal card, sightings drawn, **no** warning; stream only |
+| `NotConfigured` | any | "Aircraft overhead is not showing yet", muted, array not consulted |
+
+Confirm the `Unavailable` screen contains no number of miles and no word
+implying emptiness. The failure to look for is the card reverting to the
+`Empty` wording, which is the entire defect.
+
+`Stale` must leave the sightings on screen. The stream says so and the panel
+does not:
+
+```
+[aircraft] serving 3 cached sighting(s) behind a failed refresh - drawing them rather than a warning, and NOT taking RefreshFailed
+```
+
+#### 3. A pre-strip server, where this card is deliberately NOT fixed
+
+Point the device at a server that sends no `status`. The card behaves exactly
+as it did before this change: an empty list draws "No aircraft within 10 mi
+right now" whatever the upstream feed did. **This is the expected result, not a
+regression** - `Aircraft.cpp` says why it declined the `lastRefreshError`
+fallback that `Listings.cpp` keeps. The stream must say which case it is in:
+
+```
+[aircraft] status='(absent)' - no status field on this payload - a server that predates the field
+```
+
+*This step is what stops being true when the server ships.* Once no reachable
+server predates the strip, re-run step 2 and this one should become
+unreachable.
+
+#### 4. Muted, not amber, and still not `serviceUnreachable`
+
+`RefreshFailed` must read as a resting state - the same muted treatment
+`NotConfigured` and the two refusals get - not the amber "something is wrong
+with this device" styling. Nothing is wrong with the device.
+
+Then declare a maintenance window while the upstream feed is broken. The card
+must keep saying "couldn't check overhead" and **not** "server maintenance":
+our server is answering fine, and relabelling a provider failure as our own
+downtime replaces one false claim with another. Same distinction as 3a step 6
+and 3c step 5, on a second card.
+
+#### 5. `NotConfigured` draws a literal, never the server's words
+
+Photograph the `NotConfigured` screen and confirm it reads "Aircraft tracking is
+not set up for this home yet." and contains no vendor name, no URL, and no
+configuration key. This card has no `isConfigured` field of its own, so `status`
+is the only thing that can reach this branch - and the branch exists so the card
+never reports an empty sky for an account that has no provider on file.
 
 ---
 
