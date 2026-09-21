@@ -279,6 +279,15 @@ starting (its splash, then its journal lines). This proves the boot pointer is
 now on `factory` and that `factory` is *currently* bootable. **If CAL does not
 come up here, stop** — the rest of the test is uninterpretable.
 
+> CAL does not draw a splash on *every* boot any more, so it is worth saying why
+> one is still expected here: this step is a **power cycle**, and
+> `appOwnsThePanelThisBoot()` goes quiet only on a deliberate `ESP_RST_SW`
+> restart that is handing straight over to an App that has already proved it
+> boots. A power-on is loud by construction, as is a device whose `factory` is
+> about to be found broken. See `BOOT_SCREEN_OWNERSHIP.md`. If you ever re-run
+> this test by triggering a *software* restart instead of pulling the power, a
+> blank panel is the correct result and the journal is the thing to read.
+
 **Step 3 — corrupt the first sector of `factory`.** The first sector holds the
 image header (magic `0xE9`, segment count, entry point) and the first segment
 header, so erasing it guarantees `bootloader_load_image` rejects the image. It
@@ -337,8 +346,11 @@ deliver control to `ota_0` — which now holds **CAL**, not the App. One power
 cycle answers both questions at once.
 
 **What to look for:** CAL's own splash and its journal lines, from a unit whose
-`factory` is broken. If CAL renders and reaches its ladder, the image is
-offset-independent and §5.4 is viable. If it panics, reboots, or shows a
+`factory` is broken. (The splash is expected here on two independent counts —
+this is a power cycle, and a unit with no bootable App fails
+`mustContactServer()` — so neither of the conditions that let CAL stay quiet is
+met. See `BOOT_SCREEN_OWNERSHIP.md`.) If CAL renders and reaches its ladder, the
+image is offset-independent and §5.4 is viable. If it panics, reboots, or shows a
 scrambled panel, §5.4 is dead and §5.3 (SD) becomes the only remote path — so
 this test is a go/no-go, not a curiosity.
 
