@@ -145,6 +145,14 @@ constexpr uint32_t kIssFlyoverBanner = 0x1A1A2Eu;
 // weather's navy and aircraft's bright blue already coexist as the two
 // closest-related pair on this device.
 constexpr uint32_t kForecastBanner = 0x6A1B9Au;
+// A deep crimson, picked by elimination against every banner above rather than
+// for any association with sport. The obvious choice was a teal-green, and it
+// was wrong: tides already own 0x0F6B5C and a sports banner near it would have
+// been within a few values per channel - indistinguishable across a room, which
+// is the test this palette has been applied with throughout. Crimson is the
+// nearest genuinely unclaimed hue, far enough from listings' brick (0xA13D2D)
+// on the magenta side and from calendar's plum (0x6D2E6B) on the red side.
+constexpr uint32_t kSportsBanner = 0xA3195Bu;
 constexpr int kBannerHeight = 22;
 constexpr int kCardMargin = 10;
 
@@ -1306,6 +1314,68 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
 
   drawClock();
   restoreDefaultFont();
+}
+
+void showSportsCard(const String& homeName, const String& homeScore, const String& awayName,
+                    const String& awayScore, const String& status, uint16_t itemNumber,
+                    uint16_t itemCount) {
+  lcd.fillScreen(bg());
+  drawCardBanner("SPORTS", kSportsBanner, 110);
+
+  // Two team rows, each a name on the left and a score hard right. Names are
+  // truncated rather than wrapped and the score column is reserved first, so a
+  // long club name can never push a score off the edge or onto a second line -
+  // the score is the thing somebody crossing the room is trying to read.
+  constexpr int kScoreColumnWidth = 64;
+  constexpr int kHomeRowY = 62;
+  constexpr int kAwayRowY = 116;
+  const int nameWidth = kScreenW - kCardMargin * 2 - kScoreColumnWidth;
+
+  lcd.setTextSize(1);
+
+  for (int row = 0; row < 2; ++row) {
+    const String& name = row == 0 ? homeName : awayName;
+    const String& score = row == 0 ? homeScore : awayScore;
+    const int y = row == 0 ? kHomeRowY : kAwayRowY;
+
+    lcd.setFont(&fonts::FreeSansBold18pt7b);
+    lcd.setTextColor(ink(), bg());
+    lcd.setTextDatum(top_left);
+    drawTruncatedLeft(name, kCardMargin, y, nameWidth);
+
+    // Empty before play starts, and that is drawn as nothing rather than as a
+    // zero. Null and zero are different facts here: a nil-nil draw is a real
+    // scoreline and a game that has not started is not 0-0.
+    if (score.length() > 0) {
+      lcd.setTextDatum(top_right);
+      lcd.drawString(score, kScreenW - kCardMargin, y);
+    }
+  }
+
+  // The status row: a clock time before, the provider's own progress text
+  // during, FINAL or PPD after. Empty when the server sent a state this
+  // firmware does not know, and then this row is simply absent - claiming a
+  // game has not started is exactly the claim an unknown state cannot support.
+  if (status.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    lcd.setTextColor(muted(), bg());
+    lcd.setTextDatum(top_left);
+    lcd.drawString(status, kCardMargin, 172);
+  }
+
+  // "2 of 4", only on a card actually holding several games, so a one-game team
+  // card is not decorated with a counter that never changes.
+  if (itemCount > 1) {
+    char marker[16];
+    snprintf(marker, sizeof(marker), "%u of %u", static_cast<unsigned>(itemNumber),
+             static_cast<unsigned>(itemCount));
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setTextColor(muted(), bg());
+    lcd.setTextDatum(top_right);
+    lcd.drawString(marker, kScreenW - kCardMargin, 176);
+  }
+
+  gContentBottom = 200;
 }
 
 void showIssFlyoverCard(const String& distanceText, const String& directionText,

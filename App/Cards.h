@@ -421,7 +421,17 @@ struct CardSpec {
 // count exactly means the next new card type needs this line touched again -
 // which is the point: it is a one-line edit, and it is far better than paying
 // for three empty descriptors forever so that edit can be skipped.
-static constexpr uint8_t kMaxCards = 29;
+// 33 as of 2026-09-24: the 29 above plus four sports registrations from
+// Sports.cpp - sportsteam, sportsteam2, sportsscores and sportslive. The
+// server catalog advertises ELEVEN sports ids and this is deliberately not
+// eleven: each registration costs a CardSpec here and a PolicyEntry slot in
+// the array below, and covering all eleven would add roughly 1.6 KB of .bss on
+// a board whose largest contiguous block has been measured near the
+// 16,717-byte TLS floor - the memory that decides whether TLS opens at all. A
+// policy naming one of the other seven is ignored with a log line, exactly as
+// "weather" already is, and instances 3-5 are a later registration if anybody
+// asks for them. See Sports.h for the full accounting.
+static constexpr uint8_t kMaxCards = 33;
 
 /// Called from each card module's own translation unit at static-init time
 /// (see the `kRegistered` idiom at the bottom of Weather.cpp/Aircraft.cpp),

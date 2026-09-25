@@ -10,6 +10,7 @@
 #include "Http.h"
 #include "Identity.h"
 #include "Log.h"
+#include "Sports.h"
 #include "Motion.h"
 
 namespace CheckIn {
@@ -638,6 +639,72 @@ Result perform() {
   // parseIso8601Utc() for the refresh timestamp is the same "both null and
   // missing become 0" treatment issNextPassRiseUtc gets above. See
   // CheckIn.h's own homeValueEstimate remarks.
+
+  // SPORTS. Applied straight to Sports:: rather than staged through
+  // CheckInResult, which is a deliberate break from how every field above is
+  // handled and is worth the inconsistency: the games are the only
+  // variable-length payload here, and carrying them on the result struct too
+  // would mean a second full copy of up to four cards x four games resident at
+  // once. On the heap whose LARGEST CONTIGUOUS BLOCK decides whether TLS opens,
+  // a duplicate that exists only to preserve a code shape is the wrong trade.
+  //
+  // A MISSING "sports" KEY CLEARS NOTHING. Absent means the server said nothing
+  // about sports - an older server, or a device with no sports card - and the
+  // right response is to leave whatever is on screen alone. An explicitly empty
+  // array is different: that is the server saying there is nothing on, and it
+  // clears. Conflating the two would blank a card every time an old server
+  // answered.
+  if (responseDoc["sports"].is<JsonArrayConst>()) {
+    JsonArrayConst sportsCards = responseDoc["sports"].as<JsonArrayConst>();
+
+    if (sportsCards.size() == 0) {
+      Sports::clearAll();
+    } else {
+      for (JsonObjectConst card : sportsCards) {
+        const char* cardId = card["cardId"] | "";
+        if (cardId[0] == '\0') { continue; }
+
+        Sports::Game games[Sports::kMaxGames];
+        uint8_t count = 0;
+
+        for (JsonObjectConst game : card["games"].as<JsonArrayConst>()) {
+          if (count >= Sports::kMaxGames) { break; }
+
+          Sports::Game& slot = games[count];
+          slot.startsAtUtc = parseIso8601Utc(game["startsAtUtc"] | "");
+
+          // An unrecognised state maps to Unknown rather than to a guess. A
+          // wrong "live" is the costliest reading: it invites somebody to watch
+          // a score that will never move.
+          const char* state = game["state"] | "";
+          if (strcmp(state, "live") == 0)            { slot.state = Sports::State::Live; }
+          else if (strcmp(state, "final") == 0)      { slot.state = Sports::State::Final; }
+          else if (strcmp(state, "scheduled") == 0)  { slot.state = Sports::State::Scheduled; }
+          else if (strcmp(state, "postponed") == 0)  { slot.state = Sports::State::Postponed; }
+          else                                       { slot.state = Sports::State::Unknown; }
+
+          // -1 for absent, which is Sports::kNoScore - and distinct from 0,
+          // because a nil-nil draw is a real scoreline and a game that has not
+          // started is not 0-0.
+          slot.homeScore = game["homeScore"] | static_cast<int>(Sports::kNoScore);
+          slot.awayScore = game["awayScore"] | static_cast<int>(Sports::kNoScore);
+
+          // Bounded copies: these strings came off a wire and their length is
+          // not this firmware's to trust.
+          strncpy(slot.home, game["home"] | "", Sports::kMaxTeamNameLength);
+          slot.home[Sports::kMaxTeamNameLength] = '\0';
+          strncpy(slot.away, game["away"] | "", Sports::kMaxTeamNameLength);
+          slot.away[Sports::kMaxTeamNameLength] = '\0';
+          strncpy(slot.period, game["period"] | "", Sports::kMaxPeriodLength);
+          slot.period[Sports::kMaxPeriodLength] = '\0';
+
+          ++count;
+        }
+
+        Sports::setGames(cardId, games, count);
+      }
+    }
+  }
   result.homeValueEstimate = responseDoc["homeValueEstimate"] | -1;
   result.homeValueRangeLow = responseDoc["homeValueRangeLow"] | -1;
   result.homeValueRangeHigh = responseDoc["homeValueRangeHigh"] | -1;

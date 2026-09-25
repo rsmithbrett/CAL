@@ -201,6 +201,30 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
 void showHomeValueCard(const String& address, const String& estimateText, const String& rangeText,
                        const String& detail);
 
+/// A sports card: two team names with their scores, and a status line that is a
+/// clock time before the game, the provider's own progress text during it
+/// ("T7", "78'"), and FINAL or PPD after.
+///
+/// Scores arrive as strings and are EMPTY rather than "0" before play starts -
+/// null and zero are different facts and a nil-nil draw is real, so this draws
+/// the gap rather than a number nobody scored. The same "draw the gap honestly
+/// rather than fabricate" rule showHomeValueCard() applies to a missing range.
+///
+/// status may be empty, which happens when the server sent a state this
+/// firmware does not recognise. The row is then left blank rather than filled
+/// with a guess: that a game has not started is exactly the claim that cannot
+/// be made about an unknown state.
+///
+/// itemNumber and itemCount drive a small "2 of 4" marker, drawn only when the
+/// card holds more than one game, so a scoreboard reads as a list rather than
+/// as one result that keeps changing.
+///
+/// This draws, it does not compute - every value arrives already chosen,
+/// ordered and capped by the server. See Sports.h.
+void showSportsCard(const String& homeName, const String& homeScore, const String& awayName,
+                    const String& awayScore, const String& status, uint16_t itemNumber,
+                    uint16_t itemCount);
+
 /// The ISS flyover card: distance and compass direction to the International
 /// Space Station's current sub-satellite point, plus a one-line detail
 /// giving the actual coordinates - same two-stat-rows-plus-detail layout as
