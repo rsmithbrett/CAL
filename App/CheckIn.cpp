@@ -531,19 +531,81 @@ Result perform() {
     // firmware does, and on a board whose contiguous heap decays all evening
     // NoMemory is by far the likeliest of the five. "response was not valid
     // JSON" sent every one of those to look at the server.
-    result.responseOutOfMemory = (err == DeserializationError::NoMemory);
-    if (result.responseOutOfMemory) {
-      // Both heap figures, for the reason App.ino's [health] line prints both:
-      // ESP.getMaxAllocHeap() reads a constant 32,756 on this board and has
-      // already caused wrong diagnoses, so the honest number is printed beside
-      // the misleading one rather than instead of it.
+    // MEASURED ONCE, HERE, AND PRINTED ON EVERY BRANCH. The figure is what
+    // decides the classification below, so it has to be the same number the log
+    // line shows - reading it twice would let the message and the decision
+    // disagree about a value that moves between two calls.
+    //
+    // Both heap figures, for the reason App.ino's [health] line prints both:
+    // ESP.getMaxAllocHeap() reads a constant 32,756 on this board and has
+    // already caused wrong diagnoses, so the honest number is printed beside the
+    // misleading one rather than instead of it.
+    const size_t largest = Http::largestContiguousBytes();
+    const unsigned freeHeap = static_cast<unsigned>(ESP.getFreeHeap());
+
+    // A FRESH TLS SESSION NEEDS 16,717 CONTIGUOUS BYTES TWICE - see
+    // Http::kTlsRecordBufferBytes. When the largest single block is below the
+    // pair, no single run can hold both, and the second allocation has only the
+    // remainder to live in.
+    const bool couldNotHoldAFreshSession = largest < (2 * Http::kTlsRecordBufferBytes);
+
+    // TWO WAYS TO BE AN OUT-OF-MEMORY FAILURE, AND THE SECOND ONE WAS BEING
+    // BLAMED ON THE SERVER FOR TEN DAYS.
+    //
+    // NoMemory is the honest one: ArduinoJson itself said it could not hold the
+    // parse. IncompleteInput is the one that lies. The stream really was short,
+    // so by the letter of the code the input WAS incomplete - but on this board
+    // the usual reason it is short is that the read buffer could not be
+    // allocated, not that the server sent less than it promised.
+    //
+    // Confirmed on device 17 over 74 minutes of stream on 2026-09-15: every
+    // failure in the run followed an rgb565 graphic card draw, at free8BIT
+    // around 30,650 with a largest block of 25,588. The first record buffer fits
+    // in that block; the second has about 14KB of remainder and does not. Every
+    // POST was recorded server-side and every other device answered ok in the
+    // same minutes, so nothing was wrong with the server on any of them.
+    //
+    // WHY THE OBVIOUS DISPROOF IS NOT ONE. Successful check-ins were logged at
+    // largest=18,420, BELOW figures at which others failed, which looks like it
+    // rules the heap out and does not: a REUSED session allocates neither
+    // buffer. Largest-block alone does not predict success. What predicts it is
+    // whether a fresh handshake was needed. That inference was got wrong once
+    // already and is written down here so it is not got wrong again.
+    //
+    // THE MIRROR ERROR IS ACCEPTED DELIBERATELY. A genuinely truncated stream,
+    // arriving on a reused session while heap happens to be low, is now
+    // attributed to heap. That is the wrong attribution in that case, and it is
+    // the better trade: the action it produces (release the RAM buffers, and
+    // restart to reclaim memory if it keeps up) is harmless when the server was
+    // at fault, whereas the action the old classification produced counted
+    // toward UNREACHABLE and told the fleet the network had failed. One is a
+    // wasted remedy; the other is a permanent false record of what broke.
+    result.responseOutOfMemory =
+        err == DeserializationError::NoMemory
+        || (err == DeserializationError::IncompleteInput && couldNotHoldAFreshSession);
+
+    if (err == DeserializationError::NoMemory) {
       Log::printf("[checkin] response did not parse: %s - the server answered and the bytes were "
                   "fine, THIS DEVICE had no heap to hold them (largest 8BIT block=%u, free heap=%u)",
-                  err.c_str(), static_cast<unsigned>(Http::largestContiguousBytes()),
-                  static_cast<unsigned>(ESP.getFreeHeap()));
+                  err.c_str(), static_cast<unsigned>(largest), freeHeap);
+    } else if (result.responseOutOfMemory) {
+      Log::printf("[checkin] response did not parse: %s - the stream was short, and this device "
+                  "could not have held a fresh TLS session when it happened, so the likeliest "
+                  "cause is THIS DEVICE rather than the server (largest 8BIT block=%u needs %u "
+                  "twice, free heap=%u). NOT counted toward the unreachable threshold",
+                  err.c_str(), static_cast<unsigned>(largest),
+                  static_cast<unsigned>(Http::kTlsRecordBufferBytes), freeHeap);
     } else {
-      Log::printf("[checkin] response did not parse: %s - the server's answer is what was wrong",
-                  err.c_str());
+      // The heap figures are printed here too, and that is the whole point of
+      // the change: the suggestion that produced it asked for the largest block
+      // beside the error code on EVERY parse failure, so that the next person
+      // can see for themselves whether these cluster below the floor. A log
+      // line that only prints the measurement when the code already decided it
+      // mattered cannot be used to check the decision.
+      Log::printf("[checkin] response did not parse: %s - this device could have held a fresh TLS "
+                  "session, so the server's answer is what was wrong (largest 8BIT block=%u, "
+                  "free heap=%u)",
+                  err.c_str(), static_cast<unsigned>(largest), freeHeap);
     }
     return result;
   }

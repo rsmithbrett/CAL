@@ -601,13 +601,54 @@ time:
 
 ### 4b. What must be observed
 
-1. `[checkin] out of heap parsing the response, N of 3 ... NOT counted toward
-   the unreachable threshold`. The count must be the OOM counter, and the
-   connection counter must stay where it was.
+1. `[checkin] could not take the response in for want of heap, N of 3 ... NOT
+   counted toward the unreachable threshold`. The count must be the OOM counter,
+   and the connection counter must stay where it was. The wording changed on
+   2026-09-25 from "out of heap parsing the response", because this branch now
+   also catches a failure that never reached the parse.
 2. `err.c_str()` must name `NoMemory` specifically, with largest8 and free heap
-   beside it. A response that is genuinely malformed must still print its own
-   `DeserializationError` code and must **not** touch the OOM counter - test
-   this separately by having the server return truncated JSON.
+   beside it.
+
+**2a. `IncompleteInput` below the TLS floor. Added 2026-09-25, and it changes
+step 2.** That step used to end: "a response that is genuinely malformed must
+still print its own `DeserializationError` code and must **not** touch the OOM
+counter - test this separately by having the server return truncated JSON." Half
+of that is now wrong, and the half that changed is the reason this section
+exists.
+
+A truncated stream sets the OOM counter **when the largest contiguous 8-bit
+block at the moment of failure was below two TLS record buffers**, 2 x 16,717 =
+33,434. That is the state in which the second buffer had nowhere to go, so the
+stream was short for this device's reasons rather than the server's. Confirmed
+on device 17 across 74 minutes of stream on 2026-09-15: every failure followed
+an rgb565 graphic card draw, at free8BIT around 30,650 with largest 25,588,
+while the server had recorded every one of those POSTs and every other device
+answered ok in the same minutes.
+
+Two observations, made separately, because each is the other's control:
+
+- **Short stream, low heap.** Reproduce as in 4a, with graphic cards in the
+  rotation so the fragmentation actually happens. The line must say the stream
+  was short AND that this device could not have held a fresh TLS session, must
+  print largest8, and must say it is not counted toward the unreachable
+  threshold.
+- **Short stream, healthy heap.** Truncate the response deliberately from the
+  server, on a device with a large contiguous block. The line must now say the
+  server's answer is what was wrong, must **still print largest8** beside the
+  error code, and must climb the CONNECTION counter rather than the OOM one.
+
+The second is the one to be careful about. It is what proves the change followed
+the heap rather than relabelling every truncation as a device fault, and it is
+also where the new rule is capable of being wrong: a genuinely truncated stream
+arriving on a reused session while heap happens to be low is now attributed to
+heap. That trade is taken deliberately, and `App/CheckIn.h` argues it.
+
+**The inference that looks like a disproof.** Successful check-ins are logged at
+`largest8BIT=18420`, BELOW figures at which others fail. That appears to rule the
+heap out and does not, because a reused session allocates neither buffer. Do not
+conclude from a low-heap success that the classification is wrong. That
+inference was drawn once already and was the reason this took ten days to
+diagnose.
 3. `Graphic::releaseRamBuffers()` must run on the first occurrence only.
    Confirm from largest8 jumping once and from the pictures re-fetching.
 4. At the third consecutive OOM the device restarts. On the serial console the

@@ -1675,15 +1675,22 @@ void performCheckIn() {
     //
     // responseOutOfMemory means the round trip COMPLETED - TLS came up, the
     // secret was accepted, the server sent a whole answer - and this device then
-    // had no heap to parse it into. That is the opposite of unreachable, and
-    // feeding it to the counter below would take the correct action for a reason
-    // that is reported to the fleet as UNREACHABLE for the rest of the device's
-    // history. See gConsecutiveResponseOom.
+    // could not take it in. That is the opposite of unreachable, and feeding it
+    // to the counter below would take the correct action for a reason that is
+    // reported to the fleet as UNREACHABLE for the rest of the device's history.
+    // See gConsecutiveResponseOom.
+    //
+    // SINCE 2026-09-25 THIS BRANCH ALSO CATCHES A SHORT STREAM that arrived
+    // while the device could not have held a fresh TLS session. CheckIn.h has
+    // the evidence; the reason it belongs on this counter rather than the one
+    // below is that the remedy is the same one - give heap back, and restart to
+    // reclaim it if that is not enough - and the diagnosis it writes into the
+    // fleet's record is true rather than a story about the network.
     if (result.responseOutOfMemory) {
       ++gConsecutiveResponseOom;
-      Log::printf("[checkin] out of heap parsing the response, %lu of %lu before this device "
-                  "restarts to reclaim memory - the server was reached and answered, so this is "
-                  "NOT counted toward the unreachable threshold",
+      Log::printf("[checkin] could not take the response in for want of heap, %lu of %lu before "
+                  "this device restarts to reclaim memory - the server was reached and answered, "
+                  "so this is NOT counted toward the unreachable threshold",
                   static_cast<unsigned long>(gConsecutiveResponseOom),
                   static_cast<unsigned long>(kMaxConsecutiveResponseOom));
       // The one cheap remedy, and the only failure on this branch it is actually

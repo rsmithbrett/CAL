@@ -57,10 +57,26 @@ struct Result {
   /// NoMemory must not climb the unreachable counter when that counter's remedy
   /// announces itself as SOFTWARE_RESET+UNREACHABLE on the following boot.
   ///
-  /// The other four DeserializationError codes deliberately do NOT set this.
-  /// InvalidInput, IncompleteInput, EmptyInput and TooDeep all describe what
-  /// arrived; a truncated stream in particular IS a broken connection and
-  /// belongs on the unreachable counter exactly where it already was.
+  /// **IncompleteInput ALSO sets this, conditionally, since 2026-09-25.** This
+  /// paragraph used to read "a truncated stream in particular IS a broken
+  /// connection and belongs on the unreachable counter exactly where it already
+  /// was". That was a sound reading of the error code and the wrong reading of
+  /// this board. Seventy-four minutes of stream on device 17 showed every
+  /// IncompleteInput arriving with a largest contiguous block of 25,588, always
+  /// straight after an rgb565 card draw, while the server had recorded every one
+  /// of those POSTs and every other device answered ok in the same minutes. The
+  /// stream was short because the second TLS record buffer had nowhere to go,
+  /// not because the connection broke.
+  ///
+  /// So IncompleteInput sets this when, and only when, the largest contiguous
+  /// block at the moment of failure was below two record buffers, which is the
+  /// state in which a fresh session could not have been held. InvalidInput,
+  /// EmptyInput and TooDeep still never set it: those describe bytes that
+  /// arrived and were wrong, which no amount of heap explains.
+  ///
+  /// CheckIn.cpp carries the inference that looks like a disproof and is not
+  /// (successes logged at a LOWER largest block, because a reused session
+  /// allocates neither buffer), and why the mirror error is accepted.
   bool responseOutOfMemory = false;
   /// Server-dictated cadence for the NEXT check-in - a household's fleet size is the
   /// server's decision to make, not a constant baked into every device's firmware.
