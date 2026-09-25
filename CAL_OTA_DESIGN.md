@@ -1,12 +1,41 @@
 # Updating CAL over the air — design
 
-Design only. Nothing in this document is implemented. It covers steps 1–3 of the
-approved suggestion *"Make CAL updatable without USB"*
-(`7ab3267a-0f52-4153-9ece-89880ffb535e`): settle the bootloader-fallback
-question, re-measure the two binaries, and decide where a CAL image is staged.
-The `Kind=Cal` server work (step 4) and the App-side writer (step 5) are
-deliberately **not** designed here beyond the interface the staging decision
-forces on them.
+**THIS SHIPPED. Read section 12 before section 1.** This paragraph said "design
+only, nothing in this document is implemented" until 2026-09-25. It stopped being
+true on 2026-09-17, when the trampoline ran over the air on device 17 with no
+cable, and by 2026-09-25 three devices were reporting the current CAL build.
+Corrected rather than deleted, because a reader arriving at a 1,700-line document
+needs to know in its first paragraph whether they are holding a plan or a record,
+and this one is both.
+
+Sections 1 through 11 are the design in the order it was argued, kept as written
+even where the bench later corrected them. Section 8's corrections and section 9's
+results are the value in it, and a document edited to look as though it had been
+right the first time teaches nobody anything. Section 12 is what happened.
+Section 13 is the boot-cause reporting that came with it.
+
+It covers the approved suggestion *"Make CAL updatable without USB"*
+(`7ab3267a-0f52-4153-9ece-89880ffb535e`). **What shipped is not the design that
+suggestion proposed**, and the difference belongs here because the suggestion is
+the first thing most people will read:
+
+* The suggestion had the **App** writing `factory`, on the reasoning that the App
+  is the only thing not executing from it. What shipped is a trampoline. The App
+  only reboots into CAL; CAL downloads its own replacement into `ota_0`, reboots
+  into it as a candidate, and the candidate copies itself home. Section 10.
+* The suggestion's blocking constraint was "there is nowhere to stage 1.3MB", and
+  a later remark proposed the **SD card** as the answer. Neither was needed.
+  `ota_0` is the staging area, being the only partition firmware can write
+  without overwriting the code doing the writing, and an ESP32 app image turned
+  out to be partition-agnostic. No card is involved, which matters because the
+  survivor of any interruption then needs nothing but power.
+* Step 4, the `Kind=Cal` server work, is done: per-kind `IsCurrent`,
+  `/api/firmware/cal/manifest`, `/api/firmware/cal/binary`, and `calVersion` and
+  `calUpdateAvailable` on the check-in wire.
+* A remark on the suggestion says the database CHECK was widened to
+  `Kind IN ('SelfTest','Cal')` so that a CAL build could not be current. **That
+  never happened.** The constraint reads `SelfTest` only, `SetCurrentAsync`
+  accepts a CAL build deliberately, and a current CAL is an ordinary state.
 
 The thing this feature is for, stated once so that every trade-off below can be
 measured against it: **CAL is the image that rescues a device nobody can reach.**
@@ -1086,7 +1115,12 @@ board.
   disassembly, §4 is arithmetic, §3 is not measured, and §7 lists what remains
   unknown.
 
-## 8. Corrections from the bench, 2026-09-16
+## 8a. Corrections from the bench, 2026-09-16
+
+> Numbered 8a rather than 9, because this was written as a second "8" by mistake
+> and sat that way for nine days. Renumbering everything below it would move
+> section 12, which this document's own opening and other notes point at by
+> number, for no gain. The duplicate is resolved in place instead.
 
 Three things in this document were wrong, and one of them cost a destroyed App
 partition. Recorded here rather than silently edited, because the reason each was
