@@ -215,8 +215,8 @@ bool recordPress(const Definition& definition, const String& onScreenSummary,
   // write past what the slot holds.
   entry.compassPid = compassPid;
   entry.mlsNumber = mlsNumber;
-  entry.compassPid.replace('\\n', ' ');
-  entry.mlsNumber.replace('\\n', ' ');
+  entry.compassPid.replace('\n', ' ');
+  entry.mlsNumber.replace('\n', ' ');
   if (entry.compassPid.length() > 30) entry.compassPid = "";
   if (entry.mlsNumber.length() > 40) entry.mlsNumber = "";
   entry.onScreenSummary = onScreenSummary;
