@@ -39,3 +39,7 @@ Use QEMU `raspi0` for original Zero-like ARM1176/512 MB system checks and QEMU A
 ## First coding slice: shared due-card logic
 
 Extract the existing `CardManager` active-counter tick and due-interstitial selection into `pi/src/ScheduleCore.h` and call that exact header from the ESP32 `App/CardManager.cpp`. This is a narrow shared-source seam, not the complete scheduler or a Pi executable. Preserve the existing showable filter, order tie break, threshold (`cardsSince > interleaveEvery`), saturation, and reset-on-show behavior. Next extract list cursor and history/dwell transitions without forking behavior.
+
+## First display executable: fixture renderer
+
+The first runnable `pi-card` uses SDL2's software renderer and SDL_ttf to draw a visibly labeled development fixture at the connected screen's runtime output size. `--once output.bmp --width N --height N` runs headlessly for reproducible image/layout checks. `Layout.h` computes safe regions and aspect-preserving contain for a 4:3 graphic fixture across 4:3, 16:9 and portrait viewports. This does not fetch a server asset, display real provider data, rotate cards, enroll a device, or update a package. The fixture is intentionally marked on screen. The graphics backend is provisional until tested on a physical original Zero and Zero 2 W; QEMU/CI does not prove performance or HDMI output.
