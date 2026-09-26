@@ -29,3 +29,10 @@ For each card ID, compare real App content with Android at a known fixture input
 ## Reporting
 
 Record the exact commit SHA, Android plugin/Gradle/NDK versions, SDK level, emulator API/profile, test counts, artifact checksum, and any check not run. Read the printed build and test summaries rather than relying solely on process exit status. Do not describe an emulator pass as physical-device verification.
+
+## Android application update acceptance
+
+- Publish a higher-versionCode package on a test distribution channel and verify an in-place update on phone and Android-based TV; record package ID, channel, signing certificate identity, version before/after, and release artifact hash. Confirm that the same installation identity, assignment, secret, pending action IDs, event cursor, and usable cache survive.
+- Verify a mismatched package name/signature or non-increasing version is rejected, a rollout withheld/paused by channel does not block cards, and a revoked or incompatible installation sees a safe state. Test update interruption/relaunch and no duplicate action effect after restart.
+- Verify server card text/graphics/policy updates without an APK release; verify an APK release does not use ESP32 firmware OTA or its firmware `updateAvailable` flag.
+- On Fire TV, verify the Amazon Appstore path and remote-readable update messaging. For a managed/sideload channel, verify whether the installer requires user confirmation on the actual target; do not mark it as silent until device-owner behavior is demonstrated. No update-delivery path is implemented by the current scaffold.
