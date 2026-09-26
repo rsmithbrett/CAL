@@ -1,0 +1,33 @@
+name: Pi Zero shared scheduler slice
+
+on:
+  push:
+    branches: ["feature/pi-zero-client"]
+  pull_request:
+    paths:
+      - "pi/**"
+      - "App/CardManager.cpp"
+      - "PI_ZERO_CLIENT_*.md"
+      - ".github/workflows/pi-zero-client.yml"
+
+jobs:
+  host-scheduler:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run shared scheduling tests
+        run: make -C pi test
+
+  esp32-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Build CAL and App with the shared header
+        run: bash ci/build-firmware.sh
+      - name: Check build artifacts and checksums
+        run: |
+          test -s combined-checksums.txt
+          test -s build/esp32.esp32.esp32/CAL.ino.bin
+          test -s App/build/esp32.esp32.esp32/App.ino.bin
+          cat combined-checksums.txt
