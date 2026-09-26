@@ -82,6 +82,8 @@ struct ListingInfo {
   /// "only the fields this card actually draws are worth keeping" - so do not
   /// remove it as unused. Roughly 10 bytes per listing, kMaxListings of them.
   String mlsNumber;
+  /// Hidden Compass property id resolved by the server from the MLS number.
+  String compassPid;
 };
 
 struct Result {
