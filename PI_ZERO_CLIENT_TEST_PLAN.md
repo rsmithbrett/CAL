@@ -38,3 +38,7 @@ For every run record exact CAL/server commit, OS image, hardware revision, test 
 ## First coding slice verification
 
 Run `make -C pi test` on a clean host compiler and inspect the assertion summary. The test covers independent interstitial counters, strict threshold, content eligibility, order tie break, inactive cards and saturation. Build CAL and App firmware on the exact commit that wires `CardManager` to the shared header. Passing this slice does not prove QEMU, physical Pi, list/history/dwell parity, or live cards.
+
+## Fixture display executable gate
+
+Build `make -C pi demo` with SDL2/SDL_ttf development libraries. Run `SDL_VIDEODRIVER=dummy pi/build/pi-card --width 320 --height 240 --once /tmp/pi-320.bmp` and repeat at 1280x720. Inspect BMP dimensions and a nonempty colored frame; unit-test safe bounds and aspect-preserving contain across four viewports with `make -C pi test`. On a real Pi, run fullscreen and verify readable text, screen safe area and sustained use. These are fixture checks, not live card or physical hardware results.
