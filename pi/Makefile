@@ -1,9 +1,9 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -O2
-ARM_CXX ?= arm-linux-gnueabihf-g++
-ARM_FLAGS = -marm -march=armv6 -mfpu=vfp -mfloat-abi=hard
+ARM_CXX ?= arm-linux-gnueabi-g++
+ARM_FLAGS = -marm -march=armv6 -mfloat-abi=soft
 QEMU_ARM ?= qemu-arm
-ARM_SYSROOT ?= /usr/arm-linux-gnueabihf
+ARM_SYSROOT ?= /usr/arm-linux-gnueabi
 
 .PHONY: test test-armv6 demo clean
 

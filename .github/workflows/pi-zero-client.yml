@@ -25,10 +25,10 @@ jobs:
       - name: Install Pi Zero cross compiler and QEMU user mode
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++-arm-linux-gnueabihf qemu-user
+          sudo apt-get install -y g++-arm-linux-gnueabi qemu-user
       - name: Build and run tests as ARM1176
         run: |
-          arm-linux-gnueabihf-g++ --version | head -1
+          arm-linux-gnueabi-g++ --version | head -1
           qemu-arm --version | head -1
           make -C pi test-armv6
           file pi/build/armv6/*_test
