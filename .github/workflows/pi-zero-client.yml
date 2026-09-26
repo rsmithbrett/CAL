@@ -18,6 +18,21 @@ jobs:
       - name: Build and run shared scheduling tests
         run: make -C pi test
 
+  armv6-emulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Pi Zero cross compiler and QEMU user mode
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-arm-linux-gnueabihf qemu-user
+      - name: Build and run tests as ARM1176
+        run: |
+          arm-linux-gnueabihf-g++ --version | head -1
+          qemu-arm --version | head -1
+          make -C pi test-armv6
+          file pi/build/armv6/*_test
+
   display-fixture:
     runs-on: ubuntu-latest
     steps:

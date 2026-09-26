@@ -1,12 +1,12 @@
 # Raspberry Pi Zero display client — design proposal
 
-Status: first design gate only. No Pi executable, server enrollment, live cards, hardware run, or package update is implemented on this branch.
+Status: display fixture and first shared scheduler slice implemented. No server enrollment, live cards, hardware run, or package update is implemented on this branch.
 
 ## Goal and scope
 
 Build a Linux display client for Discover Around Me that shows the server-assigned cards and graphics on an attached screen. Every installation is a separate device with its own revocable identity, owner/brand/account assignment, policy, action queue, event cursor, diagnostics, and update state. An Android installation or ESP32 panel cannot supply its credential to a Pi.
 
-The current development baseline is Raspberry Pi OS **32-bit** on a Pi Zero/Zero W, so the architecture does not silently require a 64-bit Zero 2 W. Zero 2 W is a second test profile with the same protocol and renderer. The exact first physical board, display and input device remain to be identified before a hardware acceptance claim. Original Zero/Zero W is a single-core Armv6 device with 512 MB RAM; Zero 2 W has a quad-core Cortex-A53 with 512 MB. Measure boot, memory, frame rate, decoding, and network behavior on both before promising equal performance. Raspberry Pi OS 32-bit supports the older Zero class: https://www.raspberrypi.com/documentation/computers/os.html ; hardware: https://www.raspberrypi.com/products/raspberry-pi-zero-2-w/ and https://www.raspberrypi.com/products/raspberry-pi-zero-w/ .
+The base product is the **original Raspberry Pi Zero**, running Raspberry Pi OS 32-bit on its single-core ARM1176 (ARMv6) CPU with 512 MB RAM. Zero W and Zero 2 W are later profiles, not substitutes for the baseline. The original Zero has no built-in wireless networking, so the live-client stage needs a chosen USB network adapter or other explicit network path. The exact physical board revision, display and input device remain to be identified before hardware acceptance. Measure boot, memory, frame rate, decoding and network behavior on the original Zero before promising performance. References: https://www.raspberrypi.com/products/raspberry-pi-zero/ and https://www.raspberrypi.com/documentation/computers/processors.html .
 
 This is a separate Linux package and service, not CAL's ESP32 loader and not the shelved Android APK. CAL's `App/` is the current behavioral reference. Keep this branch separate from CAL `main`, which creates firmware releases on push. The server's formal Device Client Specification and live API console govern the wire. Update those when an actual Pi route/field is introduced, not merely from this proposal.
 
@@ -34,7 +34,7 @@ Follow `ONBOARDING.md`, `README.md`, `CI.md` and `TEST_PLAN.md` in the server re
 
 ## Emulation boundary
 
-Use QEMU `raspi0` for original Zero-like ARM1176/512 MB system checks and QEMU ARM user-mode for cross-built process tests. QEMU currently lists no Zero 2 W machine; `raspi3ap` is an approximate Cortex-A53/512 MB profile, not certification of a Zero 2 W. The emulated framebuffer can exercise layout fixtures; emulated CPU timing, HDMI-CEC, Wi-Fi radio, GPIO wiring, power, thermal behavior and SD recovery do not establish physical-device behavior. Keep QEMU fixtures in CI as automated checks and reserve the final display/input/update gate for a real board. Reference: https://www.qemu.org/docs/master/system/arm/raspi.html and https://www.qemu.org/docs/master/user/main.html .
+The first ARM gate cross-builds the shared scheduler and layout tests for ARMv6 hard-float and runs those processes under `qemu-arm -cpu arm1176`. That does not boot an OS or run the display executable. Use QEMU `raspi0` for later original Zero-like ARM1176/512 MB system checks when a pinned bootable image is available. QEMU currently lists no Zero 2 W machine; `raspi3ap` is an approximate Cortex-A53/512 MB profile, not certification of a Zero 2 W. Emulated CPU timing, HDMI-CEC, network radio, GPIO wiring, power, thermal behavior and SD recovery do not establish physical-device behavior. Keep QEMU fixtures in CI as automated checks and reserve the final display/input/update gate for a real board. Reference: https://www.qemu.org/docs/master/system/arm/raspi.html and https://www.qemu.org/docs/master/user/main.html .
 
 ## First coding slice: shared due-card logic
 
