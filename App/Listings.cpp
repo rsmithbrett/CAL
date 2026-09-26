@@ -162,6 +162,7 @@ Result fetchMine() {
     // button press can carry it into the press log and the email - see
     // ListingInfo::mlsNumber and cardDescribe() below.
     f["listings"][0]["mlsNumber"] = true;
+    f["listings"][0]["compassPid"] = true;
     return f;
   }();
 
@@ -422,6 +423,7 @@ Result fetchMine() {
     info.daysOnMarket = listing["daysOnMarket"] | 0;
     info.distanceMiles = listing["distanceMiles"] | 0.0;
     info.mlsNumber = String((const char*)(listing["mlsNumber"] | ""));
+    info.compassPid = String((const char*)(listing["compassPid"] | ""));
     result.count++;
   }
 
@@ -615,6 +617,12 @@ void cardDraw(uint16_t itemIndex) {
 /// A status screen returns empty rather than "No listings nearby". A press on a
 /// card showing nothing has nothing to name, and inventing a description would
 /// put a sentence in the press log that reads like content.
+void cardListingIds(uint16_t itemIndex, String& compassPid, String& mlsNumber) {
+  if (gLast.status != Status::Ok || itemIndex >= gLast.count) return;
+  compassPid = gLast.listings[itemIndex].compassPid;
+  mlsNumber = gLast.listings[itemIndex].mlsNumber;
+}
+
 String cardDescribe(uint16_t itemIndex) {
   if (gLast.status != Status::Ok || itemIndex >= gLast.count) {
     return String();
@@ -647,6 +655,7 @@ String cardDescribe(uint16_t itemIndex) {
   spec.fetch = cardFetch;
   spec.itemCount = cardItemCount;
   spec.describe = cardDescribe;
+  spec.listingIds = cardListingIds;
   spec.draw = cardDraw;
   spec.isNotable = cardIsNotable;
   spec.status = cardStatus;
