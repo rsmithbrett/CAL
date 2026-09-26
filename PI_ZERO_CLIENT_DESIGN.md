@@ -31,3 +31,7 @@ This is a separate Linux package and service, not CAL's ESP32 loader and not the
 ## Process
 
 Follow `ONBOARDING.md`, `README.md`, `CI.md` and `TEST_PLAN.md` in the server repository, and CAL's firmware build procedure. Record design and tests before behavior changes; keep feature code on isolated branches. Run both the new host/Pi checks and `bash ci/build-firmware.sh` for shared-source changes. Read printed test/build summaries, not only exit codes. A fresh CI build is not a physical Pi demonstration. No production credential or production database belongs in development fixtures.
+
+## Emulation boundary
+
+Use QEMU `raspi0` for original Zero-like ARM1176/512 MB system checks and QEMU ARM user-mode for cross-built process tests. QEMU currently lists no Zero 2 W machine; `raspi3ap` is an approximate Cortex-A53/512 MB profile, not certification of a Zero 2 W. The emulated framebuffer can exercise layout fixtures; emulated CPU timing, HDMI-CEC, Wi-Fi radio, GPIO wiring, power, thermal behavior and SD recovery do not establish physical-device behavior. Keep QEMU fixtures in CI as automated checks and reserve the final display/input/update gate for a real board. Reference: https://www.qemu.org/docs/master/system/arm/raspi.html and https://www.qemu.org/docs/master/user/main.html .
