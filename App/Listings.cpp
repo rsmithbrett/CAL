@@ -160,7 +160,7 @@ Result fetchMine() {
     f["listings"][0]["distanceMiles"] = true;
     // The one whitelisted field this card never draws. It rides along so a
     // button press can carry it into the press log and the email - see
-    // ListingInfo::mlsNumber and cardDescribe() below.
+    // ListingInfo and cardListingIds() below.
     f["listings"][0]["mlsNumber"] = true;
     f["listings"][0]["compassPid"] = true;
     return f;
