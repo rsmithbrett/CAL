@@ -44,7 +44,7 @@ At runtime the client measures display bounds, density, aspect ratio, safe area,
 
 Touch, D-pad/remote, and keyboard navigation map to the same card actions. Every actionable element must be reachable and visibly focused without touch. TV display uses landscape, remote-readable type, and a safe inset; phone/tablet uses its actual viewport. An unsupported input, sensor, or graphic encoding degrades predictably and reports a bounded compatibility outcome. It must remain clear when data is stale, unavailable, or not configured. Existing App privacy rules for diagnostics and calendar content apply on every screen.
 
-**Platform boundary:** Fire OS is Android-based, but the Fire TV Stick 4K Select runs Vega OS. An Android APK does not run natively on Vega; Vega would require another client package using the same platform APIs, card contract, and server-supplied assets. This does not require a model-specific Android APK. Confirm the operating system of any target hardware before claiming APK compatibility.
+**Scope:** This project builds one APK for Android-based devices, including Fire OS models that support Android apps. Vega OS is outside this project. Confirm target hardware runs Android/Fire OS before using this APK.
 
 ## Integration gates
 
