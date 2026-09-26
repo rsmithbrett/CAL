@@ -19,7 +19,7 @@ An automated host test must compile the same scheduler source that the ESP32 App
 
 ## Cloud integration (after identity design)
 
-Test registration, pending activation, revocation, secret rejection, discovery, exact camelCase contract, `cardPolicy` omitted/null versus empty, persisted press IDs across process death, deduplicated retry until `acceptedActionIds`, event cursor timeout, reconcile snapshot, reconnect after network loss, and foreground resume. Use an isolated Development Host and database. Never use an ESP32 device secret as an Android fixture.
+Test registration, pending activation, revocation, secret rejection, discovery, exact camelCase contract, `cardPolicy` omitted/null versus empty, persisted press IDs across process death, deduplicated retry until `acceptedActionIds`, event cursor timeout, reconcile snapshot, reconnect after network loss, and foreground resume. Enroll two Android installations for the same owner and prove distinct records, secrets, assignments, card policies, queues, cursors, and diagnostics; revoke or reassign one and prove the other is unchanged. A reinstall must create a new device unless a secure recovery flow is explicitly implemented. Use an isolated Development Host and database. Never use an ESP32 device secret as an Android fixture.
 
 ## Card and UX acceptance
 
