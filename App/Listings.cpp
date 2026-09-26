@@ -636,15 +636,6 @@ String cardDescribe(uint16_t itemIndex) {
   if (listing.bedrooms > 0 || listing.bathrooms > 0) {
     summary += " - " + String(listing.bedrooms, 0) + "bd/" + String(listing.bathrooms, 1) + "ba";
   }
-  // The MLS number appears here and nowhere else on this device: never on the
-  // card, only in what a press carries. It is last because it is the one part
-  // written for the recipient rather than for the household - an agent reading
-  // the email can look the listing up by it, and if the 200-character cap ever
-  // truncates this string it is the right thing to lose, since the address
-  // above already identifies the property.
-  if (listing.mlsNumber.length() > 0) {
-    summary += " - MLS " + listing.mlsNumber;
-  }
   return summary;
 }
 
