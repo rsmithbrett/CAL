@@ -16,6 +16,18 @@ Prove that an Android application can display Discover Around Me cards while reu
 6. Firmware OTA instructions are not Android application updates. Android release and installation use Android packaging and a separate version scheme.
 7. No production endpoint, credential, or user data is embedded in the APK or CI configuration.
 
+## Composable client architecture
+
+The Android app is one client of the Discover Around Me platform, not an emulator of a particular ESP32 board. The server's [Android platform API design](https://github.com/rsmithbrett/DiscoverAroundMe/blob/docs/android-platform-api-contract/ANDROID_PLATFORM_API_DESIGN.md) records the current routes and proposed identity work; the live developer API console is maintained in `ApiEndpointDocs.cs`. No Android installation can use check-in yet: the current server route requires a physical device identity.
+
+- **Client identity and transport:** one adapter owns installation credentials, authenticated API calls, version and capability reporting, retries, and offline cache policy. Each installation has its own revocable identity; no card stores a secret or calls a provider directly.
+- **Card registry:** each server card ID resolves to a renderer, a data dependency, and optional interactions. The server supplies ordering, dwell, assets, localized content, and action definitions. Android selects a renderer and lays it out at the logical 320 x 240 card size. Unknown or disabled IDs are skipped with an aggregate compatibility report.
+- **Shared behavior:** extract the scheduler and its policy transition rules into C++ that both ESP32 and Android compile. Display drawing, touch input, clock, storage, and networking stay behind platform adapters. Do not copy a fork of the scheduler into Android.
+- **Events and actions:** one event adapter long polls the JSON `/api/device/watch` route and reconciles from a snapshot; one durable queue sends button presses with check-in until the server accepts their IDs. Webhook subscriptions are outgoing server integrations for external receivers, not mobile push delivery.
+- **Capability and extension contract:** touch, motion, storage, battery, and display support are reported independently. A card's unsupported capability has a defined fallback. New cards require matching server catalog/policy, Android registration, ESP32 registration when applicable, wire documentation, tests, and a content privacy check. Android package updates do not follow the ESP32 firmware OTA path.
+
+This separation lets a new provider, card, action destination, or client platform be introduced without adding a new tenant policy engine or changing unrelated renderers.
+
 ## Shared-code experiment
 
 `App/Cards.h` describes card registration, policy, announcements, and draw/fetch callbacks. `App/CardManager.cpp` currently includes `Actions`, `Display`, `HeapRatchet`, `Log`, `Motion`, and `Touch`, and depends on Arduino `String` and timing. Compiling it for Android requires a deliberate interface boundary. A header-only or renamed copy of the scheduler does not prove behavior sharing.
