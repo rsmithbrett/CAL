@@ -1,7 +1,7 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -O2
 ARM_CXX ?= arm-linux-gnueabihf-g++
-ARM_FLAGS = -march=armv6 -mfpu=vfp -mfloat-abi=hard
+ARM_FLAGS = -marm -march=armv6 -mfpu=vfp -mfloat-abi=hard
 QEMU_ARM ?= qemu-arm
 ARM_SYSROOT ?= /usr/arm-linux-gnueabihf
 
