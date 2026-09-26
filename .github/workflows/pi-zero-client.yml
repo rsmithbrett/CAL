@@ -18,6 +18,31 @@ jobs:
       - name: Build and run shared scheduling tests
         run: make -C pi test
 
+  display-fixture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SDL display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev fonts-dejavu-core
+      - name: Build and render viewport fixtures
+        run: |
+          make -C pi demo
+          SDL_VIDEODRIVER=dummy pi/build/pi-card --width 320 --height 240 --once /tmp/pi-320.bmp
+          SDL_VIDEODRIVER=dummy pi/build/pi-card --width 1280 --height 720 --once /tmp/pi-1280.bmp
+          python3 - <<'PY'
+          import struct
+          for path, expected in [('/tmp/pi-320.bmp', (320, 240)),
+                                 ('/tmp/pi-1280.bmp', (1280, 720))]:
+              data = open(path, 'rb').read()
+              assert data[:2] == b'BM'
+              assert struct.unpack_from('<ii', data, 18) == expected
+              assert len(data) > expected[0] * expected[1]
+              assert len(set(data[54:])) > 16
+              print(f'{path}: {expected[0]}x{expected[1]}, {len(data)} bytes')
+          PY
+
   esp32-regression:
     runs-on: ubuntu-latest
     steps:
