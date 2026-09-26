@@ -34,3 +34,7 @@ For every run record exact CAL/server commit, OS image, hardware revision, test 
 - Build the 32-bit ARM client against a Pi Zero-compatible sysroot and run pure process/contract tests under QEMU ARM user mode. Do not label an x86 host build as an ARM test.
 - Boot a pinned QEMU `raspi0` fixture when available; verify start, service behavior, bounded memory and framebuffer capture. Use `raspi3ap` only as an approximate Zero 2 W class check and record that it is not a Zero 2 W emulator.
 - Keep physical Zero/Zero 2 W checks for HDMI, Wi-Fi, CEC/input, power, thermals, SD failure and package recovery. Record the QEMU version, machine, kernel/OS image, architecture and limits beside each result.
+
+## First coding slice verification
+
+Run `make -C pi test` on a clean host compiler and inspect the assertion summary. The test covers independent interstitial counters, strict threshold, content eligibility, order tie break, inactive cards and saturation. Build CAL and App firmware on the exact commit that wires `CardManager` to the shared header. Passing this slice does not prove QEMU, physical Pi, list/history/dwell parity, or live cards.
