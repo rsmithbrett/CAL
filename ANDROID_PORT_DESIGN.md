@@ -9,7 +9,7 @@ Prove that an Android application can display Discover Around Me cards while reu
 ## Boundaries and decisions
 
 1. `CAL.ino` is the ESP32 loader. It is not an Android bootloader and is not part of the Android package. `App/` is the behavioral reference.
-2. The Android application is a distinct client installation with its own identity and secret. It must not impersonate an existing panel or reuse its `X-Device-Secret`.
+2. Every Android installation is its own device, with a unique identity and `X-Device-Secret`, independent assignment, resolved policy, action queue/history, event cursor, and diagnostics. Two phones under one owner still remain separate devices. Revoking or reassigning one must not change the other. A reinstall receives a new identity unless a separately specified secure recovery/transfer flow is implemented. It must not impersonate an existing panel or reuse its secret.
 3. The server decides the resolved card policy, actions, content, and branding. Android renders those values; it does not hardcode a second server-side policy.
 4. A button press enters a durable local pending queue and rides the existing `POST /api/checkin` `pendingActions` field. The queue removes an item only after its `instanceId` appears in `acceptedActionIds`. Calendar details must not enter the press summary, logs, or telemetry.
 5. The Android app reads `GET /api/device/watch` with a cursor while foregrounded, handles `reconcile: true` as a snapshot, and refreshes on resume. A phone behind NAT does not receive inbound webhooks. Webhooks remain a separate server-to-server integration path.
