@@ -35,3 +35,7 @@ Follow `ONBOARDING.md`, `README.md`, `CI.md` and `TEST_PLAN.md` in the server re
 ## Emulation boundary
 
 Use QEMU `raspi0` for original Zero-like ARM1176/512 MB system checks and QEMU ARM user-mode for cross-built process tests. QEMU currently lists no Zero 2 W machine; `raspi3ap` is an approximate Cortex-A53/512 MB profile, not certification of a Zero 2 W. The emulated framebuffer can exercise layout fixtures; emulated CPU timing, HDMI-CEC, Wi-Fi radio, GPIO wiring, power, thermal behavior and SD recovery do not establish physical-device behavior. Keep QEMU fixtures in CI as automated checks and reserve the final display/input/update gate for a real board. Reference: https://www.qemu.org/docs/master/system/arm/raspi.html and https://www.qemu.org/docs/master/user/main.html .
+
+## First coding slice: shared due-card logic
+
+Extract the existing `CardManager` active-counter tick and due-interstitial selection into `pi/src/ScheduleCore.h` and call that exact header from the ESP32 `App/CardManager.cpp`. This is a narrow shared-source seam, not the complete scheduler or a Pi executable. Preserve the existing showable filter, order tie break, threshold (`cardsSince > interleaveEvery`), saturation, and reset-on-show behavior. Next extract list cursor and history/dwell transitions without forking behavior.
