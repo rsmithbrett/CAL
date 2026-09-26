@@ -1178,6 +1178,22 @@ budget existed — but `noteContentOverrun()` is only called by
 budget adds a `contentIsTight()` branch and one `noteContentOverrun()` call at
 the end of its draw.
 
+**The horizontal half of the same problem is
+[`TEXT_LAYOUT_DESIGN.md`](TEXT_LAYOUT_DESIGN.md).** The budget above says how
+far *down* a card may draw. Nothing said how far *right* a string may run, and
+on 2026-09-25 two cards came back from real hardware losing characters at the
+right edge: a sports card reading `Houston Astr`, and a notice card reading
+`Test device: this rotation h` with the `as` of `has` nowhere on the panel. Two
+different pieces of code making the same mistake differently. `App/Display.cpp`
+had five separate ways of putting a string into a bounded region and now has
+one, `layoutText()`, which breaks on word boundaries against measured width,
+ellipsizes visibly, allocates nothing, and narrates what it lost to the debug
+stream. Read that document before adding a card that draws text. The two
+documents meet at `linesToBudget()`, which turns `contentBottom()` into the line
+budget the routine wants — the notice and calendar cards are the first to use it
+instead of a hardcoded line count, which is also what made their 9pt fallback
+tier reachable for the first time.
+
 ### Assets and the SD card
 
 `App/SdStorage.h`/`.cpp` mounts the card (CS pin 5, the same one `CYD-Dickey`'s

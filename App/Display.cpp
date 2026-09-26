@@ -16,6 +16,11 @@
 // find, and nothing to do here beyond what this include already does.
 #include <SD.h>
 #include <cstdlib>
+// strlen/strncat, for layoutText()'s fixed line buffer. Named explicitly rather
+// than leaned on through whatever Arduino.h happens to drag in, because the
+// whole point of that buffer is that this file does its own bounded string work
+// instead of reaching for Arduino String on the draw path.
+#include <cstring>
 // For the per-capability heap figures logHeapSnapshot() reports. ESP's own
 // wrappers are not usable for this: at one measured instant ESP.getFreeHeap()
 // said 49,960 and ESP.getMaxAllocHeap() said 32,756 while the real 8BIT free
@@ -329,133 +334,414 @@ void drawClock() {
   // cannot move up without reflowing the card body above it - a four-line
   // forecast plus its "updated" line already reaches roughly y=186. So a bigger
   // clock is a card-layout change, not a font change.
+  // Raw rather than through layoutText(), and carrying the sentinel the CI
+  // gate looks for. bottom_right is the datum this corner needs - the baseline
+  // is pinned 4px off the bottom edge inside the 16px band described above,
+  // which a top-anchored TextBox cannot express - and clockText is
+  // formatTimeOfDay()'s own output, bounded to eight characters and already
+  // clamped to "--:--" for anything it cannot render. There is no wire string
+  // here for an ellipsis to protect.
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
   lcd.setTextColor(ink(), bg());
   lcd.setTextDatum(bottom_right);
-  lcd.drawString(clockText, kScreenW - 6, kScreenH - 4);
+  lcd.drawString(clockText, kScreenW - 6, kScreenH - 4);  // LAYOUT-PRIMITIVE
 }
 
-// The boot-ladder screens' (showStatus/showFailure) own word-wrap - greedy,
-// measured with real font metrics, since server-supplied strings (a card's
-// shortForecast, a content-gate refusal message) arrive with no length this
-// file controls. See wrappedLeftText further down for the card-layout
-// counterpart this restyle adds alongside it.
+// ---- The one text layout routine ----------------------------------------
+//
+// Every string this file puts inside a bounded region goes through
+// layoutText() below. There used to be five different ways of doing it and two
+// of them were photographed failing on real hardware:
+//
+//   The sports card drew `Houston Astr`. drawTruncatedLeft() shortened the name
+//   one character at a time until it measured narrow enough and then drew it
+//   with nothing to say it had been shortened, so a household read a team whose
+//   name appeared to be "Houston Astr".
+//
+//   The notice card drew `Test device: this rotation h` and then started the
+//   next line at `one`, with the `as` of "has" nowhere on the panel. The old
+//   greedy wrap recorded the space at i as a break point BEFORE measuring the
+//   candidate ending at i, so when the overflow was discovered at a space the
+//   break point was that same space: the line that had just been measured and
+//   rejected was the line that got drawn, and the panel clipped the rest. The
+//   measurement was correct and was then ignored.
+//
+// The second one is the reason this is one routine rather than four patched
+// ones. Breaking at the last space STRICTLY BEFORE the overflowing word is a
+// property of the routine now instead of a thing four call sites each have to
+// get right. TEXT_LAYOUT_DESIGN.md at the repository root has the full survey,
+// the guarantees, and the CI gate that stops a sixth approach appearing.
+//
+// The guarantees, because a caller should not have to read the body:
+//
+//   1. A line breaks at the last whitespace strictly before the word that
+//      overflows, measured with lcd.textWidth() in whatever font the caller
+//      selected. Never a character count, never an assumed glyph width.
+//   2. Nothing is drawn wider than box.width. Every line is measured before it
+//      goes out.
+//   3. Nothing vanishes without a mark. Text that does not fit is wrapped, or
+//      broken mid-word, or ellipsized with a visible "...". There is no fourth
+//      outcome and there is no silent drop.
+//   4. Nothing vanishes without a log line either. The remote debug stream is
+//      the only diagnostic channel a wall-mounted panel has.
+//   5. Nothing is allocated. Not one byte of heap on any path.
+//
+// Rule 5 is the one that constrains the implementation. mbedtls_ssl_setup()
+// needs 16,717 CONTIGUOUS bytes twice (Http.h's kTlsRecordBufferBytes,
+// DEVICE_MEMORY.md), and a device that cannot get them cannot check in, cannot
+// report telemetry and cannot be told that the update fixing it exists. The
+// helpers this replaces did the opposite: drawTruncatedLeft() took its String
+// BY VALUE and then called substring() in a loop, so one long team name was a
+// dozen heap allocations, on the draw path, every rotation. The line under
+// construction here lives in a fixed stack buffer instead, and the String
+// overload only ever calls c_str().
+
 // kUseCardBackground is the sentinel meaning "use bg() for this text's own
-// background colour", the ordinary case for every caller before
-// showBannerCard() below - a value no real 24-bit packed colour can equal, so
-// it can share the `background` parameter rather than needing a separate
-// bool flag.
+// background colour", the ordinary case for every caller except
+// showBannerCard() - a value no real 24-bit packed colour can equal, so it can
+// share the `background` parameter rather than needing a separate bool flag.
 constexpr uint32_t kUseCardBackground = 0xFFFFFFFFu;
 
-int wrappedCenteredText(const String& text, int y, uint32_t colour, uint8_t size,
-                        int lineHeight, int maxLines, uint32_t background = kUseCardBackground) {
-  lcd.setTextColor(colour, background == kUseCardBackground ? bg() : background);
-  lcd.setTextSize(size);
-  lcd.setTextDatum(top_center);
+enum class Align : uint8_t { Left, Centre, Right };
 
-  constexpr int kMargin = 8;
-  const int maxWidth = kScreenW - kMargin * 2;
-  const int textLen = static_cast<int>(text.length());
+/// The region of panel a card is willing to spend on a string, and how many
+/// lines of it. See TEXT_LAYOUT_DESIGN.md section 4 for what each field means
+/// the card is promising.
+struct TextBox {
+  int16_t x;           // left edge for Left, centre for Centre, right edge for Right
+  int16_t y;           // top of the first line
+  int16_t width;       // pixels the text may occupy, measured, never assumed
+  int16_t lineHeight;  // step from one line's top to the next
+  uint8_t maxLines;    // the line budget, which has no default on purpose
+  Align align;
+};
 
-  int lineStart = 0;
-  int lastSpace = -1;
-  int cursorY = y;
-  int linesDrawn = 0;
+struct TextResult {
+  uint8_t lines = 0;      // lines drawn, or that would be drawn under measureOnly
+  bool ellipsized = false;  // true when the "..." went on the panel
+  int16_t bottom = 0;     // y just past the last line, for stacking the next block
+};
 
-  for (int i = 0; i <= textLen && linesDrawn < maxLines; ++i) {
-    const bool atEnd = (i == textLen);
-    const bool isSpace = !atEnd && text.charAt(i) == ' ';
-    if (isSpace) {
-      lastSpace = i;
-    }
-    if (!atEnd && !isSpace) {
-      continue;
-    }
+// Above any line this panel can hold. The narrowest glyphs in the binary are
+// Font0 at size 1, six pixels wide, so a 320px line is at most 53 characters;
+// every GFX face the cards use is wider than that. A candidate that would
+// exceed this is treated as a word too long to fit and logged loudly, because
+// reaching it means a font assumption changed rather than that a string was
+// long.
+constexpr size_t kLayoutLineBytes = 128;
 
-    const String candidate = text.substring(lineStart, i);
-    if (lcd.textWidth(candidate) <= maxWidth) {
-      if (atEnd) {
-        lcd.drawString(candidate, kScreenW / 2, cursorY);
-        linesDrawn++;
-      }
-      continue;
-    }
+// Three ASCII periods, not U+2026. Every GFX font in this binary is ASCII only
+// - this file already hand-draws a circle for the degree sign (see
+// drawTemperature below) and the aircraft card writes "->" rather than an
+// arrow glyph for the same reason. A single-glyph ellipsis would render as a
+// box, which would be a worse lie than the truncation it exists to disclose.
+constexpr char kEllipsis[] = "...";
 
-    const int breakAt = (lastSpace > lineStart) ? lastSpace : i;
-    lcd.drawString(text.substring(lineStart, breakAt), kScreenW / 2, cursorY);
-    cursorY += lineHeight;
-    linesDrawn++;
-    lineStart = (lastSpace > lineStart) ? lastSpace + 1 : breakAt;
-    lastSpace = -1;
-    i = lineStart - 1;
-  }
-
-  return linesDrawn;
+/// Any byte at or below 0x20 is a break opportunity, not just ' '. A '\n' or
+/// '\t' in an admin's announcement is otherwise handed to drawString() and
+/// rendered as whatever box glyph this ASCII-only font has for it, in the
+/// middle of a household's notice. Calendar.cpp already scrubs control
+/// characters on the way in and says so; handling them here as well means the
+/// next card to take free text does not have to remember.
+bool isBreakSpace(char c) {
+  return static_cast<unsigned char>(c) <= 0x20;
 }
 
-// Same greedy word-wrap as wrappedCenteredText above, but left-margined at x
-// instead of centered across the whole screen width - the card layout this
-// restyle borrows from CYD-Dickey lays out every card against a fixed left
-// margin (their drawWeatherCard()/drawFeaturedAircraft() both use a plain
-// lcd.setCursor(10, ...) column), not centered text. Kept as a separate
-// function rather than adding an alignment flag to wrappedCenteredText:
-// showStatus()/showFailure() above are the shared boot-ladder surface
-// WifiJoin and CAL's own Provisioning module assume renders centered, and
-// this restyle doesn't touch that.
-//
-// measureOnly runs the identical wrap and returns the identical line count
-// without putting anything on screen, so a caller can ask "how tall would
-// this be at the font I currently have selected?" and choose a size before
-// committing to it - see showWeatherCard(), which uses it to keep a long
-// forecast phrase whole at a smaller size rather than clipping it at a
-// larger one. Deliberately the same function rather than a parallel
-// measuring one, because a measurement that can drift from the drawing it
-// predicts is worse than no measurement at all.
-int wrappedLeftText(const String& text, int x, int y, uint32_t colour, int lineHeight,
-                    int maxLines, int maxWidth, bool measureOnly = false) {
-  lcd.setTextColor(colour, bg());
-  lcd.setTextDatum(top_left);
+/// Copies text[from, to) into buffer and terminates it, turning any interior
+/// control character into a space for the reason isBreakSpace() gives. Returns
+/// false when the slice will not fit, which the caller treats as a word too
+/// long rather than truncating behind its own back.
+bool copySlice(char* buffer, size_t capacity, const char* text, size_t from, size_t to) {
+  const size_t length = to - from;
+  if (length + 1 > capacity) {
+    return false;
+  }
+  for (size_t i = 0; i < length; ++i) {
+    const char c = text[from + i];
+    buffer[i] = isBreakSpace(c) ? ' ' : c;
+  }
+  buffer[length] = '\0';
+  return true;
+}
 
-  const int textLen = static_cast<int>(text.length());
-  int lineStart = 0;
-  int lastSpace = -1;
-  int cursorY = y;
-  int linesDrawn = 0;
+/// Draws text into box, wrapping on word boundaries and ellipsizing when the
+/// line budget runs out. `what` names the string for the debug stream
+/// ("sports.away", "notice.body") so a log line says which string on which card
+/// lost characters - the same reasoning noteContentOverrun() takes a card name.
+///
+/// measureOnly runs the identical layout and returns the identical result
+/// without putting anything on the panel, so a card can ask "would this
+/// ellipsize at the size I have selected?" and choose a smaller one before
+/// committing. Deliberately the same function rather than a parallel measuring
+/// one, because a measurement that can drift from the drawing it predicts is
+/// worse than no measurement at all.
+TextResult layoutText(const char* text, const TextBox& box, uint32_t colour, const char* what,
+                      uint32_t background = kUseCardBackground, bool measureOnly = false) {
+  TextResult result;
+  result.bottom = box.y;
+  const char* who = (what == nullptr) ? "?" : what;
 
-  for (int i = 0; i <= textLen && linesDrawn < maxLines; ++i) {
-    const bool atEnd = (i == textLen);
-    const bool isSpace = !atEnd && text.charAt(i) == ' ';
-    if (isSpace) {
-      lastSpace = i;
-    }
-    if (!atEnd && !isSpace) {
-      continue;
-    }
-
-    const String candidate = text.substring(lineStart, i);
-    if (lcd.textWidth(candidate) <= maxWidth) {
-      if (atEnd) {
-        if (!measureOnly) {
-          lcd.drawString(candidate, x, cursorY);
-        }
-        linesDrawn++;
-      }
-      continue;
-    }
-
-    const int breakAt = (lastSpace > lineStart) ? lastSpace : i;
+  if (box.maxLines == 0 || box.width <= 0) {
+    // A layout mistake rather than a long string, so printf() rather than
+    // verbose(): this one is worth seeing on Serial whether or not anybody
+    // turned streaming on.
+    Log::printf("[display] %s: box is %dpx wide with a %u line budget, so nothing was drawn",
+                who, static_cast<int>(box.width), static_cast<unsigned>(box.maxLines));
+    return result;
+  }
+  if (text == nullptr || text[0] == '\0') {
+    // A card that silently drew nothing is a shape of bug this project has paid
+    // for more than once, so the absence of ink gets a line in the stream the
+    // same as the presence of it.
     if (!measureOnly) {
-      lcd.drawString(text.substring(lineStart, breakAt), x, cursorY);
+      Log::verbose("[display] %s: text is empty, nothing drawn", who);
     }
-    cursorY += lineHeight;
-    linesDrawn++;
-    lineStart = (lastSpace > lineStart) ? lastSpace + 1 : breakAt;
-    lastSpace = -1;
-    i = lineStart - 1;
+    return result;
   }
 
-  return linesDrawn;
+  lcd.setTextColor(colour, background == kUseCardBackground ? bg() : background);
+  switch (box.align) {
+    case Align::Centre: lcd.setTextDatum(top_center); break;
+    case Align::Right:  lcd.setTextDatum(top_right);  break;
+    case Align::Left:
+    default:            lcd.setTextDatum(top_left);   break;
+  }
+
+  char line[kLayoutLineBytes];
+  const size_t capacity = sizeof(line) - 1;
+  const size_t length = strlen(text);
+  size_t cursor = 0;
+  size_t hardBreaks = 0;
+  size_t dropped = 0;
+  int drawY = box.y;
+
+  while (cursor < length && result.lines < box.maxLines) {
+    while (cursor < length && isBreakSpace(text[cursor])) {
+      ++cursor;
+    }
+    if (cursor >= length) {
+      break;
+    }
+
+    // How much of the remainder fits, word by word. lineEnd only ever advances
+    // to a word boundary that has been MEASURED AND ACCEPTED, which is the
+    // whole correction: the old code advanced it to the boundary that had just
+    // been measured and rejected.
+    size_t lineEnd = cursor;
+    size_t scan = cursor;
+    while (scan < length) {
+      size_t wordEnd = scan;
+      while (wordEnd < length && !isBreakSpace(text[wordEnd])) {
+        ++wordEnd;
+      }
+      if (!copySlice(line, sizeof(line), text, cursor, wordEnd)) {
+        break;
+      }
+      if (lcd.textWidth(line) > box.width) {
+        break;
+      }
+      lineEnd = wordEnd;
+      scan = wordEnd;
+      while (scan < length && isBreakSpace(text[scan])) {
+        ++scan;
+      }
+    }
+
+    if (lineEnd == cursor) {
+      // Not one word fits a line of its own, so this breaks mid-word and
+      // carries the rest onto the next line. Not an ellipsis: a long URL under
+      // a QR code is better as two ugly lines than as one line with its tail
+      // deleted, and guarantee 3 says nothing is dropped while there is still
+      // somewhere to put it. The ellipsis below is for running out of lines,
+      // which is a different fact.
+      size_t fitted = 0;
+      for (size_t take = 1; cursor + take <= length && take <= capacity; ++take) {
+        if (isBreakSpace(text[cursor + take - 1])) {
+          break;
+        }
+        copySlice(line, sizeof(line), text, cursor, cursor + take);
+        if (lcd.textWidth(line) > box.width) {
+          break;
+        }
+        fitted = take;
+      }
+      if (fitted == 0) {
+        // A single glyph wider than the whole box. The box is wrong, and
+        // looping here forever would be worse than one overhanging character,
+        // so this makes progress and says so loudly.
+        Log::printf("[display] %s: a single glyph is wider than the %dpx box, drawing it anyway",
+                    who, static_cast<int>(box.width));
+        fitted = 1;
+      }
+      lineEnd = cursor + fitted;
+      ++hardBreaks;
+    }
+
+    size_t rest = lineEnd;
+    while (rest < length && isBreakSpace(text[rest])) {
+      ++rest;
+    }
+    const bool moreToCome = rest < length;
+    const bool lastLine = (static_cast<uint8_t>(result.lines + 1) >= box.maxLines);
+
+    if (moreToCome && lastLine) {
+      // Out of lines with text left over. Back characters off the end until the
+      // line plus its "..." fits, so the ellipsis is inside the box rather than
+      // hanging off the edge where the panel would clip the very mark that says
+      // something was lost.
+      size_t take = lineEnd - cursor;
+      if (take > capacity - sizeof(kEllipsis)) {
+        take = capacity - sizeof(kEllipsis);
+      }
+      while (true) {
+        while (take > 0 && isBreakSpace(text[cursor + take - 1])) {
+          --take;
+        }
+        copySlice(line, sizeof(line), text, cursor, cursor + take);
+        strncat(line, kEllipsis, sizeof(line) - strlen(line) - 1);
+        if (take == 0 || lcd.textWidth(line) <= box.width) {
+          break;
+        }
+        --take;
+      }
+      dropped = length - (cursor + take);
+      result.ellipsized = true;
+      cursor = length;
+    } else {
+      copySlice(line, sizeof(line), text, cursor, lineEnd);
+      cursor = lineEnd;
+    }
+
+    if (!measureOnly) {
+      lcd.drawString(line, box.x, drawY);  // LAYOUT-PRIMITIVE
+    }
+    ++result.lines;
+    drawY += box.lineHeight;
+  }
+
+  result.bottom = static_cast<int16_t>(drawY);
+
+  // Left the datum where it found it, the way drawRightJustified() used to.
+  // Half the card bodies below draw a literal label straight after a
+  // right-aligned value, and a leaked top_right datum would silently
+  // right-align the next thing somebody adds rather than failing visibly.
+  lcd.setTextDatum(top_left);
+
+  if (!measureOnly) {
+    if (result.ellipsized) {
+      Log::verbose("[display] %s: %u characters past line %u of %dpx did not fit, ellipsized",
+                   who, static_cast<unsigned>(dropped), static_cast<unsigned>(box.maxLines),
+                   static_cast<int>(box.width));
+    }
+    if (hardBreaks > 0) {
+      Log::verbose("[display] %s: %u word(s) wider than the %dpx box were broken mid-word", who,
+                   static_cast<unsigned>(hardBreaks), static_cast<int>(box.width));
+    }
+    if (result.lines == 0) {
+      Log::printf("[display] %s: had %u characters and drew no lines at all", who,
+                  static_cast<unsigned>(length));
+    }
+  }
+
+  return result;
+}
+
+/// The same, for the const String& every public function in Display.h takes.
+/// c_str() rather than a copy, so this overload allocates nothing either.
+TextResult layoutText(const String& text, const TextBox& box, uint32_t colour, const char* what,
+                      uint32_t background = kUseCardBackground, bool measureOnly = false) {
+  return layoutText(text.c_str(), box, colour, what, background, measureOnly);
+}
+
+/// The single-line shape, which is most of this file: a stat value, a team
+/// name, an address, a button label. One line means the "lines ran out" rule
+/// applies immediately, so anything too wide ellipsizes rather than being
+/// quietly shortened - which is exactly the sports card defect.
+///
+/// lineHeight comes from the font rather than from the caller because a
+/// one-line box has no second line to step to, and a zero there would make the
+/// returned `bottom` a quiet lie to anyone stacking a block underneath.
+/// Both overloads exist for the same reason the layoutText() pair does: a
+/// single const char* entry point taking a String would build a temporary on
+/// every call, and half the call sites below hand it a snprintf'd char buffer
+/// precisely to avoid that.
+TextResult layoutLine(const char* text, int x, int y, int width, uint32_t colour,
+                      const char* what, Align align = Align::Left,
+                      uint32_t background = kUseCardBackground) {
+  const TextBox box{static_cast<int16_t>(x), static_cast<int16_t>(y),
+                    static_cast<int16_t>(width), static_cast<int16_t>(lcd.fontHeight()), 1,
+                    align};
+  return layoutText(text, box, colour, what, background);
+}
+
+TextResult layoutLine(const String& text, int x, int y, int width, uint32_t colour,
+                      const char* what, Align align = Align::Left,
+                      uint32_t background = kUseCardBackground) {
+  return layoutLine(text.c_str(), x, y, width, colour, what, align, background);
+}
+
+/// How many lines of lineHeight actually fit between topY and the content
+/// budget's floor. This is the join between this routine and the content budget
+/// (README.md, "The content budget: a card knows whether a button will cover
+/// it"): the budget says how far down a card may draw, and this turns that into
+/// the maxLines the routine wants. A card whose text block is the last thing on
+/// the panel should ask rather than write a constant, because a constant was
+/// measured for exactly one of the two chrome configurations.
+uint8_t linesToBudget(int topY, int lineHeight) {
+  if (lineHeight <= 0) {
+    return 0;
+  }
+  const int available = gContentBottom - topY;
+  if (available < lineHeight) {
+    return 0;
+  }
+  const int lines = available / lineHeight;
+  return lines > 255 ? 255 : static_cast<uint8_t>(lines);
+}
+
+// The prose body the notice and calendar cards share: one short paragraph
+// filling most of the panel, at the larger of two sizes whenever the whole
+// thing survives it.
+//
+// One helper rather than the same eighteen lines in both cards, the same
+// reasoning README.md's "One helper, not a conditional in every card" gives
+// for the maintenance banner. Merging them also fixes a check that could not
+// fail. Both copies asked for the line count at the large size WITH A FIVE
+// LINE CAP and then tested `lines <= 5`, which a five line cap makes true
+// every time, so the smaller fallback tier was unreachable code and a long
+// notice was cut off at five lines with the denser size it was supposed to
+// drop to never once being tried. What the card actually wants to know is
+// whether the text survived, which is what TextResult::ellipsized answers and
+// what a line count never could.
+//
+// The line budgets come from linesToBudget() rather than the constants 5 and
+// 7. Those two numbers were measured against kButtonRowY when this card had no
+// idea whether a button row was coming, and the 7x18px tier was recorded in
+// README.md as landing 2px inside the button gap. Asking the budget gets the
+// full panel when no button is bound and a correctly shorter block when one
+// is, instead of one compromise that is slightly wrong in both cases.
+constexpr int16_t kProseTopY = 30;
+constexpr int16_t kProseLargeLineHeight = 24;
+constexpr int16_t kProseSmallLineHeight = 18;
+
+TextResult drawProseBody(const String& text, const char* what) {
+  const int16_t bodyWidth = kScreenW - kCardMargin * 2;
+
+  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setTextSize(1);
+  const TextBox largeBox{kCardMargin, kProseTopY, bodyWidth, kProseLargeLineHeight,
+                         linesToBudget(kProseTopY, kProseLargeLineHeight), Align::Left};
+  if (!layoutText(text, largeBox, ink(), what, kUseCardBackground, /*measureOnly=*/true)
+           .ellipsized) {
+    return layoutText(text, largeBox, ink(), what);
+  }
+
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  const TextBox smallBox{kCardMargin, kProseTopY, bodyWidth, kProseSmallLineHeight,
+                         linesToBudget(kProseTopY, kProseSmallLineHeight), Align::Left};
+  Log::verbose("[display] %s: dropped to the 9pt tier, the 12pt one would have ellipsized", what);
+  return layoutText(text, smallBox, ink(), what);
 }
 
 // Small colour-banded label in the top-left corner, e.g. CYD-Dickey's
@@ -464,13 +750,18 @@ int wrappedLeftText(const String& text, int x, int y, uint32_t colour, int lineH
 // (weather, listings, QR, branding) opens the same way, just with a
 // different fixed width/colour/label. width is per-card because the label
 // text itself varies ("WEATHER" vs "OVERHEAD").
+//
+// Every caller passes a literal today, and the label still goes through
+// layoutText() rather than straight to drawString(). Nothing in the signature
+// says a literal is required, and the one thing this file has learned is that
+// "the caller will pass something short" is a promise the caller never made.
+// The box is the coloured rect less the 8px inset on each side.
 void drawCardBanner(const String& label, uint32_t bannerColour, int width) {
   lcd.fillRect(0, 0, width, kBannerHeight, bannerColour);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);  // GFX fonts are sized at their own point size - see drawCardBanner's callers
-  lcd.setTextColor(kBannerLabelInk, bannerColour);
-  lcd.setTextDatum(top_left);
-  lcd.drawString(label, 8, 4);
+  const TextBox box{8, 4, static_cast<int16_t>(width - 16), kBannerHeight, 1, Align::Left};
+  layoutText(label, box, kBannerLabelInk, "card.banner", bannerColour);
 }
 
 // Every card-drawing function below switches to a bold sans GFX font
@@ -485,38 +776,9 @@ void restoreDefaultFont() {
   lcd.setTextDatum(top_left);
 }
 
-// Right-justifies text against rightX, truncating one character at a time
-// until it fits maxWidthPx - identical technique to CYD-Dickey's
-// drawTruncatedRight(), used there so a short value ("225kts") and a long
-// one ("British Airways") both end flush at the same right margin instead of
-// starting ragged from the left. Assumes the caller already set font/size/
-// colour, same as their version.
-void drawRightJustified(String text, int rightX, int y, int maxWidthPx) {
-  while (text.length() > 1 && lcd.textWidth(text) > maxWidthPx) {
-    text = text.substring(0, text.length() - 1);
-  }
-  lcd.setTextDatum(top_right);
-  lcd.drawString(text, rightX, y);
-  lcd.setTextDatum(top_left);
-}
-
-// Left-margined counterpart to drawRightJustified above: same
-// truncate-one-character-at-a-time technique, anchored at the left instead.
-// Used for the weather card's location and freshness lines, both of which are
-// short in practice but come from data this file does not control (a city
-// name the owner typed, say), and neither of which may be allowed to run off
-// the right edge of the panel.
-void drawTruncatedLeft(String text, int x, int y, int maxWidthPx) {
-  while (text.length() > 1 && lcd.textWidth(text) > maxWidthPx) {
-    text = text.substring(0, text.length() - 1);
-  }
-  lcd.setTextDatum(top_left);
-  lcd.drawString(text, x, y);
-}
-
 // The hand-drawn-degree-ring technique from the original centeredTemperature
 // above, adapted to a left-aligned origin instead of screen-centered - this
-// restyle's cards lay out left-margined (see wrappedLeftText's remarks), so
+// restyle's cards lay out left-margined (see layoutText's remarks), so
 // the temperature moves to match rather than staying centered on its own.
 // The bold GFX font used by the caller is exactly as ASCII-only as the bitmap
 // font the original comment describes - the missing-glyph problem, and the
@@ -532,9 +794,15 @@ void drawTemperature(int temperature, const String& unit, int x, int y, uint32_t
   lcd.setTextColor(colour, bg());
   lcd.setTextDatum(top_left);
 
-  const String numberText = String(temperature);
+  // The three pieces below advance a cursor across the panel rather than
+  // filling a box, so they do not go through layoutText() and carry the
+  // sentinel the CI gate looks for instead. Both strings are bounded by
+  // construction: a formatted int, and a unit this file's own callers pass as
+  // "F" or "C". Nothing here comes off the wire.
+  char numberText[12];
+  snprintf(numberText, sizeof(numberText), "%d", temperature);
   int cursorX = x;
-  lcd.drawString(numberText, cursorX, y);
+  lcd.drawString(numberText, cursorX, y);  // LAYOUT-PRIMITIVE
   cursorX += lcd.textWidth(numberText);
 
   const int gap = ringRadius;
@@ -555,7 +823,7 @@ void drawTemperature(int temperature, const String& unit, int x, int y, uint32_t
   }
   cursorX += ringRadius * 2 + gap;
 
-  lcd.drawString(unit, cursorX, y);
+  lcd.drawString(unit, cursorX, y);  // LAYOUT-PRIMITIVE
 }
 
 // ---------------------------------------------------------------------------
@@ -942,18 +1210,35 @@ bool readTouchRaw(int32_t& x, int32_t& y) {
   return lcd.getTouch(&x, &y);
 }
 
+// The boot-ladder screens. Both take server-supplied wording (a content-gate
+// refusal, a provisioning message) with no length this file controls, which is
+// why they wrapped before layoutText() existed and why the 8px margin either
+// side is kept: kBootTextWidth is the old wrappedCenteredText's own
+// kScreenW - 8 * 2.
+constexpr int16_t kBootTextWidth = kScreenW - 16;
+
 void showStatus(const String& headline, const String& detail) {
   clear();
-  const int headlineLines = wrappedCenteredText(headline, 85, ink(), 2, 22, 3);
+  lcd.setTextSize(2);
+  const TextBox headlineBox{kScreenW / 2, 85, kBootTextWidth, 22, 3, Align::Centre};
+  const TextResult drew = layoutText(headline, headlineBox, ink(), "status.headline");
   if (detail.length() > 0) {
-    wrappedCenteredText(detail, 85 + headlineLines * 22 + 12, muted(), 1, 14, 3);
+    lcd.setTextSize(1);
+    const TextBox detailBox{kScreenW / 2, static_cast<int16_t>(drew.bottom + 12), kBootTextWidth,
+                            14, 3, Align::Centre};
+    layoutText(detail, detailBox, muted(), "status.detail");
   }
 }
 
 void showFailure(const String& headline, const String& whatToDo) {
   clear();
-  const int headlineLines = wrappedCenteredText(headline, 75, kWarn, 2, 22, 3);
-  wrappedCenteredText(whatToDo, 75 + headlineLines * 22 + 12, muted(), 1, 14, 3);
+  lcd.setTextSize(2);
+  const TextBox headlineBox{kScreenW / 2, 75, kBootTextWidth, 22, 3, Align::Centre};
+  const TextResult drew = layoutText(headline, headlineBox, kWarn, "failure.headline");
+  lcd.setTextSize(1);
+  const TextBox detailBox{kScreenW / 2, static_cast<int16_t>(drew.bottom + 12), kBootTextWidth, 14,
+                          3, Align::Centre};
+  layoutText(whatToDo, detailBox, muted(), "failure.whattodo");
 }
 
 void aircraftLogoZone(int16_t& x, int16_t& y, int16_t& w, int16_t& h) {
@@ -980,15 +1265,15 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   // airline name - callsign was the fallback for this position for as long
   // as this server sent nothing richer (see Aircraft.h's updated remarks),
   // and stays the fallback now for a server too old to send a name at all.
-  // Truncated left at 200px, not the full card width: aircraftLogoZone()
+  // Bounded at 200px rather than the full card width: aircraftLogoZone()
   // starts at x220, and a name long enough to reach it would run under the
-  // logo rather than stopping short of it.
+  // logo rather than stopping short of it. An over-long name now ellipsizes
+  // inside those 200px instead of being shortened with nothing to show for it.
   const bool hasAirlineName = airlineName.length() > 0;
   const String headline = hasAirlineName ? airlineName : callsign;
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
-  lcd.setTextColor(ink(), bg());
-  drawTruncatedLeft(headline, kCardMargin, 32, 200);
+  layoutLine(headline, kCardMargin, 32, 200, ink(), "aircraft.headline");
 
   // Callsign drops to this secondary line, alongside distance, only when the
   // airline name took the headline slot above it - otherwise callsign is
@@ -1004,8 +1289,8 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   } else {
     snprintf(distanceBuf, sizeof(distanceBuf), "%.1f mi away", distanceMiles);
   }
-  lcd.setTextColor(muted(), bg());
-  lcd.drawString(distanceBuf, kCardMargin, 64);
+  layoutLine(distanceBuf, kCardMargin, 64, kScreenW - kCardMargin * 2, muted(),
+             "aircraft.distance");
 
   // Route, in the gap between the distance line and the stat rows.
   // Name-with-code-fallback per side, independently - see Display.h's own
@@ -1030,23 +1315,24 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
     // wrap only ever engages for a name long enough to need it, which is why
     // a 6-month-old server's codes-only response reproduces this card's
     // original layout exactly rather than merely approximating it. Two lines
-    // is the cap: a route that still doesn't fit in two gets its second line
-    // truncated by wrappedLeftText's own word-break rather than growing a
-    // third line into the stat rows further than accounted for below. No log
-    // line here - this is the draw path, and Aircraft.cpp's cardFetch()
-    // already logs this exact same name-with-code-fallback route once per
-    // fetch rather than once per draw, the same belongs-on-the-fetch-path
-    // rule Aircraft.cpp's own remarks give for the logo cache check.
-    routeLines = wrappedLeftText(routeLine, kCardMargin, 82, muted(), kRouteLineHeight,
-                                 /*maxLines=*/2, kScreenW - kCardMargin * 2);
+    // is the cap: a route that still doesn't fit in two now ellipsizes on the
+    // second line rather than growing a third into the stat rows. No log line
+    // here - this is the draw path, Aircraft.cpp's cardFetch() already logs
+    // this exact same name-with-code-fallback route once per fetch rather than
+    // once per draw, and layoutText() itself narrates an ellipsis.
+    const TextBox routeBox{kCardMargin, 82, kScreenW - kCardMargin * 2, kRouteLineHeight, 2,
+                           Align::Left};
+    routeLines = layoutText(routeLine, routeBox, muted(), "aircraft.route").lines;
   }
 
-  // Stat rows: a muted label on the left, the value right-justified against
-  // the card's right margin - the same truncate-and-right-justify technique
-  // as CYD-Dickey's drawFeaturedAircraft()/drawTruncatedRight (see
-  // drawRightJustified above), applied per-row here instead of to a whole
-  // second column of airline-specific fields CAL didn't used to have data
-  // for.
+  // Stat rows: a muted label on the left, the value right-aligned against the
+  // card's right margin - the same label-left/value-right technique as
+  // CYD-Dickey's drawFeaturedAircraft(), applied per-row here instead of to a
+  // whole second column of airline-specific fields CAL didn't used to have
+  // data for. The values are snprintf'd into a stack buffer rather than built
+  // with String concatenation, which is a heap fix as much as a tidy-up: three
+  // rows per draw was three String temporaries per draw on the heap whose
+  // largest contiguous block decides whether TLS can open.
   //
   // rowY starts right after however many lines the route text actually
   // used, rather than a fixed y=100: a one-line (or absent) route reproduces
@@ -1056,25 +1342,29 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   // this grows down rather than shrinking the font or truncating.
   const int rightX = kScreenW - kCardMargin;
   const int rowValueWidth = 150;
+  // The label's own bound, which used to be nothing at all. The value column
+  // is reserved first and the label gets what is left, so a label can never
+  // push a value off the edge - the same ordering the sports card already
+  // argues for its score column.
+  const int rowLabelWidth = rightX - rowValueWidth - kCardMargin;
   int rowY = routeLines > 0 ? 82 + routeLines * kRouteLineHeight : 100;
   constexpr int kRowHeight = 30;
 
-  lcd.setTextColor(muted(), bg());
-  lcd.drawString("Altitude", kCardMargin, rowY);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(String(altitudeFeet) + " ft", rightX, rowY, rowValueWidth);
+  char valueBuf[24];
+
+  layoutLine("Altitude", kCardMargin, rowY, rowLabelWidth, muted(), "aircraft.altitude.label");
+  snprintf(valueBuf, sizeof(valueBuf), "%d ft", altitudeFeet);
+  layoutLine(valueBuf, rightX, rowY, rowValueWidth, ink(), "aircraft.altitude", Align::Right);
   rowY += kRowHeight;
 
-  lcd.setTextColor(muted(), bg());
-  lcd.drawString("Speed", kCardMargin, rowY);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(String(static_cast<int>(speedKnots + 0.5)) + " kts", rightX, rowY, rowValueWidth);
+  layoutLine("Speed", kCardMargin, rowY, rowLabelWidth, muted(), "aircraft.speed.label");
+  snprintf(valueBuf, sizeof(valueBuf), "%d kts", static_cast<int>(speedKnots + 0.5));
+  layoutLine(valueBuf, rightX, rowY, rowValueWidth, ink(), "aircraft.speed", Align::Right);
   rowY += kRowHeight;
 
-  lcd.setTextColor(muted(), bg());
-  lcd.drawString("Heading", kCardMargin, rowY);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(compassDirection(headingDegrees), rightX, rowY, rowValueWidth);
+  layoutLine("Heading", kCardMargin, rowY, rowLabelWidth, muted(), "aircraft.heading.label");
+  layoutLine(compassDirection(headingDegrees), rightX, rowY, rowValueWidth, ink(),
+             "aircraft.heading", Align::Right);
   rowY += kRowHeight;
 
   // Same defect Weather.cpp's restyle found and fixed on its own card: this
@@ -1084,15 +1374,19 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   if (updatedAt.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
-    lcd.setTextColor(muted(), bg());
-    lcd.setTextDatum(top_left);
-    lcd.drawString(updatedAt, kCardMargin, rowY + 4);
+    layoutLine(updatedAt, kCardMargin, rowY + 4, kScreenW - kCardMargin * 2, muted(),
+               "aircraft.updated");
   }
 
   drawClock();
   restoreDefaultFont();
 }
 
+// The three status cards below (aircraft, listings, forecast) share one shape:
+// a headline in warn or muted, then an optional detail block stacked under
+// however many lines the headline actually took. The `bottom` layoutText()
+// returns is what does the stacking, so a two-line headline pushes the detail
+// down by exactly one line instead of by an assumed one.
 void showAircraftStatus(const String& headline, const String& detail, bool isProblem) {
   lcd.fillScreen(bg());
   drawCardBanner("OVERHEAD", kAircraftBanner, 130);
@@ -1100,11 +1394,12 @@ void showAircraftStatus(const String& headline, const String& detail, bool isPro
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
   const uint32_t headlineColour = isProblem ? kWarn : muted();
-  const int headlineLines =
-      wrappedLeftText(headline, kCardMargin, 40, headlineColour, 22, 3, kScreenW - kCardMargin * 2);
+  const TextBox headlineBox{kCardMargin, 40, kScreenW - kCardMargin * 2, 22, 3, Align::Left};
+  const TextResult drew = layoutText(headline, headlineBox, headlineColour, "aircraft.status");
   if (detail.length() > 0) {
-    wrappedLeftText(detail, kCardMargin, 40 + headlineLines * 22 + 12, ink(), 18, 3,
-                    kScreenW - kCardMargin * 2);
+    const TextBox detailBox{kCardMargin, static_cast<int16_t>(drew.bottom + 12),
+                            kScreenW - kCardMargin * 2, 18, 3, Align::Left};
+    layoutText(detail, detailBox, ink(), "aircraft.status.detail");
   }
 
   drawClock();
@@ -1120,20 +1415,19 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   // shape of information (a short label against a short value).
   const int rightX = kScreenW - kCardMargin;
   const int rowValueWidth = 150;
+  // Stops at the icon column rather than at the value column: the icons below
+  // are centred at x=130 and span 114-146, so a label allowed to run to x=160
+  // would print through them.
+  const int rowLabelWidth = 104;
 
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
 
-  lcd.setTextColor(muted(), bg());
-  lcd.setTextDatum(top_left);
-  lcd.drawString("Sunrise", kCardMargin, 44);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(sunriseText, rightX, 44, rowValueWidth);
+  layoutLine("Sunrise", kCardMargin, 44, rowLabelWidth, muted(), "sunmoon.sunrise.label");
+  layoutLine(sunriseText, rightX, 44, rowValueWidth, ink(), "sunmoon.sunrise", Align::Right);
 
-  lcd.setTextColor(muted(), bg());
-  lcd.drawString("Sunset", kCardMargin, 90);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(sunsetText, rightX, 90, rowValueWidth);
+  layoutLine("Sunset", kCardMargin, 90, rowLabelWidth, muted(), "sunmoon.sunset.label");
+  layoutLine(sunsetText, rightX, 90, rowValueWidth, ink(), "sunmoon.sunset", Align::Right);
 
   // One icon per row, in the gap between the label and the right-justified
   // value column - "Sunrise"/"Sunset" at this font leave roughly x100-160
@@ -1152,8 +1446,8 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
 
   if (detail.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    lcd.setTextColor(muted(), bg());
-    wrappedLeftText(detail, kCardMargin, 140, muted(), 20, 2, kScreenW - kCardMargin * 2);
+    const TextBox detailBox{kCardMargin, 140, kScreenW - kCardMargin * 2, 20, 2, Align::Left};
+    layoutText(detail, detailBox, muted(), "sunmoon.detail");
   }
 
   drawClock();
@@ -1170,20 +1464,19 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
   // "detail" worth adding.
   const int rightX = kScreenW - kCardMargin;
   const int rowValueWidth = 150;
+  // Narrower than showSunMoonCard()'s because this card's icon column sits
+  // further right to clear the wider labels: icons span 119-151, so the label
+  // stops at 109.
+  const int rowLabelWidth = 99;
 
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
 
-  lcd.setTextColor(muted(), bg());
-  lcd.setTextDatum(top_left);
-  lcd.drawString("Next high", kCardMargin, 44);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(nextHighTideText, rightX, 44, rowValueWidth);
+  layoutLine("Next high", kCardMargin, 44, rowLabelWidth, muted(), "tides.high.label");
+  layoutLine(nextHighTideText, rightX, 44, rowValueWidth, ink(), "tides.high", Align::Right);
 
-  lcd.setTextColor(muted(), bg());
-  lcd.drawString("Next low", kCardMargin, 90);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(nextLowTideText, rightX, 90, rowValueWidth);
+  layoutLine("Next low", kCardMargin, 90, rowLabelWidth, muted(), "tides.low.label");
+  layoutLine(nextLowTideText, rightX, 90, rowValueWidth, ink(), "tides.low", Align::Right);
 
   // Same icon-in-the-gap placement as showSunMoonCard()'s two rows -
   // "Next high"/"Next low" are wider labels than "Sunrise"/"Sunset" at this
@@ -1220,9 +1513,7 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   if (hasAddress) {
     lcd.setFont(&fonts::FreeSansBold12pt7b);
     lcd.setTextSize(1);
-    lcd.setTextColor(ink(), bg());
-    lcd.setTextDatum(top_left);
-    drawTruncatedLeft(address, kCardMargin, 30, kScreenW - kCardMargin * 2);
+    layoutLine(address, kCardMargin, 30, kScreenW - kCardMargin * 2, ink(), "homevalue.address");
   }
 
   // THE VERTICAL BUDGET, and why the rows below tightened rather than simply
@@ -1254,20 +1545,18 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // character-truncated into a wrong number.
   const int rightX = kScreenW - kCardMargin;
   const int rowValueWidth = 150;
+  const int rowLabelWidth = rightX - rowValueWidth - kCardMargin;
 
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
 
-  lcd.setTextColor(muted(), bg());
-  lcd.setTextDatum(top_left);
-  lcd.drawString("Est. value", kCardMargin, firstRowY);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(estimateText, rightX, firstRowY, rowValueWidth);
+  layoutLine("Est. value", kCardMargin, firstRowY, rowLabelWidth, muted(),
+             "homevalue.estimate.label");
+  layoutLine(estimateText, rightX, firstRowY, rowValueWidth, ink(), "homevalue.estimate",
+             Align::Right);
 
-  lcd.setTextColor(muted(), bg());
-  lcd.drawString("Range", kCardMargin, secondRowY);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(rangeText, rightX, secondRowY, rowValueWidth);
+  layoutLine("Range", kCardMargin, secondRowY, rowLabelWidth, muted(), "homevalue.range.label");
+  layoutLine(rangeText, rightX, secondRowY, rowValueWidth, ink(), "homevalue.range", Align::Right);
 
   // detail (price-per-square-foot and the RentCast refresh date) is optional
   // and pushes the fixed compliance line below it down by however many lines
@@ -1289,10 +1578,10 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
     const int detailLinesAllowed = roomForDetail / 18;
     if (detailLinesAllowed >= 1) {
       lcd.setFont(&fonts::FreeSansBold9pt7b);
-      const int detailLines = wrappedLeftText(detail, kCardMargin, nextY, muted(), 18,
-                                              detailLinesAllowed > 2 ? 2 : detailLinesAllowed,
-                                              kScreenW - kCardMargin * 2);
-      nextY += detailLines * 18 + 6;
+      const TextBox detailBox{
+          kCardMargin, static_cast<int16_t>(nextY), kScreenW - kCardMargin * 2, 18,
+          static_cast<uint8_t>(detailLinesAllowed > 2 ? 2 : detailLinesAllowed), Align::Left};
+      nextY = layoutText(detail, detailBox, muted(), "homevalue.detail").bottom + 6;
     } else {
       Log::verbose("[display] homevalue dropped its detail line - %d px left above the "
                    "compliance line at y=%d",
@@ -1308,8 +1597,8 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // overlapped by the thing above it either.
   const int drawComplianceAt = nextY > complianceY ? nextY : complianceY;
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  wrappedLeftText("Automated estimate, not an appraisal.", kCardMargin, drawComplianceAt, muted(),
-                  18, 1, kScreenW - kCardMargin * 2);
+  layoutLine("Automated estimate, not an appraisal.", kCardMargin, drawComplianceAt,
+             kScreenW - kCardMargin * 2, muted(), "homevalue.compliance");
   noteContentOverrun("homevalue", drawComplianceAt + complianceHeight);
 
   drawClock();
@@ -1322,33 +1611,92 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
   lcd.fillScreen(bg());
   drawCardBanner("SPORTS", kSportsBanner, 110);
 
-  // Two team rows, each a name on the left and a score hard right. Names are
-  // truncated rather than wrapped and the score column is reserved first, so a
-  // long club name can never push a score off the edge or onto a second line -
-  // the score is the thing somebody crossing the room is trying to read.
+  // Two team rows, each a name on the left and a score hard right. The score
+  // column is reserved first, so a long club name can never push a score off
+  // the edge or onto a second line - the score is the thing somebody crossing
+  // the room is trying to read.
   constexpr int kScoreColumnWidth = 64;
   constexpr int kHomeRowY = 62;
   constexpr int kAwayRowY = 116;
   const int nameWidth = kScreenW - kCardMargin * 2 - kScoreColumnWidth;
+  const int rightX = kScreenW - kCardMargin;
 
   lcd.setTextSize(1);
 
   for (int row = 0; row < 2; ++row) {
-    const String& name = row == 0 ? homeName : awayName;
-    const String& score = row == 0 ? homeScore : awayScore;
-    const int y = row == 0 ? kHomeRowY : kAwayRowY;
+    const bool isAway = (row == 1);
+    const String& name = isAway ? awayName : homeName;
+    const String& score = isAway ? awayScore : homeScore;
+    const int y = isAway ? kAwayRowY : kHomeRowY;
 
+    // THE AWAY ROW CARRIES AN "@". Two stacked names say nothing about which
+    // team is at home, and "@ Houston Astros" is the convention every American
+    // scoreboard and ticker uses, so a reader crossing the room resolves it
+    // without thinking. Only the away row is marked: a home team with no
+    // marker is the home team, and marking both would spend width saying what
+    // the absence already says.
+    //
+    // The "@" is joined to the name BEFORE anything is measured, which is the
+    // part that matters here. Added after the fit was computed it would push
+    // the name one glyph further into being cut, and the marker itself could
+    // end up being the thing the ellipsis ate - the layout would have created
+    // the defect it exists to fix.
+    //
+    // 96 bytes against a wire cap of 20 characters (Sports.h's
+    // kMaxTeamNameLength). That is not a guess at what fits the panel, which
+    // is roughly 14 glyphs at this font; it is room for anything a caller
+    // could hand this function, so the join never loses a character behind
+    // layoutText's back. A caller that somehow exceeds it says so out loud.
+    char nameLine[96];
+    const char* nameToDraw = name.c_str();
+    if (isAway && name.length() > 0) {
+      const int needed = snprintf(nameLine, sizeof(nameLine), "@ %s", name.c_str());
+      if (needed < 0 || static_cast<size_t>(needed) >= sizeof(nameLine)) {
+        Log::printf("[display] sports.away: name is %u characters, longer than the %u byte "
+                    "join buffer, so the '@' row was cut before it was measured",
+                    static_cast<unsigned>(name.length()), static_cast<unsigned>(sizeof(nameLine)));
+      }
+      nameToDraw = nameLine;
+    }
+
+    // Two tiers, the same technique showAnnouncementCard() uses for its body
+    // text: try the size the card was designed at, and drop one tier when the
+    // whole name will not survive it. "Houston Astros" is 14 characters and
+    // does not fit 236px at 18pt, which is how it reached a photograph reading
+    // "Houston Astr"; it fits comfortably at 12pt. An ellipsis is still there
+    // as the backstop for a name that will not fit either size, so this is a
+    // way of needing the ellipsis less often rather than a way of avoiding it.
+    //
+    // The score stays at 18pt regardless. This card's own reasoning is that
+    // the score is what a reader across the room is after, so the name is the
+    // one that gives up size.
     lcd.setFont(&fonts::FreeSansBold18pt7b);
-    lcd.setTextColor(ink(), bg());
-    lcd.setTextDatum(top_left);
-    drawTruncatedLeft(name, kCardMargin, y, nameWidth);
+    const int largeHeight = lcd.fontHeight();
+    const TextBox largeBox{kCardMargin, static_cast<int16_t>(y), static_cast<int16_t>(nameWidth),
+                           static_cast<int16_t>(largeHeight), 1, Align::Left};
+    const bool wouldCut =
+        layoutText(nameToDraw, largeBox, ink(), "sports.name", kUseCardBackground,
+                   /*measureOnly=*/true)
+            .ellipsized;
+
+    if (wouldCut) {
+      lcd.setFont(&fonts::FreeSansBold12pt7b);
+      // Centred against the 18pt score beside it rather than sharing its top
+      // edge, which would leave the smaller name floating high in the row.
+      const int nudge = (largeHeight - lcd.fontHeight()) / 2;
+      layoutLine(nameToDraw, kCardMargin, y + nudge, nameWidth, ink(),
+                 isAway ? "sports.away" : "sports.home");
+      lcd.setFont(&fonts::FreeSansBold18pt7b);
+    } else {
+      layoutText(nameToDraw, largeBox, ink(), isAway ? "sports.away" : "sports.home");
+    }
 
     // Empty before play starts, and that is drawn as nothing rather than as a
     // zero. Null and zero are different facts here: a nil-nil draw is a real
     // scoreline and a game that has not started is not 0-0.
     if (score.length() > 0) {
-      lcd.setTextDatum(top_right);
-      lcd.drawString(score, kScreenW - kCardMargin, y);
+      layoutLine(score, rightX, y, kScoreColumnWidth, ink(),
+                 isAway ? "sports.awayscore" : "sports.homescore", Align::Right);
     }
   }
 
@@ -1356,11 +1704,15 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
   // during, FINAL or PPD after. Empty when the server sent a state this
   // firmware does not know, and then this row is simply absent - claiming a
   // game has not started is exactly the claim an unknown state cannot support.
+  //
+  // Bounded short of the "N of M" counter that shares this row, rather than
+  // across the whole card: the counter is drawn after and would otherwise be
+  // printed over by a long enough progress string.
+  constexpr int kMarkerColumnWidth = 64;
   if (status.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold12pt7b);
-    lcd.setTextColor(muted(), bg());
-    lcd.setTextDatum(top_left);
-    lcd.drawString(status, kCardMargin, 172);
+    layoutLine(status, kCardMargin, 172, kScreenW - kCardMargin * 2 - kMarkerColumnWidth, muted(),
+               "sports.status");
   }
 
   // "2 of 4", only on a card actually holding several games, so a one-game team
@@ -1370,9 +1722,7 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
     snprintf(marker, sizeof(marker), "%u of %u", static_cast<unsigned>(itemNumber),
              static_cast<unsigned>(itemCount));
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    lcd.setTextColor(muted(), bg());
-    lcd.setTextDatum(top_right);
-    lcd.drawString(marker, kScreenW - kCardMargin, 176);
+    layoutLine(marker, rightX, 176, kMarkerColumnWidth, muted(), "sports.counter", Align::Right);
   }
 
   gContentBottom = 200;
@@ -1388,25 +1738,21 @@ void showIssFlyoverCard(const String& distanceText, const String& directionText,
   // showSunMoonCard() uses for day length - here, the actual coordinates.
   const int rightX = kScreenW - kCardMargin;
   const int rowValueWidth = 150;
+  const int rowLabelWidth = rightX - rowValueWidth - kCardMargin;
 
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
 
-  lcd.setTextColor(muted(), bg());
-  lcd.setTextDatum(top_left);
-  lcd.drawString("Distance", kCardMargin, 44);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(distanceText, rightX, 44, rowValueWidth);
+  layoutLine("Distance", kCardMargin, 44, rowLabelWidth, muted(), "iss.distance.label");
+  layoutLine(distanceText, rightX, 44, rowValueWidth, ink(), "iss.distance", Align::Right);
 
-  lcd.setTextColor(muted(), bg());
-  lcd.drawString("Direction", kCardMargin, 90);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(directionText, rightX, 90, rowValueWidth);
+  layoutLine("Direction", kCardMargin, 90, rowLabelWidth, muted(), "iss.direction.label");
+  layoutLine(directionText, rightX, 90, rowValueWidth, ink(), "iss.direction", Align::Right);
 
   if (detail.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    lcd.setTextColor(muted(), bg());
-    wrappedLeftText(detail, kCardMargin, 140, muted(), 20, 2, kScreenW - kCardMargin * 2);
+    const TextBox detailBox{kCardMargin, 140, kScreenW - kCardMargin * 2, 20, 2, Align::Left};
+    layoutText(detail, detailBox, muted(), "iss.detail");
   }
 
   drawClock();
@@ -1426,25 +1772,21 @@ void showIssNextPassCard(const String& riseTimeText, const String& riseDirection
   // live coordinates.
   const int rightX = kScreenW - kCardMargin;
   const int rowValueWidth = 150;
+  const int rowLabelWidth = rightX - rowValueWidth - kCardMargin;
 
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
 
-  lcd.setTextColor(muted(), bg());
-  lcd.setTextDatum(top_left);
-  lcd.drawString("Next pass", kCardMargin, 44);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(riseTimeText, rightX, 44, rowValueWidth);
+  layoutLine("Next pass", kCardMargin, 44, rowLabelWidth, muted(), "iss.nextpass.label");
+  layoutLine(riseTimeText, rightX, 44, rowValueWidth, ink(), "iss.nextpass", Align::Right);
 
-  lcd.setTextColor(muted(), bg());
-  lcd.drawString("Direction", kCardMargin, 90);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(riseDirectionText, rightX, 90, rowValueWidth);
+  layoutLine("Direction", kCardMargin, 90, rowLabelWidth, muted(), "iss.risedir.label");
+  layoutLine(riseDirectionText, rightX, 90, rowValueWidth, ink(), "iss.risedir", Align::Right);
 
   if (detail.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    lcd.setTextColor(muted(), bg());
-    wrappedLeftText(detail, kCardMargin, 140, muted(), 20, 2, kScreenW - kCardMargin * 2);
+    const TextBox detailBox{kCardMargin, 140, kScreenW - kCardMargin * 2, 20, 2, Align::Left};
+    layoutText(detail, detailBox, muted(), "iss.detail");
   }
 
   drawClock();
@@ -1534,13 +1876,17 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
 
   if (phaseName.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold12pt7b);
-    wrappedCenteredText(phaseName, 150, ink(), 1, 22, 1);
+    layoutLine(phaseName, kScreenW / 2, 150, kBootTextWidth, ink(), "moon.phase", Align::Centre);
   }
 
   char pctBuffer[24];
   snprintf(pctBuffer, sizeof(pctBuffer), "%d%% illuminated", static_cast<int>(k * 100.0 + 0.5));
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  wrappedCenteredText(String(pctBuffer), 176, muted(), 1, 18, 1);
+  // The buffer straight through rather than String(pctBuffer): the temporary
+  // that wrapping cost was a heap allocation on the draw path for a string
+  // that is already a flat array.
+  layoutLine(pctBuffer, kScreenW / 2, 176, kBootTextWidth, muted(), "moon.illuminated",
+             Align::Centre);
 
   drawClock();
   restoreDefaultFont();
@@ -1573,16 +1919,27 @@ void showClockDate(const String& timeText, const String& dateText) {
   if (lcd.textWidth(timeText) > maxTimeWidth) {
     lcd.setTextSize(1);
   }
-  lcd.drawString(timeText, kScreenW / 2, 100);
+  // One of the three raw draws left in this file, and the only one on a card.
+  // The hero wants middle_center so the numerals sit centred on y=100, which
+  // is a datum a top-anchored TextBox does not express, and it already
+  // measures and gives up a whole size rather than clipping - the one thing
+  // layoutText() would add is an ellipsis on a string that formatTimeOfDay()
+  // bounds to eight characters. If even size 1 will not fit, that is a font
+  // change nobody accounted for, so it says so rather than quietly clipping.
+  if (lcd.textWidth(timeText) > maxTimeWidth) {
+    Log::printf("[display] clockdate: '%s' is %dpx wide at the smallest size, past the %dpx card",
+                timeText.c_str(), lcd.textWidth(timeText), maxTimeWidth);
+  }
+  lcd.drawString(timeText, kScreenW / 2, 100);  // LAYOUT-PRIMITIVE
 
   // The date, secondary to the time both in size and in colour (muted(),
   // same as every other card's supporting line) - the same bold 9pt/12pt
   // family the rest of this file uses rather than a plain bitmap face, and
-  // reusing wrappedCenteredText's own word-wrap/measure logic (see
-  // showStatus() above) rather than assuming a spelled-out weekday and month
-  // always fits on one line at this width.
+  // wrapped rather than assuming a spelled-out weekday and month always fits
+  // on one line at this width.
   lcd.setFont(&fonts::FreeSansBold12pt7b);
-  wrappedCenteredText(dateText, 145, muted(), 1, 20, 2);
+  const TextBox dateBox{kScreenW / 2, 145, kBootTextWidth, 20, 2, Align::Centre};
+  layoutText(dateText, dateBox, muted(), "clockdate.date");
 
   drawClock();
   restoreDefaultFont();
@@ -1611,10 +1968,13 @@ void showCalendarCard(const String& text, uint8_t itemNumber, uint8_t itemCount)
   if (itemCount > 1 && itemNumber >= 1) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
-    lcd.setTextDatum(top_right);
-    lcd.setTextColor(muted(), bg());
-    lcd.drawString(String(itemNumber) + " of " + String(itemCount), kScreenW - kCardMargin, 8);
-    lcd.setTextDatum(top_left);
+    // snprintf into a buffer rather than String(itemNumber) + " of " + ... :
+    // that expression was three heap allocations per draw for a string this
+    // card already knows the exact shape of.
+    char counter[16];
+    snprintf(counter, sizeof(counter), "%u of %u", static_cast<unsigned>(itemNumber),
+             static_cast<unsigned>(itemCount));
+    layoutLine(counter, kScreenW - kCardMargin, 8, 64, muted(), "calendar.counter", Align::Right);
   }
 
   // The body reuses the announcement card's two-tier wrap verbatim rather than
@@ -1622,18 +1982,8 @@ void showCalendarCard(const String& text, uint8_t itemNumber, uint8_t itemCount)
   // button row, and an event line is the same shape of content as a notice -
   // one short paragraph of prose. What was wrong before was never the layout,
   // only the green "NOTICE" banner stamped above it.
-  const int bodyWidth = kScreenW - kCardMargin * 2;
   if (text.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold12pt7b);
-    lcd.setTextSize(1);
-    const int linesAtLargeSize =
-        wrappedLeftText(text, kCardMargin, 30, ink(), 24, 5, bodyWidth, /*measureOnly=*/true);
-    if (linesAtLargeSize <= 5) {
-      wrappedLeftText(text, kCardMargin, 30, ink(), 24, 5, bodyWidth);
-    } else {
-      lcd.setFont(&fonts::FreeSansBold9pt7b);
-      wrappedLeftText(text, kCardMargin, 30, ink(), 18, 7, bodyWidth);
-    }
+    drawProseBody(text, "calendar.body");
   }
 
   drawClock();
@@ -1644,27 +1994,20 @@ void showAnnouncementCard(const String& text) {
   lcd.fillScreen(bg());
   drawCardBanner("NOTICE", kAnnouncementBanner, 90);
 
-  const int bodyWidth = kScreenW - kCardMargin * 2;
+  // Starts at y=30 rather than the original y=40 - kButtonRowY moved from 190
+  // to 160 when the button row doubled in height, and shifting this block's
+  // own start up by 10px buys back exactly the clearance that move cost. How
+  // many lines fit under that start is now the content budget's answer rather
+  // than this card's guess: see drawProseBody().
+  //
+  // This is the card whose first line was photographed reading "Test device:
+  // this rotation h" with the rest of "has" clipped off the panel. That was
+  // the wrap breaking at the space it had just measured and rejected, and it
+  // is fixed in layoutText() rather than here, because the listings card and
+  // the QR caption were making the identical mistake through the identical
+  // function.
   if (text.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold12pt7b);
-    lcd.setTextSize(1);
-    // Starts at y=30 rather than the original y=40 - kButtonRowY moved from
-    // 190 to 160 when the button row doubled in height, and shifting this
-    // block's own start up by 10px buys back exactly the clearance that
-    // move cost. 5 lines at 24px is now y 30-150, clear of the button row by
-    // 10px.
-    const int linesAtLargeSize =
-        wrappedLeftText(text, kCardMargin, 30, ink(), 24, 5, bodyWidth, /*measureOnly=*/true);
-    if (linesAtLargeSize <= 5) {
-      wrappedLeftText(text, kCardMargin, 30, ink(), 24, 5, bodyWidth);
-    } else {
-      // 7 lines at 18px is y 30-156, a tighter but still real 4px clearance
-      // at the smaller size - and 7 lines of roughly 38 characters each
-      // still comfortably covers the full 280-character limit without a
-      // further fallback tier.
-      lcd.setFont(&fonts::FreeSansBold9pt7b);
-      wrappedLeftText(text, kCardMargin, 30, ink(), 18, 7, bodyWidth);
-    }
+    drawProseBody(text, "notice.body");
   }
 
   drawClock();
@@ -1694,7 +2037,8 @@ void showBannerCard(const String& text) {
     // strip than ranged left against an edge nothing else in the strip lines
     // up with. Three lines at 26px (78px) inside a 100px-tall strip leaves
     // an 11px margin top and bottom.
-    wrappedCenteredText(text, 11, kBannerStripInk, 1, 26, 3, kBannerStripFill);
+    const TextBox stripBox{kScreenW / 2, 11, kScreenW - kCardMargin * 2, 26, 3, Align::Centre};
+    layoutText(text, stripBox, kBannerStripInk, "banner.strip", kBannerStripFill);
   }
 
   drawClock();
@@ -1758,9 +2102,13 @@ void showQrTextCard(const String& qrData, const String& caption) {
     // since CardPolicyEditing.MaxQrDataLength already keeps an ordinary saved
     // policy well clear of that limit - handled by a failure message rather than
     // drawing garbage, the same choice CAL's own showQr() makes.
-    wrappedLeftText("Cannot display code", kCardMargin, 60, ink(), 22, 2, bodyWidth);
+    layoutLine("Cannot display code", kCardMargin, 60, bodyWidth, ink(), "qr.failure");
     if (qrData.length() > 0) {
-      wrappedLeftText(qrData, kCardMargin, 110, muted(), 18, 3, bodyWidth);
+      // The payload itself, which is the one thing on this card a reader could
+      // still act on. Word-broken mid-token when it has to be, because a URL
+      // has no spaces and half of one is no use to anybody.
+      const TextBox dataBox{kCardMargin, 110, bodyWidth, 18, 3, Align::Left};
+      layoutText(qrData, dataBox, muted(), "qr.failure.data");
     }
     drawClock();
     restoreDefaultFont();
@@ -1787,13 +2135,19 @@ void showQrTextCard(const String& qrData, const String& caption) {
   const bool hasCaption = caption.length() > 0;
   if (hasCaption) {
     lcd.setFont(&fonts::FreeSansBold12pt7b);
-    y += wrappedCenteredText(caption, y, ink(), 1, 22, 1) * 22;
-    y += 2;
+    // The 22px step is this card's own rather than the font's advance: its
+    // vertical budget is measured to the pixel (see the header comment above)
+    // and FreeSansBold12pt7b's line advance is several pixels taller than the
+    // spacing this layout was built around.
+    layoutLine(caption, kScreenW / 2, y, bodyWidth, ink(), "qr.caption", Align::Centre);
+    y += 22 + 2;
   }
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   // One line, not two, once a caption is already on screen - see this
   // function's own header comment for why.
-  wrappedCenteredText(qrData, y, muted(), 1, 16, hasCaption ? 1 : 2);
+  const TextBox dataBox{kScreenW / 2, static_cast<int16_t>(y), static_cast<int16_t>(bodyWidth),
+                        16, static_cast<uint8_t>(hasCaption ? 1 : 2), Align::Centre};
+  layoutText(qrData, dataBox, muted(), "qr.data");
 
   drawClock();
   restoreDefaultFont();
@@ -1813,66 +2167,73 @@ void showListingsCard(const String& address, const String& propertyType, int pri
   // every other list card on this build shows exactly one item today (see
   // Aircraft.h's own remarks on why), so this is the first card that has ever
   // needed to tell a household "there is more" at all.
+  // 64px is the counter's own column in the banner row, to the right of the
+  // coloured rect that ends at x=130. It does not constrain the address below,
+  // which is a row further down; it bounds the counter itself, which used to be
+  // drawn right-aligned against the margin with nothing saying how far left it
+  // was allowed to grow.
+  constexpr int kCounterWidth = 64;
   if (total > 1) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
-    lcd.setTextColor(muted(), bg());
     char caption[16];
     snprintf(caption, sizeof(caption), "%u of %u", static_cast<unsigned>(index) + 1,
              static_cast<unsigned>(total));
-    lcd.setTextDatum(top_right);
-    lcd.drawString(caption, kScreenW - kCardMargin, 4);
-    lcd.setTextDatum(top_left);
+    layoutLine(caption, kScreenW - kCardMargin, 4, kCounterWidth, muted(), "listings.counter",
+               Align::Right);
   }
 
   // Headline: the address itself, the one fact that actually identifies
-  // *this* listing from the last one shown.
+  // *this* listing from the last one shown. A formatted RentCast address runs
+  // long, so this is the card's most likely ellipsis and it is now an
+  // ellipsis rather than a character count silently thrown away.
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
-  lcd.setTextColor(ink(), bg());
-  drawTruncatedLeft(address, kCardMargin, 32, kScreenW - kCardMargin * 2);
+  layoutLine(address, kCardMargin, 32, kScreenW - kCardMargin * 2, ink(), "listings.address");
 
   // Price and property type share the sub-headline - the same "two related
   // facts, one line" pairing showAircraftCard() gives callsign+distance.
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  lcd.setTextColor(muted(), bg());
   String subline = formatPrice(price);
   if (propertyType.length() > 0) {
     subline += " - " + propertyType;
   }
-  drawTruncatedLeft(subline, kCardMargin, 64, kScreenW - kCardMargin * 2);
+  layoutLine(subline, kCardMargin, 64, kScreenW - kCardMargin * 2, muted(), "listings.subline");
 
   // Stat rows: identical label-left/value-right technique to
   // showAircraftCard()'s Altitude/Speed/Heading block - the same shape of
   // information, a house instead of a plane.
   const int rightX = kScreenW - kCardMargin;
   const int rowValueWidth = 150;
+  const int rowLabelWidth = rightX - rowValueWidth - kCardMargin;
   int rowY = 88;
   constexpr int kRowHeight = 26;
 
-  lcd.setTextColor(muted(), bg());
-  lcd.drawString("Beds", kCardMargin, rowY);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(formatCount(bedrooms), rightX, rowY, rowValueWidth);
+  layoutLine("Beds", kCardMargin, rowY, rowLabelWidth, muted(), "listings.beds.label");
+  layoutLine(formatCount(bedrooms), rightX, rowY, rowValueWidth, ink(), "listings.beds",
+             Align::Right);
   rowY += kRowHeight;
 
-  lcd.setTextColor(muted(), bg());
-  lcd.drawString("Baths", kCardMargin, rowY);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(formatCount(bathrooms), rightX, rowY, rowValueWidth);
+  layoutLine("Baths", kCardMargin, rowY, rowLabelWidth, muted(), "listings.baths.label");
+  layoutLine(formatCount(bathrooms), rightX, rowY, rowValueWidth, ink(), "listings.baths",
+             Align::Right);
   rowY += kRowHeight;
 
-  lcd.setTextColor(muted(), bg());
-  lcd.drawString("Sq Ft", kCardMargin, rowY);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(squareFootage > 0 ? String(squareFootage) : String("-"), rightX, rowY,
-                     rowValueWidth);
+  layoutLine("Sq Ft", kCardMargin, rowY, rowLabelWidth, muted(), "listings.sqft.label");
+  char sqftBuf[16];
+  if (squareFootage > 0) {
+    snprintf(sqftBuf, sizeof(sqftBuf), "%d", squareFootage);
+  } else {
+    // A dash, not a zero. An unknown floor area and a zero-square-foot house
+    // are different claims, and only one of them is one this card can make.
+    snprintf(sqftBuf, sizeof(sqftBuf), "-");
+  }
+  layoutLine(sqftBuf, rightX, rowY, rowValueWidth, ink(), "listings.sqft", Align::Right);
   rowY += kRowHeight;
 
-  lcd.setTextColor(muted(), bg());
-  lcd.drawString("Listed", kCardMargin, rowY);
-  lcd.setTextColor(ink(), bg());
-  drawRightJustified(formatDaysOnMarket(daysOnMarket), rightX, rowY, rowValueWidth);
+  layoutLine("Listed", kCardMargin, rowY, rowLabelWidth, muted(), "listings.listed.label");
+  layoutLine(formatDaysOnMarket(daysOnMarket), rightX, rowY, rowValueWidth, ink(),
+             "listings.listed", Align::Right);
   rowY += kRowHeight;
 
   // Footer: distance and freshness together, both pinned to a fixed baseline
@@ -1883,11 +2244,14 @@ void showListingsCard(const String& address, const String& propertyType, int pri
   snprintf(distanceBuf, sizeof(distanceBuf), "%.1f mi away", distanceMiles);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
-  lcd.setTextColor(muted(), bg());
-  lcd.setTextDatum(top_left);
-  lcd.drawString(distanceBuf, kCardMargin, rowY + 4);
+  // The freshness column is reserved first at 160px, so the distance gets what
+  // is left of the row rather than the two of them overprinting each other.
+  constexpr int kFreshnessWidth = 160;
+  layoutLine(distanceBuf, kCardMargin, rowY + 4, kScreenW - kCardMargin * 2 - kFreshnessWidth,
+             muted(), "listings.distance");
   if (updatedAt.length() > 0) {
-    drawRightJustified(updatedAt, rightX, rowY + 4, 160);
+    layoutLine(updatedAt, rightX, rowY + 4, kFreshnessWidth, muted(), "listings.updated",
+               Align::Right);
   }
 
   drawClock();
@@ -1901,11 +2265,12 @@ void showListingsStatus(const String& headline, const String& detail, bool isPro
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
   const uint32_t headlineColour = isProblem ? kWarn : muted();
-  const int headlineLines =
-      wrappedLeftText(headline, kCardMargin, 40, headlineColour, 22, 3, kScreenW - kCardMargin * 2);
+  const TextBox headlineBox{kCardMargin, 40, kScreenW - kCardMargin * 2, 22, 3, Align::Left};
+  const TextResult drew = layoutText(headline, headlineBox, headlineColour, "listings.status");
   if (detail.length() > 0) {
-    wrappedLeftText(detail, kCardMargin, 40 + headlineLines * 22 + 12, ink(), 18, 3,
-                    kScreenW - kCardMargin * 2);
+    const TextBox detailBox{kCardMargin, static_cast<int16_t>(drew.bottom + 12),
+                            kScreenW - kCardMargin * 2, 18, 3, Align::Left};
+    layoutText(detail, detailBox, ink(), "listings.status.detail");
   }
 
   drawClock();
@@ -1918,6 +2283,13 @@ void showListingsStatus(const String& headline, const String& detail, bool isPro
 // icon beneath it. Columns 1+ get the first three characters of whatever
 // name the server sent ("Monday" -> "Mon"), which is as far as this width
 // stretches at a size still legible from across a room.
+//
+// Three characters is the wording wanted ("Mon"), not a width fallback, which
+// is why this still counts characters rather than measuring. The measuring
+// happens where it belongs, at the draw: the label goes through layoutText()
+// against the real column width, so a font change that makes three characters
+// too wide for 60px ellipsizes and says so instead of printing over the
+// neighbouring column.
 String shortDayLabel(uint8_t index, const String& name) {
   if (index == 0) {
     return "Now";
@@ -1951,17 +2323,19 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // than the same phrase would for "Today".
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
-  lcd.setTextColor(muted(), bg());
-  lcd.setTextDatum(top_right);
-  lcd.drawString(currentIsDaytime ? "Day" : "Night", kScreenW - kCardMargin, 4);
-  lcd.setTextDatum(top_left);
+  constexpr int kDayNightWidth = 64;
+  layoutLine(currentIsDaytime ? "Day" : "Night", kScreenW - kCardMargin, 4, kDayNightWidth,
+             muted(), "forecast.daynight", Align::Right);
 
   // Location, same placement as the retired showWeatherCard()'s own line -
   // this card answers the identical "72 degrees *where*" question that one
   // did.
   if (location.length() > 0) {
-    lcd.setTextColor(muted(), bg());
-    drawTruncatedLeft(location, kCardMargin, 28, bodyWidth);
+    // Stops short of the Day/Night tag above it rather than running the full
+    // card width: the tag is drawn first and a long enough city name would
+    // otherwise print straight through it.
+    layoutLine(location, kCardMargin, 28, bodyWidth - kDayNightWidth, muted(),
+               "forecast.location");
   }
 
   // The hero icon and temperature, side by side - icon on the left the way a
@@ -1989,15 +2363,14 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   if (currentShortForecast.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold12pt7b);
     lcd.setTextSize(1);
-    lcd.setTextColor(ink(), bg());
-    drawTruncatedLeft(currentShortForecast, 76, 80, kScreenW - 76 - kCardMargin);
+    layoutLine(currentShortForecast, 76, 80, kScreenW - 76 - kCardMargin, ink(),
+               "forecast.condition");
   }
 
   if (updatedAt.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
-    lcd.setTextColor(muted(), bg());
-    drawTruncatedLeft(updatedAt, kCardMargin, 104, bodyWidth);
+    layoutLine(updatedAt, kCardMargin, 104, bodyWidth, muted(), "forecast.updated");
   }
 
   // A thin rule separating "right now" from "the rest of the week" - the
@@ -2016,9 +2389,8 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
 
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
-    lcd.setTextColor(muted(), bg());
-    lcd.setTextDatum(top_center);
-    lcd.drawString(shortDayLabel(i, dayNames[i]), columnCentreX, 122);
+    layoutLine(shortDayLabel(i, dayNames[i]), columnCentreX, 122, kColumnWidth, muted(),
+               "forecast.daylabel", Align::Centre);
 
     // Always the daytime variant: each strip column summarises a whole day,
     // not a specific night, so there is no isDaytime of its own to read the
@@ -2028,9 +2400,8 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
 
     char tempBuffer[12];
     snprintf(tempBuffer, sizeof(tempBuffer), "%d%s", dayTemperatures[i], dayUnits[i].c_str());
-    lcd.setTextColor(ink(), bg());
-    lcd.drawString(tempBuffer, columnCentreX, 178);
-    lcd.setTextDatum(top_left);
+    layoutLine(tempBuffer, columnCentreX, 178, kColumnWidth, ink(), "forecast.daytemp",
+               Align::Centre);
   }
 
   drawClock();
@@ -2044,11 +2415,12 @@ void showForecastStatus(const String& headline, const String& detail, bool isPro
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
   const uint32_t headlineColour = isProblem ? kWarn : muted();
-  const int headlineLines =
-      wrappedLeftText(headline, kCardMargin, 40, headlineColour, 22, 3, kScreenW - kCardMargin * 2);
+  const TextBox headlineBox{kCardMargin, 40, kScreenW - kCardMargin * 2, 22, 3, Align::Left};
+  const TextResult drew = layoutText(headline, headlineBox, headlineColour, "forecast.status");
   if (detail.length() > 0) {
-    wrappedLeftText(detail, kCardMargin, 40 + headlineLines * 22 + 12, ink(), 18, 3,
-                    kScreenW - kCardMargin * 2);
+    const TextBox detailBox{kCardMargin, static_cast<int16_t>(drew.bottom + 12),
+                            kScreenW - kCardMargin * 2, 18, 3, Align::Left};
+    layoutText(detail, detailBox, ink(), "forecast.status.detail");
   }
 
   drawClock();
@@ -2060,11 +2432,12 @@ void showNoContent(const String& headline, const String& detail) {
 
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
-  const int headlineLines =
-      wrappedLeftText(headline, kCardMargin, 60, muted(), 22, 3, kScreenW - kCardMargin * 2);
+  const TextBox headlineBox{kCardMargin, 60, kScreenW - kCardMargin * 2, 22, 3, Align::Left};
+  const TextResult drew = layoutText(headline, headlineBox, muted(), "nocontent.headline");
   if (detail.length() > 0) {
-    wrappedLeftText(detail, kCardMargin, 60 + headlineLines * 22 + 12, muted(), 18, 3,
-                    kScreenW - kCardMargin * 2);
+    const TextBox detailBox{kCardMargin, static_cast<int16_t>(drew.bottom + 12),
+                            kScreenW - kCardMargin * 2, 18, 3, Align::Left};
+    layoutText(detail, detailBox, muted(), "nocontent.detail");
   }
 
   drawClock();
@@ -2127,17 +2500,30 @@ void drawOneButton(uint8_t index, uint8_t count, const String& label, uint32_t f
   lcd.setTextSize(1);
   lcd.setTextColor(kButtonInk, fill);
 
-  // Truncated one character at a time to fit, the same technique
-  // drawRightJustified() uses - the label is the server's wording drawn
-  // verbatim, and it has no idea how wide this panel is.
-  String text = label;
+  // This used to carry its own copy of the truncate-a-character-at-a-time
+  // loop, which is how a server label like "Request a brochure" reached the
+  // glass as "Request a broch" with nothing saying so. The label is the
+  // server's wording drawn verbatim and it has no idea how wide this panel
+  // is, so it goes through the same routine every card uses.
+  //
+  // Two lines rather than one. A 60px button has room for them at this font,
+  // and a two-line label is a label a household can read where an ellipsized
+  // one is a guess. The ellipsis is still the backstop for a label too long
+  // for even two lines.
   const int maxTextWidth = w - 10;
-  while (text.length() > 1 && lcd.textWidth(text) > maxTextWidth) {
-    text = text.substring(0, text.length() - 1);
-  }
-  lcd.setTextDatum(middle_center);
-  lcd.drawString(text, x + w / 2, y + h / 2);
-  lcd.setTextDatum(top_left);
+  const int lineHeight = lcd.fontHeight();
+  const TextBox measuring{static_cast<int16_t>(x + w / 2), 0, static_cast<int16_t>(maxTextWidth),
+                          static_cast<int16_t>(lineHeight), 2, Align::Centre};
+  const uint8_t lines =
+      layoutText(label, measuring, kButtonInk, "button.label", fill, /*measureOnly=*/true).lines;
+
+  // Centred in the button's own height, which is what middle_center used to
+  // do for a single line and what a fixed top y would get wrong the moment a
+  // label wrapped onto a second one.
+  const int blockHeight = (lines > 0 ? lines : 1) * lineHeight;
+  TextBox drawing = measuring;
+  drawing.y = static_cast<int16_t>(y + h / 2 - blockHeight / 2);
+  layoutText(label, drawing, kButtonInk, "button.label", fill);
 }
 
 }  // namespace

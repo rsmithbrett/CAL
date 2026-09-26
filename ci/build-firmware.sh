@@ -188,6 +188,69 @@ if ! diff -q <(restart_causes BootDiag.h) <(restart_causes App/BootDiag.h) >/dev
   exit 1
 fi
 
+# EVERY BOUNDED STRING GOES THROUGH THE ONE LAYOUT ROUTINE.
+#
+# Two failures photographed on real hardware on 2026-09-25, from two different
+# pieces of code making the same mistake differently: a sports card reading
+# "Houston Astr" because drawTruncatedLeft() shortened a team name with nothing
+# to say it had, and a notice card reading "Test device: this rotation h"
+# because the greedy wrap drew the very line it had just measured and rejected.
+# App/Display.cpp had five different ways of putting a string into a bounded
+# region. It now has one, layoutText(), and TEXT_LAYOUT_DESIGN.md says why.
+#
+# A compiler cannot catch a sixth appearing. `lcd.drawString(someWireString, x,
+# y)` is perfectly legal and draws perfectly happily until the string is long,
+# which is the day nobody is looking. So it is checked the only way it can be,
+# the same way the Motion entry points above are: every lcd.drawString() in
+# App/Display.cpp must either pass a string literal, which is bounded because
+# the programmer can see it, or carry the LAYOUT-PRIMITIVE sentinel that marks
+# the few places allowed to draw raw - inside layoutText() itself, the corner
+# clock, the clock card's hero, and drawTemperature's cursor walk.
+#
+# Deliberately a grep and nothing cleverer, in the same spirit as the Motion
+# gate: it does not know whether the text will fit, it knows the difference
+# between "went through the routine" and "did not", which is the failure that
+# actually happened and the one worth a gate.
+echo "==> Checking every bounded string in App/Display.cpp goes through layoutText()"
+RAW_DRAWS=$(grep -n 'lcd\.drawString(' App/Display.cpp \
+            | grep -v 'LAYOUT-PRIMITIVE' \
+            | grep -v 'lcd\.drawString("' || true)
+if [ -n "$RAW_DRAWS" ]; then
+  echo "ERROR: App/Display.cpp draws a non-literal string without going through" >&2
+  echo "       layoutText(). Such a string is measured against nothing and is clipped" >&2
+  echo "       by the panel when it is too long, which is how 'Houston Astros' reached" >&2
+  echo "       a household's wall reading 'Houston Astr'." >&2
+  echo "$RAW_DRAWS" >&2
+  echo "       Use layoutText()/layoutLine() with a TextBox, or, if this genuinely" >&2
+  echo "       cannot be expressed as a box, say why in a comment and add the" >&2
+  echo "       LAYOUT-PRIMITIVE sentinel. See TEXT_LAYOUT_DESIGN.md section 7." >&2
+  exit 1
+fi
+
+# The helpers layoutText() replaced, by name. Bringing any of them back would
+# compile and would silently reinstate the defect, so the names are retired
+# rather than deprecated - a deprecated helper carrying a comment asking people
+# not to use it is a helper that gets used, and three of these were themselves
+# the same truncation loop written out separately.
+#
+# The scan is App/ only. CAL's own root Display.cpp keeps a wrappedCenteredText,
+# corrected in the same pass but deliberately not replaced by a layout module:
+# the factory partition has one call site shape and nothing to spend it on.
+echo "==> Checking the retired text helpers have not come back"
+for RETIRED in drawTruncatedLeft drawRightJustified wrappedLeftText wrappedCenteredText; do
+  # Definitions and calls, not the comments in Display.cpp and in this file
+  # that explain what they were, so the pattern needs a '(' straight after the
+  # name and skips a line that starts as a comment.
+  if grep -rnE "^[^/]*\b${RETIRED}\(" --exclude-dir=build --include='*.cpp' --include='*.h' --include='*.ino' App/ >/dev/null 2>&1; then
+    echo "ERROR: ${RETIRED}() is back in App/." >&2
+    echo "       It was removed because it shortened server-supplied text with no" >&2
+    echo "       indication that anything had been lost. Use layoutText()/layoutLine()." >&2
+    echo "       See TEXT_LAYOUT_DESIGN.md section 7." >&2
+    grep -rnE "^[^/]*\b${RETIRED}\(" --exclude-dir=build --include='*.cpp' --include='*.h' --include='*.ino' App/ >&2
+    exit 1
+  fi
+done
+
 echo "==> Compiling CAL"
 arduino-cli compile --fqbn "$FQBN" --export-binaries .
 

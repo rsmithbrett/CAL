@@ -13,6 +13,12 @@
 #include "CalQr.h"
 
 #include "Display.h"
+// wrappedCenteredText() says when it has ellipsized. A boot screen whose
+// message was cut is exactly the kind of thing nobody notices until a
+// household reads half an instruction, and the journal survives the reboot
+// that Serial does not.
+#include "Journal.h"
+#include <string.h>
 
 namespace Display {
 namespace {
@@ -96,11 +102,38 @@ void centeredText(const String& text, int y, uint32_t colour, uint8_t size) {
 // server-supplied strings verbatim ("the wording shown on screen comes from the server
 // rather than from a table compiled in here", per Enrollment.cpp), so CAL has no control
 // over their length and cannot assume any sentence fits on one line at any text size.
-// Draws up to maxLines and silently drops anything past that rather than running off the
-// bottom of the screen - a truncated-but-legible message beats an overflowing one. Returns
-// how many lines it actually drew, so a caller stacking more text below can place it after
-// however many lines this one sentence turned out to need, rather than at a fixed offset
-// sized for a single line.
+// Returns how many lines it actually drew, so a caller stacking more text below can place
+// it after however many lines this one sentence turned out to need, rather than at a fixed
+// offset sized for a single line.
+//
+// **THIS BROKE AT THE WRONG SPACE, AND THE APP'S COPY OF IT WAS PHOTOGRAPHED DOING SO.**
+// The old version recorded the space at i as a break point BEFORE measuring the candidate
+// ending at i, so when the overflow was discovered at a space the break point was that same
+// space: the line that had just been measured and rejected was the line that got drawn, and
+// the panel clipped whatever hung off the right edge. App/Display.cpp carried the identical
+// function and the identical ordering, and a notice card came back from real hardware
+// reading "Test device: this rotation h" with the "as" of "has" nowhere on the screen. CAL
+// has never been photographed failing this way, but it is the same code drawing the same
+// kind of server-supplied string, so it is fixed in the same pass.
+//
+// App/ got a full layout routine out of this (see TEXT_LAYOUT_DESIGN.md). CAL gets the
+// correction and an ellipsis and nothing more: this file has one call site shape, centred
+// text on a boot screen, and importing a layout module into the factory partition would buy
+// nothing it can use.
+//
+// Three changes, then, against the old body:
+//
+//   1. A line breaks at the last whitespace STRICTLY BEFORE the overflowing word. Nothing
+//      is drawn that has not been measured and accepted at the width it is drawn at.
+//   2. Running out of lines ellipsizes the last one with a visible "..." instead of
+//      dropping the remainder with nothing to show for it. Three ASCII periods, not U+2026:
+//      the bitmap face here has no Unicode coverage and a single-glyph ellipsis would draw
+//      as a box, which is a worse lie than the truncation it is disclosing.
+//   3. No Arduino String on the path. The old body allocated one per candidate measurement
+//      and one per line drawn; this uses a fixed stack buffer, because CAL runs on the same
+//      board whose largest contiguous block decides whether TLS can open.
+constexpr size_t kWrapLineBytes = 128;
+
 int wrappedCenteredText(const String& text, int y, uint32_t colour, uint8_t size,
                         int lineHeight, int maxLines) {
   lcd.setTextColor(colour, kBg);
@@ -109,43 +142,111 @@ int wrappedCenteredText(const String& text, int y, uint32_t colour, uint8_t size
 
   constexpr int kMargin = 8;
   const int maxWidth = kScreenW - kMargin * 2;
-  const int textLen = static_cast<int>(text.length());
 
-  int lineStart = 0;
-  int lastSpace = -1;
+  const char* source = text.c_str();
+  const size_t length = text.length();
+  char line[kWrapLineBytes];
+  const size_t capacity = sizeof(line) - 1;
+
+  size_t cursor = 0;
   int cursorY = y;
   int linesDrawn = 0;
 
-  for (int i = 0; i <= textLen && linesDrawn < maxLines; ++i) {
-    const bool atEnd = (i == textLen);
-    const bool isSpace = !atEnd && text.charAt(i) == ' ';
-    if (isSpace) {
-      lastSpace = i;
+  // Any byte at or below 0x20 counts as a break, not just ' '. A '\n' in a server message
+  // would otherwise be handed to drawString() and rendered as whatever box glyph this face
+  // has for it, in the middle of a sentence a household is trying to act on.
+  auto isBreak = [](char c) { return static_cast<unsigned char>(c) <= 0x20; };
+
+  while (cursor < length && linesDrawn < maxLines) {
+    while (cursor < length && isBreak(source[cursor])) {
+      ++cursor;
     }
-    if (!atEnd && !isSpace) {
-      continue;
+    if (cursor >= length) {
+      break;
     }
 
-    const String candidate = text.substring(lineStart, i);
-    if (lcd.textWidth(candidate) <= maxWidth) {
-      if (atEnd) {
-        lcd.drawString(candidate, kScreenW / 2, cursorY);
-        linesDrawn++;
+    size_t lineEnd = cursor;
+    size_t scan = cursor;
+    while (scan < length) {
+      size_t wordEnd = scan;
+      while (wordEnd < length && !isBreak(source[wordEnd])) {
+        ++wordEnd;
       }
-      continue;
+      if (wordEnd - cursor > capacity) {
+        break;
+      }
+      for (size_t i = cursor; i < wordEnd; ++i) {
+        line[i - cursor] = isBreak(source[i]) ? ' ' : source[i];
+      }
+      line[wordEnd - cursor] = '\0';
+      if (lcd.textWidth(line) > maxWidth) {
+        break;
+      }
+      lineEnd = wordEnd;
+      scan = wordEnd;
+      while (scan < length && isBreak(source[scan])) {
+        ++scan;
+      }
     }
 
-    // This word pushed the line over the limit. Break at the space before it
-    // rather than mid-word - unless the line is a single word with nothing to
-    // break at, in which case it goes out on its own and overflows rather
-    // than looping on a word that will never fit.
-    const int breakAt = (lastSpace > lineStart) ? lastSpace : i;
-    lcd.drawString(text.substring(lineStart, breakAt), kScreenW / 2, cursorY);
+    if (lineEnd == cursor) {
+      // One word wider than the whole screen. Break it mid-word and carry the rest onto the
+      // next line rather than ellipsizing it here: there is still somewhere to put those
+      // characters, and a device secret or a hostname half-shown is still half-readable.
+      size_t fitted = 0;
+      for (size_t take = 1; cursor + take <= length && take <= capacity; ++take) {
+        if (isBreak(source[cursor + take - 1])) {
+          break;
+        }
+        memcpy(line, source + cursor, take);
+        line[take] = '\0';
+        if (lcd.textWidth(line) > maxWidth) {
+          break;
+        }
+        fitted = take;
+      }
+      lineEnd = cursor + (fitted == 0 ? 1 : fitted);
+    }
+
+    size_t rest = lineEnd;
+    while (rest < length && isBreak(source[rest])) {
+      ++rest;
+    }
+    const bool lastLine = (linesDrawn + 1 >= maxLines);
+
+    if (rest < length && lastLine) {
+      size_t take = lineEnd - cursor;
+      if (take > capacity - 4) {
+        take = capacity - 4;
+      }
+      while (true) {
+        while (take > 0 && isBreak(source[cursor + take - 1])) {
+          --take;
+        }
+        for (size_t i = 0; i < take; ++i) {
+          line[i] = isBreak(source[cursor + i]) ? ' ' : source[cursor + i];
+        }
+        line[take] = '\0';
+        strcat(line, "...");
+        if (take == 0 || lcd.textWidth(line) <= maxWidth) {
+          break;
+        }
+        --take;
+      }
+      Journal::printf("[display] wrapped text ran out of lines, %u characters ellipsized",
+                      static_cast<unsigned>(length - (cursor + take)));
+      cursor = length;
+    } else {
+      for (size_t i = cursor; i < lineEnd; ++i) {
+        line[i - cursor] = isBreak(source[i]) ? ' ' : source[i];
+      }
+      line[lineEnd - cursor] = '\0';
+      cursor = lineEnd;
+    }
+
+    lcd.drawString(line, kScreenW / 2, cursorY);
     cursorY += lineHeight;
     linesDrawn++;
-    lineStart = (lastSpace > lineStart) ? lastSpace + 1 : breakAt;
-    lastSpace = -1;
-    i = lineStart - 1;  // re-examine from the new line's start on the next iteration
   }
 
   return linesDrawn;

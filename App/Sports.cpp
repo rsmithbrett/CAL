@@ -52,18 +52,48 @@ void copyBounded(char* destination, const char* source, size_t capacity) {
 /// What the card says when a game has not started. Deliberately a clock time
 /// and not a countdown: a countdown is wrong the moment the rotation moves on,
 /// and this card may sit unredrawn for minutes.
+///
+/// **THIS RENDERED UTC AND CALLED IT LOCAL.** It used to be
+/// `localtime_r(&game.startsAtUtc, &local)`, which on this device returns UTC:
+/// AppService.cpp calls `configTime(0, 0, ...)`, so the C library's timezone
+/// offset is zero by design and `localtime_r` here is `gmtime_r` under a
+/// misleading name. A 21:40 Eastern baseball game was photographed on the card
+/// reading 01:40, which is worse than an obviously broken value, because 01:40
+/// is a time somebody will believe.
+///
+/// The offset is applied by hand instead, the way every other card that shows
+/// a time already does it: ClockDate.cpp's `time(nullptr) +
+/// Display::utcOffsetMinutes() * 60` followed by `gmtime_r`, and Calendar.cpp
+/// twice. The offset arrives on the check-in response and is handed to
+/// Display::setEnvironment(), so it is already here for the asking.
+///
+/// The household's 12-or-24-hour preference is honoured through
+/// Display::formatTimeOfDay() for the reason ClockDate.cpp's own comment
+/// gives: the clock card would be the first place anybody noticed that setting
+/// not being applied, and a game start time is the second.
 String startTimeText(const Game& game) {
+  // Reachable rather than defensive: CheckIn.cpp's parseIso8601Utc() returns 0
+  // for a missing, null or unparseable startsAtUtc and a scheduled game can
+  // carry any of the three. "--:--" is what Display::formatTimeOfDay() itself
+  // renders for a time it cannot state, in 12-hour households as well as
+  // 24-hour ones, so this is the firmware's existing "no usable time" wording
+  // rather than a third convention of this card's own.
   if (game.startsAtUtc == 0) { return String("--:--"); }
 
-  // localtime, not gmtime: the device applies its own offset, which is why the
-  // server sends UTC and refuses to pre-convert - a device that moved would
-  // otherwise show the wrong time until its next check-in.
+  const int offsetMinutes = Display::utcOffsetMinutes();
+  const time_t localInstant = game.startsAtUtc + static_cast<time_t>(offsetMinutes) * 60;
   struct tm local;
-  localtime_r(&game.startsAtUtc, &local);
+  gmtime_r(&localInstant, &local);
+  const String rendered = Display::formatTimeOfDay(local.tm_hour, local.tm_min);
 
-  char buffer[6];
-  snprintf(buffer, sizeof(buffer), "%02d:%02d", local.tm_hour, local.tm_min);
-  return String(buffer);
+  // Every input and the output. A start time is a value a household checks
+  // against the outside world, and being quietly wrong by five hours is the
+  // failure this line exists to make reconstructible from the debug stream
+  // without standing in front of the panel.
+  Log::verbose("[sports] start time: utc=%ld offset=%dmin 12hour=%s -> %s",
+               static_cast<long>(game.startsAtUtc), offsetMinutes,
+               Display::use12HourClock() ? "yes" : "no", rendered.c_str());
+  return rendered;
 }
 
 /// The short status a card draws beside a game.
