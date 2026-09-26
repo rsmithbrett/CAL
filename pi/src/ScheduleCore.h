@@ -24,7 +24,7 @@ int8_t dueInterstitial(const Card* cards, uint8_t count,
                        Eligible eligible, Earlier earlier) {
   int8_t best = -1;
   for (uint8_t i = 0; i < count; ++i) {
-    if (!eligible(i) || cards[i].interleaveEvery == 0 ||
+    if (cards[i].interleaveEvery == 0 || !eligible(i) ||
         cards[i].cardsSince <= cards[i].interleaveEvery) {
       continue;
     }
