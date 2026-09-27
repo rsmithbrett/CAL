@@ -33,6 +33,7 @@ For every run record exact CAL/server commit, OS image, hardware revision, test 
 
 - Baseline the original Pi Zero CPU: build the shared scheduler and layout tests in ARM state with `-marm -march=armv6 -mfloat-abi=soft` using Ubuntu's `gnueabi` cross-runtime, then run them with `qemu-arm -cpu arm1176` via `make -C pi test-armv6`. Record the compiler and QEMU versions in the CI log. This tests ARMv6 instructions but not Raspberry Pi OS's hard-float ABI, a booted OS, or the display.
 - Build the 32-bit ARM display client against a Pi Zero-compatible sysroot and run process/contract tests under QEMU ARM user mode as the next gate. Do not label an x86 host build as an ARM test.
+- As an intermediate display gate, build the SDL fixture inside an emulated Alpine `armhf` (ARMv6 hard-float) container, render 320×240 and 1280×720 BMP frames, verify dimensions and nonblank pixels, and publish the frames for visual inspection. This checks executable ARMv6 display code, but Alpine's musl ABI is not Raspberry Pi OS's glibc ABI.
 - Boot a pinned QEMU `raspi0` fixture when available; verify start, service behavior, bounded memory and framebuffer capture. Use `raspi3ap` only as an approximate Zero 2 W class check and record that it is not a Zero 2 W emulator.
 - Keep physical Zero/Zero 2 W checks for HDMI, Wi-Fi, CEC/input, power, thermals, SD failure and package recovery. Record the QEMU version, machine, kernel/OS image, architecture and limits beside each result.
 

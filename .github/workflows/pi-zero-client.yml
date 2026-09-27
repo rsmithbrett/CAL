@@ -33,6 +33,40 @@ jobs:
           make -C pi test-armv6
           file pi/build/armv6/*_test
 
+  armv6-display:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+      - name: Build and render the actual display executable on ARMv6
+        run: |
+          docker run --rm --platform linux/arm/v6 \
+            -v "$PWD:/work" -w /work arm32v6/alpine:3.20.10 sh -ec '
+              apk add --no-cache build-base make pkgconf sdl2-dev sdl2_ttf-dev font-dejavu file
+              make -C pi demo CXX=g++
+              file pi/build/pi-card
+              test "$(readelf -h pi/build/pi-card | sed -n "s/.*Machine: *//p")" = ARM
+              SDL_VIDEODRIVER=dummy pi/build/pi-card --width 320 --height 240 --once /work/pi-armv6-320.bmp
+              SDL_VIDEODRIVER=dummy pi/build/pi-card --width 1280 --height 720 --once /work/pi-armv6-1280.bmp
+            '
+          python3 - <<'PY'
+          import struct
+          for name, expected in [('pi-armv6-320.bmp', (320, 240)),
+                                 ('pi-armv6-1280.bmp', (1280, 720))]:
+              with open(name, 'rb') as frame:
+                  data = frame.read()
+              assert data[:2] == b'BM'
+              assert struct.unpack_from('<ii', data, 18) == expected
+              assert len(set(data[54:])) > 16
+              print(f'{name}: {expected[0]}x{expected[1]}, {len(data)} bytes')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-zero-emulated-frames
+          path: pi-armv6-*.bmp
+
   display-fixture:
     runs-on: ubuntu-latest
     steps:
