@@ -5,6 +5,9 @@ on:
     branches: ["feature/pi-zero-client"]
     paths:
       - "pi/ci/test-raspios-image.sh"
+      - "pi/src/InstallationConfig.h"
+      - "pi/tests/installation_config_test.cpp"
+      - "pi/Makefile"
       - ".github/workflows/pi-zero-raspios.yml"
   workflow_dispatch:
 

@@ -46,6 +46,7 @@ sudo chroot "$root_fs" /bin/sh -ec '
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y --no-install-recommends build-essential pkg-config file libsdl2-dev libsdl2-ttf-dev fonts-dejavu-core
+  make -C /work/pi test CXX=g++
   make -C /work/pi demo CXX=g++
   file /work/pi/build/pi-card
   readelf -l /work/pi/build/pi-card | grep -F "/lib/ld-linux-armhf.so.3"

@@ -2,6 +2,8 @@
 
 Status: display fixture and first shared scheduler slice implemented. No server enrollment, live cards, hardware run, or package update is implemented on this branch.
 
+The Pi credential-file reader is now implemented as an isolated storage boundary, with private-file and per-installation checks. It is not yet connected to a network client. Server-side provisioning and identity are being developed separately in DiscoverAroundMe PR #15.
+
 ## Goal and scope
 
 Build a Linux display client for Discover Around Me that shows the server-assigned cards and graphics on an attached screen. Every installation is a separate device with its own revocable identity, owner/brand/account assignment, policy, action queue, event cursor, diagnostics, and update state. An Android installation or ESP32 panel cannot supply its credential to a Pi.
