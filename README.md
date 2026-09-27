@@ -2133,14 +2133,73 @@ dark actually reaches the server instead of being lost with the rest of RAM.
 |---|---|---|
 | `kBatchIntervalMs` | 1000 ms | `loop()` already runs on roughly a 1-second cadence of its own (its closing `delay(1000)`), with no hardware timer or second task driving anything faster. A shorter timer would only be aspirational — `poll()` cannot be called any more often than `loop()` actually calls it. |
 | `kMaxBatchLines` / `kMaxBatchBytes` | 40 lines / 4 KB | Caps a single `POST` body so one flush can't spike request latency or hold up `loop()` for longer than necessary; whatever doesn't fit waits for the next `poll()`. |
-| `kMaxBufferedLines` / `kMaxBufferedBytes` | 200 lines / 16 KB | The buffer's actual memory ceiling, independent of and larger than the per-batch cap — this is what protects against unbounded growth if the network is down for a while. Generous for several minutes of this firmware's real log volume (roughly one line every few seconds, brief bursts during WiFi join/check-in/update) while staying a small, fixed slice of the ESP32's ~320 KB SRAM, and only ever paid while an admin has actually turned streaming on. |
+| `kMaxBufferedLines` / `kMaxBufferedBytes` | 200 lines / 16 KB | The buffer's ceiling when the heap can carry it — independent of and larger than the per-batch cap, and what protects against unbounded growth if the network is down for a while. Generous for several minutes of this firmware's real log volume (roughly one line every few seconds, brief bursts during WiFi join/check-in/update), and only ever paid while an admin has actually turned streaming on. **This is no longer the only thing bounding the buffer — see `kMinLargestBlockBytes` below.** |
+| `kMinLargestBlockBytes` | 33,434 bytes (`2 × Http::kTlsRecordBufferBytes`) | The heap floor the buffer refuses to encroach on. While the largest free 8-bit block is under it, the buffer's ceiling drops to **one batch** (40 lines / 4 KB) instead of 200 lines / 16 KB. Same figure `CheckIn.cpp` already uses for "this device could not have held a fresh TLS session", deliberately rather than a second threshold that could drift from it. |
 
-Once either buffer cap is hit, the oldest line is dropped to make room for the
+Once any buffer cap is hit, the oldest line is dropped to make room for the
 newest — oldest-first, never growing unbounded and never crashing — and the
 next successful flush is prefixed with a `[N lines dropped]` marker line
 summarizing exactly how many were lost. A failed `POST` leaves the buffer
 untouched for a retry on the next `poll()`; only what the server actually
 accepted (`HTTP 200`) is removed.
+
+**The heap cap, and the loop it exists to break.** Until 2026-09-27 the two
+caps above were the whole story, and neither of them asked whether the device
+could afford 16 KB across 200 separate Arduino `String` allocations. On device
+23 ("Test2") with streaming on, per boot:
+
+| uptime | free8 total | largest free block |
+|---|---|---|
+| 12 s | 31,100 | 18,420 |
+| 104 s | 19,480 | 8,692 |
+| 160 s | 15,060 | 4,596 → restart |
+
+A 16,040-byte fall in 160 seconds against a `kMaxBufferedBytes` of 16,384, with
+the largest block's share of the total dropping from 59% to 35% — the
+fragmentation signature of 200 separate allocations, not one 16 KB block.
+`HeapRatchet.h` had already named this module "the dominant consumer" on those
+grounds; this is that sentence becoming a restart loop.
+
+**It could not recover on its own, and that is what made it a defect rather
+than a known cost.** Draining the buffer means a `POST`, a `POST` needs a TLS
+session, and a new TLS session needs a contiguous
+`Http::kTlsRecordBufferBytes` that the buffer has just eaten — so the buffer
+pinned the memory required to empty the buffer. Check-ins failed for the same
+reason, `App.ino`'s unreachable watchdog restarted the device, streaming came
+back on at the next check-in, and it happened again. Devices 17 and 23 booted
+six times in 62 minutes this way and never got out. Devices 12, 18 and 30 have
+streaming off and stayed healthy throughout.
+
+**Why not `Http::canOpenNewSession()` directly**, which is the obvious
+candidate. It is documented as a *proof of impossibility* — the line past which
+recovery is already gone, a fact to act on by restarting — and a proof of
+impossibility is not a budget to spend down to. By the time it reads false the
+device is already in the state the cap exists to prevent. Retreating from that
+line does not undo it either: freeing 200 scattered `String`s returns bytes
+without necessarily returning one contiguous 16,717-byte block. So the buffer
+stays clear of the floor rather than falling back from it, which is what makes
+the threshold a *derived headroom* (`2 ×`) rather than the predicate itself.
+
+**Why the low-heap ceiling is one batch and not zero.** A device short of heap
+is precisely the device someone has a stream open on. A buffer that refused to
+hold anything would answer a memory problem by destroying the only diagnostic
+channel a deployed device has, handing the reader a silence indistinguishable
+from a healthy quiet device. One batch is the smallest size at which `poll()`
+still has a full `POST` to send, so the stream keeps running at its ordinary
+rate and gives up only its depth-on-outage — the part that was never affordable
+on this board anyway.
+
+**It says so when it happens**, per the standing rule that CAL and App log
+their decisions *and* the branches they skipped. The flush carries a second
+marker naming the count, the measured largest block and the requirement. That
+marker is composed straight into the outgoing JSON array rather than logged,
+and it has to be: routing it through `Log::printf()` would call
+`pushToBuffer()` — the function that produced the drop — appending a line about
+the buffer being over its ceiling to the buffer, evicting another line and
+counting another drop. **Serial is untouched by all of this.** `line()` writes
+`Serial` unconditionally and first, before the buffer is ever consulted, so
+every dropped line was already printed in full over the cable; the drop is a
+property of the remote stream alone.
 
 **Formatting.** `Log::printf()` renders into a fixed 256-byte stack scratch
 buffer — deterministic, and consistent with this module running from
