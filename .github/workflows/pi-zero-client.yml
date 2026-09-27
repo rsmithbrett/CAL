@@ -48,8 +48,10 @@ jobs:
               make -C pi demo CXX=g++
               file pi/build/pi-card
               test "$(readelf -h pi/build/pi-card | sed -n "s/.*Machine: *//p")" = ARM
-              SDL_VIDEODRIVER=dummy pi/build/pi-card --width 320 --height 240 --once /work/pi-armv6-320.bmp
-              SDL_VIDEODRIVER=dummy pi/build/pi-card --width 1280 --height 720 --once /work/pi-armv6-1280.bmp
+              font_path=$(find /usr/share/fonts -name DejaVuSans.ttf -print -quit)
+              test -n "$font_path"
+              SDL_VIDEODRIVER=dummy pi/build/pi-card --font "$font_path" --width 320 --height 240 --once /work/pi-armv6-320.bmp
+              SDL_VIDEODRIVER=dummy pi/build/pi-card --font "$font_path" --width 1280 --height 720 --once /work/pi-armv6-1280.bmp
             '
           python3 - <<'PY'
           import struct
