@@ -1439,6 +1439,144 @@ void aircraftLogoZone(int16_t& x, int16_t& y, int16_t& w, int16_t& h) {
   h = 34;
 }
 
+/// SHORTENS ONE ALREADY-FORMATTED AIRPORT NAME, ON THE DEVICE, BECAUSE THE
+/// SERVER'S OWN SHORTENER MISSES EVERY NAME THAT ACTUALLY NEEDS IT.
+///
+/// AirportNameFormatter.Shorten (server side) turns a TRAILING
+/// " International Airport" into " Intl". That fires on the short names and on
+/// none of the long ones, because hexdb's long names do not end there - they
+/// end in a parenthetical or a second name after a slash:
+///
+///   Minneapolis-Saint Paul International Airport (Wold-Chamberlain Field), MN
+///   Charleston International Airport / Charleston Air Force Base, SC
+///   Athens International Airport (Eleftherios Venizelos Airport), GR
+///
+/// so "International Airport" survives in the middle of the string and the
+/// route line inherits all of it. Measured over the 948 distinct
+/// origin/destination pairs the route cache can currently produce: the widest
+/// route line is 1,077px against a 2 x 300px box, and 110 of the 948 overrun
+/// it - the worst losing its destination entirely.
+///
+/// This is the server's half done on the device. It is not the server's half
+/// made unnecessary: the bytes are still downloaded and still held in RAM, and
+/// the fix belongs upstream where the name is formatted once instead of on
+/// every draw of every device. It is here because the card can be fixed today
+/// and the wire cannot - the firmware compatibility gate is closed and this
+/// needs no new field, no new shape and no new value.
+///
+/// The four rules, in order, each measured rather than guessed:
+///   1. A trailing ", XX" of one to three characters is the state or country
+///      suffix AirportNameFormatter appends. Split it off first and put it
+///      back last, so the rules below cannot eat it.
+///   2. A parenthetical is a second name for the same airport. "(Wold-
+///      Chamberlain Field)" tells a household nothing that "Minneapolis-Saint
+///      Paul" has not already told them.
+///   3. Everything after " / " is likewise the same airport said twice
+///      ("Charleston International Airport / Charleston Air Force Base").
+///   4. Only then " International Airport" -> " Intl" ANYWHERE, which is the
+///      rule the server has and cannot reach, and a bare trailing " Airport"
+///      goes entirely - exactly AirportNameFormatter's own two rules, applied
+///      where they now bite.
+///
+/// Result over the same 948 pairs: widest line 1,077px -> 710px, overruns
+/// 110 -> 54. The 54 that remain are genuinely long names with nothing left
+/// to strip ("Ronald Reagan Washington National, VA"), and they now lose a
+/// word or two off a destination rather than the whole destination.
+///
+/// Case-sensitive on purpose where the server is not. Every name in the cache
+/// is cased exactly this way, and a miss here costs the old behaviour rather
+/// than a wrong one - which is the right way round for a rule that runs on a
+/// draw path with no test harness behind it.
+///
+/// Writes into `out` and returns the length written, so a draw allocates
+/// nothing. See showAircraftCard() for why the caller's buffer is the size it
+/// is.
+size_t shortenAirportName(const char* name, char* out, size_t capacity) {
+  if (out == nullptr || capacity == 0) {
+    return 0;
+  }
+  out[0] = '\0';
+  if (name == nullptr || name[0] == '\0') {
+    return 0;
+  }
+
+  const size_t length = strlen(name);
+
+  // 1. The ", XX" suffix, taken off the end before anything else touches the
+  //    string. The shortest matching tail is the LAST ", " in the name, which
+  //    is the one AirportNameFormatter wrote.
+  const char* suffix = nullptr;
+  size_t suffixLength = 0;
+  size_t baseLength = length;
+  for (size_t tail = 1; tail <= 3 && tail + 2 <= length; ++tail) {
+    if (name[length - tail - 2] == ',' && name[length - tail - 1] == ' ') {
+      suffix = name + length - tail;
+      suffixLength = tail;
+      baseLength = length - tail - 2;
+      break;
+    }
+  }
+
+  if (baseLength + 1 > capacity) {
+    baseLength = capacity - 1;
+  }
+  memcpy(out, name, baseLength);
+  out[baseLength] = '\0';
+
+  // 2. One parenthetical group.
+  char* const open = strstr(out, " (");
+  if (open != nullptr) {
+    char* const close = strchr(open + 2, ')');
+    if (close != nullptr) {
+      memmove(open, close + 1, strlen(close + 1) + 1);
+    }
+  }
+
+  // 3. An alternate name after " / ".
+  char* const slash = strstr(out, " / ");
+  if (slash != nullptr) {
+    *slash = '\0';
+  }
+
+  // 4. The two rules the server already documents, applied anywhere rather
+  //    than only at the end.
+  static const char kInternationalAirport[] = " International Airport";
+  static const char kIntl[] = " Intl";
+  char* const international = strstr(out, kInternationalAirport);
+  if (international != nullptr) {
+    const size_t found = sizeof(kInternationalAirport) - 1;
+    const size_t replacement = sizeof(kIntl) - 1;
+    memcpy(international, kIntl, replacement);
+    memmove(international + replacement, international + found,
+            strlen(international + found) + 1);
+  }
+
+  size_t used = strlen(out);
+  static const char kAirport[] = " Airport";
+  const size_t airportLength = sizeof(kAirport) - 1;
+  if (used >= airportLength && strcmp(out + used - airportLength, kAirport) == 0) {
+    used -= airportLength;
+    out[used] = '\0';
+  }
+
+  // Removing a group can leave a dangling separator behind it.
+  while (used > 0 && (out[used - 1] == ' ' || out[used - 1] == ',' || out[used - 1] == '-')) {
+    --used;
+    out[used] = '\0';
+  }
+
+  // 1, concluded.
+  if (suffixLength > 0 && used + 2 + suffixLength + 1 <= capacity) {
+    out[used++] = ',';
+    out[used++] = ' ';
+    memcpy(out + used, suffix, suffixLength);
+    used += suffixLength;
+    out[used] = '\0';
+  }
+
+  return used;
+}
+
 void showAircraftCard(const String& callsign, const String& airlineName, int altitudeFeet,
                       double speedKnots, double headingDegrees, double distanceMiles,
                       const String& originCode, const String& destinationCode,
@@ -1486,27 +1624,68 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   // all draws no line at all - the honest rendering of "no route data", the
   // same reasoning Graphic.cpp draws nothing rather than an empty frame when
   // it has no picture configured.
-  const String originDisplay = originName.length() > 0 ? originName : originCode;
-  const String destinationDisplay = destinationName.length() > 0 ? destinationName : destinationCode;
+  const char* const originDisplay =
+      originName.length() > 0 ? originName.c_str() : originCode.c_str();
+  const char* const destinationDisplay =
+      destinationName.length() > 0 ? destinationName.c_str() : destinationCode.c_str();
   int routeLines = 0;
-  if (originDisplay.length() > 0) {
+  if (originDisplay[0] != '\0') {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
-    // "->" rather than a real arrow glyph, for the same reason as the
-    // separator above - plain ASCII only.
-    const String routeLine = destinationDisplay.length() > 0
-        ? (originDisplay + " -> " + destinationDisplay)
-        : ("from " + originDisplay);
+    // Built into a stack buffer through shortenAirportName() above rather
+    // than by concatenating Strings, which is the truncation fix and a heap
+    // fix in one: the old form built three String temporaries on every draw
+    // of this card, on a device whose largest contiguous block decides
+    // whether TLS can open, and the stat rows below already avoid exactly
+    // that for exactly that reason.
+    //
+    // 256 bytes is past anything this box can draw rather than an estimate.
+    // Two 300px lines at 9pt hold roughly 90 characters of ordinary mixed
+    // case, so a route line clipped at 255 loses only characters layoutText()
+    // was going to ellipsize anyway - and it still says so, because the
+    // ellipsis is decided against the BOX, not against this buffer. A name
+    // long enough to reach here at all would have to be most of the
+    // server's 200-character column with nothing in it to shorten.
+    char routeLine[256];
+    size_t used = 0;
+    if (destinationDisplay[0] == '\0') {
+      // "->" rather than a real arrow glyph, for the same reason as the
+      // separator above - plain ASCII only.
+      static const char kFrom[] = "from ";
+      used = sizeof(kFrom) - 1;
+      memcpy(routeLine, kFrom, used);
+      shortenAirportName(originDisplay, routeLine + used, sizeof(routeLine) - used);
+    } else {
+      used = shortenAirportName(originDisplay, routeLine, sizeof(routeLine));
+      static const char kArrow[] = " -> ";
+      const size_t arrowLength = sizeof(kArrow) - 1;
+      if (used + arrowLength + 1 < sizeof(routeLine)) {
+        memcpy(routeLine + used, kArrow, arrowLength + 1);
+        used += arrowLength;
+        shortenAirportName(destinationDisplay, routeLine + used, sizeof(routeLine) - used);
+      }
+    }
     // A pure-code route ("KRDU -> KLGA") always fits kRouteLineHeight's
     // single line, the same one line this drew before names existed - the
     // wrap only ever engages for a name long enough to need it, which is why
     // a 6-month-old server's codes-only response reproduces this card's
     // original layout exactly rather than merely approximating it. Two lines
     // is the cap: a route that still doesn't fit in two now ellipsizes on the
-    // second line rather than growing a third into the stat rows. No log line
-    // here - this is the draw path, Aircraft.cpp's cardFetch() already logs
-    // this exact same name-with-code-fallback route once per fetch rather than
-    // once per draw, and layoutText() itself narrates an ellipsis.
+    // second line rather than growing a third into the stat rows. A THIRD
+    // LINE WAS MEASURED AND REFUSED - the stat rows and the freshness line
+    // below already reach y=219 of a 220px budget once the route takes two
+    // lines, so an 18px third line puts this card 18px under the corner
+    // clock. The room the route needed came from the names being too long,
+    // not from the card being too short, which is why shortenAirportName()
+    // above is the fix and a taller box is not.
+    //
+    // No log line here - this is the draw path, Aircraft.cpp's cardFetch()
+    // already logs this exact same name-with-code-fallback route once per
+    // fetch rather than once per draw, and layoutText() itself narrates an
+    // ellipsis. Note that the logged route and the drawn route are now
+    // deliberately different strings: the log says what the server sent, this
+    // says what fits, and a diagnostic that quietly adopted the display's
+    // abbreviations would stop being able to show a bad name upstream.
     const TextBox routeBox{kCardMargin, 82, kScreenW - kCardMargin * 2, kRouteLineHeight, 2,
                            Align::Left};
     routeLines = layoutText(routeLine, routeBox, muted(), "aircraft.route").lines;
@@ -1535,7 +1714,29 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   // argues for its score column.
   const int rowLabelWidth = rightX - rowValueWidth - kCardMargin;
   int rowY = routeLines > 0 ? 82 + routeLines * kRouteLineHeight : 100;
-  constexpr int kRowHeight = 30;
+
+  // THE ROW PITCH CLOSES UP WHEN THE ROUTE TOOK TWO LINES, because at 30 it
+  // did not fit and never had. Arithmetic, both at 9pt whose fontHeight() is
+  // 22, against contentBottom()'s 220 with no button bound:
+  //
+  //   one route line   rowY 100 -> rows 100/130/160, freshness 194..216   fits
+  //   two route lines  rowY 118 -> rows 118/148/178, freshness 212..234   14px over
+  //
+  // So every two-line route has been drawing its freshness line 14px into the
+  // corner clock, and the budget check inside layoutText() reports it on
+  // every such draw. It is not a new defect and shortenAirportName() above
+  // makes it rarer, not impossible - 54 of 948 route pairs still need the
+  // second line.
+  //
+  // At 25 the two-line case reads rows 118/143/168 and freshness 197..219,
+  // one pixel inside the budget. 25 against a 22px advance leaves 3px between
+  // rows rather than 8: closer than this card's other mode and still clearly
+  // three rows. The alternative was dropping the freshness line, which is the
+  // line that says whether the aeroplane overhead is the one being described.
+  //
+  // The one-line case keeps 30 exactly, so the layout every device is drawing
+  // today does not move at all.
+  const int kRowHeight = routeLines >= 2 ? 25 : 30;
 
   char valueBuf[24];
 
@@ -1728,21 +1929,62 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   lcd.fillScreen(bg());
   drawCardBanner("HOME VALUE", kHomeValueBanner, 150);
 
-  // The address leads, exactly as it does on showListingsCard() - a dollar
-  // figure that names no house is the one thing on this card a reader cannot
-  // check. Truncated rather than wrapped, and to ONE line: a formatted RentCast
-  // address ("300 Eatons Landing Dr, Annapolis, MD 21401") runs to two lines at
-  // 12pt and there is no vertical room for a second one, per the budget below.
+  // THE ADDRESS, ON TWO LINES AT 9pt - THE SAME ANSWER showListingsCard()
+  // ALREADY ARRIVED AT, copied rather than reinvented.
+  //
+  // This was one 12pt line in a 300px box and BOTH live addresses overflowed
+  // it. Re-measured against the vendored glyph tables rather than taken on
+  // trust: "300 Eatons Landing Dr, Annapolis, MD 21401" is 518px and
+  // "104 Virginia Ave, Edgewater, MD 21037" is 449px, against 300. So the row
+  // that says WHICH HOUSE the valuation is of was ellipsizing on every draw -
+  // "300 Eatons Landing Dr, Anna..." - and this card's dollar figure is
+  // exactly the claim a reader cannot check without it.
+  //
+  // At 9pt those same two are 384px and 332px, so one 9pt line does not fit
+  // either. Two 9pt lines do, with most of the second line spare. That is the
+  // listings card's measured conclusion over all 118 of its own addresses and
+  // it transfers unchanged, which is the point of copying it rather than
+  // inventing something: two cards that lead with a postal address should not
+  // lay one out two different ways.
+  //
+  // THE VERTICAL COST IS 7px AND THE BLOCK BELOW MOVES BY EXACTLY THAT.
+  // FreeSansBold12pt7b advances 29 and two 18px 9pt lines advance 36, so
+  // everything under the headline shifts down 7 and keeps the gaps it had
+  // rather than absorbing them. There were only 3px of slack at firstRowY=62,
+  // so absorbing was never available - the budget block below says where the
+  // other 4 came from.
   //
   // Absent is a real case - a valuation resolved from a GPS fix has no address
   // to print - and then this row is not drawn and everything below it moves
   // back up to where it was. An empty headline would leave a gap that reads as
   // a rendering fault rather than as an absent fact.
+  //
+  // AND IT IS DROPPED ENTIRELY WHEN A BUTTON IS BOUND, which is this card's
+  // own documented last resort ("the only element here that a reader can do
+  // without, since the card's own banner already says what kind of thing this
+  // is") rather than a new rule invented here. The arithmetic leaves no
+  // choice: a button drops the floor to y=154, the compliance line below now
+  // reserves two 22px lines instead of one, and 26 + 36 (address) + 29 + 29
+  // (the two stat rows) reaches y=120 against a compliance line that has to
+  // start at 110. Something has to go and the card already said which. A
+  // truncated address and an absent one are different claims, and this draws
+  // neither a wrong one nor an unexplained gap.
+  constexpr int kAddressLineHeight = 18;
+  constexpr int kAddressLines = 2;
+  const bool tight = contentIsTight();
   const bool hasAddress = address.length() > 0;
-  if (hasAddress) {
-    lcd.setFont(&fonts::FreeSansBold12pt7b);
+  const bool drawAddress = hasAddress && !tight;
+  if (hasAddress && !drawAddress) {
+    Log::verbose("[display] homevalue dropped its address row - a bound button leaves no room "
+                 "above the compliance line for %d px of headline",
+                 kAddressLines * kAddressLineHeight);
+  }
+  if (drawAddress) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
-    layoutLine(address, kCardMargin, 30, kScreenW - kCardMargin * 2, ink(), "homevalue.address");
+    const TextBox addressBox{kCardMargin, 30, kScreenW - kCardMargin * 2, kAddressLineHeight,
+                             kAddressLines, Align::Left};
+    layoutText(address, addressBox, ink(), "homevalue.address");
   }
 
   // THE VERTICAL BUDGET, and why the rows below tightened rather than simply
@@ -1755,15 +1997,31 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // gaps between the two stat rows were 46px and 50px for 17px-tall text, so
   // the room came out of those rather than off the end of the card.
   //
+  // WHERE THE 22px OF THE COMPLIANCE LINE'S SECOND LINE CAME FROM: the detail
+  // block, which now has room for one line rather than two. That costs
+  // nothing measurable, because the widest detail string this card produces
+  // is one line already - "$275/sq ft - updated Sep 25" is 232px and the
+  // deliberately absurd "$11,111/sq ft - updated Sep 11" is 256px, both
+  // inside the 300px box. The second detail line was headroom for a string
+  // HomeValue.cpp does not build, and it has been spent on a line that was
+  // being cut on every draw.
+  //
   // Tight mode is the same reasoning applied again, with less room. A button row
   // takes everything below y=154, and the compliance line still has to fit under
   // the detail block, so the address and both stat rows move up and close up.
   // The address is the first thing to go if even that is not enough - it is the
   // only element here that a reader can do without, since the card's own banner
-  // already says what kind of thing this is.
-  const bool tight = contentIsTight();
-  const int firstRowY = tight ? (hasAddress ? 50 : 38) : (hasAddress ? 62 : 44);
-  const int secondRowY = tight ? (hasAddress ? 80 : 72) : (hasAddress ? 100 : 90);
+  // already says what kind of thing this is. It is now actually dropped rather
+  // than merely said to be droppable: see the headline block above for the
+  // arithmetic that finally forced it.
+  //
+  // The no-button numbers below are the old ones plus the 7px the two-line 9pt
+  // headline costs over the single 12pt line it replaced. The gaps are
+  // unchanged: 62->69 and 100->107 keep the same 38px pitch and the same 9px
+  // clearance into the detail block, so nothing about this card's proportions
+  // changed - the whole stack simply starts 7px lower.
+  const int firstRowY = tight ? 38 : (drawAddress ? 69 : 44);
+  const int secondRowY = tight ? 72 : (drawAddress ? 107 : 90);
 
   // Same stat-row layout as showSunMoonCard()/showTidesCard() above: two
   // rows, label left and value right-justified. Unlike either of those,
@@ -1832,7 +2090,7 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // and pushes the fixed compliance line below it down by however many lines
   // it actually used - the same "grow down rather than overlap" reasoning
   // showAircraftCard() applies to its own variable-height route line.
-  int nextY = tight ? (hasAddress ? 108 : 100) : (hasAddress ? 138 : 140);
+  int nextY = tight ? 105 : (drawAddress ? 145 : 140);
 
   // The compliance line is reserved FIRST, not fitted last. It is the one line
   // on this card that is not allowed to go missing, so the detail block gets
@@ -1840,20 +2098,42 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // nothing, the detail is dropped. Price per square foot and a refresh date are
   // worth having; they are not worth pushing a legal qualifier off the panel,
   // which is exactly what happened when a button appeared on this card.
-  // 22, not the 18 this reserved before, and the four pixels matter now.
-  // FreeSansBold9pt7b's fontHeight() is 22, so layoutLine() reports this
-  // line's bottom at complianceY + 22 - which, reserved at 18, is four pixels
-  // PAST contentBottom() on every single draw. It has always looked fine on
-  // glass, because a 9pt line's actual ink is shorter than the font's advance
-  // and those four pixels were empty. It looked fine to nothing else: the
-  // budget check now inside layoutText() would have reported an overrun on
-  // every home value card ever drawn, and a check that fires on a card that
-  // is not broken is a check people learn to scroll past.
+  // 22 per line, not the 18 this reserved before, and the four pixels matter.
+  // FreeSansBold9pt7b's fontHeight() is 22, so layoutText() reports this
+  // block's bottom at complianceY + 22 per line - which, reserved at 18, was
+  // four pixels PAST contentBottom() on every single draw. It has always
+  // looked fine on glass, because a 9pt line's actual ink is shorter than the
+  // font's advance and those four pixels were empty. It looked fine to nothing
+  // else: the budget check now inside layoutText() would have reported an
+  // overrun on every home value card ever drawn, and a check that fires on a
+  // card that is not broken is a check people learn to scroll past. Reserving
+  // what the font advances rather than what the ink happens to occupy is also
+  // just the correct number.
   //
-  // Reserving what the font actually advances rather than what the ink
-  // happens to occupy is also just the correct number. The line moves up four
-  // pixels and nothing else on this card changes.
-  const int complianceHeight = 22;
+  // TWO LINES, BECAUSE THE WORDING DOES NOT FIT ONE AND THE WORDING IS THE
+  // POINT. Re-measured: "Automated estimate, not an appraisal." is 323px at
+  // 9pt in a 300px box, so it has been rendering as "Automated estimate, not
+  // an..." - deleting the one word the line exists to say. There is no
+  // smaller face to fall back to (Font0 is the 6x8 bitmap drawClock()'s own
+  // remarks record as unreadable on this panel), so the choice was a second
+  // line or a shorter sentence.
+  //
+  // A shorter sentence was measured and rejected. Nothing that keeps both
+  // halves of the claim fits: "Automated estimate, not appraisal." is 297px
+  // with three pixels to spare and reads as a typo, and every phrasing with
+  // real margin ("Estimate only, not an appraisal." at 268) drops the word
+  // "automated", which is half of what the qualifier asserts. HomeValueModels
+  // calls the distinction "a compliance requirement from the product owner,
+  // not wording", so the wording COULD have moved - but a second line costs
+  // 22px on a card that can find 22px, and rewriting a compliance sentence to
+  // save pixels is a trade worth not making when it is avoidable.
+  //
+  // It wraps to "Automated estimate, not an" (235px) and "appraisal." (83px),
+  // and neither line ellipsizes at any address, estimate or range, because
+  // this string is a literal and cannot vary.
+  constexpr int kComplianceLineHeight = 22;
+  constexpr int kComplianceLines = 2;
+  const int complianceHeight = kComplianceLineHeight * kComplianceLines;
   const int complianceY = contentBottom() - complianceHeight;
 
   if (detail.length() > 0) {
@@ -1880,8 +2160,11 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // overlapped by the thing above it either.
   const int drawComplianceAt = nextY > complianceY ? nextY : complianceY;
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  layoutLine("Automated estimate, not an appraisal.", kCardMargin, drawComplianceAt,
-             kScreenW - kCardMargin * 2, muted(), "homevalue.compliance");
+  const TextBox complianceBox{kCardMargin, static_cast<int16_t>(drawComplianceAt),
+                              kScreenW - kCardMargin * 2, kComplianceLineHeight,
+                              kComplianceLines, Align::Left};
+  layoutText("Automated estimate, not an appraisal.", complianceBox, muted(),
+             "homevalue.compliance");
   noteContentOverrun("homevalue", drawComplianceAt + complianceHeight);
 
   drawClock();
@@ -2573,11 +2856,32 @@ void showQrTextCard(const String& qrData, const String& caption) {
   int y = y0 + side + 6;
   const bool hasCaption = caption.length() > 0;
   if (hasCaption) {
-    lcd.setFont(&fonts::FreeSansBold12pt7b);
-    // The 22px step is this card's own rather than the font's advance: its
-    // vertical budget is measured to the pixel (see the header comment above)
-    // and FreeSansBold12pt7b's line advance is several pixels taller than the
-    // spacing this layout was built around.
+    // 9pt, NOT 12pt, AND THE CARD'S OWN COMMENT IS THE ARGUMENT FOR IT.
+    //
+    // At 12pt this line was cutting captions nobody would call long. Measured
+    // against the vendored glyph tables: the seeded "Scan for our latest
+    // listings" is 304px in a 300px box and rendered "Scan for our latest
+    // listin...", "Book a tour of this property" is 320px, and "Scan me for
+    // more information" is 346px. Twenty-six to twenty-eight ordinary
+    // characters was the whole budget.
+    //
+    // At 9pt the same three are 226, 237 and 256px, so a caption gets roughly
+    // half again as many characters before anything is lost. This card already
+    // says the caption is supplementary and not the point - the code is the
+    // point - so spending legibility rather than words is the trade this card
+    // has already argued for, and the QR modules themselves do not move.
+    //
+    // NOT a guarantee, and deliberately not dressed up as one: CardSpec.text
+    // holds up to 280 characters and an operator can type a paragraph. A
+    // caption past the box still ellipsizes and layoutText() still says so in
+    // the stream. What changed is that an ordinary caption stops being cut.
+    //
+    // The 22px step below is unchanged and is now exactly FreeSansBold9pt7b's
+    // own fontHeight(), where at 12pt it was several pixels short of the
+    // font's advance and this card was carrying its own number to compensate.
+    // The layout is the same layout; it has simply stopped disagreeing with
+    // the face drawn into it.
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
     layoutLine(caption, kScreenW / 2, y, bodyWidth, ink(), "qr.caption", Align::Centre);
     y += 22 + 2;
   }

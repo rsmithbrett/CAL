@@ -581,9 +581,11 @@ So the checks are:
    warnings, against 1,508,976 before this change, so the routine and every
    converted call site together cost 1,888 bytes of flash and left 586,288
    bytes of headroom. CAL is rebuilt in the same pass because its own
-   `Display.cpp` carries the corrected wrap; that file compiles clean, and the
-   one symbol the change adds, `Journal::printf`, is defined in `Journal.cpp`
-   in the same sketch.
+   `Display.cpp` carries the corrected wrap: **1,349,664 bytes**, also no
+   warnings, against the 1,703,936-byte (`0x1A0000`) factory partition, so
+   354,272 bytes of headroom there. The one symbol that change adds,
+   `Journal::printf`, is defined in `Journal.cpp` in the same sketch and
+   `CAL.ino` already links against it.
 2. The two CI gates in section 7, which fail the build on a new unbounded
    `drawString` and on any of the retired helper names reappearing.
 3. **On hardware, and only on hardware:**
@@ -726,3 +728,225 @@ watch.
 - **That the `@` is now on the row a household reads as the host.** The
   arithmetic is not in question; the convention is, and it was wrong once
   already in exactly this file.
+
+---
+
+### 9b. The 2026-09-28 pass: the four remaining truncations
+
+Section 9a left four strings measured and unfixed. This is those four, plus
+one redraw bug that came in from a photograph rather than from the audit.
+
+**The measurements were redone, not inherited.** `LGFXBase::text_width()` was
+reimplemented a fourth time, independently of the three the audit used, by
+reading `LGFXBase.cpp:2184` and the vendored `FreeSansBold9pt7b.h` /
+`FreeSansBold12pt7b.h` glyph tables directly. At `size_x == 1` every `>>16` in
+that routine is the identity, so the whole of it is: substitute `0x20` for any
+code outside the face, then per character `right = left + max(xAdvance, width
++ xOffset)` and `left += xAdvance`, with the one special case that a first
+glyph with a negative `xOffset` starts both cursors at `-xOffset`.
+
+It reproduces **every** figure already written into this repository by hand -
+`Est. value` at 112px, `Sunrise` at 89, `Sunset` at 81, `$400K - $450K` at
+161, the whole all-ones range table from 167 to 223, `$9999K - $99999K` at
+200, and the widest live listings address at 523 - to the pixel, and it agrees
+with the audit's own numbers for all four strings below. `fontHeight()` comes
+out at 22 for 9pt and 29 for 12pt, which is what the cards already assume.
+
+That is a fourth agreeing model of LovyanGFX. It is still a model.
+
+#### `homevalue.compliance` - two lines
+
+`Automated estimate, not an appraisal.` is **323px** at 9pt in a 300px box, so
+it has been drawing as `Automated estimate, not an...` - the one line on the
+card that `Display.h` says may not go missing, missing the word it exists to
+say. There is no smaller face to drop to; `Font0` is the 6x8 bitmap that
+`drawClock()`'s own remarks record as unreadable on this panel.
+
+A shorter sentence was measured before being rejected, not instead of:
+
+| wording | width | verdict |
+|---|---|---|
+| `Automated estimate, not an appraisal.` | 323 | over |
+| `Automated estimate, not an appraisal` | 319 | over |
+| `Automated estimate. Not appraised.` | 306 | over |
+| `Automated estimate, not appraised.` | 303 | over |
+| `Automated estimate, not appraisal.` | 297 | fits by 3px, reads as a typo |
+| `Automated value, not an appraisal.` | 296 | fits by 4px, "value" is weaker |
+| `Model estimate, not an appraisal.` | 282 | drops "automated" |
+| `Auto estimate, not an appraisal.` | 270 | reads like car insurance |
+| `Estimate only, not an appraisal.` | 268 | drops "automated" |
+
+Nothing that keeps both halves of the claim fits with margin worth having.
+`HomeValueModels.cs` calls the distinction "a compliance requirement from the
+product owner, **not wording**", so the sentence *could* have moved - but a
+second line costs 22px on a card that can find 22px, and rewording a legal
+line to save pixels is a trade worth not making while it is avoidable. It
+wraps to `Automated estimate, not an` (235px) and `appraisal.` (83px), and
+cannot vary, because it is a literal.
+
+The 22px came out of the detail block, which now has room for one line
+instead of two. That costs nothing measurable: `$275/sq ft - updated Sep 25`
+is 232px and the deliberately absurd `$11,111/sq ft - updated Sep 11` is 256,
+both inside one 300px line. The second detail line was headroom for a string
+`HomeValue.cpp` does not build.
+
+#### `homevalue.address` - two 9pt lines, and the block below moves 7px
+
+Both live addresses overflow: `300 Eatons Landing Dr, Annapolis, MD 21401` is
+**518px** at 12pt and **384px** at 9pt, `104 Virginia Ave, Edgewater, MD
+21037` is **449** and **332**. One line does not work at either size, so this
+takes the listings card's answer unchanged - two 9pt lines at an 18px step -
+rather than inventing a second way to lay out a postal address.
+
+Two 9pt lines advance 36 against the single 12pt line's 29, so the cost is
+**7px** and everything below moves down by exactly that: `firstRowY` 62 to 69,
+`secondRowY` 100 to 107, the detail block 138 to 145. The pitch and the gaps
+are unchanged, which is the point - there were only 3px of slack at 62, so
+absorbing it was never on the table.
+
+**With a button bound the address is dropped entirely**, which is this card's
+own long-standing sentence ("the only element here that a reader can do
+without") acted on rather than only written down. The arithmetic forces it: a
+154px floor, a compliance line now reserving 44, and 26 + 36 + 29 + 29 reaches
+120 against a compliance line that must start at 110. The tight path loses the
+refresh date for the same reason. The card then draws the shape it already
+draws for a household with no stored address.
+
+#### `aircraft.route` - shortened on the device
+
+The cause is server-side and is worth stating precisely, because the fix that
+matters is not in this repository. `AirportNameFormatter.Shorten` strips a
+**trailing** `" International Airport"`. Every name long enough to matter does
+not end there:
+
+```
+Minneapolis-Saint Paul International Airport (Wold-Chamberlain Field), MN
+Charleston International Airport / Charleston Air Force Base, SC
+Athens International Airport (Eleftherios Venizelos Airport), GR
+```
+
+so the rule fires on the short names and on none of the long ones.
+
+Measured over the **948 distinct origin/destination display pairs** the route
+cache can currently produce (1,394 cached routes, less the three-leg ones
+`FlightRouteService.SplitRoute` refuses, joined against the 255-row airport
+name cache with the ICAO code as the fallback the card actually uses):
+
+| | widest route line | overrun a 2 x 300px box |
+|---|---|---|
+| before | 1,077px | 110 of 948 |
+| after | 710px | 54 of 948 |
+
+`shortenAirportName()` in `App/Display.cpp` does what the server's own two
+rules would do if they could reach: split off a one-to-three character
+`", XX"` suffix, drop one parenthetical, drop an alternate name after `" / "`,
+then `" International Airport"` to `" Intl"` **anywhere** and a bare trailing
+`" Airport"` entirely, and put the suffix back. The 54 that remain are names
+with nothing left to strip - `Ronald Reagan Washington National, VA`,
+`Hartsfield-Jackson Atlanta Intl, GA` - and they now lose a word off a
+destination rather than the destination.
+
+**A third line was measured and refused.** The stat rows and the freshness
+line already reach y=234 against a 220 budget whenever the route takes two
+lines, so an 18px third line would put this card 32px under the corner clock.
+That existing 14px overrun is fixed in the same pass by closing the stat-row
+pitch from 30 to 25 **only** when the route took two lines, which lands the
+freshness line at 197..219 - one pixel inside. The one-line case, which is
+what every device draws today, keeps 30 and does not move at all.
+
+**What the server should still do**, and this is the half that belongs
+upstream: apply `Shorten`'s two rules to the whole string rather than to its
+tail, and drop a parenthetical and a `" / "` alternate before formatting. Then
+the device pays neither the bytes nor the per-draw work, and the raw name is
+still available in `provider_airport_name_cache` for a diagnostic. The device
+rule stays regardless - it is the only half that can ship without the wire
+moving, and a card that fits whatever it is sent is the better shape anyway.
+
+#### `qr.caption` - 9pt
+
+At 12pt the 300px box held about twenty-seven ordinary characters. The seeded
+`Scan for our latest listings` is **304px**, `Book a tour of this property` is
+**320**, `Scan me for more information` is **346**. At 9pt the same three are
+**226**, **237** and **256**.
+
+This card's own comment already says the caption is "supplementary, not the
+point" - the code is the point - so the font is the thing to spend. **Nothing
+else on the card moves**: the 22px step this layout was already carrying as a
+number of its own is exactly `FreeSansBold9pt7b`'s `fontHeight()`, where at
+12pt it was several pixels short of the font's advance. The layout has stopped
+disagreeing with the face drawn into it.
+
+Not a guarantee, and deliberately not dressed as one: `CardSpec::text` holds
+280 characters and an operator can type a paragraph. A long caption still
+ellipsizes and `layoutText()` still says so.
+
+#### And one redraw bug, from a photograph
+
+`CardManager::rewind()` at cursor 0 was the one navigation path that returned
+without repainting. `Display::flashNavEdge()` erases a 106px edge strip as
+press feedback and redraws only the chevron, so that path left a blank column
+down the side of the card until the next auto-advance. `flashNavEdge()`'s own
+comment had predicted exactly this path and exactly this consequence. It is
+one `drawCurrent()` call. Not a layout change, and recorded here because it
+came out of the same photograph pass as the rest.
+
+**As built, 2026-09-28.** All five gates in `ci/build-firmware.sh` green, run
+by hand before the compile started; **no warnings and no errors** anywhere in
+a 467-line verbose log, checked by reading it rather than by the exit code.
+
+| image | before | after | delta | real ceiling | headroom |
+|---|---|---|---|---|---|
+| `App.ino.bin` | 1,517,776 | **1,518,128** | +352 | 2,097,152 (`ota_0`) | 579,024 (72% used) |
+| `CAL.ino.bin` | 1,349,664 | 1,349,664 | 0 | 1,703,936 (`factory`) | 354,272 (79% used) |
+
+Both memory lines, as arduino-cli printed them — and its "Maximum is 1966080"
+is the FQBN's generic `min_spiffs` scheme, not either real ceiling above,
+which is why the script re-checks against `partitions.csv` itself:
+
+```
+App: Sketch uses 1517971 bytes (77%) of program storage space. Maximum is 1966080 bytes.
+     Global variables use 81980 bytes (25%) of dynamic memory, leaving 245700 bytes for
+     local variables. Maximum is 327680 bytes.
+```
+
+**Globals did not move at all** — 81,980 before and after. That is the number
+worth watching on this fleet, and it says what these changes are: the whole
++352 bytes is flash, mostly `shortenAirportName()`'s code and the string
+literals it matches against. The 256-byte route buffer is stack, not `.bss`,
+and it replaces three heap `String` temporaries per draw of the aircraft
+card, so the largest-contiguous-block figure that decides whether TLS can
+open should move the right way rather than the wrong one.
+
+CAL was **not** rebuilt: nothing under `App/` is compiled into it and no
+root-level source changed in this pass, so its 2026-09-27 artifact is the
+current one and all three of its ceiling checks were run against it. The
+binding ceiling remains the **field** factory partition of 1,441,792 bytes
+that the fleet is actually running, where CAL sits at 93% with 92,128 spare.
+The two sketches' `partitions.bin` images are byte-identical, which is the
+check that the table did not move.
+
+The four ceiling checks, run by hand:
+
+```
+CAL (factory)                            1349664 / 1703936 (79%)  spare 354272  PASS
+App (ota_0)                              1518128 / 2097152 (72%)  spare 579024  PASS
+CAL (must also fit ota_0, OTA staging)   1349664 / 2097152 (64%)  spare 747488  PASS
+CAL (field factory, pre-re-table)        1349664 / 1441792 (93%)  spare  92128  PASS
+```
+
+**Still needs a device:**
+
+- **That two 9pt lines still read as a headline** on the home value card, the
+  same open question the listings card left.
+- **That the compliance line on two lines still reads as one sentence** rather
+  than as a line and an orphan.
+- **That `Minneapolis-Saint Paul Intl, MN` is recognisably the same airport**
+  as what the server sent. The arithmetic is not in question; whether a
+  household reads the shortened name as the right place is.
+- **That the aircraft card's two-line-route mode at a 25px pitch still reads
+  as three rows**, and not as a crowded block.
+- **The aircraft card under a bound button is still broken and was left so.**
+  Its freshness line lands at y=194 against a 154 floor whenever an action is
+  bound, which is the audit's own step 13 - a layout that needs redesign, not
+  a shifted y. The budget check reports it, correctly, and nothing here
+  silences it.

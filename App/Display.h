@@ -165,6 +165,18 @@ void showFailure(const String& headline, const String& whatToDo);
 /// pure-code route (the common case today, and the only case a 6-month-old
 /// server can produce) still lands on exactly the one line it always has.
 ///
+/// **Both names are shortened again here, on the device**, before they are
+/// laid out - see shortenAirportName() in Display.cpp. The server's
+/// AirportNameFormatter.Shorten only strips a TRAILING " International
+/// Airport", which fires on none of the names that are actually too long,
+/// because those end in "(Wold-Chamberlain Field)" or
+/// "/ Charleston Air Force Base" instead. Measured over the 948 distinct
+/// origin/destination pairs the route cache can currently produce, the
+/// widest route line drops from 1,077px to 710px and the number overrunning
+/// the two-line box from 110 to 54. This is the server's job done in the one
+/// place that could be changed today; the wire is unchanged and needs to be,
+/// and the upstream fix is still worth making.
+///
 /// This function draws no logo. The image lives in the Assets cache under a
 /// server-given id this file has no reason to know about (see aircraftLogoZone()
 /// below and Aircraft.cpp's cardDraw()) - the same module boundary Graphic.cpp
@@ -234,14 +246,34 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
 /// price-per-square-foot line without ever being able to silently drop the
 /// one line compliance actually requires.
 ///
+/// **Over two lines, because the sentence does not fit one.** "Automated
+/// estimate, not an appraisal." measures 323px at 9pt in a 300px box, so
+/// until now it drew as "Automated estimate, not an..." - present, reserved,
+/// unconditional, and missing the word it exists to say. Two 22px lines is
+/// the reservation; a shorter sentence was measured and rejected because
+/// nothing keeping both halves of the claim fits with real margin.
+///
 /// `address` is the property the estimate is of, drawn as the headline the
 /// same way showListingsCard() draws its own - a dollar figure that names no
 /// house is the one fact on this card a reader cannot check. Empty is a real
 /// case rather than a fault (a valuation resolved from a GPS fix has no
 /// address to print) and the headline row is then not drawn at all, with the
-/// rows below moving back up. Truncated to one line, never wrapped: the
-/// compliance line above has to fit underneath everything else on a 240px
-/// screen, and a second headline line is what it would cost.
+/// rows below moving back up. **Wrapped over two 9pt lines, not truncated on
+/// one 12pt line**, which is showListingsCard()'s own measured answer to the
+/// same problem reused rather than re-derived: both live addresses overflow a
+/// single 300px line at 12pt (518px and 449px) and at 9pt (384px and 332px),
+/// so the headline was ellipsizing on every draw of every device. Two 9pt
+/// lines cost 7px over the single 12pt line they replace, and the whole block
+/// below moves down by exactly that.
+///
+/// **Dropped entirely when a button is bound**, which is this card's own
+/// long-standing statement that the address is the one element here a reader
+/// can do without, finally acted on rather than only written down: the
+/// compliance line now reserves two lines rather than one, and a 154px floor
+/// has no room for a headline as well. The card then reads exactly as it does
+/// for a household with no stored address, which is a shape it already draws
+/// correctly - and the tight path loses the refresh date for the same reason,
+/// which is an acceptable trade against a legal line that cannot be cut.
 void showHomeValueCard(const String& address, const String& estimateText, const String& rangeText,
                        const String& detail);
 
@@ -421,6 +453,15 @@ void showBannerCard(const String& text);
 /// code regardless of whether a caption is present, mirroring CAL's own showQr() - "the
 /// address in characters as well as in the code, because cameras fail" applies exactly as
 /// much on this panel as on CAL's.
+///
+/// The caption is drawn at **9pt, not 12pt**, which is this card's own "supplementary,
+/// not the point" argument applied to the font rather than only to the position. At 12pt
+/// the 300px box held about twenty-seven ordinary characters and was cutting captions
+/// nobody would call long - "Scan for our latest listings" measures 304px, "Book a tour
+/// of this property" 320px. The same two are 226px and 237px at 9pt. It is not a
+/// guarantee: `CardSpec::text` holds up to 280 characters and a long caption still
+/// ellipsizes, and says so in the stream. Nothing else on the card moves - the 22px step
+/// this layout was already carrying is exactly FreeSansBold9pt7b's own fontHeight().
 void showQrTextCard(const String& qrData, const String& caption);
 
 /// The real-estate listings card: one nearest-market listing per screen, with
