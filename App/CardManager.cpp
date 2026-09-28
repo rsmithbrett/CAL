@@ -659,6 +659,15 @@ void drawCurrent() {
   if (gCurrent.card < 0 || gCurrent.card >= static_cast<int8_t>(gCardCount) ||
       !showable(static_cast<uint8_t>(gCurrent.card))) {
     gButtonCount = 0;
+    // The budget belongs beside gButtonCount, not only on the path below.
+    // This early return sets the count to zero and then drew showNoContent()
+    // against WHATEVER BUDGET THE PREVIOUS CARD LEFT BEHIND - so a device
+    // whose last card had a button bound rendered its "nothing to show yet"
+    // screen against a floor of 154 with no button row coming to justify it.
+    // Harmless while nothing measured the floor; now that layoutText()
+    // compares every string against it, a leaked budget is a stream full of
+    // overruns that are not real. Zero buttons, full panel, stated together.
+    Display::setContentBudget(false);
     Touch::setActionZones(nullptr, 0);
     Display::showNoContent("Nothing to show yet",
                            "Waiting for the first update from the server.");

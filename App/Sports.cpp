@@ -205,8 +205,15 @@ void drawCardAt(uint8_t index, uint16_t itemIndex) {
   // The age is named either way, and the empty case says WHY it is empty
   // rather than printing nothing: "no age line" on its own would be
   // indistinguishable from an age line that was meant to appear and did not.
-  Log::verbose("[sports] on screen: card=%s %s %s - %s %s (%s) [%s]", kCardIds[index],
-               game.home, homeScore.c_str(), awayScore.c_str(), game.away, status.c_str(),
+  //
+  // AWAY FIRST, AND THE "@" ON THE HOST, matching what the panel now draws -
+  // see Display::showSportsCard()'s own remarks on why the old arrangement
+  // stated that the visitor was hosting. This line is what anybody verifying
+  // that fix will actually read, because nobody is standing in front of
+  // device 23; a stream still reading home-first would have them checking the
+  // fix against the bug's own ordering and concluding it had not landed.
+  Log::verbose("[sports] on screen: card=%s %s %s - @ %s %s (%s) [%s]", kCardIds[index],
+               game.away, awayScore.c_str(), game.home, homeScore.c_str(), status.c_str(),
                age.length() > 0 ? age.c_str() : "no age line - server says this card is current");
 
   Display::showSportsCard(game.home, homeScore, game.away, awayScore, status,

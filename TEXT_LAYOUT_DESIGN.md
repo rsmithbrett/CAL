@@ -488,6 +488,43 @@ which was at home. `@ Houston Astros` is the convention every American
 scoreboard uses. Only the away row is marked, because a home team with no
 marker is the home team.
 
+**That paragraph was wrong about which row, and it shipped.** `@ X` is read
+"at X", so the marker names the **host**, not the visitor. Marking the away
+row therefore stated that the away team was hosting — photographed on device
+23 as `Yankees / @ Orioles` on a day the Yankees hosted, which is the exact
+inversion of the truth and reads as a completely ordinary scoreline. Nothing
+about it looks wrong, which is why it survived a photograph, a review, and
+this document.
+
+**Corrected 2026-09-27, and the correction took the row order with it.** Two
+variants were available. Moving the marker onto the home row alone is one line
+and still reads wrong, because no scoreboard or ticker writes the host first.
+So the rows swapped as well: **away on top unmarked, home underneath carrying
+the `@`**, which is the vertical form American scoreboards use —
+
+```
+  NYY  5
+@ BAL  3
+```
+
+— and that same photographed game now renders `Orioles / @ Yankees`.
+
+The part that belongs to this document is what makes the swap dangerous to do
+by halves. **The row index picks the position and the flag picks the team.**
+Name, score and marker are all selected by `isAway`; `y` is selected by `row`.
+Swapping one of the four and not the others puts a score against the wrong
+team, and a scoreline with the numbers transposed looks exactly as plausible
+as a correct one — strictly worse than the bug it came from, because there is
+then nothing on the panel that looks off at all.
+
+The fix is firmware, not server. The marker exists only in `App/Display.cpp`,
+and swapping the two names server-side instead was refused: it works today and
+can never be undone, because the wire contract documents what those fields
+mean, the device's own `[sports] on screen:` line would start lying, and every
+firmware flashed afterwards would carry the inversion forever. That log line
+was flipped to read away-first in the same change, since it is what anybody
+verifying the fix actually reads — nobody is standing in front of device 23.
+
 The part that belongs to this document: **the `@` is joined to the name before
 anything is measured.** Added after the fit was computed it would push the name
 one glyph further into being cut, and the marker itself could end up being what
@@ -504,6 +541,28 @@ The score stays at 18pt: this card's own comment says the score is what a reader
 across the room is after, so the name is the one that gives up size. The
 ellipsis is still there for a name that fits neither, which makes this a way of
 needing the ellipsis less often rather than a way of avoiding it.
+
+**Three-tier as of 2026-09-27, the third at 9pt.** Two tiers were not enough:
+the 12pt tier still ellipsizes anything from "@ New York Yankees" (247px)
+upward against a 236px column, and long names are not the rare case. Three
+separate routes produce one — football is returned untouched by design, an
+unrecognised market returns the full name, and the nickname-collision branch
+returns market and nickname together — and the first of those is the common
+one, not the third.
+
+Reapportioning the row was measured and rejected before a third tier was
+added. The score column has **7 real pixels** of slack against a shortfall
+that runs from 9 to 64 pixels depending on the name, so widening the name
+column buys back the narrowest case and nothing else.
+
+At 9pt every realistic name clears the column: the widest, `@ Tampa Bay
+Buccaneer` at the 20-character wire cap, measures 217px and leaves 19. **The
+9pt tier fires only after 12pt has been measured and rejected**, which is the
+whole point of a ladder — a name that fits 12pt must never be drawn at 9pt,
+because this card's argument is that the score reads from across the room and
+9pt is a third the height of the top tier. Dropping two tiers is announced on
+the stream rather than left to be noticed. Whether 9pt is legible enough at
+room distance is the one part of this that needs glass; see section 9.
 
 ---
 
@@ -531,6 +590,9 @@ So the checks are:
    - The sports card shows `Houston Astros` whole at the smaller tier, or
      `Houston Ast...` if it still will not fit, and never `Houston Astr`.
    - The away row reads `@ Houston Astros` and the home row has no marker.
+     **Superseded 2026-09-27** — see section 8a. The away row now reads
+     `Houston Astros` with no marker and sits on top; the **home** row carries
+     the `@` and sits underneath.
    - A 21:40 Eastern game reads `21:40`, or `9:40 PM` in a 12-hour household,
      and not `01:40`. The debug stream carries
      `[sports] start time: utc=... offset=...min 12hour=... -> ...` on every
@@ -541,3 +603,126 @@ So the checks are:
 
 Point 3 is the one that needs a device. The first two are what this change can
 prove on its own.
+
+---
+
+### 9a. The 2026-09-27 card-audit build
+
+A second pass over the same routine, from `CARD_AUDIT_2026_09_27.md`. What is
+new here as a *method* is that the widths below are **measured, not
+estimated**: `LGFXBase::text_width()` was reimplemented against the vendored
+LovyanGFX glyph tables, and the reimplementation reproduces **all eleven**
+width figures previously recorded by hand in this repository's own source
+comments — `Updated just now` at 150px, `Updated 365 days ago` at 190,
+`99.9 mi away` at 109, `HALFTIME` at 124, `311 deg NW` at 140 and the rest —
+exactly, to the pixel. It is still a model of LovyanGFX, and one flashed
+device converts every figure below from modelled to observed.
+
+**The content budget moved inside `layoutText()`.** `setContentBudget()` had
+existed since the home value card lost its compliance line under a button
+row, and exactly one card of fourteen consulted it. Rather than teach the
+other thirteen, one comparison now runs where every bounded string already
+passes — which is only possible *because* of section 7's gate: the rule that
+every non-literal string in `App/Display.cpp` goes through this routine is
+what makes this a genuine choke point rather than a place most strings visit.
+A gate written to stop a sixth truncation helper turns out to be what makes
+the geometry measurable.
+
+It names the **box**, not the card — `[display] listings.onmarket drew to
+y=184, past its 154 budget` — because `noteContentOverrun()`'s card name says
+which card to go and read, where the `what` string says which row to move.
+`Log::printf`, not `verbose`, since it only fires when something is wrong.
+
+One exemption: `drawOneButton()` draws its label through the same routine at
+roughly y=181 *by design*, so a file-static flag is set around
+`drawActionButtons()`. Nothing else in the file draws chrome text through
+`layoutText()` — the corner clock and the clock card's hero are
+`LAYOUT-PRIMITIVE` and never reach it.
+
+Two false positives were found and fixed rather than tolerated, because a
+check that fires on a card that is not broken is a check people scroll past:
+a stray `gContentBottom = 200` left at the end of `showSportsCard()`, and
+`CardManager`'s early return to `showNoContent()` leaking the previous card's
+budget. A third was subtler and is worth recording: the home value compliance
+line reserved **18px** for a 9pt line whose `fontHeight()` is **22**, so it
+had always reported a bottom four pixels past `contentBottom()`. It looked
+fine on glass because a 9pt line's ink is shorter than its advance. The
+reservation is now 22 — reserving what the font advances rather than what the
+ink happens to occupy.
+
+**Widths settled in this pass**, all against the measured model:
+
+| element | before | after |
+|---|---|---|
+| sports name | 2 tiers, 12pt floor; `@ Tampa Bay Buccaneer` cut at 292px | 3 tiers, 9pt floor at 217px of 236 — 19px spare |
+| `homevalue.range` | 150px shared column; **shortest possible range already 11px over** | own 80/210 split; fits to a $10M low / $100M high |
+| `homevalue.estimate` | 150px shared column | own 116/174 split (label measures 112) |
+| `listings.address` | one 12pt line, 300px; **0 of 118 live addresses fit** | two 9pt lines, 523px of 600 at the widest |
+| `listings` "Listed N days" | `Listed 3234 days` | `On market 8.8 years`, label 89px of 150 |
+
+Two of those are worth stating as findings rather than as fixes. The home
+value range's **shortest** producible value, `$400K - $450K`, is 161px in a
+150px column — so that row had been drawing `$400K -...`, a range with no
+upper bound, since it was written. And the listings address did not fit for
+**any** of the 118 live listings; dropping `, STATE ZIP` server-side was
+measured before being rejected, since 92 of the 118 still overflow at 12pt
+without it.
+
+The listings card also gained the reserve-first tight layout
+`showHomeValueCard()` already had. Four stat rows plus a footer do not fit
+above y=154, and y=154 is the floor on **every device in this fleet** whenever
+an action is bound, because all nine share one account and the `Request Tour`
+binding is live. With a button bound the card now seats two stat rows at a
+22px pitch and drops the other two with a line naming each; without one it
+seats all four at 26px and lands within a pixel of where it always did.
+
+**As built, 2026-09-27.** `ci/build-firmware.sh` end to end, **no warnings and
+no errors**, all five gates green before either compile started.
+
+| image | before | after | delta | real ceiling | headroom |
+|---|---|---|---|---|---|
+| `App.ino.bin` | 1,515,808 | **1,517,776** | +1,968 | 2,097,152 (`ota_0`) | 579,376 (72% used) |
+| `CAL.ino.bin` | 1,349,664 | **1,349,664** | 0 | 1,703,936 (`factory`) | 354,272 (79% used) |
+
+Both memory lines, as arduino-cli printed them — and note that its "Maximum is
+1966080" is the FQBN's generic `min_spiffs` scheme, not either real ceiling
+above, which is the whole reason the script re-checks against `partitions.csv`
+itself:
+
+```
+CAL: Sketch uses 1349523 bytes (68%) of program storage space. Maximum is 1966080 bytes.
+     Global variables use 52124 bytes (15%) of dynamic memory, leaving 275556 bytes for
+     local variables. Maximum is 327680 bytes.
+App: Sketch uses 1517619 bytes (77%) of program storage space. Maximum is 1966080 bytes.
+     Global variables use 81980 bytes (25%) of dynamic memory, leaving 245700 bytes for
+     local variables. Maximum is 327680 bytes.
+```
+
+CAL is byte-for-byte the same **size** because nothing under `App/` is compiled
+into it and its own sources were not touched; its image hash still moves,
+because the ESP32 app descriptor embeds a compile timestamp. The bootloader and
+partition images hash identically to the previous build, which is the check
+that nothing structural moved.
+
+The binding ceiling remains the **field** one, not the table in
+`partitions.csv`: CAL against the 1,441,792-byte factory partition the fleet
+is actually running is at **93%**, with 92,128 bytes spare. That number did
+not move in this pass and no change here touches CAL, but it is the one to
+watch.
+
+**Still needs a device, and nothing here can prove it:**
+
+- **Whether 9pt is legible across a room.** This is the open question from the
+  audit's section 7 and it is a judgement, not a measurement: the sports
+  card's whole argument is that the score reads from a distance, and a 9pt
+  name is a third the height of the 18pt tier. The alternative is an
+  ellipsis, and the ellipsis is still the backstop below 9pt.
+- **That two 9pt address lines look like a headline** rather than like body
+  text that lost its heading.
+- **Every MODELLED width above.** One flashed device with a bound button
+  settles all of them at once, together with the budget check: the stream
+  should fall silent on the cards that now fit, and name a box and a y on the
+  ones that still do not.
+- **That the `@` is now on the row a household reads as the host.** The
+  arithmetic is not in question; the convention is, and it was wrong once
+  already in exactly this file.

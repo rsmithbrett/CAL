@@ -274,6 +274,70 @@ void copyBounded(const char* source, char* destination, size_t capacity) {
   destination[capacity - 1] = '\0';
 }
 
+/// copyBounded()'s disclosing sibling, for a field whose loss changes what the
+/// panel SAYS rather than merely shortening it. Same bounded copy, plus two
+/// things: a visible "..." written into the tail when anything was dropped,
+/// and a line in the stream naming the field and the loss.
+///
+/// WHY THE WIRE-LEVEL CUTS NEEDED THIS AT ALL. App/Display.cpp's layoutText()
+/// marks and reports everything it shortens, which is the whole point of
+/// TEXT_LAYOUT_DESIGN.md - but it can only mark what reaches it. These fields
+/// are cut HERE, in the parser, several layers before any box exists, and
+/// until now they were cut by a bare strncpy() that reported nothing to
+/// anybody. A team name arriving as "Golden State Warrio" is then perfectly
+/// short enough for the panel, so the display never ellipsizes it and nothing
+/// anywhere says a character was lost. That is precisely the silent
+/// truncation the layout work was done to eliminate, surviving one layer
+/// upstream of where anyone went looking for it.
+///
+/// So the panel carries the evidence too, not only the stream: "Golden State
+/// Wa..." reads as a name that did not fit, where "Golden State Warrio" reads
+/// as a name somebody misspelled.
+///
+/// NOT FOR IDS. A truncated identifier is a perfectly valid identifier for
+/// something else, and one with "..." glued on matches nothing at all - which
+/// is why copyBounded() above keeps the ids and this one takes display text.
+void copyBoundedMarked(const char* source, char* destination, size_t capacity,
+                       const char* field) {
+  if (capacity == 0) {
+    return;
+  }
+  if (source == nullptr) {
+    destination[0] = '\0';
+    return;
+  }
+  const size_t room = capacity - 1;
+  const size_t length = strlen(source);
+  if (length <= room) {
+    memcpy(destination, source, length + 1);
+    return;
+  }
+
+  // Three of the surviving bytes go to the mark. A field with no room for even
+  // that keeps as much of the value as it can instead: a buffer filled edge to
+  // edge with "..." would carry strictly less than the fragment it replaced.
+  const bool marking = room > 3;
+  const size_t kept = marking ? room - 3 : room;
+  memcpy(destination, source, kept);
+  if (marking) {
+    destination[kept] = '.';
+    destination[kept + 1] = '.';
+    destination[kept + 2] = '.';
+  }
+  destination[kept + (marking ? 3 : 0)] = '\0';
+
+  // printf rather than verbose: a field arriving longer than this device can
+  // hold is the server and the firmware disagreeing about a bound, and
+  // noticing it must not depend on somebody having switched streaming on
+  // first. Not a hot path - these run once per check-in over at most a
+  // handful of items.
+  Log::printf("[checkin] %s arrived %u characters long and this device holds %u, so %u were cut "
+              "on the wire%s",
+              field, static_cast<unsigned>(length), static_cast<unsigned>(room),
+              static_cast<unsigned>(length - kept),
+              marking ? " and the stored value is marked '...'" : "");
+}
+
 /// Where parsed announcements actually live - see CheckIn::Result's own
 /// remarks on why this is file-static rather than an inline array on that
 /// struct. Overwritten by every perform() call, which is safe because the one
@@ -311,7 +375,12 @@ void parseAnnouncements(JsonVariantConst source, Result& result) {
     Cards::Announcement& announcement = gAnnouncementBuffer[result.announcementCount];
 
     copyBounded(item["id"] | "", announcement.id, sizeof(announcement.id));
-    copyBounded(item["text"] | "", announcement.text, sizeof(announcement.text));
+    // Marked and reported: the text is what a household reads off the banner,
+    // and 120 bytes is a bound this device chose against DRAM rather than one
+    // the server promised to respect. The id above stays unmarked for the
+    // reason copyBoundedMarked() gives.
+    copyBoundedMarked(item["text"] | "", announcement.text, sizeof(announcement.text),
+                      "announcement text");
     announcement.isAction = item["isAction"] | false;
     copyBounded(item["actionId"] | "", announcement.actionId, sizeof(announcement.actionId));
 
@@ -770,12 +839,19 @@ Result perform() {
 
           // Bounded copies: these strings came off a wire and their length is
           // not this firmware's to trust.
-          strncpy(slot.home, game["home"] | "", Sports::kMaxTeamNameLength);
-          slot.home[Sports::kMaxTeamNameLength] = '\0';
-          strncpy(slot.away, game["away"] | "", Sports::kMaxTeamNameLength);
-          slot.away[Sports::kMaxTeamNameLength] = '\0';
-          strncpy(slot.period, game["period"] | "", Sports::kMaxPeriodLength);
-          slot.period[Sports::kMaxPeriodLength] = '\0';
+          //
+          // Through copyBoundedMarked() rather than a bare strncpy(), which is
+          // what these three were. A 20-byte cap cuts real team names -
+          // "Golden State Warriors" is 21 - and the cut fragment then fits the
+          // panel perfectly well, so layoutText() has nothing to mark and the
+          // household reads a misspelling instead of a truncation. The period
+          // is capped at 8, which "HALFTIME" fills exactly and "1ST QUARTER"
+          // does not; it gets the same treatment for the same reason, even
+          // though 8 is enough for nearly every code the provider sends.
+          copyBoundedMarked(game["home"] | "", slot.home, sizeof(slot.home), "sports home team");
+          copyBoundedMarked(game["away"] | "", slot.away, sizeof(slot.away), "sports away team");
+          copyBoundedMarked(game["period"] | "", slot.period, sizeof(slot.period),
+                            "sports period");
 
           ++count;
         }

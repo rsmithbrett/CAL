@@ -73,10 +73,61 @@ uint16_t cardItemCount() { return (hasNextPass() || hasData()) ? 1 : 0; }
 /// precision for "which way to look", which is all this card claims to
 /// answer (see IssFlyover.h and CheckInModels.cs's own remarks on why this
 /// is a map bearing, not a real observational azimuth).
+///
+/// NULL FOR A BEARING THAT IS NOT ONE, and every caller below writes "--".
+///
+/// The -1.0 sentinel that means "the server sent no azimuth" used to come
+/// back from here as "N". (-1.0 + 22.5) / 45.0 is 0.477, the cast truncates
+/// it to 0, and index 0 is north - so the one value that means "this is not a
+/// direction" rendered as the most ordinary direction there is. A household
+/// would have been told to look north at a pass whose bearing nobody knew.
+///
+/// UNREACHABLE TODAY, so this is a guard rather than a repair: the server
+/// never sends a pass without its azimuth, and the sentinel currently renders
+/// as the visibly broken "-01 deg N" rather than as a clean lie. Written
+/// anyway because it costs one comparison and the failure it prevents is the
+/// silent one - the day a nullable azimuth arrives, this is already correct.
+///
+/// NaN falls into the same branch on purpose. Every comparison against NaN is
+/// false, so the negated pair below is true for it, and a NaN bearing draws a
+/// dash rather than indexing this table with whatever the cast produces.
+///
+/// THE 8-POINT COMPASS ITSELF IS NOT THE PROBLEM AND IS NOT BEING CHANGED.
+/// The ISS direction row was reported as truncating and it does not: the
+/// widest string these eight points can produce is "311 deg NW" at 140px in a
+/// 150px column, so every bearing fits with 10px to spare. The earlier
+/// measurement was of a 16-point string ("292 deg WNW") that this function
+/// cannot emit.
 const char* compassPoint(double bearingDegrees) {
   static const char* const kPoints[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+  if (!(bearingDegrees >= 0.0 && bearingDegrees < 360.0)) {
+    return nullptr;
+  }
   const int index = static_cast<int>((bearingDegrees + 22.5) / 45.0) % 8;
   return kPoints[index < 0 ? index + 8 : index];
+}
+
+/// "042 deg NE" for a real bearing, "--" for one this card cannot state.
+///
+/// One helper rather than the same ternary at each of the three call sites
+/// below, and it writes the WHOLE value rather than just the compass letter:
+/// "-01 deg --" would still be putting a sentinel on the glass next to a
+/// disclaimer, which is two answers to one question. A dash on its own is the
+/// card declining to say, which is what it means.
+///
+/// snprintf into the caller's buffer rather than returning a String, so this
+/// allocates nothing - the same reason every other formatter in this file
+/// takes a stack buffer.
+void writeBearing(char* buffer, size_t capacity, double bearingDegrees) {
+  const char* const point = compassPoint(bearingDegrees);
+  if (point == nullptr) {
+    Log::printf("[iss] bearing %.1f is not in [0,360), so this row says '--' rather than "
+                "naming a direction",
+                bearingDegrees);
+    snprintf(buffer, capacity, "--");
+    return;
+  }
+  snprintf(buffer, capacity, "%03.0f deg %s", bearingDegrees, point);
 }
 
 String distanceText() {
@@ -93,7 +144,7 @@ String distanceText() {
 /// spelling it out is the safe choice here rather than risking a blank box.
 String directionText() {
   char buffer[16];
-  snprintf(buffer, sizeof(buffer), "%03.0f deg %s", gBearingDegrees, compassPoint(gBearingDegrees));
+  writeBearing(buffer, sizeof(buffer), gBearingDegrees);
   return String(buffer);
 }
 
@@ -126,8 +177,7 @@ String nextPassRiseTimeText() { return localHhMm(gNextPassRiseUtc); }
 /// Same "042 deg NE" shape as directionText() above, for the rise azimuth.
 String nextPassRiseDirectionText() {
   char buffer[16];
-  snprintf(buffer, sizeof(buffer), "%03.0f deg %s", gNextPassRiseAzimuthDegrees,
-            compassPoint(gNextPassRiseAzimuthDegrees));
+  writeBearing(buffer, sizeof(buffer), gNextPassRiseAzimuthDegrees);
   return String(buffer);
 }
 
@@ -137,11 +187,17 @@ String nextPassRiseDirectionText() {
 /// showSunMoonCard()'s day-length string and this card's own coordinateText()
 /// already play.
 String nextPassDetailText() {
+  // Two bearings on one line, and either can be absent independently, so each
+  // resolves to its own "--" rather than the line as a whole vanishing. A
+  // null straight into "%s" is undefined behavior, which is the other reason
+  // these do not go inline any more.
+  const char* const peakPoint = compassPoint(gNextPassMaxElevationAzimuthDegrees);
+  const char* const setPoint = compassPoint(gNextPassSetAzimuthDegrees);
   char buffer[64];
   snprintf(buffer, sizeof(buffer), "Highest %.0f deg %s at %s, sets %s %s",
-            gNextPassMaxElevationDegrees, compassPoint(gNextPassMaxElevationAzimuthDegrees),
+            gNextPassMaxElevationDegrees, peakPoint == nullptr ? "--" : peakPoint,
             localHhMm(gNextPassMaxElevationUtc).c_str(), localHhMm(gNextPassSetUtc).c_str(),
-            compassPoint(gNextPassSetAzimuthDegrees));
+            setPoint == nullptr ? "--" : setPoint);
   return String(buffer);
 }
 

@@ -254,6 +254,26 @@ constexpr int kButtonBandGap = 6;
 /// a sane budget rather than zero.
 int gContentBottom = kClockTop;
 
+/// THE ONE EXEMPTION FROM THE BUDGET CHECK INSIDE layoutText().
+///
+/// drawOneButton() below puts its label through layoutText() like everything
+/// else, and a button label lands at roughly y=181 - past the budget by
+/// design, because the budget exists to keep CARD CONTENT out of the band the
+/// buttons are about to be painted into. Without this the check would report
+/// every button on every card with a binding, and a check that cries wolf on
+/// every draw is a check nobody reads.
+///
+/// A file-static flag set around drawActionButtons() rather than a parameter on
+/// layoutText(), because there is exactly one chrome caller and adding an
+/// argument to the routine every card uses would invite a second. Safe as a
+/// plain bool: this firmware is single-threaded and nothing re-enters the
+/// display module from an interrupt.
+///
+/// Nothing else in this file draws chrome text through layoutText(). The corner
+/// clock and the clock card's hero go straight to drawString() under the
+/// LAYOUT-PRIMITIVE sentinel, so neither reaches the check at all.
+bool gDrawingChrome = false;
+
 // The same bright, high-contrast blue CYD-Dickey settled on for its own
 // buttons (its BUTTON_COLOR = 0x2E9FFF), chosen there because the default
 // dark navy was hard to read on this panel. Deliberately outside the
@@ -621,6 +641,39 @@ TextResult layoutText(const char* text, const TextBox& box, uint32_t colour, con
   }
 
   result.bottom = static_cast<int16_t>(drawY);
+
+  // THE CONTENT BUDGET, CHECKED AT THE CHOKE POINT RATHER THAN PER CARD.
+  //
+  // setContentBudget() has existed since the home value card lost its
+  // compliance line under a button row, and until now exactly one card of
+  // fourteen consulted it. The other thirteen lay themselves out against the
+  // full panel and lose whatever they put below y=160 the moment an action is
+  // bound - silently, because drawChrome() paints the buttons AFTER the card
+  // has finished and nothing compares the two.
+  //
+  // One comparison here covers all fourteen and every card added later,
+  // because CI gate 1 (ci/build-firmware.sh, "every bounded string goes
+  // through the one layout routine") already guarantees that every
+  // non-literal string in this file arrives at this line. That gate was
+  // written to stop a sixth truncation helper appearing; it turns out to also
+  // make this the one place worth measuring geometry.
+  //
+  // It names the BOX, not the card. noteContentOverrun() takes a card name
+  // because it is called once per card from the bottom of a draw function;
+  // this fires per string, and "listings.listed" says which row to move where
+  // "listings" would only say which card to go and read. Same reasoning the
+  // `what` parameter carries for the ellipsis line above.
+  //
+  // printf() rather than verbose(), matching noteContentOverrun(): this only
+  // ever fires when something is actually wrong, and noticing it must not
+  // depend on somebody having switched streaming on first.
+  //
+  // measureOnly is excluded because a measuring pass puts no ink on the panel
+  // - a card asking "would this fit at 18pt?" has not overrun anything, and
+  // reporting the tier it went on to reject would be noise.
+  if (!measureOnly && !gDrawingChrome && drawY > gContentBottom) {
+    Log::printf("[display] %s drew to y=%d, past its %d budget", who, drawY, gContentBottom);
+  }
 
   // Left the datum where it found it, the way drawRightJustified() used to.
   // Half the card bodies below draw a literal label straight after a
@@ -1043,8 +1096,29 @@ void drawWeatherIcon(WeatherIconKind kind, int cx, int cy, int radius, bool isDa
 // need its own degree-glyph workaround for no real benefit - CYD-Dickey's
 // aircraft card doesn't show the raw number either, only the compass
 // letter).
+//
+// RETURNS NULL FOR A BEARING THAT IS NOT ONE, and the caller draws "--".
+//
+// A GUARD, NOT A FIX: nothing currently reaches this with an out-of-range
+// value, and it is being added because the shape of the bug is already
+// present one module over. IssFlyover.cpp's identical lookup is handed a -1.0
+// "no azimuth" sentinel, and (-1.0 + 22.5) / 45.0 truncates to 0, so the
+// sentinel that means "this is not a direction" comes back as a confident
+// "N". This is §3 of the card audit in miniature - an absent value rendered
+// as a specific one - and the same arithmetic lives here, waiting for the day
+// the aircraft heading becomes nullable server-side. A dash costs nothing and
+// cannot be mistaken for a reading.
+//
+// NaN is caught by the same test, which is the reason it is written as a pair
+// of comparisons rather than as `degrees < 0 || degrees >= 360.0` negated:
+// every comparison against NaN is false, so !(x >= 0 && x < 360) is true for
+// it and a NaN bearing draws a dash rather than indexing the table with
+// whatever the cast produces.
 const char* compassDirection(double degrees) {
   static const char* dirs[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+  if (!(degrees >= 0.0 && degrees < 360.0)) {
+    return nullptr;
+  }
   int index = (static_cast<int>((degrees + 22.5) / 45.0)) % 8;
   if (index < 0) index += 8;
   return dirs[index];
@@ -1086,9 +1160,38 @@ String formatCount(double value) {
   return String(buffer);
 }
 
-// "New today"/"1 day"/"N days" - same singular/plural care
-// describeFreshness() already gives "Updated 1 min ago" elsewhere in this
-// file, applied to RentCast's daysOnMarket instead of a fetch age.
+// "New today"/"1 day"/"N days"/"N weeks"/"N months"/"N.N years" - same
+// singular/plural care describeFreshness() already gives "Updated 1 min ago"
+// elsewhere in this file, applied to RentCast's daysOnMarket instead of a
+// fetch age, and now stepping its unit the way describeAnswerAge() does.
+//
+// THE NUMBER WAS NEVER WRONG. It was checked before this was changed, because
+// "Listed 3234 days" looks exactly like a units bug or an epoch left at zero,
+// and a presentation fix applied to a genuinely broken number would have
+// buried the real defect under a nicer-looking one. RentCast documents
+// daysOnMarket as days the listing has been active, and the cache corroborates
+// it: eight addresses observed twice, six advancing exactly one per day, one
+// advancing exactly fourteen over fourteen days, one resetting on a relist.
+// 3,234 days is a true claim about a listing that has sat for nearly nine
+// years.
+//
+// So the defect is legibility. "Listed 3234 days" reads as a fault, and a
+// household that decides the panel is broken stops believing the rows that
+// are fine. Stepped, the same number reads "On market 8.8 years", which is
+// the same fact in a form nobody has to count digits to interpret.
+//
+// TRUNCATING AT EVERY STEP, including the years, and that is the same choice
+// describeAnswerAge() makes immediately above with the same reasoning: this
+// card may understate a listing's age by less than one unit and must never
+// overstate it. 3,234 days is 8.86 years, so it renders "8.8 years" rather
+// than the "8.9" that rounding would give - 8.9 years is 3,248 days, which is
+// a claim about a listing fourteen days older than the one RentCast described.
+// Understating by up to 36 days on a nine-year-old listing changes nothing a
+// reader would act on; overstating is the thing the rule forbids.
+//
+// Every value fits: swept over every integer day from 0 to 200,000 against
+// the 150px value column at FreeSansBold9pt7b, the widest output is
+// "100.0 years" at 96px.
 String formatDaysOnMarket(int days) {
   if (days <= 0) {
     return "New today";
@@ -1096,7 +1199,24 @@ String formatDaysOnMarket(int days) {
   if (days == 1) {
     return "1 day";
   }
-  return String(days) + " days";
+  if (days < 14) {
+    return String(days) + " days";
+  }
+  if (days < 61) {
+    const int weeks = days / 7;
+    return weeks == 1 ? String("1 week") : String(weeks) + " weeks";
+  }
+  if (days < 366) {
+    const int months = days / 30;
+    return months == 1 ? String("1 month") : String(months) + " months";
+  }
+  // long rather than int for the intermediate: days is a wire value and
+  // multiplying an implausible one by ten before dividing would overflow an
+  // int on this target, turning a silly number into a negative one.
+  const long tenths = static_cast<long>(days) * 10 / 365;
+  char buffer[24];
+  snprintf(buffer, sizeof(buffer), "%ld.%ld years", tenths / 10, tenths % 10);
+  return String(buffer);
 }
 
 uint8_t gBrightnessPercent = 100;
@@ -1430,7 +1550,14 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   rowY += kRowHeight;
 
   layoutLine("Heading", kCardMargin, rowY, rowLabelWidth, muted(), "aircraft.heading.label");
-  layoutLine(compassDirection(headingDegrees), rightX, rowY, rowValueWidth, ink(),
+  // "--" when the bearing is not a bearing - see compassDirection() on why
+  // that is a guard rather than a fix, and why a dash beats a plausible "N".
+  const char* const headingText = compassDirection(headingDegrees);
+  if (headingText == nullptr) {
+    Log::printf("[display] aircraft.heading: %.1f is not a bearing in [0,360), drawing '--'",
+                headingDegrees);
+  }
+  layoutLine(headingText == nullptr ? "--" : headingText, rightX, rowY, rowValueWidth, ink(),
              "aircraft.heading", Align::Right);
   rowY += kRowHeight;
 
@@ -1646,19 +1773,60 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // this column without either colliding with the label or being
   // character-truncated into a wrong number.
   const int rightX = kScreenW - kCardMargin;
-  const int rowValueWidth = 150;
-  const int rowLabelWidth = rightX - rowValueWidth - kCardMargin;
+
+  // A SPLIT PER ROW, NOT ONE SHARED SPLIT. Both rows used to divide the 300px
+  // of content width as 150/150, which is the wrong answer for both of them:
+  // "Est. value" is 112px at 12pt and wanted nothing like 150, while the range
+  // it left 150px for is the widest value this card can produce. "$400K -
+  // $450K" alone is 161px, so the SHORTEST range this card has ever drawn was
+  // already 11px over its column and rendering as "$400K -...", a range with
+  // no upper bound - which is not a shortened value, it is a different claim.
+  //
+  // MEASURED RATHER THAN NUDGED, swept over the domain instead of sampled,
+  // because a range is two formatted numbers and sampling two plausible ones
+  // proves nothing about the third. formatThousands() emits "$<N>K" with N
+  // rounded to the nearest thousand, so the width is set by how many digits
+  // each side carries - and by WHICH digits, since '1' is the widest glyph in
+  // this face at 14px against 13 for every other digit. The table below is
+  // therefore the worst case for each shape, all-ones, not a sampled value:
+  //
+  //   digits      worst case                width
+  //   3 and 3     $111K - $111K             167px   fits
+  //   3 and 4     $111K - $1111K            181px   fits
+  //   4 and 4     $1111K - $1111K           195px   fits
+  //   4 and 5     $1111K - $11111K          209px   fits, by 1px
+  //   5 and 5     $11111K - $11111K         223px   ELLIPSIZES
+  //
+  // (An ordinary all-nines pairing is a little narrower - "$9999K - $99999K"
+  // is 200px - which is why the column is sized against the ones.)
+  //
+  // So every valuation with a low under $10M fits whole, including a high
+  // approaching $100M. A house valued over $10M at BOTH ends of its range
+  // still ellipsizes, and that is left as an ellipsis on purpose rather than
+  // chased with a smaller font: it is outside anything RentCast has returned
+  // to this fleet, and layoutText() marks it visibly instead of inventing a
+  // number, which is the guarantee that matters when the alternative is a
+  // silently wrong dollar figure.
+  //
+  // The 10px each row leaves between its label and its value is the gap, not
+  // slack. 116 + 174 and 80 + 210 both come to 290 of the 300 available.
+  constexpr int kEstimateLabelWidth = 116;
+  constexpr int kEstimateValueWidth = 174;
+  constexpr int kRangeLabelWidth = 80;
+  constexpr int kRangeValueWidth = 210;
 
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
 
-  layoutLine("Est. value", kCardMargin, firstRowY, rowLabelWidth, muted(),
+  layoutLine("Est. value", kCardMargin, firstRowY, kEstimateLabelWidth, muted(),
              "homevalue.estimate.label");
-  layoutLine(estimateText, rightX, firstRowY, rowValueWidth, ink(), "homevalue.estimate",
+  layoutLine(estimateText, rightX, firstRowY, kEstimateValueWidth, ink(), "homevalue.estimate",
              Align::Right);
 
-  layoutLine("Range", kCardMargin, secondRowY, rowLabelWidth, muted(), "homevalue.range.label");
-  layoutLine(rangeText, rightX, secondRowY, rowValueWidth, ink(), "homevalue.range", Align::Right);
+  layoutLine("Range", kCardMargin, secondRowY, kRangeLabelWidth, muted(),
+             "homevalue.range.label");
+  layoutLine(rangeText, rightX, secondRowY, kRangeValueWidth, ink(), "homevalue.range",
+             Align::Right);
 
   // detail (price-per-square-foot and the RentCast refresh date) is optional
   // and pushes the fixed compliance line below it down by however many lines
@@ -1672,7 +1840,20 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // nothing, the detail is dropped. Price per square foot and a refresh date are
   // worth having; they are not worth pushing a legal qualifier off the panel,
   // which is exactly what happened when a button appeared on this card.
-  const int complianceHeight = 18;
+  // 22, not the 18 this reserved before, and the four pixels matter now.
+  // FreeSansBold9pt7b's fontHeight() is 22, so layoutLine() reports this
+  // line's bottom at complianceY + 22 - which, reserved at 18, is four pixels
+  // PAST contentBottom() on every single draw. It has always looked fine on
+  // glass, because a 9pt line's actual ink is shorter than the font's advance
+  // and those four pixels were empty. It looked fine to nothing else: the
+  // budget check now inside layoutText() would have reported an overrun on
+  // every home value card ever drawn, and a check that fires on a card that
+  // is not broken is a check people learn to scroll past.
+  //
+  // Reserving what the font actually advances rather than what the ink
+  // happens to occupy is also just the correct number. The line moves up four
+  // pixels and nothing else on this card changes.
+  const int complianceHeight = 22;
   const int complianceY = contentBottom() - complianceHeight;
 
   if (detail.length() > 0) {
@@ -1718,25 +1899,48 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
   // the edge or onto a second line - the score is the thing somebody crossing
   // the room is trying to read.
   constexpr int kScoreColumnWidth = 64;
-  constexpr int kHomeRowY = 62;
-  constexpr int kAwayRowY = 116;
+  constexpr int kFirstRowY = 62;
+  constexpr int kSecondRowY = 116;
   const int nameWidth = kScreenW - kCardMargin * 2 - kScoreColumnWidth;
   const int rightX = kScreenW - kCardMargin;
 
   lcd.setTextSize(1);
 
+  // AWAY FIRST, HOME SECOND, AND THE "@" MOVED WITH THEM.
+  //
+  // This card used to draw home at y=62 unmarked and away at y=116 prefixed
+  // "@ ", on the stated belief that "@ Houston Astros" marks the away team.
+  // It does not. "@ X" is read "at X", so the marker names the HOST, and the
+  // card was therefore stating that the away team was hosting - photographed
+  // as "Yankees / @ Orioles" on a day the Yankees hosted, which is the exact
+  // inversion of the truth and reads as a perfectly ordinary scoreline.
+  //
+  // Two ways to fix it, and only one of them is right. Moving the marker onto
+  // the home row alone is one line and still reads wrong, because no ticker
+  // writes the host first. So the rows swap as well: away on top unmarked,
+  // home underneath carrying the "@", which is the vertical form every
+  // American scoreboard uses -
+  //
+  //     NYY  5
+  //   @ BAL  3
+  //
+  // and that same photographed game now renders "Orioles / @ Yankees".
+  //
+  // THE ROW INDEX PICKS THE POSITION AND THE FLAG PICKS THE TEAM, which is
+  // the part worth being careful about. Name, score and marker are all chosen
+  // by isAway; y is chosen by row. Swapping one of the four and not the
+  // others puts a score against the wrong team, and a scoreline with the
+  // numbers transposed looks exactly as plausible as a correct one - worse
+  // than the bug it came from, because nothing on the panel looks off.
   for (int row = 0; row < 2; ++row) {
-    const bool isAway = (row == 1);
+    const bool isAway = (row == 0);
     const String& name = isAway ? awayName : homeName;
     const String& score = isAway ? awayScore : homeScore;
-    const int y = isAway ? kAwayRowY : kHomeRowY;
+    const int y = (row == 0) ? kFirstRowY : kSecondRowY;
 
-    // THE AWAY ROW CARRIES AN "@". Two stacked names say nothing about which
-    // team is at home, and "@ Houston Astros" is the convention every American
-    // scoreboard and ticker uses, so a reader crossing the room resolves it
-    // without thinking. Only the away row is marked: a home team with no
-    // marker is the home team, and marking both would spend width saying what
-    // the absence already says.
+    // THE HOME ROW CARRIES THE "@", for the reason above: the marker names the
+    // host. Only one row is marked - an unmarked team is the visitor, and
+    // marking both would spend width saying what the absence already says.
     //
     // The "@" is joined to the name BEFORE anything is measured, which is the
     // part that matters here. Added after the fit was computed it would push
@@ -1751,46 +1955,88 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
     // layoutText's back. A caller that somehow exceeds it says so out loud.
     char nameLine[96];
     const char* nameToDraw = name.c_str();
-    if (isAway && name.length() > 0) {
+    if (!isAway && name.length() > 0) {
       const int needed = snprintf(nameLine, sizeof(nameLine), "@ %s", name.c_str());
       if (needed < 0 || static_cast<size_t>(needed) >= sizeof(nameLine)) {
-        Log::printf("[display] sports.away: name is %u characters, longer than the %u byte "
+        Log::printf("[display] sports.home: name is %u characters, longer than the %u byte "
                     "join buffer, so the '@' row was cut before it was measured",
                     static_cast<unsigned>(name.length()), static_cast<unsigned>(sizeof(nameLine)));
       }
       nameToDraw = nameLine;
     }
 
-    // Two tiers, the same technique showAnnouncementCard() uses for its body
-    // text: try the size the card was designed at, and drop one tier when the
-    // whole name will not survive it. "Houston Astros" is 14 characters and
-    // does not fit 236px at 18pt, which is how it reached a photograph reading
-    // "Houston Astr"; it fits comfortably at 12pt. An ellipsis is still there
-    // as the backstop for a name that will not fit either size, so this is a
-    // way of needing the ellipsis less often rather than a way of avoiding it.
+    // THREE TIERS, the same technique showAnnouncementCard() uses for its body
+    // text: try the size the card was designed at, and drop a tier whenever
+    // the whole name will not survive it. "Houston Astros" is 14 characters
+    // and does not fit 236px at 18pt, which is how it reached a photograph
+    // reading "Houston Astr"; it fits comfortably at 12pt.
     //
-    // The score stays at 18pt regardless. This card's own reasoning is that
-    // the score is what a reader across the room is after, so the name is the
-    // one that gives up size.
+    // WHY A THIRD TIER AT 9pt, AND WHY IT COULD NOT BE A WIDER COLUMN
+    // INSTEAD. The obvious cheaper fix is to take width off the score column
+    // and give it to the name. It does not reach: the score column has 7 real
+    // pixels of slack against a shortfall that runs from 9 to 64 pixels
+    // depending on the name, so reapportioning buys back the narrowest case
+    // and nothing else. Measured against the vendored glyph tables, the long
+    // names all clear 236px at 9pt with room to spare - the widest realistic
+    // one, "@ Tampa Bay Buccaneer" at the 20-character wire cap, comes to
+    // 217px and leaves 19.
+    //
+    // AND WHY LONG NAMES ARE NOT RARE. Three separate routes produce one, so
+    // this is not just the nickname-collision case:
+    //   - football is returned untouched by design, full name and all;
+    //   - a market the server does not recognise returns the full name;
+    //   - the collision branch returns market and nickname together.
+    // The common route is the first, not the third.
+    //
+    // The 9pt tier fires only after 12pt has been measured and rejected. That
+    // ordering is the whole point of a tier ladder: a name that fits 12pt must
+    // never be drawn at 9pt, because this card's argument is that it reads
+    // from across the room and 9pt is a third the height of the top tier.
+    // An ellipsis is still the backstop below 9pt, so this is a way of needing
+    // the ellipsis less often rather than a way of avoiding it.
+    //
+    // The score stays at 18pt regardless, at every tier. This card's own
+    // reasoning is that the score is what a reader across the room is after,
+    // so the name is the one that gives up size.
+    const char* const what = isAway ? "sports.away" : "sports.home";
     lcd.setFont(&fonts::FreeSansBold18pt7b);
     const int largeHeight = lcd.fontHeight();
     const TextBox largeBox{kCardMargin, static_cast<int16_t>(y), static_cast<int16_t>(nameWidth),
                            static_cast<int16_t>(largeHeight), 1, Align::Left};
-    const bool wouldCut =
-        layoutText(nameToDraw, largeBox, ink(), "sports.name", kUseCardBackground,
-                   /*measureOnly=*/true)
-            .ellipsized;
+    const bool cutAt18 = layoutText(nameToDraw, largeBox, ink(), "sports.name", kUseCardBackground,
+                                    /*measureOnly=*/true)
+                             .ellipsized;
 
-    if (wouldCut) {
+    if (!cutAt18) {
+      layoutText(nameToDraw, largeBox, ink(), what);
+    } else {
       lcd.setFont(&fonts::FreeSansBold12pt7b);
       // Centred against the 18pt score beside it rather than sharing its top
       // edge, which would leave the smaller name floating high in the row.
-      const int nudge = (largeHeight - lcd.fontHeight()) / 2;
-      layoutLine(nameToDraw, kCardMargin, y + nudge, nameWidth, ink(),
-                 isAway ? "sports.away" : "sports.home");
+      // Recomputed per tier, because the nudge is half the height the name
+      // gave up and 9pt gives up more than 12pt does.
+      const int mediumNudge = (largeHeight - lcd.fontHeight()) / 2;
+      const TextBox mediumBox{kCardMargin, static_cast<int16_t>(y + mediumNudge),
+                              static_cast<int16_t>(nameWidth),
+                              static_cast<int16_t>(lcd.fontHeight()), 1, Align::Left};
+      const bool cutAt12 = layoutText(nameToDraw, mediumBox, ink(), "sports.name",
+                                      kUseCardBackground, /*measureOnly=*/true)
+                               .ellipsized;
+
+      if (!cutAt12) {
+        layoutText(nameToDraw, mediumBox, ink(), what);
+      } else {
+        lcd.setFont(&fonts::FreeSansBold9pt7b);
+        const int smallNudge = (largeHeight - lcd.fontHeight()) / 2;
+        // Said out loud, not silently. Dropping two tiers is the card giving
+        // up most of its headline size to keep a name whole, and a household
+        // seeing a noticeably smaller name should be explicable from the
+        // stream rather than from guesswork.
+        Log::printf("[display] %s: '%s' would not fit %dpx at 18pt or 12pt, drawing it at 9pt",
+                    what, nameToDraw, nameWidth);
+        layoutLine(nameToDraw, kCardMargin, y + smallNudge, nameWidth, ink(), what);
+      }
       lcd.setFont(&fonts::FreeSansBold18pt7b);
-    } else {
-      layoutText(nameToDraw, largeBox, ink(), isAway ? "sports.away" : "sports.home");
     }
 
     // Empty before play starts, and that is drawn as nothing rather than as a
@@ -1907,15 +2153,18 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
                 static_cast<unsigned>(itemNumber), static_cast<unsigned>(itemCount));
   }
 
-  // LEFT AS FOUND, and it does nothing. CardManager::drawCurrent() calls
-  // setContentBudget() immediately BEFORE card.draw(), so this assignment lands
-  // after the only read that could have mattered and is overwritten before the
-  // next one. Noted rather than removed because this card lays itself out
-  // against fixed pixel rows and never consults the budget at all - the status
-  // row at 172 is already inside a bound button's row - so tidying this single
-  // line would imply a relationship to the budget that this card does not have.
-  // Reported separately: the fix is a layout change to the whole card.
-  gContentBottom = 200;
+  // The stray `gContentBottom = 200` that used to close this function is gone.
+  // It was left in place on the argument that it did nothing - and it does
+  // nothing to THIS card, because CardManager::drawCurrent() calls
+  // setContentBudget() immediately before every card.draw(). What it did do
+  // was leave a number behind that no card had asked for, ready for any draw
+  // that reaches the panel outside that path. Now that layoutText() compares
+  // every string against the budget, a wrong budget is no longer inert: it
+  // would make the check report the next card against 200 instead of against
+  // 154 or 220. Deleting the assignment is the fix; this card's own
+  // relationship to the budget is unchanged and still wrong, and the status
+  // row at y=172 is still inside a bound button's band. The difference is that
+  // the stream now says so on every draw instead of nobody knowing.
 }
 
 void showIssFlyoverCard(const String& distanceText, const String& directionText,
@@ -2373,43 +2622,99 @@ void showListingsCard(const String& address, const String& propertyType, int pri
                Align::Right);
   }
 
-  // Headline: the address itself, the one fact that actually identifies
-  // *this* listing from the last one shown. A formatted RentCast address runs
-  // long, so this is the card's most likely ellipsis and it is now an
-  // ellipsis rather than a character count silently thrown away.
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  // THE ADDRESS, ON TWO LINES AT 9pt, AND WHY IT IS NOT A CHOICE.
+  //
+  // This was one 12pt line in a 300px box and it did not fit a single live
+  // listing. Measured against the vendored glyph tables over all 118 addresses
+  // in the cache, the range is 345 to 644px; even the shortest of them is 27
+  // characters against a box that holds about 22 at this font. So the row that
+  // says WHICH HOUSE this is was ellipsizing on every draw on every device -
+  // the one fact on the card a reader cannot reconstruct from the others.
+  //
+  // Two lines at 12pt is arithmetically impossible here, not merely tight: a
+  // second 12pt line costs 29px and there is nowhere on this card to find it.
+  // Two lines at 9pt cost 7px against the single 12pt line they replace, and
+  // every live address fits inside 2 x 300px with room over - the widest,
+  // "2201 Chesapeake Harbour Dr E Unit T1, Annapolis, MD 21403", comes to
+  // 523px of the 600 available.
+  //
+  // Dropping ", STATE ZIP" server-side was the cheaper-looking alternative and
+  // it was measured rather than assumed: 92 of the 118 still overflow at 12pt.
+  // Only street-only fits on one line, and that drops the city, which is
+  // exactly what tells two rows apart in a ten-mile search.
+  //
+  // Unconditionally 9pt rather than 12pt-when-it-fits. A tier ladder here
+  // would earn its complexity only for an address short enough to fit 300px
+  // at 12pt, and no listing in the cache is; what it would cost is a headline
+  // block whose height depends on its content, which is what the rest of this
+  // layout is computed from below.
+  constexpr int kAddressLineHeight = 18;
+  constexpr int kAddressLines = 2;
+  constexpr int kBodyLineHeight = 22;  // FreeSansBold9pt7b's own fontHeight()
+  const int bodyWidth = kScreenW - kCardMargin * 2;
+  const bool tight = contentIsTight();
+
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
-  layoutLine(address, kCardMargin, 32, kScreenW - kCardMargin * 2, ink(), "listings.address");
+
+  const int addressTopY = tight ? 26 : 30;
+  const TextBox addressBox{kCardMargin, static_cast<int16_t>(addressTopY),
+                           static_cast<int16_t>(bodyWidth),
+                           static_cast<int16_t>(kAddressLineHeight), kAddressLines, Align::Left};
+  layoutText(address, addressBox, ink(), "listings.address");
+  const int addressBottom = addressTopY + kAddressLines * kAddressLineHeight;
 
   // Price and property type share the sub-headline - the same "two related
   // facts, one line" pairing showAircraftCard() gives callsign+distance.
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  const int sublineY = addressBottom + 2;
   String subline = formatPrice(price);
   if (propertyType.length() > 0) {
     subline += " - " + propertyType;
   }
-  layoutLine(subline, kCardMargin, 64, kScreenW - kCardMargin * 2, muted(), "listings.subline");
+  layoutLine(subline, kCardMargin, sublineY, bodyWidth, muted(), "listings.subline");
 
-  // Stat rows: identical label-left/value-right technique to
-  // showAircraftCard()'s Altitude/Speed/Heading block - the same shape of
-  // information, a house instead of a plane.
+  // THE FOOTER IS RESERVED FIRST, AND THE STAT ROWS GET WHAT IS LEFT, which is
+  // the pattern showHomeValueCard() already uses for its compliance line and
+  // the reason this card needed a tight mode at all.
+  //
+  // Four stat rows plus a footer do not fit above y=154, and y=154 is the
+  // floor on every device in this fleet whenever an action is bound - the
+  // `Request Tour` binding on this card is live for all nine, because they
+  // share one account. So this is not a defensive branch for a configuration
+  // nobody runs; it is the configuration that is actually deployed, and until
+  // now the card laid itself out against the full panel and had its last two
+  // rows and its whole footer painted over by the button row.
+  //
+  // Reserve-first rather than fit-last, for the same reason the home value
+  // card gives: the distance and the freshness are what say whether this
+  // listing is near you and whether the answer is current, and a stat row is
+  // not worth pushing either off the panel.
   const int rightX = kScreenW - kCardMargin;
   const int rowValueWidth = 150;
   const int rowLabelWidth = rightX - rowValueWidth - kCardMargin;
-  int rowY = 88;
-  constexpr int kRowHeight = 26;
+  constexpr int kFooterHeight = kBodyLineHeight;
+  const int footerY = contentBottom() - kFooterHeight;
 
-  layoutLine("Beds", kCardMargin, rowY, rowLabelWidth, muted(), "listings.beds.label");
-  layoutLine(formatCount(bedrooms), rightX, rowY, rowValueWidth, ink(), "listings.beds",
-             Align::Right);
-  rowY += kRowHeight;
+  const int rowY = sublineY + kBodyLineHeight;
+  const int roomForRows = footerY - rowY;
 
-  layoutLine("Baths", kCardMargin, rowY, rowLabelWidth, muted(), "listings.baths.label");
-  layoutLine(formatCount(bathrooms), rightX, rowY, rowValueWidth, ink(), "listings.baths",
-             Align::Right);
-  rowY += kRowHeight;
+  // The tallest row pitch that seats all four, down to a floor of the font's
+  // own line height - below that the rows would overlap rather than merely
+  // crowd. 26 was the old fixed pitch and it no longer fits even the roomy
+  // case now that the address takes a second line.
+  constexpr int kRowHeightPreferred = 26;
+  constexpr int kRowHeightMin = kBodyLineHeight;
+  constexpr int kStatRowCount = 4;
+  int rowHeight = kRowHeightPreferred;
+  while (rowHeight > kRowHeightMin && rowHeight * kStatRowCount > roomForRows) {
+    --rowHeight;
+  }
+  const int rowsThatFit = roomForRows > 0 ? roomForRows / rowHeight : 0;
 
-  layoutLine("Sq Ft", kCardMargin, rowY, rowLabelWidth, muted(), "listings.sqft.label");
+  char bedsBuf[16];
+  snprintf(bedsBuf, sizeof(bedsBuf), "%s", formatCount(bedrooms).c_str());
+  char bathsBuf[16];
+  snprintf(bathsBuf, sizeof(bathsBuf), "%s", formatCount(bathrooms).c_str());
   char sqftBuf[16];
   if (squareFootage > 0) {
     snprintf(sqftBuf, sizeof(sqftBuf), "%d", squareFootage);
@@ -2418,16 +2723,51 @@ void showListingsCard(const String& address, const String& propertyType, int pri
     // are different claims, and only one of them is one this card can make.
     snprintf(sqftBuf, sizeof(sqftBuf), "-");
   }
-  layoutLine(sqftBuf, rightX, rowY, rowValueWidth, ink(), "listings.sqft", Align::Right);
-  rowY += kRowHeight;
+  char marketBuf[24];
+  snprintf(marketBuf, sizeof(marketBuf), "%s", formatDaysOnMarket(daysOnMarket).c_str());
 
-  layoutLine("Listed", kCardMargin, rowY, rowLabelWidth, muted(), "listings.listed.label");
-  layoutLine(formatDaysOnMarket(daysOnMarket), rightX, rowY, rowValueWidth, ink(),
-             "listings.listed", Align::Right);
-  rowY += kRowHeight;
+  // "On market", not "Listed". The label and the value were read together as
+  // "Listed 3234 days", which states a fault rather than a fact - see
+  // formatDaysOnMarket() for why the number itself was checked before the
+  // wording was touched. "On market 8.8 years" is the same claim in a form
+  // that reads as one. 89px at 9pt in a 150px label column.
+  //
+  // The stream identifiers move with the label: a row named listings.listed
+  // that draws "On market" is a row somebody searching the stream for it will
+  // not find.
+  const struct {
+    const char* label;
+    const char* value;
+    const char* labelWhat;
+    const char* valueWhat;
+  } statRows[kStatRowCount] = {
+      {"Beds", bedsBuf, "listings.beds.label", "listings.beds"},
+      {"Baths", bathsBuf, "listings.baths.label", "listings.baths"},
+      {"Sq Ft", sqftBuf, "listings.sqft.label", "listings.sqft"},
+      {"On market", marketBuf, "listings.onmarket.label", "listings.onmarket"},
+  };
 
-  // Footer: distance and freshness together, both pinned to a fixed baseline
-  // below the stat rows rather than flowing under them - same reasoning
+  for (int i = 0; i < kStatRowCount; ++i) {
+    if (i >= rowsThatFit) {
+      // Announced, not silently skipped. A household that is used to four
+      // rows will notice two of them gone, and "the button row took the
+      // space" is an explanation that has to be available from the stream -
+      // the same reasoning showSportsCard() gives when its counter yields to
+      // the age line.
+      Log::printf("[display] listings: no room for the '%s' row - %dpx between the subline at "
+                  "y=%d and the footer reserved at y=%d seats %d of %d rows at a %dpx pitch",
+                  statRows[i].label, roomForRows, sublineY, footerY, rowsThatFit, kStatRowCount,
+                  rowHeight);
+      continue;
+    }
+    const int y = rowY + i * rowHeight;
+    layoutLine(statRows[i].label, kCardMargin, y, rowLabelWidth, muted(), statRows[i].labelWhat);
+    layoutLine(statRows[i].value, rightX, y, rowValueWidth, ink(), statRows[i].valueWhat,
+               Align::Right);
+  }
+
+  // Footer: distance and freshness together, both pinned to the reserved
+  // baseline above rather than flowing under the stat rows - same reasoning
   // showWeatherCard()'s own freshness line gives for not letting this move
   // around the card as other fields change length.
   char distanceBuf[32];
@@ -2459,10 +2799,10 @@ void showListingsCard(const String& address, const String& propertyType, int pri
   // ago") leaves about 22px of clear space between them, and a tight row beats
   // either string losing its tail.
   constexpr int kFreshnessWidth = 190;
-  layoutLine(distanceBuf, kCardMargin, rowY + 4, kScreenW - kCardMargin * 2 - kFreshnessWidth,
-             muted(), "listings.distance");
+  layoutLine(distanceBuf, kCardMargin, footerY, bodyWidth - kFreshnessWidth, muted(),
+             "listings.distance");
   if (updatedAt.length() > 0) {
-    layoutLine(updatedAt, rightX, rowY + 4, kFreshnessWidth, muted(), "listings.updated",
+    layoutLine(updatedAt, rightX, footerY, kFreshnessWidth, muted(), "listings.updated",
                Align::Right);
   }
 
@@ -2744,9 +3084,16 @@ void drawActionButtons(const String* labels, uint8_t count) {
   if (labels == nullptr || count == 0) {
     return;
   }
+  // The budget check in layoutText() is off for the duration - see
+  // gDrawingChrome's own remarks. These labels are the chrome the budget
+  // exists to reserve room FOR, so a button reporting itself as an overrun
+  // would be the check disagreeing with its own purpose. Cleared on the way
+  // out rather than left set, so the very next card draw is measured again.
+  gDrawingChrome = true;
   for (uint8_t i = 0; i < count; ++i) {
     drawOneButton(i, count, labels[i], kButtonFill);
   }
+  gDrawingChrome = false;
   restoreDefaultFont();
 }
 
