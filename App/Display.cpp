@@ -1206,6 +1206,73 @@ String formatTimeOfDay(int hour24, int minute) {
   return String(buffer);
 }
 
+String describeAnswerAge(time_t observedAtUtc) {
+  // Nothing on the wire. Absent, null, or a string this firmware's sscanf could
+  // not read all arrive here as 0, and all three mean the same thing to a
+  // reader: this card cannot say how old its answer is.
+  if (observedAtUtc <= 0) {
+    Log::verbose("[display] answer age: no observed-at timestamp, saying nothing");
+    return String();
+  }
+
+  // THE CLOCK GATE. Everything below is `now - then`, and `now` is SNTP's
+  // answer - which does not exist until AppService::synchroniseTime() has
+  // landed, and does not exist at all on a device that booted without a
+  // network. Before then time(nullptr) is a small number near the epoch and
+  // the arithmetic below would confidently report tens of thousands of days.
+  //
+  // The threshold is "plainly later than this firmware was written" rather
+  // than a precise sync flag, the same shape of check Calendar.cpp makes
+  // before it computes "Today" and "Tomorrow": this module has no way to ask
+  // whether SNTP succeeded, and a clock that is merely a few minutes out
+  // changes nothing at this granularity.
+  constexpr time_t kClockLooksSynchronised = 1735689600;  // 2025-01-01T00:00:00Z
+  const time_t now = time(nullptr);
+  if (now < kClockLooksSynchronised) {
+    Log::verbose("[display] answer age: clock reads %ld, which is before 2025 - not synchronised "
+                 "yet, so no age is claimed",
+                 static_cast<long>(now));
+    return String();
+  }
+
+  // A timestamp in the future is the server and this device disagreeing about
+  // what time it is, not an answer from tomorrow. Saying nothing beats
+  // rendering a negative age as an enormous unsigned one.
+  if (observedAtUtc > now) {
+    Log::verbose("[display] answer age: observed-at %ld is %ld s in the FUTURE of this device's "
+                 "clock (%ld) - saying nothing rather than guessing",
+                 static_cast<long>(observedAtUtc), static_cast<long>(observedAtUtc - now),
+                 static_cast<long>(now));
+    return String();
+  }
+
+  // See this function's declaration in Display.h for why the units step twice
+  // and why the second step is at two days rather than one.
+  const long ageSeconds = static_cast<long>(now - observedAtUtc);
+  if (ageSeconds < 60) {
+    return String("Updated just now");
+  }
+  const long ageMinutes = ageSeconds / 60;
+  if (ageMinutes < 60) {
+    // "1 min ago", never "1 mins ago" - the same singular the minute-only
+    // helpers on the other cards already spell out by hand.
+    return ageMinutes == 1 ? String("Updated 1 min ago")
+                           : String("Updated ") + ageMinutes + " min ago";
+  }
+  const long ageHours = ageMinutes / 60;
+  if (ageHours < 48) {
+    return ageHours == 1 ? String("Updated 1 hour ago")
+                         : String("Updated ") + ageHours + " hours ago";
+  }
+  // Truncating rather than rounding, deliberately, and it is the same choice
+  // every branch above makes: a card may understate an answer's age by less
+  // than one unit, and must never overstate it. "Updated 2 days ago" about
+  // something 2 days and 20 hours old is a conservative claim; "3 days ago"
+  // about something 2 days and 4 hours old is a wrong one.
+  const long ageDays = ageHours / 24;
+  return String("Updated ") + ageDays + " days ago";
+}
+
 bool readTouchRaw(int32_t& x, int32_t& y) {
   return lcd.getTouch(&x, &y);
 }
@@ -1463,11 +1530,40 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
   // and this function's own declaration in Display.h for why a tide has no
   // "detail" worth adding.
   const int rightX = kScreenW - kCardMargin;
-  const int rowValueWidth = 150;
-  // Narrower than showSunMoonCard()'s because this card's icon column sits
-  // further right to clear the wider labels: icons span 119-151, so the label
-  // stops at 109.
-  const int rowLabelWidth = 99;
+
+  // THE THREE COLUMNS, RE-MEASURED 2026-09-27 BECAUSE BOTH LABELS WERE BEING
+  // EATEN. This card drew "Next..." on both rows on every device that had it -
+  // tides.high.label and tides.low.label ellipsized on devices 12, 17 and 23,
+  // which is every device with the card, and a photograph confirms it. The two
+  // rows were then distinguishable only by their arrow icons, so the card no
+  // longer said what it was for.
+  //
+  // The cause is visible in the comment this replaces: the label was squeezed
+  // to 99px to clear an icon that had itself been moved right to clear the
+  // label. At FreeSansBold12pt7b "Next high" measures 110px and "Next low"
+  // 100px, so neither fitted - and because layoutText() wraps on word
+  // boundaries before it ellipsizes, both fell back to the only word that fit
+  // and drew "Next..." (71px). Off by eleven pixels on one row and by one on
+  // the other, with the same useless result on both.
+  //
+  // The room came from the VALUE column, which had it. Every value this card
+  // can draw is a clock time from Display::formatTimeOfDay(): 58px in 24-hour
+  // form, at most 107px in 12-hour form ("11:11 AM", the widest of all 1,440
+  // possibilities), or "--:--" at 38px. It was reserved 150. The columns now
+  // measure:
+  //
+  //   label  x=10..132   (122px) - "Next high" is 110, so 12px spare
+  //   icon   x=147..179  (32px, radius 16 centred at 163)
+  //   value  x=194..310  (116px) - the widest possible time is 107, 9px spare
+  //
+  // with 15px of clear panel either side of the icon. Both rows keep identical
+  // geometry, because a reader compares them.
+  //
+  // Labels are NOT shortened to "High"/"Low" to make them fit. "Next" is the
+  // word that says these are upcoming times rather than the last ones, which
+  // is the whole question somebody looks at this card to answer.
+  const int rowValueWidth = 116;
+  const int rowLabelWidth = 122;
 
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
@@ -1478,14 +1574,20 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
   layoutLine("Next low", kCardMargin, 90, rowLabelWidth, muted(), "tides.low.label");
   layoutLine(nextLowTideText, rightX, 90, rowValueWidth, ink(), "tides.low", Align::Right);
 
-  // Same icon-in-the-gap placement as showSunMoonCard()'s two rows -
-  // "Next high"/"Next low" are wider labels than "Sunrise"/"Sunset" at this
-  // font, so the column sits a little further right to stay clear of them.
-  // Same size bump as showSunMoonCard()'s icons, for the same reported reason -
-  // "Next high"/"Next low" leave a narrower gap (ending ~x110 vs. the value
-  // column's x160), so radius 16 centred at x=135 (119-151) rather than
-  // showSunMoonCard()'s x=130, to keep clearance on both sides.
-  constexpr int kIconColumnX = 135;
+  // Same icon-in-the-gap placement as showSunMoonCard()'s two rows, and the
+  // same radius 16 for the same reported reason (12 was too small to read at a
+  // glance). It sits further right than showSunMoonCard()'s x=130 because
+  // "Next high"/"Next low" are wider labels than "Sunrise"/"Sunset" - but the
+  // centre is now derived from the two columns either side rather than nudged
+  // by hand, which is what went wrong before: 32px centred in the gap between
+  // the label's right edge (132) and the value column's left edge (194) puts
+  // it at 163, spanning 147-179 with 15px clear on both sides.
+  //
+  // showSunMoonCard() above was checked for the same defect and does NOT have
+  // it: "Sunrise" is 89px and "Sunset" 81px against its 104px label column, so
+  // both fit with room to spare, which is why no sunmoon.*.label ellipsis ever
+  // appeared in the telemetry. It is deliberately left alone.
+  constexpr int kIconColumnX = 163;
   constexpr int kIconRadius = 16;
   drawTideIcon(kIconColumnX, 44 + 9, kIconRadius, /*rising=*/true);
   drawTideIcon(kIconColumnX, 90 + 9, kIconRadius, /*rising=*/false);
@@ -1607,7 +1709,7 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
 
 void showSportsCard(const String& homeName, const String& homeScore, const String& awayName,
                     const String& awayScore, const String& status, uint16_t itemNumber,
-                    uint16_t itemCount) {
+                    uint16_t itemCount, const String& ageText) {
   lcd.fillScreen(bg());
   drawCardBanner("SPORTS", kSportsBanner, 110);
 
@@ -1708,23 +1810,111 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
   // Bounded short of the "N of M" counter that shares this row, rather than
   // across the whole card: the counter is drawn after and would otherwise be
   // printed over by a long enough progress string.
+  // THERE IS NO FOURTH ROW ON THIS CARD, AND THAT IS THE POINT.
+  //
+  // The obvious home for the age line - a line of its own at y=198 - measures
+  // as free and is not. setContentBudget() drops the content floor to
+  // kButtonRowY - kButtonBandGap = 154 whenever this card has an action bound,
+  // and drawChrome() then paints the button row over y=160..220. This card is
+  // also one of the thirteen that never consults contentBottom() and never
+  // calls noteContentOverrun(), so anything placed down there would be covered
+  // silently with nothing in the stream to say so. The status and counter rows
+  // below y=160 are ALREADY being painted over on a device with a button
+  // bound: "nothing is drawn at y=205" is therefore not evidence that the room
+  // is free, it is evidence that the region belongs to the chrome.
+  //
+  // So the age goes on the row that already exists, in the slot the counter
+  // already occupies, and this function draws no pixel lower than it did
+  // before. Whatever is wrong with this card's relationship to the button row
+  // stays exactly as wrong as it was rather than becoming one element worse.
   constexpr int kMarkerColumnWidth = 64;
+  constexpr int kStatusRowY = 172;
+  constexpr int kStatusBoxWidth = kScreenW - kCardMargin * 2 - kMarkerColumnWidth;  // 236
+  // The 9pt right-hand slot sits 4px lower than the 12pt status so an 18px
+  // line is optically centred against the 23px one beside it. That is the
+  // counter's existing offset, kept because the age takes the counter's place.
+  constexpr int kRightSlotY = 176;
+  constexpr int kStatusToAgeGap = 10;
+
+  // MEASURED, so the age gets the room the status actually leaves rather than
+  // the room a worst case would leave. The status runs from "T7" (28px) through
+  // a start time ("11:11 AM", 107px) to an eight-character provider period
+  // ("HALFTIME", 124px), and reserving for the widest would deny the age a
+  // place on every ordinary card. Clamped to the box, because layoutLine()
+  // ellipsizes anything longer down to it and the ink on the panel is then
+  // never wider than this.
+  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  int statusInkWidth = 0;
   if (status.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold12pt7b);
-    layoutLine(status, kCardMargin, 172, kScreenW - kCardMargin * 2 - kMarkerColumnWidth, muted(),
-               "sports.status");
+    statusInkWidth = lcd.textWidth(status.c_str());
+    if (statusInkWidth > kStatusBoxWidth) {
+      statusInkWidth = kStatusBoxWidth;
+    }
+    layoutLine(status, kCardMargin, kStatusRowY, kStatusBoxWidth, muted(), "sports.status");
+  }
+
+  // HOW OLD THIS ANSWER IS - empty, and this whole block skipped, on every card
+  // the server has not flagged as old, which is nearly all of them. See this
+  // function's declaration in Display.h and CARD_ABSENCE_AND_AGE_DESIGN.md
+  // section 8 for why it appears rarely rather than always.
+  //
+  // THE AGE NEVER ELLIPSIZES. It is a qualifier on the card's content and not
+  // the content, so when the status word has not left room for the whole
+  // sentence this draws nothing and says so in the stream. "Updated 47 hou..."
+  // would be worse than no line at all: the card would have spent its one spare
+  // slot on something that no longer states an age, and a reader would have no
+  // way to tell what was lost. The status keeps its natural width either way -
+  // it is the thing somebody crossed the room to read.
+  bool drewAge = false;
+  if (ageText.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    const int roomForAge = kScreenW - kCardMargin - kCardMargin - statusInkWidth -
+                           (statusInkWidth > 0 ? kStatusToAgeGap : 0);
+    const int ageInkWidth = lcd.textWidth(ageText.c_str());
+    if (ageInkWidth <= roomForAge) {
+      layoutLine(ageText, rightX, kRightSlotY, roomForAge, muted(), "sports.age", Align::Right);
+      drewAge = true;
+    } else {
+      // printf rather than verbose: this is the card declining to say something
+      // it was asked to say, on one of the few draws where it had anything to
+      // say at all, and noticing it must not depend on somebody having switched
+      // streaming on first.
+      Log::printf("[display] sports.age: '%s' needs %dpx and the status word left %dpx, so this "
+                  "card draws no age rather than an ellipsized one",
+                  ageText.c_str(), ageInkWidth, roomForAge);
+    }
   }
 
   // "2 of 4", only on a card actually holding several games, so a one-game team
   // card is not decorated with a counter that never changes.
-  if (itemCount > 1) {
+  //
+  // YIELDS TO THE AGE, because they are one 64px slot and both cannot have it.
+  // On the rare card old enough for the server to say so, "this answer is
+  // thirty-one hours old" is worth more than "you are looking at the second of
+  // four": the counter says where you are in a list the rotation will show you
+  // anyway, the age says whether any of it is still true. Announced rather than
+  // silent, because a household used to seeing a counter will notice it gone.
+  if (itemCount > 1 && !drewAge) {
     char marker[16];
     snprintf(marker, sizeof(marker), "%u of %u", static_cast<unsigned>(itemNumber),
              static_cast<unsigned>(itemCount));
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    layoutLine(marker, rightX, 176, kMarkerColumnWidth, muted(), "sports.counter", Align::Right);
+    layoutLine(marker, rightX, kRightSlotY, kMarkerColumnWidth, muted(), "sports.counter",
+               Align::Right);
+  } else if (itemCount > 1) {
+    Log::printf("[display] sports.counter: '%u of %u' dropped this draw so the age line can have "
+                "its slot - this card is stale, and saying so is worth more than the item number",
+                static_cast<unsigned>(itemNumber), static_cast<unsigned>(itemCount));
   }
 
+  // LEFT AS FOUND, and it does nothing. CardManager::drawCurrent() calls
+  // setContentBudget() immediately BEFORE card.draw(), so this assignment lands
+  // after the only read that could have mattered and is overwritten before the
+  // next one. Noted rather than removed because this card lays itself out
+  // against fixed pixel rows and never consults the budget at all - the status
+  // row at 172 is already inside a bound button's row - so tidying this single
+  // line would imply a relationship to the budget that this card does not have.
+  // Reported separately: the fix is a layout change to the whole card.
   gContentBottom = 200;
 }
 
@@ -2244,9 +2434,31 @@ void showListingsCard(const String& address, const String& propertyType, int pri
   snprintf(distanceBuf, sizeof(distanceBuf), "%.1f mi away", distanceMiles);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
-  // The freshness column is reserved first at 160px, so the distance gets what
-  // is left of the row rather than the two of them overprinting each other.
-  constexpr int kFreshnessWidth = 160;
+  // The freshness column is reserved first, so the distance gets what is left
+  // of the row rather than the two of them overprinting each other.
+  //
+  // 190px, MEASURED, and it was 160 - which was already too narrow for the
+  // wording this card had before today. At FreeSansBold9pt7b "Updated just
+  // now" is 150px and fits, but "Updated 1 min ago" is 161 and "Updated 59 min
+  // ago" is 171, so every value except the shortest one has been ellipsizing
+  // to "Updated 1..." since the column was written. The 24-hour cache fix
+  // (Listings.cpp, CARD_ABSENCE_AND_AGE_DESIGN.md section 2a) makes the
+  // longest forms routine rather than rare - "Updated 47 hours ago" is 189 and
+  // "Updated 365 days ago" is 190 - so the column is sized to the longest
+  // string Display::describeAnswerAge() can produce within a year.
+  //
+  // The 110px that leaves for the distance is measured too: "99.9 mi away" is
+  // 109px, so everything inside a plausible search radius fits. A three-digit
+  // distance ("999.9 mi away", 119px) ellipsizes, which is the right way round
+  // - a listing a thousand miles away is not what this card is for, and an
+  // ellipsis says something was dropped rather than hiding it.
+  //
+  // The two columns abut with no gap at their simultaneous worst case. That is
+  // deliberate rather than overlooked: 300px of row cannot hold both worst
+  // cases and a margin, the realistic pair ("3.2 mi away" and "Updated 5 hours
+  // ago") leaves about 22px of clear space between them, and a tight row beats
+  // either string losing its tail.
+  constexpr int kFreshnessWidth = 190;
   layoutLine(distanceBuf, kCardMargin, rowY + 4, kScreenW - kCardMargin * 2 - kFreshnessWidth,
              muted(), "listings.distance");
   if (updatedAt.length() > 0) {

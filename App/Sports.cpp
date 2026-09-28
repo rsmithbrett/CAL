@@ -25,6 +25,13 @@ const char* const kCardIds[kMaxCards] = {
 struct CardSlot {
   Game games[kMaxGames];
   uint8_t count = 0;
+
+  /// When the server last read the provider, or 0 for "the server did not flag
+  /// this card as old", which is the ordinary state - see setGames() in
+  /// Sports.h. Four bytes per card instance, sixteen across the four: the
+  /// entire .bss cost of this feature on a board whose .bss budget is the
+  /// reason there are four instances here and not eleven.
+  time_t staleSinceUtc = 0;
 };
 
 CardSlot gCards[kMaxCards];
@@ -122,6 +129,55 @@ String scoreText(int16_t score) {
   return score == kNoScore ? String("") : String(score);
 }
 
+/// The age line, or an empty string for "draw nothing", which is what this
+/// returns nearly always.
+///
+/// **Absent means fresh** and is the ordinary path: the server sends
+/// `staleSinceUtc` only when it judges the answer old (see setGames() in
+/// Sports.h), so a card that is current gets no line, no reserved space and no
+/// wording at all. A label that appears on every card is a label nobody reads;
+/// one that appears rarely is the one that gets noticed on the evening it
+/// matters. CARD_ABSENCE_AND_AGE_DESIGN.md section 8.
+///
+/// The words come from Display::describeAnswerAge(), which the listings card
+/// also uses, so the two cards cannot end up describing age differently - the
+/// point of putting that function in Display.h rather than writing a second
+/// one here.
+///
+/// **The sub-minute suppression is a contradiction guard, not a rounding
+/// choice.** describeAnswerAge() says "Updated just now" for anything under a
+/// minute, which is correct as an age and absurd beside a staleness flag: the
+/// server would be saying "I could not confirm this" over a line saying it was
+/// confirmed seconds ago. Section 3 of the same design says a contradiction is
+/// not drawn, so this draws nothing and puts the oddity in the stream instead,
+/// where somebody can go and look at why the server flagged it.
+String staleAgeText(const CardSlot& slot) {
+  if (slot.staleSinceUtc == 0) {
+    return String();
+  }
+
+  // Empty here means the device could not honestly compute an age at all - no
+  // clock yet, or a timestamp in the future. describeAnswerAge() has already
+  // said which in the stream, so this only records what the card did about it.
+  const String age = Display::describeAnswerAge(slot.staleSinceUtc);
+  if (age.length() == 0) {
+    Log::verbose("[sports] card is flagged stale but no age can be computed - drawing the card "
+                 "unmarked rather than an age this device cannot stand behind");
+    return String();
+  }
+
+  const time_t now = time(nullptr);
+  if (now - slot.staleSinceUtc < 60) {
+    Log::printf("[sports] server flagged this card STALE but its own read was %ld s ago - not "
+                "drawing an age, because 'Updated just now' beside a staleness flag is a "
+                "contradiction. Worth looking at why the server called it stale",
+                static_cast<long>(now - slot.staleSinceUtc));
+    return String();
+  }
+
+  return age;
+}
+
 uint16_t itemCountFor(uint8_t index) {
   return gCards[index].count;
 }
@@ -140,16 +196,21 @@ void drawCardAt(uint8_t index, uint16_t itemIndex) {
   const String status = stateText(game);
   const String homeScore = scoreText(game.homeScore);
   const String awayScore = scoreText(game.awayScore);
+  const String age = staleAgeText(slot);
 
   // The quieter logging tier every card here uses: runs once per dwell rather
   // than once per check-in, states exactly what is on screen, and is a no-op
   // unless remote streaming is on for this device. It is the only way to
   // reconstruct this card's content without standing in front of the hardware.
-  Log::verbose("[sports] on screen: card=%s %s %s - %s %s (%s)", kCardIds[index],
-               game.home, homeScore.c_str(), awayScore.c_str(), game.away, status.c_str());
+  // The age is named either way, and the empty case says WHY it is empty
+  // rather than printing nothing: "no age line" on its own would be
+  // indistinguishable from an age line that was meant to appear and did not.
+  Log::verbose("[sports] on screen: card=%s %s %s - %s %s (%s) [%s]", kCardIds[index],
+               game.home, homeScore.c_str(), awayScore.c_str(), game.away, status.c_str(),
+               age.length() > 0 ? age.c_str() : "no age line - server says this card is current");
 
   Display::showSportsCard(game.home, homeScore, game.away, awayScore, status,
-                          itemIndex + 1, slot.count);
+                          itemIndex + 1, slot.count, age);
 }
 
 // Four wrappers, one per registration. CardSpec::DrawFn and ItemCountFn are
@@ -229,7 +290,7 @@ bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw
 
 }  // namespace
 
-void setGames(const char* cardId, const Game* games, uint8_t count) {
+void setGames(const char* cardId, const Game* games, uint8_t count, time_t staleSinceUtc) {
   const int8_t index = indexOf(cardId);
   if (index < 0) {
     // A policy or payload naming an instance this firmware does not register.
@@ -260,12 +321,33 @@ void setGames(const char* cardId, const Game* games, uint8_t count) {
     slot.games[i].away[kMaxTeamNameLength] = '\0';
   }
   slot.count = count;
+  slot.staleSinceUtc = staleSinceUtc;
 
-  Log::printf("[sports] card '%s' now holds %u game(s)", cardId, static_cast<unsigned>(count));
+  // One line, both branches named, on a path that runs once per check-in. The
+  // fresh branch is said out loud rather than left as silence because on this
+  // field absence IS the answer - "the server did not flag this" and "the
+  // firmware never looked" are otherwise identical from outside, and that is
+  // the same mistake the telemetry calVersion narration exists to prevent.
+  // Deliberately folded into the existing line rather than added as a second
+  // one: debug streaming was switched off fleet-wide after a heap fault, and
+  // the way back on is not to have grown the stream while it was off.
+  Log::printf("[sports] card '%s' now holds %u game(s); %s", cardId,
+              static_cast<unsigned>(count),
+              staleSinceUtc == 0
+                  ? "no staleSinceUtc on the payload, so the server considers it current and no "
+                    "age will be drawn"
+                  : "server sent staleSinceUtc - this card will show how old its answer is");
 }
 
 void clearAll() {
-  for (uint8_t i = 0; i < kMaxCards; ++i) { gCards[i].count = 0; }
+  // The age goes with the games. Leaving a staleSinceUtc behind on an emptied
+  // slot would let yesterday's staleness reappear on tomorrow's fixtures the
+  // moment a card is repopulated by a payload that carries no timestamp -
+  // which, since absence means fresh, is the ordinary payload.
+  for (uint8_t i = 0; i < kMaxCards; ++i) {
+    gCards[i].count = 0;
+    gCards[i].staleSinceUtc = 0;
+  }
   Log::printf("[sports] cleared all cards");
 }
 

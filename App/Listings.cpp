@@ -1,6 +1,7 @@
 #include "Listings.h"
 
 #include <ArduinoJson.h>
+#include <stdio.h>  // sscanf, used by parseIso8601Utc() below
 
 #include "Cards.h"
 #include "Config.h"
@@ -61,6 +62,56 @@ String describeMarket(const String& cityState) {
 /// Log's 256-byte scratch buffer, which would otherwise take the line's own
 /// tail - the part naming which branch was taken - rather than the prose's.
 constexpr int kLoggedRefreshErrorChars = 120;
+
+/// Days from the civil epoch (1970-01-01) to the given UTC calendar date -
+/// Howard Hinnant's days_from_civil, copied verbatim from CheckIn.cpp's copy
+/// along with parseIso8601Utc() below, exactly as Calendar.cpp already copied
+/// the same pair.
+///
+/// Duplicated rather than shared, which is the call this codebase has now made
+/// three times for the same reason Calendar.cpp states: both helpers are
+/// file-local statics in an anonymous namespace in CheckIn.cpp, so sharing them
+/// would mean a new header and a new translation unit to hold two pure
+/// functions, and this module must not edit CheckIn.* at all. Actions.cpp keeps
+/// its own nowAsIso8601Utc() and Tides.cpp its own toLocalMinutes() on the same
+/// grounds.
+long daysFromCivil(int year, int month, int day) {
+  year -= month <= 2 ? 1 : 0;
+  const long era = (year >= 0 ? year : year - 399) / 400;
+  const unsigned yearOfEra = static_cast<unsigned>(year - era * 400);
+  const unsigned dayOfYear = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+  const unsigned dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear;
+  return era * 146097 + static_cast<long>(dayOfEra) - 719468;
+}
+
+/// Parses the server's ISO-8601 UTC instant into epoch seconds. Returns 0 -
+/// Result::fetchedAtUtc's own "absent" sentinel - for a JSON null, a missing
+/// field, or anything this sscanf() cannot read.
+///
+/// Deliberately tolerant rather than asserting, for the reason CheckIn.cpp
+/// gives for its identical copy: a malformed instant is exactly as much "no
+/// answer" to this device as a JSON null is, and the caller has a correct
+/// fallback for 0 either way.
+///
+/// **The trailing-text tolerance matters more here than anywhere else it is
+/// copied to.** `fetchedAtUtc` is a non-nullable C# DateTimeOffset, which
+/// System.Text.Json writes with a numeric offset and sub-second digits
+/// ("2026-09-26T14:03:11.4271830+00:00") rather than the bare "...Z" the
+/// hand-built check-in fields use. The sscanf stops at the seconds and ignores
+/// the rest, so ".4271830+00:00", "Z" and "+00:00" all parse identically - and
+/// the value is UtcNow-derived server-side, so the offset it drops is always
+/// zero.
+time_t parseIso8601Utc(const char* text) {
+  if (text == nullptr || text[0] == '\0') {
+    return 0;
+  }
+  int year, month, day, hour, minute, second;
+  if (sscanf(text, "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &minute, &second) != 6) {
+    return 0;
+  }
+  const long days = daysFromCivil(year, month, day);
+  return static_cast<time_t>(days) * 86400 + hour * 3600 + minute * 60 + second;
+}
 
 }  // namespace
 
@@ -124,12 +175,37 @@ Result fetchMine() {
   // - same rationale as Aircraft.cpp's own filter. A single index anywhere
   // inside the "listings" array (ArduinoJson's own filter semantics) applies
   // to every element, not just index 0, so this keeps every listing's fields
-  // for every element the array actually has. fetchedAtUtc and postalCode are
-  // deliberately left out of the filter entirely - freshness is computed
-  // client-side from gLastOkMs, the same convention Weather.cpp/Aircraft.cpp
-  // already keep, and postalCode has no use on this card once cityState is
+  // for every element the array actually has. postalCode is deliberately left
+  // out of the filter entirely - it has no use on this card once cityState is
   // available. status/isConfigured/lastRefreshError are top-level siblings of
   // the array, not part of it, so they get their own filter entries.
+  //
+  // **fetchedAtUtc IS KEPT, AND THIS CARD IS THE ONE EXCEPTION TO THE SHARED
+  // FRESHNESS CONVENTION.** It used to be stripped here, deliberately, with a
+  // comment saying freshness is computed client-side from gLastOkMs "the same
+  // convention Weather.cpp/Aircraft.cpp already keep" - two claims, one of
+  // which was a stale file name (it is Forecast.cpp; there is no Weather.cpp)
+  // and the other of which is still right everywhere except on this card.
+  //
+  // The convention is sound wherever the SERVER's cache is short. Forecast and
+  // calendar cache for 30 minutes, so "when this device last got an Ok" is
+  // within half an hour of "how old the answer is" and nobody is misled. The
+  // listings cache is TWENTY-FOUR HOURS - 48 times longer - so this device can
+  // ask, be handed yesterday's rows straight out of that cache, and print
+  // "Updated just now" over them. On 2026-09-27 device 23 did exactly that
+  // against an answer a day and a half old.
+  //
+  // So this one card reads the server's own timestamp for its freshness LINE,
+  // and nothing else changes. gLastOkMs stays - here and on every other card -
+  // because it is itself an earlier fix: Aircraft.cpp records that the line
+  // used to be hardcoded "Updated just now" on every draw, "false by
+  // construction" on a redraw or on reverse navigation into card history, and
+  // measuring from the last Ok is the correction for that. Replacing it fleet-
+  // wide would revert that fix on the cards where it is doing real work.
+  //
+  // DO NOT "fix" this back to the shared convention. See
+  // CARD_ABSENCE_AND_AGE_DESIGN.md section 2a, which was narrowed twice on the
+  // way precisely because the first two drafts of it were too broad.
   //
   // THE FILTER IS NOT A DOCUMENTATION DETAIL, IT IS THE READ ITSELF. An
   // un-whitelisted key is dropped during deserialization and never reaches
@@ -150,6 +226,13 @@ Result fetchMine() {
     f["status"] = true;
     f["isConfigured"] = true;
     f["lastRefreshError"] = true;
+    // The server's own "when RentCast was last read", not "when this device
+    // asked" - see the exception paragraph above. ListingsResult.FetchedAtUtc
+    // is non-nullable server-side and has been on this route since it was
+    // written, so this is a firmware-only change against a field already on
+    // the wire: nothing here needs a server deploy, and the closed six-month
+    // compatibility gate is untouched.
+    f["fetchedAtUtc"] = true;
     f["listings"][0]["address"] = true;
     f["listings"][0]["propertyType"] = true;
     f["listings"][0]["price"] = true;
@@ -181,6 +264,27 @@ Result fetchMine() {
     result.cityState = String(city) + ", " + String(state);
   } else if (strlen(city) > 0) {
     result.cityState = String(city);
+  }
+
+  // WHEN THE SERVER READ RENTCAST. Kept on the Result and used for this card's
+  // freshness line in place of the device's own gLastOkMs - see the filter's
+  // exception paragraph above and CARD_ABSENCE_AND_AGE_DESIGN.md section 2a.
+  //
+  // Both branches are named because this is the sentence that decides which of
+  // two very different numbers goes on a household's wall, and on a deployed
+  // device the stream is the only place to see which one it picked. Once per
+  // fetch, not once per draw, so it is nowhere near a hot path.
+  const char* fetchedAtText = doc["fetchedAtUtc"] | "";
+  result.fetchedAtUtc = parseIso8601Utc(fetchedAtText);
+  if (result.fetchedAtUtc > 0) {
+    Log::verbose("[listings] server read RentCast at %s (epoch %ld) - the freshness line will "
+                 "measure the ANSWER's age, not this device's",
+                 fetchedAtText, static_cast<long>(result.fetchedAtUtc));
+  } else {
+    Log::printf("[listings] no usable fetchedAtUtc on this payload (raw '%s') - falling back to "
+                "the device-side gLastOkMs measurement, which UNDERSTATES the age of anything "
+                "served from the server's 24-hour cache",
+                fetchedAtText);
   }
 
   // WHY THERE ARE TWO SIGNALS HERE AND NOT ONE.
@@ -388,13 +492,19 @@ Result fetchMine() {
   // which is exactly the state that value was added to name. The server is
   // serving last-known-good rows while its refresh fails behind them
   // (RefreshCoreAsync keeps them on purpose). Drawing real listings beats
-  // drawing a warning, and the card's own "Updated N min ago" line already
-  // understates their age rather than overstating it, so the screen is left
-  // alone and only the stream is told.
+  // drawing a warning, so the screen keeps the rows and the stream is told.
+  //
+  // **This is the case the freshness line was fixed for.** It used to say
+  // "Updated N min ago" about a device fetch, which on this branch understated
+  // the rows' age by up to the server's whole 24-hour cache - the wrong
+  // direction of error on exactly the branch where the rows are known to be
+  // old. With fetchedAtUtc it now says how old they actually are, which is why
+  // no warning is needed here beyond the number itself.
   if (refreshFailed) {
     Log::printf("[listings] serving %u cached listing(s) behind a failed refresh - drawing them "
                 "rather than a warning, and NOT taking RefreshFailed: real rows beat a warning, "
-                "and 'Updated N min ago' already understates their age",
+                "and the freshness line now reports the server's own fetchedAtUtc, so it states "
+                "their real age instead of understating it",
                 static_cast<unsigned>(listings.size()));
     if (hasRefreshError) {
       Log::printf("[listings] stale-rows reason (operator text, never drawn): %.*s",
@@ -454,14 +564,29 @@ Result gLast;
 bool gEverFetched = false;
 
 /// millis() when gLast last became an Ok result - same field, same reasoning
-/// as Weather.cpp's/Aircraft.cpp's gLastOkMs.
+/// as Forecast.cpp's/Aircraft.cpp's gLastOkMs.
+///
+/// **KEPT, and not repurposed.** This card's freshness LINE no longer comes
+/// from here (see cardFreshnessLine() below), but the field stays: it is the
+/// fallback whenever the server sends no usable `fetchedAtUtc`, and it is the
+/// only thing this device knows about its own conversation with the server as
+/// opposed to the age of the answer. Removing it would revert the fix
+/// Aircraft.cpp records - "Updated just now" hardcoded on every draw - on the
+/// one path that still needs it.
 unsigned long gLastOkMs = 0;
 
 /// Unsigned subtraction, correct across the millis() rollover at ~49 days -
-/// identical to Weather.cpp's/Aircraft.cpp's describeFreshness(), duplicated
+/// identical to Forecast.cpp's/Aircraft.cpp's describeFreshness(), duplicated
 /// rather than shared for the same reason Aircraft.cpp's own copy is: the
 /// three cards' Result types are unrelated and a shared helper would need a
 /// fourth file just to hold one function used three times.
+///
+/// Minutes only, which is the right granularity for what it measures - the gap
+/// since THIS DEVICE last got an Ok, bounded in practice by the card refresh
+/// interval. It is no longer the granularity this card's line usually needs;
+/// Display::describeAnswerAge() handles hours and days for the server-supplied
+/// timestamp, and this is only reached on the fallback path where the age is
+/// a device-side interval rather than a cache age.
 String describeFreshness(unsigned long fetchedAtMs) {
   const unsigned long ageMinutes = (millis() - fetchedAtMs) / 60000UL;
   if (ageMinutes == 0) {
@@ -471,6 +596,36 @@ String describeFreshness(unsigned long fetchedAtMs) {
     return "Updated 1 min ago";
   }
   return String("Updated ") + ageMinutes + " min ago";
+}
+
+/// The line this card actually draws, and the one place the two sources are
+/// chosen between.
+///
+/// Prefers the server's `fetchedAtUtc` - how old the ANSWER is - and falls back
+/// to describeFreshness(gLastOkMs) - how long since THIS DEVICE asked - when
+/// there is no usable server timestamp or when this device's clock is not good
+/// enough to subtract with. The fallback is the behavior this card had before
+/// the change, so the worst case is exactly what shipped yesterday rather than
+/// a blank line or a wrong number.
+///
+/// The wording comes from Display::describeAnswerAge() rather than from here,
+/// so this card and the sports card cannot drift into two ways of saying the
+/// same thing - the same rule Display::formatTimeOfDay() already enforces for
+/// clock times. See that function for the units and for why they step at an
+/// hour and again at two days.
+///
+/// Logged only on the fallback, and at verbose. This runs once per draw, which
+/// is the closest thing this card has to a hot path, and the ordinary case has
+/// nothing to say that the fetch-time line above did not already say.
+String cardFreshnessLine() {
+  const String fromServer = Display::describeAnswerAge(gLast.fetchedAtUtc);
+  if (fromServer.length() > 0) {
+    return fromServer;
+  }
+  Log::verbose("[listings] freshness line falling back to gLastOkMs (fetchedAtUtc=%ld) - this "
+               "measures when this device asked, not how old the answer is",
+               static_cast<long>(gLast.fetchedAtUtc));
+  return describeFreshness(gLastOkMs);
 }
 
 /// Re-asserted once per check-in - see Cards.h's StatusFn. NotConfigured is
@@ -566,7 +721,7 @@ void cardDraw(uint16_t itemIndex) {
                               listing.bedrooms, listing.bathrooms, listing.squareFootage,
                               listing.daysOnMarket, listing.distanceMiles,
                               /*index=*/itemIndex, /*total=*/gLast.count,
-                              describeFreshness(gLastOkMs));
+                              cardFreshnessLine());
     return;
   }
 

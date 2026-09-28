@@ -1,6 +1,9 @@
 #pragma once
 
 #include <Arduino.h>
+#include <time.h>  // time_t, for describeAnswerAge() below - the same explicit
+                   // include Sports.h already carries rather than relying on
+                   // Arduino.h to drag it in.
 
 /// Everything the App draws.
 ///
@@ -77,6 +80,47 @@ bool use12HourClock();
 /// server sent. Returns "--:--" for an out-of-range value rather than formatting
 /// nonsense confidently.
 String formatTimeOfDay(int hour24, int minute);
+
+/// **The one place the age of an ANSWER becomes text on this device**, for the
+/// same reason formatTimeOfDay() above is the one place a clock time does: two
+/// cards now say how old the thing they are showing is, and two cards saying it
+/// in two idioms is exactly the drift that function exists to prevent.
+///
+/// `observedAtUtc` is epoch seconds for the moment the SERVER read the upstream
+/// provider - `fetchedAtUtc` on the listings payload, `staleSinceUtc` on a
+/// sports card. It is emphatically NOT the moment this device asked: see
+/// CARD_ABSENCE_AND_AGE_DESIGN.md section 2a for the incident where those two
+/// were a day and a half apart and the card printed the shorter one.
+///
+/// **Returns an empty string when it cannot honestly say**, which the caller
+/// must handle rather than print: a zero timestamp (absent, null or unparseable
+/// on the wire), a clock this device has not yet synchronised, or an instant in
+/// the future. An age computed against a 1970 clock would read "Updated 20819
+/// days ago" on a card that is perfectly current, which is a worse failure than
+/// saying nothing at all.
+///
+/// **THE UNITS, AND WHY THEY CHANGE TWICE.** The cards that measure their own
+/// fetch time only ever needed minutes, because the servers behind them cache
+/// for 30 minutes. This helper is for the answers that can be genuinely old -
+/// the listings cache is 24 hours - and "Updated 1,847 min ago" is a number,
+/// not a sentence. So:
+///
+///   under a minute      "Updated just now"
+///   under an hour       "Updated 7 min ago"      (minutes, as before)
+///   under two days      "Updated 31 hours ago"   (hours, NOT rounded to days)
+///   beyond that         "Updated 3 days ago"
+///
+/// The switch to days is at 48 hours rather than 24 on purpose. The listings
+/// cache lifetime is 24 hours, so the whole interesting range of that card -
+/// including the day-and-a-half-old answer from the incident - sits below two
+/// days, and collapsing it to "Updated 1 day ago" would throw away the six
+/// hours that made that answer wrong. Past two days a refresh is plainly broken
+/// rather than merely late, the extra precision buys nothing, and days take
+/// over where they stop costing anything.
+///
+/// US spelling and plain words - "Updated", "min", "hours", "days". This is
+/// read by a household from across a room, not by an operator.
+String describeAnswerAge(time_t observedAtUtc);
 
 /// The raw touch read beneath Touch.h/.cpp's debounced, event-style API.
 /// Lives here, not in Touch.cpp, because this file already owns the one
@@ -219,11 +263,35 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
 /// card holds more than one game, so a scoreboard reads as a list rather than
 /// as one result that keeps changing.
 ///
+/// ageText is the "Updated 31 hours ago" line, and is EMPTY nearly always -
+/// the server flags a sports card as old only when a refresh was attempted,
+/// came back empty and left a previous answer standing, so an empty string
+/// here is the ordinary case and means "draw the card exactly as before, with
+/// no line and no gap where one would have gone". Already worded by
+/// Sports.cpp through Display::describeAnswerAge(), which the listings card
+/// uses too so the two cards cannot describe an age differently.
+///
+/// **It takes the "2 of 4" counter's slot rather than a row of its own**, so
+/// the counter is not drawn on a draw that shows an age. There is no fourth
+/// row to be had: a bound action drops the content floor to y=154 and
+/// drawChrome() paints the button row over y=160..220, and this card is one of
+/// the thirteen that never consults contentBottom() - a line at y=198 would be
+/// covered with nothing in the stream saying so. Keeping the age inside an
+/// existing slot means this function draws no pixel lower than it did before
+/// the age existed, and the scores and status word do not move at all.
+///
+/// The two cannot both have the slot. On a card the server has called old, how
+/// old the answer is beats which of four fixtures is on screen - the rotation
+/// shows the others anyway. The age is right-aligned into whatever the status
+/// word actually leaves, measured on each draw, and is **dropped entirely
+/// rather than ellipsized** when that is not enough: a truncated age states
+/// nothing while still costing the slot that could have stated something.
+///
 /// This draws, it does not compute - every value arrives already chosen,
 /// ordered and capped by the server. See Sports.h.
 void showSportsCard(const String& homeName, const String& homeScore, const String& awayName,
                     const String& awayScore, const String& status, uint16_t itemNumber,
-                    uint16_t itemCount);
+                    uint16_t itemCount, const String& ageText);
 
 /// The ISS flyover card: distance and compass direction to the International
 /// Space Station's current sub-satellite point, plus a one-line detail

@@ -726,6 +726,23 @@ Result perform() {
         const char* cardId = card["cardId"] | "";
         if (cardId[0] == '\0') { continue; }
 
+        // HOW OLD THIS CARD'S ANSWER IS, and absent on the ordinary path.
+        //
+        // `| ""` then parseIso8601Utc() gives 0 for a JSON null, for a server
+        // predating the field, and for anything the parser cannot read - the
+        // same "both null and missing become 0" treatment issNextPassRiseUtc
+        // and homeValueUpdatedAtUtc already get above. Here 0 carries real
+        // meaning rather than being a mere sentinel: the server sends this key
+        // ONLY when it judges the answer old, so its absence is the server
+        // saying the card is current, and old firmware ignoring it is exactly
+        // what makes the field additive against the closed compatibility gate.
+        // See SportsCardPayload.StaleSinceUtc and Sports.h's setGames().
+        //
+        // Read once per card rather than per game, which is the shape the
+        // server sends and the shape a reader needs - see
+        // CARD_ABSENCE_AND_AGE_DESIGN.md section 8.
+        const time_t staleSinceUtc = parseIso8601Utc(card["staleSinceUtc"] | "");
+
         Sports::Game games[Sports::kMaxGames];
         uint8_t count = 0;
 
@@ -763,7 +780,7 @@ Result perform() {
           ++count;
         }
 
-        Sports::setGames(cardId, games, count);
+        Sports::setGames(cardId, games, count, staleSinceUtc);
       }
     }
   }
