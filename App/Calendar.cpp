@@ -488,6 +488,24 @@ void copyTitle(char* destination, const char* source) {
     destination[written++] = '.';
   }
   destination[written] = '\0';
+
+  // SAID OUT LOUD, which it was not before. This was the one of the four
+  // wire-level truncations that already marked its output - the "..." above
+  // has always been here - and it still reported nothing, so the loss was
+  // visible on the glass and invisible to anybody reading the stream. A panel
+  // in a household is not somewhere a person is standing; the stream is the
+  // only diagnostic channel a deployed device has, and a truncation nobody
+  // can count is a truncation nobody can size a buffer against.
+  //
+  // printf rather than verbose, matching the three sports and announcement
+  // sites in CheckIn.cpp: this fires only when something was actually lost.
+  // Not a hot path - once per event, over at most a handful per check-in.
+  if (truncating) {
+    Log::printf("[calendar] title arrived %u characters long and this device holds %u, so %u "
+                "were cut on the wire and the stored value is marked '...'",
+                static_cast<unsigned>(sourceLength), static_cast<unsigned>(kMaxTitleLength),
+                static_cast<unsigned>(sourceLength - copyLength));
+  }
 }
 
 /// The one line this card draws, built from an event - "Tomorrow 09:00 -

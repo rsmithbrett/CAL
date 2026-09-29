@@ -15,8 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install check-in transport dependency
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
       - name: Build and run shared scheduling tests
-        run: make -C pi test
+        run: make -C pi test checkin
 
   armv6-emulation:
     runs-on: ubuntu-latest

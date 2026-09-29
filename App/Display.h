@@ -1,6 +1,9 @@
 #pragma once
 
 #include <Arduino.h>
+#include <time.h>  // time_t, for describeAnswerAge() below - the same explicit
+                   // include Sports.h already carries rather than relying on
+                   // Arduino.h to drag it in.
 
 /// Everything the App draws.
 ///
@@ -78,6 +81,47 @@ bool use12HourClock();
 /// nonsense confidently.
 String formatTimeOfDay(int hour24, int minute);
 
+/// **The one place the age of an ANSWER becomes text on this device**, for the
+/// same reason formatTimeOfDay() above is the one place a clock time does: two
+/// cards now say how old the thing they are showing is, and two cards saying it
+/// in two idioms is exactly the drift that function exists to prevent.
+///
+/// `observedAtUtc` is epoch seconds for the moment the SERVER read the upstream
+/// provider - `fetchedAtUtc` on the listings payload, `staleSinceUtc` on a
+/// sports card. It is emphatically NOT the moment this device asked: see
+/// CARD_ABSENCE_AND_AGE_DESIGN.md section 2a for the incident where those two
+/// were a day and a half apart and the card printed the shorter one.
+///
+/// **Returns an empty string when it cannot honestly say**, which the caller
+/// must handle rather than print: a zero timestamp (absent, null or unparseable
+/// on the wire), a clock this device has not yet synchronised, or an instant in
+/// the future. An age computed against a 1970 clock would read "Updated 20819
+/// days ago" on a card that is perfectly current, which is a worse failure than
+/// saying nothing at all.
+///
+/// **THE UNITS, AND WHY THEY CHANGE TWICE.** The cards that measure their own
+/// fetch time only ever needed minutes, because the servers behind them cache
+/// for 30 minutes. This helper is for the answers that can be genuinely old -
+/// the listings cache is 24 hours - and "Updated 1,847 min ago" is a number,
+/// not a sentence. So:
+///
+///   under a minute      "Updated just now"
+///   under an hour       "Updated 7 min ago"      (minutes, as before)
+///   under two days      "Updated 31 hours ago"   (hours, NOT rounded to days)
+///   beyond that         "Updated 3 days ago"
+///
+/// The switch to days is at 48 hours rather than 24 on purpose. The listings
+/// cache lifetime is 24 hours, so the whole interesting range of that card -
+/// including the day-and-a-half-old answer from the incident - sits below two
+/// days, and collapsing it to "Updated 1 day ago" would throw away the six
+/// hours that made that answer wrong. Past two days a refresh is plainly broken
+/// rather than merely late, the extra precision buys nothing, and days take
+/// over where they stop costing anything.
+///
+/// US spelling and plain words - "Updated", "min", "hours", "days". This is
+/// read by a household from across a room, not by an operator.
+String describeAnswerAge(time_t observedAtUtc);
+
 /// The raw touch read beneath Touch.h/.cpp's debounced, event-style API.
 /// Lives here, not in Touch.cpp, because this file already owns the one
 /// LGFX instance for this panel (see `lcd` and begin() below) - a second
@@ -120,6 +164,18 @@ void showFailure(const String& headline, const String& whatToDo);
 /// starting position instead of truncating or shrinking the font, and why a
 /// pure-code route (the common case today, and the only case a 6-month-old
 /// server can produce) still lands on exactly the one line it always has.
+///
+/// **Both names are shortened again here, on the device**, before they are
+/// laid out - see shortenAirportName() in Display.cpp. The server's
+/// AirportNameFormatter.Shorten only strips a TRAILING " International
+/// Airport", which fires on none of the names that are actually too long,
+/// because those end in "(Wold-Chamberlain Field)" or
+/// "/ Charleston Air Force Base" instead. Measured over the 948 distinct
+/// origin/destination pairs the route cache can currently produce, the
+/// widest route line drops from 1,077px to 710px and the number overrunning
+/// the two-line box from 110 to 54. This is the server's job done in the one
+/// place that could be changed today; the wire is unchanged and needs to be,
+/// and the upstream fix is still worth making.
 ///
 /// This function draws no logo. The image lives in the Assets cache under a
 /// server-given id this file has no reason to know about (see aircraftLogoZone()
@@ -190,14 +246,34 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
 /// price-per-square-foot line without ever being able to silently drop the
 /// one line compliance actually requires.
 ///
+/// **Over two lines, because the sentence does not fit one.** "Automated
+/// estimate, not an appraisal." measures 323px at 9pt in a 300px box, so
+/// until now it drew as "Automated estimate, not an..." - present, reserved,
+/// unconditional, and missing the word it exists to say. Two 22px lines is
+/// the reservation; a shorter sentence was measured and rejected because
+/// nothing keeping both halves of the claim fits with real margin.
+///
 /// `address` is the property the estimate is of, drawn as the headline the
 /// same way showListingsCard() draws its own - a dollar figure that names no
 /// house is the one fact on this card a reader cannot check. Empty is a real
 /// case rather than a fault (a valuation resolved from a GPS fix has no
 /// address to print) and the headline row is then not drawn at all, with the
-/// rows below moving back up. Truncated to one line, never wrapped: the
-/// compliance line above has to fit underneath everything else on a 240px
-/// screen, and a second headline line is what it would cost.
+/// rows below moving back up. **Wrapped over two 9pt lines, not truncated on
+/// one 12pt line**, which is showListingsCard()'s own measured answer to the
+/// same problem reused rather than re-derived: both live addresses overflow a
+/// single 300px line at 12pt (518px and 449px) and at 9pt (384px and 332px),
+/// so the headline was ellipsizing on every draw of every device. Two 9pt
+/// lines cost 7px over the single 12pt line they replace, and the whole block
+/// below moves down by exactly that.
+///
+/// **Dropped entirely when a button is bound**, which is this card's own
+/// long-standing statement that the address is the one element here a reader
+/// can do without, finally acted on rather than only written down: the
+/// compliance line now reserves two lines rather than one, and a 154px floor
+/// has no room for a headline as well. The card then reads exactly as it does
+/// for a household with no stored address, which is a shape it already draws
+/// correctly - and the tight path loses the refresh date for the same reason,
+/// which is an acceptable trade against a legal line that cannot be cut.
 void showHomeValueCard(const String& address, const String& estimateText, const String& rangeText,
                        const String& detail);
 
@@ -219,11 +295,35 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
 /// card holds more than one game, so a scoreboard reads as a list rather than
 /// as one result that keeps changing.
 ///
+/// ageText is the "Updated 31 hours ago" line, and is EMPTY nearly always -
+/// the server flags a sports card as old only when a refresh was attempted,
+/// came back empty and left a previous answer standing, so an empty string
+/// here is the ordinary case and means "draw the card exactly as before, with
+/// no line and no gap where one would have gone". Already worded by
+/// Sports.cpp through Display::describeAnswerAge(), which the listings card
+/// uses too so the two cards cannot describe an age differently.
+///
+/// **It takes the "2 of 4" counter's slot rather than a row of its own**, so
+/// the counter is not drawn on a draw that shows an age. There is no fourth
+/// row to be had: a bound action drops the content floor to y=154 and
+/// drawChrome() paints the button row over y=160..220, and this card is one of
+/// the thirteen that never consults contentBottom() - a line at y=198 would be
+/// covered with nothing in the stream saying so. Keeping the age inside an
+/// existing slot means this function draws no pixel lower than it did before
+/// the age existed, and the scores and status word do not move at all.
+///
+/// The two cannot both have the slot. On a card the server has called old, how
+/// old the answer is beats which of four fixtures is on screen - the rotation
+/// shows the others anyway. The age is right-aligned into whatever the status
+/// word actually leaves, measured on each draw, and is **dropped entirely
+/// rather than ellipsized** when that is not enough: a truncated age states
+/// nothing while still costing the slot that could have stated something.
+///
 /// This draws, it does not compute - every value arrives already chosen,
 /// ordered and capped by the server. See Sports.h.
 void showSportsCard(const String& homeName, const String& homeScore, const String& awayName,
                     const String& awayScore, const String& status, uint16_t itemNumber,
-                    uint16_t itemCount);
+                    uint16_t itemCount, const String& ageText);
 
 /// The ISS flyover card: distance and compass direction to the International
 /// Space Station's current sub-satellite point, plus a one-line detail
@@ -353,6 +453,15 @@ void showBannerCard(const String& text);
 /// code regardless of whether a caption is present, mirroring CAL's own showQr() - "the
 /// address in characters as well as in the code, because cameras fail" applies exactly as
 /// much on this panel as on CAL's.
+///
+/// The caption is drawn at **9pt, not 12pt**, which is this card's own "supplementary,
+/// not the point" argument applied to the font rather than only to the position. At 12pt
+/// the 300px box held about twenty-seven ordinary characters and was cutting captions
+/// nobody would call long - "Scan for our latest listings" measures 304px, "Book a tour
+/// of this property" 320px. The same two are 226px and 237px at 9pt. It is not a
+/// guarantee: `CardSpec::text` holds up to 280 characters and a long caption still
+/// ellipsizes, and says so in the stream. Nothing else on the card moves - the 22px step
+/// this layout was already carrying is exactly FreeSansBold9pt7b's own fontHeight().
 void showQrTextCard(const String& qrData, const String& caption);
 
 /// The real-estate listings card: one nearest-market listing per screen, with
@@ -573,6 +682,26 @@ void flashNavEdge(bool isForward, bool canReverse);
 /// evidence that this device can draw than that it cannot, so it is left out of
 /// the measurement entirely rather than being allowed to mask a genuine run.
 uint32_t consecutiveDrawFailures();
+
+/// Paints the whole panel with the current day/night theme background, and
+/// nothing else.
+///
+/// Every card body in this file starts with the same fill, so this exists for
+/// the one caller that is NOT a card body: Graphic.cpp's tight branch, which
+/// draws its picture through drawImageFromSdInRect() into (0, 0, 320, 154)
+/// instead of over the whole panel. The in-rect draw deliberately does not
+/// clear - it was written for an airline logo layered onto an already-composed
+/// aircraft card, where clearing would erase the card underneath it - so a
+/// caller using it as a card's entire content has to clear first or the
+/// previous card's pixels stay visible in the letterbox above and below the
+/// scaled image.
+///
+/// Here rather than in Graphic.cpp because this file owns the one LGFX
+/// instance for this panel and the theme colours that go with it, the same
+/// reason drawImageFromSd() and readTouchRaw() live here. A caller cannot
+/// reach bg() from outside, and should not: which grey a night-mode panel
+/// clears to is not a picture card's business.
+void clearPanel();
 
 /// Draws a cached image from the SD card, scaled to fit and centred on the
 /// whole panel. Clears to the theme background first, so a failed decode

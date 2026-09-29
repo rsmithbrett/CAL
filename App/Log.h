@@ -18,6 +18,31 @@
 /// in hand must still see exactly what they would have seen before this
 /// module existed - that is this module's fallback of last resort, not a
 /// nice-to-have, and nothing about local debugging may regress because of it.
+/// This holds for the heap cap below too: the pending buffer dropping a line
+/// is invisible over the cable, because Serial was already written before the
+/// buffer was ever consulted.
+///
+/// THE PENDING BUFFER YIELDS TO THE HEAP, and this is load-bearing rather
+/// than a refinement. It is capped by line count and by bytes, and ALSO by
+/// how much contiguous heap the device has left: while the largest free 8-bit
+/// block is under two of Http::kTlsRecordBufferBytes - the figure CheckIn.cpp
+/// already uses for "could not have held a fresh TLS session" - the buffer
+/// holds one batch rather than its full ceiling, evicting oldest-first
+/// exactly as it does at the byte cap.
+///
+/// Without that third cap the buffer is self-sustaining in the worst way: it
+/// pins up to 16KB across 200 Arduino Strings, a new TLS session needs a
+/// contiguous block the buffer has just eaten, and the POST that would DRAIN
+/// the buffer is therefore the one request that cannot go out. Measured on
+/// device 23 on 2026-09-27 as a 16,040-byte fall in 160 seconds ending in a
+/// restart, repeating six times in 62 minutes on two devices. Log.cpp carries
+/// the numbers and the argument for the threshold.
+///
+/// The consequence to know about as a caller: nothing changes about what you
+/// may log or how often, but on a memory-starved device the stream is
+/// SHALLOWER - roughly one batch of backlog instead of several minutes of it.
+/// It says so itself when that happens, in a marker line composed directly
+/// into the outgoing batch (it cannot be logged, for the obvious reason).
 ///
 /// Buffering onto the remote stream only happens while the server's most
 /// recent check-in response asked for it (CheckIn::Result::debugStreamRequested,

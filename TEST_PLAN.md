@@ -666,6 +666,67 @@ diagnose.
 
 ---
 
+## 4c. The debug-stream buffer yields to the heap
+
+**This is the test for the loop the stream itself used to cause.** The pending
+buffer was capped only by lines and bytes; on device 23 that cost 16,040 bytes
+of heap in 160 seconds, and because draining the buffer needs a TLS session
+that the buffer had just made impossible, the device could neither send nor
+recover and restarted on a loop. `App/Log.cpp` now also caps the buffer at one
+batch whenever the largest free 8-bit block is below `kMinLargestBlockBytes`
+(`2 x Http::kTlsRecordBufferBytes` = 33,434).
+
+**Nothing here can be checked from a compile.** All of it needs hardware, and
+the point of the change is a runtime figure the build output cannot show.
+
+### 4c.1 On a device that is NOT heap-starved (the control)
+
+1. A device with plenty of contiguous heap, debug stream **on**. Confirm from
+   the `[health]` line that largest8 is comfortably above 33,434.
+2. Behaviour must be exactly as before: no heap marker in the stream, and a
+   backlog that survives a brief network outage to arrive in full afterwards.
+   This is what proves the cap followed the heap rather than simply making the
+   buffer smaller for everybody.
+
+### 4c.2 On a heap-starved device (the case)
+
+Produce the condition as in 4a (no SD card, several graphic cards, long
+announcement queue) with the stream on, and let largest8 decay past 33,434.
+
+1. The flush must carry the marker naming the count, the measured largest block
+   and the requirement - `[N of those dropped for heap: largest free block was
+   X and a fresh TLS session needs 16717 twice, ...]`. A silent cap is a
+   failure of this test even if the heap behaves.
+2. **The marker must not multiply.** Watch several consecutive flushes. One
+   marker per flush, with the count resetting after each `HTTP 200`. A marker
+   that appears twice in one batch, or a count that climbs while nothing else
+   is being logged, means it is being logged rather than composed into the
+   batch and is feeding itself.
+3. **The stream must keep working, not go silent.** New lines must continue to
+   arrive at the ordinary rate; only the depth of backlog is given up. A device
+   that stops streaming entirely under heap pressure has failed this, and has
+   removed the only diagnostic channel it has at the moment it is needed.
+4. largest8 must **stop** its decay rather than merely decaying more slowly.
+   The 16 KB is the specific thing being given back.
+5. The device must no longer enter the restart loop: no `UNREACHABLE` restart
+   attributable to the stream, over a run long enough that the old firmware
+   would have rebooted several times (devices 17 and 23 managed six in 62
+   minutes).
+6. **Recovery is automatic and must be observed.** Once the buffer has drained
+   and largest8 climbs back above 33,434, the full 200-line / 16 KB ceiling
+   must come back - confirm by causing a brief outage afterwards and seeing a
+   deep backlog arrive again.
+
+### 4c.3 Serial, which must not have changed at all
+
+With a USB cable attached to a device in the starved state of 4c.2, the serial
+console must show **every** line, including the ones the remote stream dropped.
+`Log::line()` writes Serial before the buffer is consulted, so this should be
+true by construction - check it anyway, because `Log.h` makes it a hard promise
+and this is the change most capable of breaking it quietly.
+
+---
+
 ## 5. `HeapRatchet` names the boot, and the identity now needs six buckets (`02d696c`)
 
 ### 5a. On the device

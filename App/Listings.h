@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <time.h>  // time_t, for Result::fetchedAtUtc below.
 
 /// Real-estate listings near the device owner's Target market - the third
 /// server-fetched content type, sitting beside Weather.h/Aircraft.h as its
@@ -94,6 +95,24 @@ struct Result {
   /// a city name over a bare postal code. Empty when the server didn't send
   /// one, in which case those screens fall back to a market-less phrasing.
   String cityState;
+
+  /// **When the SERVER last read RentCast**, in epoch seconds, or 0 when the
+  /// payload carried no usable `fetchedAtUtc`. Not when this device asked.
+  ///
+  /// This is the only card that keeps this, and CARD_ABSENCE_AND_AGE_DESIGN.md
+  /// section 2a is the whole argument for why it is one card and not all of
+  /// them: the gap between "when I asked" and "how old the answer is" is
+  /// bounded by the server's cache, weather and calendar cache for 30 minutes
+  /// where the device's own fetch time is a fine proxy, and listings caches for
+  /// 24 hours where it is not. On 2026-09-27 a device drew "Updated just now"
+  /// over an answer a day and a half old.
+  ///
+  /// 0 is a real and expected value, not a fault: a server that somehow omits
+  /// the field, a null, or anything the parser cannot read. The card falls back
+  /// to the old device-side measurement in that case rather than drawing
+  /// nothing or, worse, an age computed from a zero.
+  time_t fetchedAtUtc = 0;
+
   /// Set on every non-Ok status, including Empty - what to put on screen.
   ///
   /// Always the plain, honest text, even during a declared maintenance window -

@@ -645,6 +645,15 @@ void drawCurrent() {
   if (gCurrent.card < 0 || gCurrent.card >= static_cast<int8_t>(gCardCount) ||
       !showable(static_cast<uint8_t>(gCurrent.card))) {
     gButtonCount = 0;
+    // The budget belongs beside gButtonCount, not only on the path below.
+    // This early return sets the count to zero and then drew showNoContent()
+    // against WHATEVER BUDGET THE PREVIOUS CARD LEFT BEHIND - so a device
+    // whose last card had a button bound rendered its "nothing to show yet"
+    // screen against a floor of 154 with no button row coming to justify it.
+    // Harmless while nothing measured the floor; now that layoutText()
+    // compares every string against it, a leaked budget is a stream full of
+    // overruns that are not real. Zero buttons, full panel, stated together.
+    Display::setContentBudget(false);
     Touch::setActionZones(nullptr, 0);
     Display::showNoContent("Nothing to show yet",
                            "Waiting for the first update from the server.");
@@ -730,6 +739,25 @@ void advance() {
 
 void rewind() {
   if (gHistoryCursor == 0) {
+    // REDRAW EVEN THOUGH NOTHING MOVED, because the tap that got here has
+    // already damaged the screen. handleTap() calls Display::flashNavEdge()
+    // before this, and that flash fills a kEdgeZoneWidth strip (106px) down the
+    // edge, waits, then erases it back to the background and redraws only the
+    // chevron - it cannot know what card content was underneath. Every other
+    // nav path repaints immediately afterwards, so the damage is invisible;
+    // this one returned without drawing anything and left a 106px blank column
+    // until some unrelated later redraw happened to fix it.
+    //
+    // flashNavEdge()'s own comment predicted exactly this path and exactly
+    // this consequence. It was right, and it was left unfixed. Reported from a
+    // photograph on 2026-09-28: "it stops drawing the left corner after
+    // pressing the nav button, it does recover". The recovery was the next
+    // auto-advance.
+    //
+    // A redraw on a press that changes nothing looks wasteful and is not. The
+    // alternative is showing a household a card with a strip missing, and the
+    // press has already cost a 180ms flash.
+    drawCurrent();
     return;
   }
   gHistoryCursor--;

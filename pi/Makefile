@@ -5,7 +5,7 @@ ARM_FLAGS = -marm -march=armv6 -mfloat-abi=soft
 QEMU_ARM ?= qemu-arm
 ARM_SYSROOT ?= /usr/arm-linux-gnueabi
 
-.PHONY: test test-armv6 demo clean
+.PHONY: test test-armv6 demo checkin clean
 
 test: build/schedule_core_test build/layout_test build/installation_config_test
 	./build/schedule_core_test
@@ -20,6 +20,12 @@ test-armv6: build/armv6/schedule_core_test build/armv6/layout_test build/armv6/i
 	$(QEMU_ARM) -cpu arm1176 -L $(ARM_SYSROOT) ./build/armv6/installation_config_test
 
 demo: build/pi-card
+
+checkin: build/pi-checkin
+
+build/pi-checkin: src/checkin.cpp src/CheckInTransport.h src/InstallationConfig.h
+	mkdir -p build
+	$(CXX) $(CXXFLAGS) -Isrc src/checkin.cpp -o $@ -lcurl
 
 build/pi-card: src/main.cpp src/Layout.h
 	mkdir -p build

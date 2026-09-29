@@ -293,14 +293,49 @@ void report(const char* lastCheckInOutcome) {
   // motionCapability follows: an empty string would be a claim about a CAL, and the
   // honest thing to say about a CAL too old to name itself is nothing. The server
   // renders a missing value as "unknown - pre-OTA CAL".
+  //
+  // BOTH FIELDS ARE NARRATED ON THE WAY OUT, and the omitted one especially.
+  // An absent calVersion, a report this firmware never built, and a field lost
+  // somewhere between here and the row all look identical from outside - and on
+  // this fleet the absent case is the ORDINARY one, because most CALs in the
+  // field predate calver entirely. Until these lines existed nothing anywhere
+  // distinguished "old CAL, nothing to say" from "the telemetry path did not
+  // run", which is the difference someone reading the stream actually needs.
+  //
+  // Logged HERE, at the decision, rather than left to the POST body a few dozen
+  // lines down: that line is Log::verbose and formats into the same fixed
+  // 256-byte scratch every other call uses, while this body is several times
+  // that - both of these fields sit well past the cut and reach the stream as
+  // "...(truncated)". The one existing line that would have carried them cannot.
+  // Logging before the POST also puts the branch on record when the request
+  // afterwards fails, which is exactly when someone is watching.
+  //
+  // Log::printf rather than Log::verbose, i.e. unconditional on Serial: two
+  // short lines per report is the budget the "ok" summary and the ratchet line
+  // already spend, and a bench cable with no stream turned on is where a
+  // mis-tabled device gets found. Repeated on every report rather than said
+  // once at boot, for the same reason restartReason is re-sent on every row -
+  // the report most likely to be lost is the first one after a reboot.
   const String calVersion = Identity::installedCalVersion();
   if (calVersion.length() > 0) {
     requestDoc["calVersion"] = calVersion;
+    Log::printf("[telemetry] calVersion=%s (reported)", calVersion.c_str());
+  } else {
+    Log::line("[telemetry] calVersion OMITTED: nvs 'calver' is empty, so this CAL "
+              "predates recording its own version - the field is left off the report "
+              "rather than sent blank, and the server renders it as "
+              "'unknown - pre-OTA CAL'");
   }
   // The layout is ALWAYS sent. Unlike a version it is never unknowable - the table
   // is right there in flash - so there is no honest reason to omit it, and it is
   // the field that would have prevented a destroyed App partition.
-  requestDoc["partitionLayout"] = partitionLayoutSummary();
+  //
+  // Held in a local purely so the exact string that goes on the wire is the exact
+  // string that reaches the log - having it in the stream verbatim, rather than a
+  // paraphrase of it, is the entire point of the field (2026-09-16).
+  const String partitionLayout = partitionLayoutSummary();
+  requestDoc["partitionLayout"] = partitionLayout;
+  Log::printf("[telemetry] partitionLayout=%s", partitionLayout.c_str());
   // The two figures that turn the heap ratchet from something somebody has to
   // sit and watch into arithmetic the server does on every report.
   //

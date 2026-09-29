@@ -121,7 +121,27 @@ struct Game {
 /// `cardId` must be one of the four registered ids; anything else is logged and
 /// dropped, so a server advertising an instance this firmware does not register
 /// costs a log line rather than a silent misfile onto the wrong card.
-void setGames(const char* cardId, const Game* games, uint8_t count);
+///
+/// `staleSinceUtc` is epoch seconds for when the server last actually read the
+/// provider, and **0 is the ordinary value and means "fresh"**. The server
+/// sends `staleSinceUtc` only when it judges the answer old - a refresh that
+/// was attempted, came back empty, and left a previous answer standing - and
+/// omits the key entirely otherwise (SportsCardPayload.StaleSinceUtc, added
+/// server-side 2026-09-27). Absence is therefore not a gap to go looking for;
+/// it is the server saying this card is current.
+///
+/// **The server judges, not this device.** CARD_ABSENCE_AND_AGE_DESIGN.md
+/// section 8 reverses section 5 on exactly this point: the server is the side
+/// that knows the refresh interval the answer was meant to live inside, and a
+/// staleness threshold compiled into firmware could only be changed by
+/// shipping firmware. So there is no threshold constant here, no clock
+/// arithmetic to decide staleness, and no second field carrying a flag - one
+/// nullable timestamp, and its absence means fresh.
+///
+/// ONE TIMESTAMP PER CARD, not per game, also from section 8: the question a
+/// reader has is whether the screen in front of them is current, not which of
+/// four fixtures refreshed most recently.
+void setGames(const char* cardId, const Game* games, uint8_t count, time_t staleSinceUtc);
 
 /// Drop everything. Called when a check-in reports no sports content at all, so
 /// yesterday's fixtures cannot linger on screen past their day.
