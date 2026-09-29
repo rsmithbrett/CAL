@@ -683,6 +683,26 @@ void flashNavEdge(bool isForward, bool canReverse);
 /// the measurement entirely rather than being allowed to mask a genuine run.
 uint32_t consecutiveDrawFailures();
 
+/// Paints the whole panel with the current day/night theme background, and
+/// nothing else.
+///
+/// Every card body in this file starts with the same fill, so this exists for
+/// the one caller that is NOT a card body: Graphic.cpp's tight branch, which
+/// draws its picture through drawImageFromSdInRect() into (0, 0, 320, 154)
+/// instead of over the whole panel. The in-rect draw deliberately does not
+/// clear - it was written for an airline logo layered onto an already-composed
+/// aircraft card, where clearing would erase the card underneath it - so a
+/// caller using it as a card's entire content has to clear first or the
+/// previous card's pixels stay visible in the letterbox above and below the
+/// scaled image.
+///
+/// Here rather than in Graphic.cpp because this file owns the one LGFX
+/// instance for this panel and the theme colours that go with it, the same
+/// reason drawImageFromSd() and readTouchRaw() live here. A caller cannot
+/// reach bg() from outside, and should not: which grey a night-mode panel
+/// clears to is not a picture card's business.
+void clearPanel();
+
 /// Draws a cached image from the SD card, scaled to fit and centred on the
 /// whole panel. Clears to the theme background first, so a failed decode
 /// leaves a clean screen rather than a half-painted one; returns false in that

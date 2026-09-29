@@ -27,6 +27,20 @@ namespace {
 static_assert(Cards::kMaxAssetIdLength >= Assets::kMaxIdLength,
               "Cards::kMaxAssetIdLength must be able to hold any id Assets accepts");
 
+/// The panel's own dimensions, needed here only by the tight draw below, which
+/// has to name a rectangle rather than saying "the whole screen".
+///
+/// Restated rather than exported from Display.h on purpose. Display.cpp's
+/// kScreenW/kScreenH are deliberately private - the whole point of that file
+/// owning the one LGFX instance is that no card does panel arithmetic, and
+/// making them public would invite exactly that. The one number here that can
+/// actually move is the bottom of the content area, and that is read from
+/// Display::contentBottom() at the call site rather than written down; the
+/// width and the full height are fixed by the hardware this firmware is
+/// compiled for, not by a layout decision anybody is going to revisit.
+constexpr int kPanelWidth = 320;
+constexpr int kPanelHeight = 240;
+
 /// One picture card's worth of fetch/itemCount/draw logic, parameterized on
 /// `N` purely to give each instantiation its own set of static globals - the
 /// same file-scope globals a single card would hold, replicated by the
@@ -230,6 +244,10 @@ struct Instance {
   /// drawn by CardManager after this returns (see drawChrome() in
   /// CardManager.cpp), the same as for every other card - there is nothing
   /// card-specific to do here.
+  ///
+  /// EXCEPT WHEN A BUTTON IS BOUND TO THIS CARD, and then the picture is
+  /// letterboxed into the top 154px rather than drawn over the whole panel.
+  /// See the tight branch below for the argument and for what it costs.
   static void draw(uint16_t) {
     if (!gReady || gCachedId.length() == 0 || gCachedId != wantedAssetId()) {
       // Only reachable if the policy changed between the scheduler's
@@ -240,12 +258,63 @@ struct Instance {
       return;
     }
 
+    // THE BOTTOM 60px OF THIS PICTURE BELONGS TO THE BUTTON ROW WHENEVER ONE
+    // IS BOUND TO THIS CARD, AND THE PICTURE DOES NOT HAVE TO BE DRAWN AT
+    // PANEL SIZE.
+    //
+    // The audit that found this (CARD_AUDIT_2026_09_27.md section 1.9) called
+    // it "unfixable by reflow" and then corrected itself in section 9.3. The
+    // first half is right: there is nothing to reflow on a card that is one
+    // picture, no rows to move up and no strings to shorten. The conclusion
+    // did not follow. Display::drawImageFromSdInRect() already exists, already
+    // auto-fits - scaleX and scaleY left at zero is what makes LovyanGFX size
+    // the image into the box rather than draw it at native size - and the
+    // aircraft card has been drawing airline logos through it all along. So a
+    // picture card with a button shows the WHOLE picture, letterboxed above
+    // the buttons, at about 64% of the height it would otherwise have.
+    //
+    // THE ALTERNATIVE CONSIDERED AND REJECTED was anchoring the image to the
+    // top at native size, so the loss came off the bottom edge rather than out
+    // of the whole picture's scale. It is the smaller change and it still
+    // loses part of the picture. On a photograph that is survivable; on
+    // anything with a caption, a logo, a footer or a person's chin in the
+    // bottom sixth it is not, and a picture card has no way to know which kind
+    // of asset an operator uploaded.
+    //
+    // THE CLEAR IS NOT OPTIONAL AND IS EASY TO MISS. The full-panel draws
+    // (Display::drawImageFromSd(), drawImageFromBuffer()) fill the screen with
+    // the theme background themselves before decoding. The in-rect draw
+    // deliberately does not - it was written for a logo layered onto an
+    // already-composed aircraft card, where clearing would erase the card
+    // underneath. Used as a whole card's content it has to be cleared for, or
+    // the previous card's pixels stay showing in the letterbox bands above and
+    // below the scaled image, which would read as a rendering fault rather
+    // than as a smaller picture.
+    //
+    // The rect's height is read from Display::contentBottom() rather than
+    // written as 154. That is the number the button band actually starts
+    // after, it has moved once already (kButtonRowY went from 190 to 160 when
+    // the row doubled in height), and a card that asks keeps working the next
+    // time it moves.
+    const bool tight = Display::contentIsTight();
+
     // What is actually on screen this draw, not just what fetch() last
     // resolved - the two can diverge across a rewind, where this runs again
     // with no fresh fetch behind it. noteState() above only logs on a
-    // change of state, not on every draw.
-    Log::verbose("[%s] drawing '%s'%s", id(), gCachedId.c_str(),
-                gFromRam ? " (from RAM)" : " (from SD)");
+    // change of state, not on every draw. The tight case says so here because
+    // the remote debug stream is the only way anybody finds out that a device
+    // is drawing its pictures at two thirds size, and "the picture looks
+    // small" is otherwise indistinguishable from a badly cropped asset.
+    if (tight) {
+      Log::verbose("[%s] drawing '%s'%s into (0, 0, %d, %d) - a button is bound to this card, so "
+                   "the picture is scaled into the band above the button row instead of filling "
+                   "the panel",
+                   id(), gCachedId.c_str(), gFromRam ? " (from RAM)" : " (from SD)", kPanelWidth,
+                   Display::contentBottom());
+    } else {
+      Log::verbose("[%s] drawing '%s'%s", id(), gCachedId.c_str(),
+                  gFromRam ? " (from RAM)" : " (from SD)");
+    }
 
     // gFromRam picks which of Assets' two draw entry points owns this
     // instance's bytes right now - drawCached() reads gCachedId back off
@@ -253,8 +322,35 @@ struct Instance {
     // current state would either miss an SD-cached picture or try to read
     // an SD file the RAM fallback never wrote. Both give the same retry
     // count and decode-failure reporting (see Assets.h's drawRam() remarks).
-    const bool drew =
-        gFromRam ? Assets::drawRam(gCachedId, gRamBuffer) : Assets::drawCached(gCachedId);
+    //
+    // THE RAM FALLBACK HAS NO IN-RECT PATH, AND SO IS LEFT FULL-SCREEN.
+    // Assets has drawCachedInRect() for an SD-backed asset and nothing
+    // equivalent for a RamAssetBuffer - Display::drawImageFromBuffer() takes
+    // no rectangle, and adding the pair of entry points that would give it one
+    // is new code in the decoder path on the devices least able to absorb a
+    // mistake there (a device is in RAM fallback precisely because its SD card
+    // will not mount, and Assets.h's releaseRamBuffer() remarks set out how
+    // close those devices already run to the contiguous-block limit that TLS
+    // needs). So a no-SD device with a button bound to a picture card keeps
+    // the behaviour it has today, which is the bottom 60px covered - no worse
+    // than before, and not silently: the line below says so every draw, as a
+    // printf rather than a verbose because it is a case this change was
+    // supposed to cover and does not.
+    bool drew = false;
+    if (gFromRam) {
+      if (tight) {
+        Log::printf("[%s] asset '%s' is in RAM and there is no in-rect draw for a RAM buffer, so "
+                    "this picture is drawn full-screen and the button row still covers its "
+                    "bottom %d px",
+                    id(), gCachedId.c_str(), kPanelHeight - Display::contentBottom());
+      }
+      drew = Assets::drawRam(gCachedId, gRamBuffer);
+    } else if (tight) {
+      Display::clearPanel();
+      drew = Assets::drawCachedInRect(gCachedId, 0, 0, kPanelWidth, Display::contentBottom());
+    } else {
+      drew = Assets::drawCached(gCachedId);
+    }
     if (drew) {
       return;
     }

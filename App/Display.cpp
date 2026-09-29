@@ -2182,10 +2182,46 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
   // the edge or onto a second line - the score is the thing somebody crossing
   // the room is trying to read.
   constexpr int kScoreColumnWidth = 64;
-  constexpr int kFirstRowY = 62;
-  constexpr int kSecondRowY = 116;
+
+  // EVERYTHING SHIFTS UP WHEN A BUTTON IS BOUND TO THIS CARD, and no
+  // information is given up doing it - which is what makes this the easy one
+  // of the three cards the audit found (CARD_AUDIT_2026_09_27.md section 9.2,
+  // approved).
+  //
+  // Measured against the tight floor of 154 (setContentBudget() drops
+  // gContentBottom to kButtonRowY - kButtonBandGap whenever Actions::forCard()
+  // resolved a button for THIS card), the untight layout runs to y=201: the
+  // second team row at y=116 bottoms at 158 and is 4px past, the 12pt status
+  // at y=172 bottoms at 201 and is 47px past, and the 9pt right-hand slot at
+  // y=176 bottoms at 198 and is 44px past. Three of the four rows on the card
+  // are wholly or partly inside the band drawChrome() paints.
+  //
+  // THE 54px PITCH BETWEEN THE TWO TEAM ROWS IS DELIBERATE AND UNCHANGED.
+  // 44 and 88 are not "62 and 116, scaled" - they are the same 54px gap moved
+  // up as a unit. That gap is what makes the two names read as a pair, one
+  // scoreline, rather than as the first two entries of a list; closing it to
+  // recover a few more pixels would save room and cost the card its shape.
+  //
+  // THE SCORE STAYS 18pt AT EVERY TIER, TIGHT OR NOT, which is this card's
+  // oldest rule and the reason the name ladder below exists at all: the score
+  // is what somebody crossed the room to read. Only the status word gives up
+  // size here, and only when tight.
+  const bool tight = contentIsTight();
+  const int firstRowY = tight ? 44 : 62;
+  const int secondRowY = tight ? 88 : 116;
   const int nameWidth = kScreenW - kCardMargin * 2 - kScoreColumnWidth;
   const int rightX = kScreenW - kCardMargin;
+
+  // Said out loud on every tight draw - the remote debug stream is the only
+  // diagnostic a deployed device has, and a card that has quietly rearranged
+  // itself should be explicable from the stream rather than from guesswork.
+  // verbose rather than printf: a bound button is a configuration somebody
+  // chose, not a fault.
+  if (tight) {
+    Log::verbose("[display] sports is tight (floor %d) - team rows at %d and %d, status and "
+                 "age/counter joined at 132 with the status at 9pt instead of 12pt",
+                 contentBottom(), firstRowY, secondRowY);
+  }
 
   lcd.setTextSize(1);
 
@@ -2219,7 +2255,7 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
     const bool isAway = (row == 0);
     const String& name = isAway ? awayName : homeName;
     const String& score = isAway ? awayScore : homeScore;
-    const int y = (row == 0) ? kFirstRowY : kSecondRowY;
+    const int y = (row == 0) ? firstRowY : secondRowY;
 
     // THE HOME ROW CARRIES THE "@", for the reason above: the marker names the
     // host. Only one row is marked - an unmarked team is the visitor, and
@@ -2354,15 +2390,34 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
   //
   // So the age goes on the row that already exists, in the slot the counter
   // already occupies, and this function draws no pixel lower than it did
-  // before. Whatever is wrong with this card's relationship to the button row
-  // stays exactly as wrong as it was rather than becoming one element worse.
+  // before.
   constexpr int kMarkerColumnWidth = 64;
-  constexpr int kStatusRowY = 172;
   constexpr int kStatusBoxWidth = kScreenW - kCardMargin * 2 - kMarkerColumnWidth;  // 236
-  // The 9pt right-hand slot sits 4px lower than the 12pt status so an 18px
-  // line is optically centred against the 23px one beside it. That is the
-  // counter's existing offset, kept because the age takes the counter's place.
-  constexpr int kRightSlotY = 176;
+
+  // TIGHT, THE STATUS ROW MOVES TO 132 AND DROPS A FONT SIZE; UNTIGHT IT IS
+  // UNTOUCHED AT 172 AND 12pt.
+  //
+  // 132 plus the 22px fontHeight() reports at 9pt bottoms at 154 exactly,
+  // which is the floor and not a pixel under it. At 12pt the same row would be
+  // 29px tall and would have to start at 125 to fit - close enough to the
+  // second team row's own bottom (88 + 42 = 130 at 18pt) to collide with it.
+  // So the size drop is not a preference, it is what the arithmetic leaves
+  // once the two team rows have kept their 18pt and their 54px pitch.
+  //
+  // A TIGHT-ONLY SUBSTITUTION, NOT A NEW DEFAULT. The 12pt status is worth
+  // keeping wherever there is room for it, and there is room for it on nine of
+  // nine fielded devices today, so the untight card must not change. Whether
+  // 9pt is legible from across the room is the same question section 7.3 of
+  // the audit raises about 9pt team names, and it deserves the same look on
+  // glass rather than the same assumption.
+  //
+  // THE AGE AND COUNTER JOIN IT ON THE SAME LINE, at the same y rather than
+  // 4px below it. That 4px offset exists only to centre an 18px 9pt line
+  // against a 23px 12pt one; tight, both sides of the row are 9pt and there is
+  // nothing to centre against, so a nudge would just push the right-hand slot
+  // 4px past the floor for no optical gain at all.
+  const int statusRowY = tight ? 132 : 172;
+  const int rightSlotY = tight ? 132 : 176;
   constexpr int kStatusToAgeGap = 10;
 
   // MEASURED, so the age gets the room the status actually leaves rather than
@@ -2372,14 +2427,19 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
   // place on every ordinary card. Clamped to the box, because layoutLine()
   // ellipsizes anything longer down to it and the ink on the panel is then
   // never wider than this.
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  //
+  // Measured at whichever size the status is about to be drawn at, which is
+  // the part that would be easy to get wrong: measuring at 12pt and drawing at
+  // 9pt would reserve about a third more width than the ink actually needs and
+  // would push the age off a tight card that had room for it.
+  lcd.setFont(tight ? &fonts::FreeSansBold9pt7b : &fonts::FreeSansBold12pt7b);
   int statusInkWidth = 0;
   if (status.length() > 0) {
     statusInkWidth = lcd.textWidth(status.c_str());
     if (statusInkWidth > kStatusBoxWidth) {
       statusInkWidth = kStatusBoxWidth;
     }
-    layoutLine(status, kCardMargin, kStatusRowY, kStatusBoxWidth, muted(), "sports.status");
+    layoutLine(status, kCardMargin, statusRowY, kStatusBoxWidth, muted(), "sports.status");
   }
 
   // HOW OLD THIS ANSWER IS - empty, and this whole block skipped, on every card
@@ -2401,7 +2461,7 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
                            (statusInkWidth > 0 ? kStatusToAgeGap : 0);
     const int ageInkWidth = lcd.textWidth(ageText.c_str());
     if (ageInkWidth <= roomForAge) {
-      layoutLine(ageText, rightX, kRightSlotY, roomForAge, muted(), "sports.age", Align::Right);
+      layoutLine(ageText, rightX, rightSlotY, roomForAge, muted(), "sports.age", Align::Right);
       drewAge = true;
     } else {
       // printf rather than verbose: this is the card declining to say something
@@ -2428,7 +2488,7 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
     snprintf(marker, sizeof(marker), "%u of %u", static_cast<unsigned>(itemNumber),
              static_cast<unsigned>(itemCount));
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    layoutLine(marker, rightX, kRightSlotY, kMarkerColumnWidth, muted(), "sports.counter",
+    layoutLine(marker, rightX, rightSlotY, kMarkerColumnWidth, muted(), "sports.counter",
                Align::Right);
   } else if (itemCount > 1) {
     Log::printf("[display] sports.counter: '%u of %u' dropped this draw so the age line can have "
@@ -2436,18 +2496,45 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
                 static_cast<unsigned>(itemNumber), static_cast<unsigned>(itemCount));
   }
 
-  // The stray `gContentBottom = 200` that used to close this function is gone.
-  // It was left in place on the argument that it did nothing - and it does
-  // nothing to THIS card, because CardManager::drawCurrent() calls
-  // setContentBudget() immediately before every card.draw(). What it did do
-  // was leave a number behind that no card had asked for, ready for any draw
-  // that reaches the panel outside that path. Now that layoutText() compares
-  // every string against the budget, a wrong budget is no longer inert: it
-  // would make the check report the next card against 200 instead of against
-  // 154 or 220. Deleting the assignment is the fix; this card's own
-  // relationship to the budget is unchanged and still wrong, and the status
-  // row at y=172 is still inside a bound button's band. The difference is that
-  // the stream now says so on every draw instead of nobody knowing.
+  // THIS CARD'S RELATIONSHIP TO THE BUTTON ROW, WHICH IS NO LONGER WRONG.
+  //
+  // What stood here until 2026-09-28 said that whatever was wrong with this
+  // card and the button row "stays exactly as wrong as it was". That was true
+  // when it was written - the age line had just been put on the counter's row
+  // rather than on a fourth row of its own, precisely so the card drew no
+  // pixel lower than before, and nothing about the underlying overrun had been
+  // addressed. It is not true any more, and leaving it would send the next
+  // reader looking for a defect that has been fixed.
+  //
+  // What is true now: this card reads contentIsTight() at the top and lays
+  // itself out twice over. Untight, it is byte-for-byte the card it always
+  // was - team rows at 62 and 116, a 12pt status at 172, the right-hand slot
+  // at 176 - because that is what nine of nine fielded devices draw and a
+  // change they would all see needs a reason none of them have. Tight, the
+  // team rows move to 44 and 88 keeping their 54px pitch and their 18pt
+  // scores, the status drops to 9pt and joins the age and counter on one row
+  // at 132, and the lowest ink on the card bottoms at 154 - the floor
+  // setContentBudget() set, reached exactly and not crossed.
+  //
+  // WHAT IS STILL WORTH KNOWING. This card still does not call
+  // noteContentOverrun() itself, so it does not report its own bottom as a
+  // card. It no longer needs to: every string on it goes through layoutText(),
+  // which compares each box against gContentBottom and says so in the stream
+  // when one runs past, and unlike the forecast card's strip icons there is no
+  // element on this card that draws outside that path. The one thing a table
+  // cannot settle is whether a 9pt status word reads from across the room,
+  // which is the same question section 7.3 of the audit raises about 9pt team
+  // names and is on the list to look at on glass.
+  //
+  // The stray `gContentBottom = 200` that used to close this function is still
+  // gone, and the reason is worth keeping: it was left in place on the
+  // argument that it did nothing, and it does nothing to THIS card, because
+  // CardManager::drawCurrent() calls setContentBudget() immediately before
+  // every card.draw(). What it did do was leave a number behind that no card
+  // had asked for, ready for any draw that reaches the panel outside that
+  // path. Now that layoutText() compares every string against the budget, a
+  // wrong budget is no longer inert: it would make the check report the next
+  // card against 200 instead of against 154 or 220.
 }
 
 void showIssFlyoverCard(const String& distanceText, const String& directionText,
@@ -3183,15 +3270,166 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   layoutLine(currentIsDaytime ? "Day" : "Night", kScreenW - kCardMargin, 4, kDayNightWidth,
              muted(), "forecast.daynight", Align::Right);
 
+  // THE TIGHT LAYOUT, AND WHY IT IS THE STRIP THAT PAYS FOR IT.
+  //
+  // setContentBudget() drops the content floor from kClockTop (220) to
+  // kButtonRowY - kButtonBandGap (154) whenever an action is bound TO THIS
+  // CARD - resolved per card by Actions::forCard() immediately before the
+  // draw, not once per device. Measured against that floor the strip as it
+  // stands runs to y=200: its icon (cy=155, r=17) reaches 172, which is
+  // already 12px inside the band drawChrome() paints, and the day temperature
+  // at y=178 bottoms at 200, which is 46px past. The icon is the one worth
+  // naming, because it never passes through layoutText() and so the runtime
+  // budget check at the bottom of that routine cannot see it at all - a
+  // silently painted-over circle with nothing in the stream to say so.
+  //
+  // Hero and strip together want about 200px of a 154px card, so roughly 46px
+  // has to come from somewhere, and the decision (CARD_AUDIT_2026_09_27.md
+  // section 9.1, approved) is that all of it comes from the strip: the hero
+  // keeps its 24pt temperature, its 24px-radius icon and its condition phrase
+  // untouched. The argument is about what the household asked for. Somebody
+  // who has put a button on their forecast card has added a thing to do, not
+  // stopped wanting to know what the weather is doing right now, and shrinking
+  // the "right now" block to protect a five-day outlook would be paying for
+  // the less-asked-for half with the more-asked-for one.
+  //
+  // WHAT WAS CONSIDERED AND REJECTED. Dropping the strip entirely fits
+  // trivially and was not chosen - the outlook is the reason this card
+  // replaced the old paging weather card, and a forecast card showing only
+  // current conditions is the card it was built to stop being. Shrinking the
+  // hero instead is the inversion argued against above. Paging the strip back
+  // in on a touch would re-introduce exactly the mode this card retired, and
+  // would do it on the one card that now has a button competing for the touch.
+  //
+  // NOTHING BELOW CHANGES WHEN NO BUTTON IS BOUND, and that is a hard
+  // requirement rather than a nicety: nine of nine fielded devices are in the
+  // untight case for this card today - the fleet's one live binding is
+  // `Request Tour` on the listings card - so the full-size strip is still what
+  // every real household sees, and every branch here has to leave it exactly
+  // as it was.
+  const bool tight = contentIsTight();
+
+  // THE FRESHNESS STAMP MOVES ONTO THE LOCATION ROW WHEN TIGHT.
+  //
+  // This is the only thing reclaimed from ABOVE the rule, and it is reclaimed
+  // for a reason rather than because it was the easiest row to move: a
+  // freshness stamp is a qualifier on the card - it says whether the numbers
+  // are still worth believing - and not part of the "right now" block the
+  // decision above set out to protect. Two qualifiers can share a row. A 24pt
+  // temperature can share nothing.
+  //
+  // RESERVED BY MEASUREMENT RATHER THAN BY A CONSTANT, which is the same call
+  // showSportsCard() makes below for its own status/age row and for the same
+  // reason. The stamp runs from "Updated just now" (150px at 9pt against the
+  // vendored glyph table) through "Updated 59 min ago" (171px) to "Updated
+  // 1439 min ago" (191px) on a card whose fetches have been failing for a day.
+  // Reserving the worst case would leave the location 45px of the 300px body
+  // on every ordinary draw, which is not a location, it is an ellipsis with a
+  // letter in front of it. Measuring hands the location whatever this
+  // particular stamp actually leaves.
+  //
+  // THE CAP EXISTS SO THE RESERVATION CANNOT EAT THE WHOLE ROW.
+  // describeFreshness() in Forecast.cpp puts no upper bound on the minute
+  // count - it never rolls up into hours the way Listings.cpp's copy does - so
+  // a device offline long enough produces an arbitrarily wide string. Past the
+  // cap the stamp ellipsizes inside its own reservation instead of pushing the
+  // location off the card, which is the right way round: at that age the exact
+  // minute count has stopped being the interesting part of the sentence.
+  //
+  // THE TIGHT LOCATION BOX DOES NOT ALSO STOP SHORT BY kDayNightWidth, AND THE
+  // UNTIGHT ONE STILL DOES.
+  //
+  // The untight reservation stays exactly as it has been since this card was
+  // written, because nine of nine fielded devices draw that path and a change
+  // they would all see needs a reason none of them have. But it is worth
+  // writing down what that reservation is actually worth, because the tight
+  // row cannot afford to pay it twice: the Day/Night tag is on the row ABOVE.
+  // It is drawn at y=4 and 9pt reports a 22px fontHeight(), so its ink ends at
+  // 26 against a location whose box starts at 28. They cannot collide. The
+  // reservation guards against a future font change, not against any string
+  // this card can be handed today.
+  //
+  // Tight, that guard costs more than it protects. With the freshness stamp
+  // now sharing this row, keeping the kDayNightWidth term as well left the
+  // location 67 to 86px of the 300px body - and measured against the vendored
+  // glyph table "Annapolis" alone is 87px and "Annapolis, MD" is 125px, so
+  // every real location on this fleet would have ellipsized, and it would have
+  // ellipsized to protect two pixels of clearance from a row that is not
+  // there. Dropping the term recovers 64px and leaves the location between 101
+  // and 142px depending on how wide the stamp measured, which is enough for
+  // the ordinary case.
+  //
+  // So the only thing the tight location reserves against is the stamp beside
+  // it - a real neighbour on a real row, with a measured reservation of its
+  // own just below.
+  constexpr int kUpdatedGap = 8;
+  constexpr int kUpdatedMaxWidth = 200;
+  int updatedInkWidth = 0;
+  if (tight && updatedAt.length() > 0) {
+    updatedInkWidth = lcd.textWidth(updatedAt.c_str());
+    if (updatedInkWidth > kUpdatedMaxWidth) {
+      updatedInkWidth = kUpdatedMaxWidth;
+    }
+  }
+  const int updatedReservation = updatedInkWidth > 0 ? updatedInkWidth + kUpdatedGap : 0;
+
+  // Said out loud on every tight draw, because this is the card rearranging
+  // itself and the remote debug stream is the only thing a deployed device has
+  // to say so with. verbose rather than printf: a bound button is a
+  // configuration somebody chose, not a fault, and this would otherwise repeat
+  // on every appearance of the card forever.
+  if (tight) {
+    // "when there is a strip under it" is not hedging - a one-period forecast
+    // draws neither, and the strip block below says so on its own line. This
+    // line runs before the column count is known, so it must not claim a rule
+    // that turns out not to be drawn.
+    Log::verbose("[display] forecast is tight (floor %d) - hero unchanged, freshness stamp on "
+                 "the location row reserving %dpx, rule at 112 when there is a strip under it, "
+                 "strip drops its 'Now' column and compresses the rest to one icon and one "
+                 "joined line each",
+                 contentBottom(), updatedReservation);
+  }
+
   // Location, same placement as the retired showWeatherCard()'s own line -
   // this card answers the identical "72 degrees *where*" question that one
   // did.
   if (location.length() > 0) {
-    // Stops short of the Day/Night tag above it rather than running the full
-    // card width: the tag is drawn first and a long enough city name would
-    // otherwise print straight through it.
-    layoutLine(location, kCardMargin, 28, bodyWidth - kDayNightWidth, muted(),
-               "forecast.location");
+    // Untight, stops short of the Day/Night tag above it rather than running
+    // the full card width: the tag is drawn first and a long enough city name
+    // would otherwise print straight through it. Tight, it stops short of the
+    // freshness stamp that has joined it on this row instead, and takes back
+    // the tag's 64px - see the two paragraphs above for why the tag's
+    // reservation is the one that can be given up and the stamp's is not.
+    const int locationWidth =
+        tight ? bodyWidth - updatedReservation : bodyWidth - kDayNightWidth;
+    if (locationWidth > 0) {
+      layoutLine(location, kCardMargin, 28, locationWidth, muted(), "forecast.location");
+    } else {
+      // printf rather than verbose: the card was asked to say where it is and
+      // has drawn nothing at all, which is a defect rather than a routine
+      // decision, and noticing it must not depend on somebody having switched
+      // streaming on first.
+      //
+      // Only reachable on a tight card - the untight box is a constant 236px
+      // and cannot go non-positive - and only if kUpdatedMaxWidth is ever
+      // raised past the body width, since the stamp is capped at 200 of 300
+      // today. Kept anyway: the cap and the body width are two constants in
+      // two places, and the day somebody moves one of them this line is the
+      // difference between a missing location and a missing location nobody
+      // can explain.
+      Log::printf("[display] forecast.location: a %dpx freshness stamp left %dpx of the %dpx "
+                  "row, so no location was drawn at all",
+                  updatedReservation, locationWidth, bodyWidth);
+    }
+  }
+
+  // The stamp itself, right-aligned into the reservation measured for it.
+  // Drawn after the location rather than before so this reads down the row
+  // left to right in source order; they cannot overlap either way, because the
+  // location box was narrowed by exactly this much.
+  if (tight && updatedInkWidth > 0) {
+    layoutLine(updatedAt, kScreenW - kCardMargin, 28, updatedInkWidth, muted(),
+               "forecast.updated", Align::Right);
   }
 
   // The hero icon and temperature, side by side - icon on the left the way a
@@ -3223,41 +3461,208 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
                "forecast.condition");
   }
 
-  if (updatedAt.length() > 0) {
+  // The freshness stamp's own row, untight only - tight, it has already been
+  // drawn up on the location row above and this whole block is skipped. This
+  // is the row the tight layout reclaims; see the reasoning there.
+  if (!tight && updatedAt.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
     layoutLine(updatedAt, kCardMargin, 104, bodyWidth, muted(), "forecast.updated");
   }
 
+  // The outlook strip - five days untight, four tight. Column width divides
+  // the panel evenly (untight, kMaxForecastStripDays = 5, so 60px per column
+  // with no remainder at kScreenW = 320); each column centres its own day
+  // label, icon and temperature independently rather than sharing any x
+  // position with its neighbours, so dayCount can be anywhere from 1 to
+  // kMaxForecastStripDays without leaving a lopsided gap.
+  //
+  // THREE ROWS UNTIGHT, TWO ELEMENTS TIGHT. The full-size column is a label at
+  // y=122, a 17px-radius icon at cy=155 and a temperature at y=178, which is
+  // the 200px-deep card the budget cannot afford. The compressed column is a
+  // 10px-radius icon at cy=123 and then ONE line at y=132 carrying the day
+  // label and the temperature together, bottoming at 154 exactly - 132 plus
+  // the 22px fontHeight() reports at 9pt, with nothing to spare and nothing
+  // wasted. The 40px the strip gets is spent on keeping all three facts (which
+  // day, what it will do, how warm) rather than on keeping three rows.
+  //
+  // AND THE TIGHT STRIP DROPS COLUMN 0 ENTIRELY, WHICH IS WHAT BOUGHT BACK THE
+  // WIDTH.
+  //
+  // shortDayLabel() returns "Now" for index 0, and the period that column
+  // summarises is the period the hero block directly above it already renders
+  // in full - a 24px-radius icon, a 24pt temperature and the condition phrase.
+  // The tight card was spending a fifth of the one strip it could barely
+  // afford on a 20px restatement of the thing the whole decision above was
+  // taken to protect. Dropping it costs the card nothing a reader cannot see
+  // eight rows higher, and it is the only element on this card that can be
+  // removed and leave the card saying exactly as much as it did before.
+  //
+  // THE REMAINING DAYS THEN SPREAD, rather than staying on their old 60px
+  // pitch with a hole where column 0 was. Four days across the 300px body is
+  // 75px each, which is the width that lets the tight line carry the full
+  // three-character shortDayLabel() the untight strip uses - so the tight and
+  // untight labels are now the same string from the same helper, and the
+  // two-character truncation this branch carried for one revision is gone. It
+  // existed only because a 60px column could not hold "Mon 72" (63px); at 75px
+  // the widest realistic column, "Mon 100"/"Wed 100" at 73px, fits with 2px
+  // over. That also disposes of "No" as the abbreviation for the current
+  // period, which was the one open wording question here: there is no column 0
+  // left to abbreviate.
+  //
+  // THE WIDTH COMES FROM THE COLUMNS ACTUALLY DRAWN, NOT FROM
+  // kMaxForecastStripDays, so a short forecast spreads too. A device sent
+  // three periods draws two tight columns at 150px each, centred at 85 and
+  // 235 - spread across the strip rather than crammed at the left with a gap
+  // on the right. Every divisor divides 300 exactly (4->75, 3->100, 2->150,
+  // 1->300), so there is no truncation remainder to leave one column narrower
+  // than its neighbours.
+  //
+  // THE UNTIGHT STRIP DOES NOT SPREAD, AND THAT IS LEFT ALONE DELIBERATELY. It
+  // keeps a fixed 60px pitch from index 0 whatever dayCount is, so an untight
+  // card with three days draws three 60px columns left-packed with 120px of
+  // empty strip on the right. That is today's behaviour on nine of nine
+  // fielded devices and changing it is not in scope here - but it is a real
+  // asymmetry between the two paths and somebody comparing them later should
+  // find it written down rather than think one of them is a bug.
+  //
+  // MEASURED BEFORE THE RULE IS DRAWN, WHICH IS WHY THIS BLOCK MOVED ABOVE IT.
+  // The rule below is only drawn when there is a strip for it to separate, so
+  // the count has to be known first. That ordering is the whole of the change;
+  // none of the arithmetic here depends on the rule.
+  const uint8_t availableDays =
+      dayCount < kMaxForecastStripDays ? dayCount : kMaxForecastStripDays;
+  const uint8_t firstStripDay = tight ? 1 : 0;
+  const uint8_t stripColumns =
+      availableDays > firstStripDay ? static_cast<uint8_t>(availableDays - firstStripDay) : 0;
+  const int columnWidth = tight ? (stripColumns > 0 ? bodyWidth / stripColumns : bodyWidth)
+                                : bodyWidth / kMaxForecastStripDays;
+
   // A thin rule separating "right now" from "the rest of the week" - the
   // only line-art on this card that is not a weather icon.
-  lcd.drawFastHLine(kCardMargin, 118, bodyWidth, muted());
+  //
+  // Six pixels higher when tight, which is exactly the room freed by the
+  // freshness row moving up: the condition phrase above it is 12pt at y=80 and
+  // bottoms at 109 in both cases, so 112 is the first line that still clears
+  // it, and every pixel taken off the rule is a pixel the compressed strip
+  // below gets back.
+  //
+  // AND IT IS NOT DRAWN AT ALL WHEN THE TIGHT STRIP HAS NO COLUMNS. A server
+  // that sent a single period sent only "Now", and "Now" is the one column the
+  // tight branch drops - so the strip below is empty and the rule would be a
+  // separator with nothing on the far side of it. That is not a cosmetic
+  // problem. A rule is a promise that something follows, and a promise the
+  // card does not keep reads as content that failed to load rather than as
+  // content that was never there: a household would reasonably conclude the
+  // forecast was half-broken, and the honest tight card in that case is the
+  // hero and nothing else. The hero already answers the only period the server
+  // sent, so nothing is actually missing from the panel.
+  //
+  // THE UNTIGHT PATH ALWAYS DRAWS THE RULE, including the dayCount == 0 case
+  // where it too has an empty strip beneath it. That is today's behaviour on
+  // nine of nine fielded devices, and although the same argument would apply
+  // there it is a separate change that nobody has asked for and that every
+  // fielded household would see. The condition below is `!tight ||` for
+  // exactly that reason, not because the untight case is right.
+  const bool drawStripRule = !tight || stripColumns > 0;
+  if (drawStripRule) {
+    lcd.drawFastHLine(kCardMargin, tight ? 112 : 118, bodyWidth, muted());
+  } else {
+    // The whole absence in one line, rather than half of it - a reader of the
+    // stream should not have to work out from "no columns" that the rule went
+    // with them. verbose rather than printf: this is the correct rendering of
+    // a one-period forecast on a card with a button bound, not a fault.
+    Log::verbose("[display] forecast drew no strip and no rule - the server sent %u period(s), "
+                 "the tight strip drops the 'Now' column because the hero above already shows "
+                 "it, and a rule with nothing under it would read as content that failed to "
+                 "load",
+                 static_cast<unsigned>(dayCount));
+  }
 
-  // The five-day strip. Column width divides the panel evenly
-  // (kMaxForecastStripDays = 5, so 60px per column with no remainder at
-  // kScreenW = 320); each column centres its own day label, icon and
-  // temperature independently rather than sharing any x position with its
-  // neighbours, so dayCount can be anywhere from 1 to
-  // kMaxForecastStripDays without leaving a lopsided gap.
-  constexpr int kColumnWidth = (kScreenW - kCardMargin * 2) / kMaxForecastStripDays;
-  for (uint8_t i = 0; i < dayCount && i < kMaxForecastStripDays; i++) {
-    const int columnCentreX = kCardMargin + i * kColumnWidth + kColumnWidth / 2;
+  for (uint8_t i = firstStripDay; i < availableDays; i++) {
+    // Position by column, index by day. The two are the same number on the
+    // untight path and differ by one on the tight path, and conflating them is
+    // exactly how the first column would end up drawn at the second column's
+    // x - a card that reads as perfectly ordinary while showing Tuesday's
+    // weather under Monday's heading.
+    const int column = i - firstStripDay;
+    const int columnCentreX = kCardMargin + column * columnWidth + columnWidth / 2;
 
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
-    layoutLine(shortDayLabel(i, dayNames[i]), columnCentreX, 122, kColumnWidth, muted(),
-               "forecast.daylabel", Align::Centre);
+    if (!tight) {
+      layoutLine(shortDayLabel(i, dayNames[i]), columnCentreX, 122, columnWidth, muted(),
+                 "forecast.daylabel", Align::Centre);
+    }
 
     // Always the daytime variant: each strip column summarises a whole day,
     // not a specific night, so there is no isDaytime of its own to read the
     // way the hero above reads currentIsDaytime for "right now".
-    drawWeatherIcon(classifyCondition(dayConditions[i]), columnCentreX, 155, /*radius=*/17,
-                    /*isDaytime=*/true);
+    //
+    // A RADIUS-10 ICON IS SMALL, AND THAT IS THE ONE THING HERE THAT A TABLE
+    // CANNOT SETTLE. drawWeatherIcon() scales every feature off the radius, so
+    // partly-cloudy's sun disc comes out at radius * 0.38 - about 4px across -
+    // and the rain strokes at radius * 0.4. Whether that reads as weather or
+    // as a smudge has to be judged on glass. If it is a smudge, the decision
+    // already taken (CARD_AUDIT_2026_09_27.md section 9.1) is to drop the
+    // strip icon altogether and put the day label and the temperature on two
+    // 9pt rows at y=110 and y=132, losing the per-day condition and keeping
+    // the other two facts. That fallback is written down so it stays a
+    // decision rather than becoming a discovery.
+    //
+    // The icon's own ink can reach cy + radius * 0.95 (the sun's longest ray),
+    // which is y=132 against a joined line whose box starts at 132. They share
+    // at most a pixel of a ray tip, which is why the icon is drawn first and
+    // the text second: the text wins the overlap, and a clipped ray tip on one
+    // of the four 20px icons is not a legibility problem. Reversing the order
+    // would let a ray draw over a digit, which is.
+    drawWeatherIcon(classifyCondition(dayConditions[i]), columnCentreX, tight ? 123 : 155,
+                    /*radius=*/tight ? 10 : 17, /*isDaytime=*/true);
 
-    char tempBuffer[12];
-    snprintf(tempBuffer, sizeof(tempBuffer), "%d%s", dayTemperatures[i], dayUnits[i].c_str());
-    layoutLine(tempBuffer, columnCentreX, 178, kColumnWidth, ink(), "forecast.daytemp",
-               Align::Centre);
+    if (tight) {
+      // THE UNIT IS DROPPED, and only here. It still does not fit even at the
+      // widened 75px pitch - "Mon 100" is already 73px and the trailing "F"
+      // costs another 11 - and the hero temperature eight rows up is already
+      // carrying the unit for the whole card, so a reader who has seen "72F"
+      // at 24pt does not need the strip to re-state which scale the week is
+      // in. The untight column below keeps it, because at 60px it has been
+      // fitting a two-digit temperature plus a unit all along and dropping it
+      // there would be a change nine of nine devices would see for no reason.
+      //
+      // THE LABEL IS THE SAME shortDayLabel() THE UNTIGHT STRIP USES, with no
+      // shortening of any kind. It carried a two-character truncation for one
+      // revision, because CARD_AUDIT_2026_09_27.md section 9.1 wrote this line
+      // as `"Mo 72"` while shortDayLabel() returns three characters, and at
+      // the old 60px pitch three would not fit - "Mon 72" measures 63px and
+      // "Now 72" 64px against the vendored glyph table, so every column of
+      // every tight card would have ellipsized.
+      //
+      // Dropping column 0 fixed the width instead of the string, which is the
+      // better of the two fixes and made the truncation unnecessary: at 75px
+      // the two widest realistic columns, "Mon 100" and "Wed 100", measure
+      // 73px and fit with 2px over. So the tight and untight strips now name
+      // their days identically, which is one fewer way for the two paths to
+      // drift, and shortDayLabel() stays the single place that decides how a
+      // day is worded.
+      //
+      // Joined before it is measured, not after, for the reason
+      // showSportsCard() spells out about its own "@ " prefix: a string
+      // assembled after the fit was computed can have the ellipsis eat the
+      // part that was added, and then the layout has created the defect it
+      // exists to prevent. 24 bytes against a label shortDayLabel() caps at
+      // three characters and a temperature no wider than a sign and three
+      // digits.
+      char stripLine[24];
+      snprintf(stripLine, sizeof(stripLine), "%s %d", shortDayLabel(i, dayNames[i]).c_str(),
+               dayTemperatures[i]);
+      layoutLine(stripLine, columnCentreX, 132, columnWidth, ink(), "forecast.daytemp",
+                 Align::Centre);
+    } else {
+      char tempBuffer[12];
+      snprintf(tempBuffer, sizeof(tempBuffer), "%d%s", dayTemperatures[i], dayUnits[i].c_str());
+      layoutLine(tempBuffer, columnCentreX, 178, columnWidth, ink(), "forecast.daytemp",
+                 Align::Centre);
+    }
   }
 
   drawClock();
@@ -4171,6 +4576,14 @@ bool drawRgb565FromBuffer(const uint8_t* data, size_t size, int32_t boxX, int32_
 }  // namespace
 
 uint32_t consecutiveDrawFailures() { return gConsecutiveDrawFailures; }
+
+// See Display.h for why this is public at all: the in-rect image draw below
+// deliberately does not clear, and Graphic.cpp's tight branch is the one
+// caller that needs it to have been cleared anyway. One line rather than a
+// parameterised "clear this rect" - a partial clear would leave whatever the
+// previous card drew in the part that was not cleared, which is the exact
+// artifact this exists to prevent.
+void clearPanel() { lcd.fillScreen(bg()); }
 
 /// Declared ahead of its definition below purely so the in-rect draw, which
 /// comes first in this file, can call it too - see its own remarks further
