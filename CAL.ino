@@ -523,6 +523,13 @@ void setup() {
                   "entirely and opening the portal");
   }
   if (forced || !Provisioning::joinStoredNetwork()) {
+    // Two different reasons reach here and a support read needs to tell them
+    // apart: the networks failed, or the household held BOOT during the ladder
+    // to say the WiFi has changed.
+    if (Provisioning::setupRequestedDuringJoin()) {
+      Journal::line("[wifi] the household asked for WiFi setup during the join - "
+                    "opening the portal");
+    }
     // Repeated failure means the stored credentials are wrong or the network
     // is gone - retrying them indefinitely would look identical to an outage.
     Provisioning::run();

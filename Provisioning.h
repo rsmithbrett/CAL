@@ -20,4 +20,12 @@ bool run();
 /// send working devices back to provisioning.
 bool joinStoredNetwork();
 
+/// Whether the last joinStoredNetwork() stopped because the household held the
+/// BOOT button during the ladder rather than because the networks failed.
+///
+/// The button is watched throughout the join, not only at power-on: the wait
+/// the household is sitting through is exactly when they want to say the WiFi
+/// has changed. Reading this clears it.
+bool setupRequestedDuringJoin();
+
 }  // namespace Provisioning

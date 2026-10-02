@@ -4,6 +4,7 @@
 #include <WebServer.h>
 #include <WiFi.h>
 
+#include "BootButton.h"
 #include "Config.h"
 #include "Display.h"
 #include "Identity.h"
@@ -115,6 +116,15 @@ struct Candidate {
   int32_t rssi;
 };
 
+/// Set by attemptJoin() when the household holds BOOT during the ladder. Read
+/// and cleared by joinStoredNetwork(), which stops laddering and lets the
+/// caller open the portal.
+bool gSetupRequestedDuringJoin = false;
+
+/// How long BOOT must be held during the ladder. The same three seconds as the
+/// power-on gesture, so there is one hold time to learn.
+constexpr uint32_t kSetupHoldMs = 3000;
+
 bool attemptJoin(const Identity::Network& net) {
   for (uint8_t attempt = 1; attempt <= Config::kWifiJoinAttempts; ++attempt) {
     Display::showStatus("Connecting to WiFi",
@@ -122,6 +132,7 @@ bool attemptJoin(const Identity::Network& net) {
     WiFi.begin(net.ssid.c_str(), net.password.c_str());
 
     const uint32_t deadline = millis() + Config::kWifiJoinTimeoutMs;
+    bool prompted = false;
     while (millis() < deadline) {
       if (WiFi.status() == WL_CONNECTED) {
         Journal::printf("[wifi] joined '%s' on attempt %u of %u", net.ssid.c_str(),
@@ -129,6 +140,30 @@ bool attemptJoin(const Identity::Network& net) {
                         static_cast<unsigned>(Config::kWifiJoinAttempts));
         return true;
       }
+
+      // The household is standing in front of the unit while this runs, and
+      // until now nothing watched the button until the next power-on.
+      if (BootButton::isDown()) {
+        if (!prompted) {
+          Display::showStatus("Keep holding BOOT to set up WiFi", "Release now to cancel");
+          prompted = true;
+        }
+        if (BootButton::heldFor(kSetupHoldMs)) {
+          Journal::line("[wifi] BOOT held during the join ladder - stopping and opening "
+                        "WiFi setup");
+          BootButton::reset();
+          gSetupRequestedDuringJoin = true;
+          WiFi.disconnect();
+          return false;
+        }
+      } else if (prompted) {
+        // Released early. Put the attempt back on the glass so the screen does
+        // not keep telling somebody to hold a button they let go of.
+        Display::showStatus("Connecting to WiFi",
+                            net.ssid + "  (attempt " + String(attempt) + ")");
+        prompted = false;
+      }
+
       delay(250);
     }
     // WiFi.status() at the moment of the timeout separates a wrong passphrase
@@ -147,7 +182,16 @@ bool attemptJoin(const Identity::Network& net) {
 
 }  // namespace
 
+bool setupRequestedDuringJoin() {
+  const bool requested = gSetupRequestedDuringJoin;
+  gSetupRequestedDuringJoin = false;
+  return requested;
+}
+
 bool joinStoredNetwork() {
+  gSetupRequestedDuringJoin = false;
+  BootButton::begin();
+
   const uint8_t known = Identity::networkCount();
   if (known == 0) {
     Journal::line("[wifi] nothing remembered - no join attempted, going straight to the "
@@ -219,6 +263,11 @@ bool joinStoredNetwork() {
       Identity::rememberNetwork(net.ssid, net.password);
       return true;
     }
+    // A hold means the household has told us the network changed. Trying the
+    // rest of the list is the wait they just asked to end.
+    if (gSetupRequestedDuringJoin) {
+      return false;
+    }
   }
 
   // Nothing remembered was in range. Falling back to trying them blind covers
@@ -231,6 +280,9 @@ bool joinStoredNetwork() {
       if (net.ssid.length() > 0 && attemptJoin(net)) {
         Identity::rememberNetwork(net.ssid, net.password);
         return true;
+      }
+      if (gSetupRequestedDuringJoin) {
+        return false;
       }
     }
   } else {
