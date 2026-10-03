@@ -93,29 +93,73 @@ Count how many times each card was shown **while the motion sensor confirmed som
 was there**, how long each showing lasted, and aggregate it by day, week, month and
 year, so a marketing reader can be told what their screen actually earned.
 
-## Two numbers for every card, always
-
-**Every showing is recorded on every device.** How many times each card was shown, and
-for how long. A unit with no motion sensor still reports all of it.
-
-**Presence is a second measure layered on the first**, on units that have the sensor:
-of that screen time, how much had somebody in front of it.
-
-So a card carries two durations:
+## Four measures per card
 
 | Measure | Recorded on | Means |
 |---|---|---|
-| Shown | Every device | The card was on the glass for this long |
-| Shown with somebody there | Devices with a motion sensor | Of that time, this much had presence |
+| **Shown** | Every device | The card was on the glass this long |
+| **Seen** | Every device | A human was confirmed there while it was up |
+| **Sought** | Every device | Somebody stopped on it, having navigated to it |
+| **Acted on** | Every device | The card's action was pressed while it was up |
 
-A marketing reader gets reach from the first and attention from the second, and the two
-never have to be reconciled because one is a subset of the other by construction.
+### Seen has two sources, and either one is proof
 
-**Presence is absent, not zero, where there is no sensor.** A zero would be a claim that
-nobody was ever there. The screen time on that unit is still a real number and still
-counts; only the presence column is unknown. `/device` already reports whether a unit
-has a motion sensor, so the server can tell "none present" from "cannot tell" without
-asking the device anything new.
+A human is confirmed present when **the motion sensor says so**, or when **somebody is
+working the controls**. Both are evidence; neither depends on the other.
+
+The second matters more than it first appears. **A card crossed during a rewind was seen
+by a person, whether or not they stopped on it.** Somebody pressing back three times is
+in front of the device for all three cards, looking at each one as it passes. Counting
+only the card they landed on throws away two confirmed views and understates every card
+that sits between two popular ones.
+
+So any card drawn inside an active navigation window is Seen, destination or not. The
+window opens on the first forward or back press and closes after the auto-advance timer
+resumes — `CardManager.cpp` already suppresses that timer after a deliberate touch, so
+the window it needs exists today and is the thing that defines "still navigating".
+
+This also means **a unit with no motion sensor still reports Seen**, whenever somebody
+touches the controls. The sensor widens the measure; it does not own it.
+
+### Sought is narrower, deliberately
+
+Sought is the card somebody navigated to **and stayed on** — the auto-advance timer
+resumed while it was still up, or they pressed the action. A card flicked past is Seen
+and not Sought.
+
+Keeping these apart is the whole point: Seen answers "did a person look at this", Sought
+answers "did a person want this". Collapsing them would let a card that is merely in the
+way of a popular one look as wanted as its neighbour.
+
+`advanceCard()` and `rewindCard()` are the manual path and are already distinct from
+rotation, so both counters hang off a distinction the firmware makes today.
+
+**Acted on** is the button on a card — the press that already reaches the press log.
+Recording it here as a card attribute puts reach, attention, intent and response on one
+row, so a marketing reader can see that a card was shown 400 times, seen 130, sought 22
+and acted on 9, and know what each number means.
+
+## Seen is a subset of Shown, always
+
+Every showing is recorded on every device: how many times, and for how long. Seen is
+carved out of that same time, so the two never need reconciling — one contains the other
+by construction.
+
+**Where a unit has no motion sensor, its Seen figure counts navigation only.** That is a
+real number and it belongs in the report, but it is a floor rather than a measure: the
+unit reports what it can prove, and people who stood and watched without touching
+anything are not in it.
+
+So the report distinguishes three things, and must not blend them:
+
+| | |
+|---|---|
+| Seen, sensor unit | Presence or navigation. The fuller measure. |
+| Seen, no sensor | Navigation only. A floor. |
+| Sensor absent | Said out loud, so a low figure is read as a thinner measurement rather than a quiet screen. |
+
+`/device` already reports whether a unit has a motion sensor, so the server can tell
+these apart without asking the device anything new.
 
 ## It has to be WHICH card, not which kind of card
 
@@ -158,8 +202,10 @@ Per showing:
 |---|---|
 | Card id | The slot. Known-card ids already on the wire. |
 | Content key | Which listing, which link, which picture. Absent where the card is its own content. |
-| Duration shown | The baseline measure, on every device. |
+| Times shown, duration shown | The baseline, on every device. |
 | Duration with presence | Omitted entirely on a unit with no sensor. |
+| Times sought | Reached by forward or back rather than by rotation. |
+| Times acted on | The card's action pressed while it was up. |
 
 Rolled up on the device into a small fixed buffer, keyed by card **and content**, and
 uploaded at check-in. The device holds totals, not a log of showings: a per-showing log
@@ -184,8 +230,39 @@ optional fields**. So:
 
 ## The server side
 
-- Store per device, per card, per hour. Hourly is the smallest bucket worth keeping and
-  rolls up cleanly into day, week, month and year without storing four tables.
+### The hour is the smallest thing stored
+
+One row per device, per card, per content key, per hour. Day, week, month and year are
+all sums over it, so there is one table rather than four and no chance of the four
+disagreeing.
+
+Nothing finer is kept. A per-showing log answers no question anybody asks and grows
+with screen time rather than with fleet size.
+
+### Thirteen months, trailing
+
+Thirteen rather than twelve so this October can be compared with last October. A reader
+asking "is the screen doing better than a year ago" needs both endpoints, and twelve
+months loses the far one the day they ask.
+
+Rows older than thirteen months are deleted on a schedule, oldest hour first.
+
+### Purging on request
+
+Two shapes, because the two reasons differ:
+
+| Purge | Removes | For |
+|---|---|---|
+| By card type | Every row for a card family across the scope — all QR codes, all announcements | A card type being retired, or counted wrongly and not worth keeping |
+| By specific card | One card and one content key — this QR link, this listing, this picture | A campaign that should not be reported on, or content removed at somebody's request |
+
+A purge is scoped to one organization and recorded in the audit log with who asked and
+what it covered. Deleting somebody's measurement history is a write worth being able to
+account for later.
+
+Totals are recomputed rather than adjusted. Subtracting a purged figure from a stored
+roll-up leaves a total that no longer matches its own rows, and that divergence is
+invisible until somebody checks.
 - Aggregate by display, by account, and by brand, since a marketing reader asks "what
   did my fleet earn", not "what did display 12 earn".
 - **Screen time totals cover every display.** Every unit reports it, so the fleet number
