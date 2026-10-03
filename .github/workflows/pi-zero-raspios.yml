@@ -1,0 +1,30 @@
+name: Pi Zero Raspberry Pi OS fixture
+
+on:
+  push:
+    branches: ["feature/pi-zero-client"]
+    paths:
+      - "pi/ci/test-raspios-image.sh"
+      - "pi/src/InstallationConfig.h"
+      - "pi/tests/installation_config_test.cpp"
+      - "pi/Makefile"
+      - ".github/workflows/pi-zero-raspios.yml"
+  workflow_dispatch:
+
+jobs:
+  raspios-display:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+      - name: Install image and filesystem tools
+        run: sudo apt-get update && sudo apt-get install -y qemu-user-static parted e2fsprogs xz-utils
+      - name: Build and render inside pinned Raspberry Pi OS image
+        run: bash pi/ci/test-raspios-image.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-zero-raspios-frames
+          path: pi-raspios-*.bmp

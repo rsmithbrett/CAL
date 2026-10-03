@@ -1,0 +1,47 @@
+# Raspberry Pi Zero display client — design proposal
+
+Status: display fixture and first shared scheduler slice implemented. No server enrollment, live cards, hardware run, or package update is implemented on this branch.
+
+The Pi credential-file reader is now implemented as an isolated storage boundary, with private-file and per-installation checks. It is not yet connected to a network client. Server-side provisioning and identity are being developed separately in DiscoverAroundMe PR #15.
+
+## Goal and scope
+
+Build a Linux display client for Discover Around Me that shows the server-assigned cards and graphics on an attached screen. Every installation is a separate device with its own revocable identity, owner/brand/account assignment, policy, action queue, event cursor, diagnostics, and update state. An Android installation or ESP32 panel cannot supply its credential to a Pi.
+
+The base product is the **original Raspberry Pi Zero**, running Raspberry Pi OS 32-bit on its single-core ARM1176 (ARMv6) CPU with 512 MB RAM. Zero W and Zero 2 W are later profiles, not substitutes for the baseline. The original Zero has no built-in wireless networking, so the live-client stage needs a chosen USB network adapter or other explicit network path. The exact physical board revision, display and input device remain to be identified before hardware acceptance. Measure boot, memory, frame rate, decoding and network behavior on the original Zero before promising performance. References: https://www.raspberrypi.com/products/raspberry-pi-zero/ and https://www.raspberrypi.com/documentation/computers/processors.html .
+
+This is a separate Linux package and service, not CAL's ESP32 loader and not the shelved Android APK. CAL's `App/` is the current behavioral reference. Keep this branch separate from CAL `main`, which creates firmware releases on push. The server's formal Device Client Specification and live API console govern the wire. Update those when an actual Pi route/field is introduced, not merely from this proposal.
+
+## Client boundaries
+
+1. **Identity and activation:** a Pi installation has a server record, unique secret, platform/package version, activation, assignment, and revocation lifecycle. Do not synthesize a MAC address to pass physical-only enrollment or reuse an ESP32 secret. The existing server check-in route currently requires a physical-device identity, so live calls are gated on a server change. A normal package update retains identity; a fresh install or erased storage receives a new identity unless a separately authorized transfer flow exists.
+2. **Transport and state:** one adapter owns TLS, authentication, timeouts, backoff, local persisted state and bounded logs. The client uses authenticated check-in to obtain resolved policy/actions and `GET /api/device/watch` JSON long polling with a cursor while running; it reconciles from a snapshot and refreshes after reconnect. Inbound webhooks are not a client push channel. A durable pending-action queue retains each stable instance ID until `acceptedActionIds` acknowledges it. Never log calendar details or expose secrets in diagnostics.
+3. **Card registry and scheduler:** the server supplies card order, dwell, interleave, content, actions, branding and assets. Extract the actual scheduler source from `App/CardManager.cpp` behind platform adapters and compile that same source into ESP32 and Pi. Do not copy a second scheduler or mistake a static card picture for parity. Unknown card IDs are skipped with a bounded compatibility report.
+4. **Renderer and input:** measure the actual framebuffer/display geometry, density, safe area and orientation at runtime. Select and verify server asset variants/hashes; preserve aspect ratio and semantic content. Do not upscale the ESP32 320 × 240 frame or crop QR codes, logos, captions, disclaimers or actions. Evaluate a small native Linux renderer on real hardware before fixing the graphics backend; avoid assuming a Chromium kiosk can meet the original Zero memory and latency budget. Normalize touch, keyboard, buttons and HDMI-CEC remote input into shared actions only where that input actually exists. Provide visible focus and a clear no-input fallback.
+5. **Configuration and locality:** server policy and brand/account inheritance remain authoritative. The client caches only the last permitted display state for offline use, marks stale/unavailable data clearly, and bounds asset cache size, writes, telemetry and log retention. Device-specific screen behavior is an adapter/capability, not a forked card policy. Locale content follows the operative server contract; do not invent a translation-file dependency.
+6. **OTA and recovery:** app updates are signed Linux packages distributed through a controlled, authenticated repository or managed fleet channel, installed by an explicitly configured updater and restarted under systemd. Package and OS security updates have separate policies; the server must not offer an ESP32 firmware image to a Pi. Define channel, package signing, monotonic versions, staged rollout, update window, health check, rollback to a retained known-good package, interrupted install and SD-card failure behavior before unattended rollout. No remote arbitrary shell commands, plain APK/ESP32 binaries, or unsigned scripts. Server card/graphic changes normally require no client package update.
+
+## Delivery stages
+
+1. Confirm first target board (Zero/Zero W versus Zero 2 W), Raspberry Pi OS image, HDMI/display resolution, Wi-Fi, input/remote and power. Capture baseline cold boot, memory and image-decode measurements. Use an isolated development identity and database.
+2. Extract scheduler behavior to shared C++ and build host tests plus ESP32 regression. Record order, interleave, history, dwell, manual navigation, policy replacement and empty-card semantics.
+3. Add Pi platform adapters and a headless frame fixture, then validate the actual HDMI display and input on a physical Zero. A host build or screenshot alone does not pass the hardware gate.
+4. Specify and implement server-side Pi identity/enrollment/check-in with authorization and tenant-isolation contract tests. Update the formal client specification and developer API docs in the same change. Keep ESP32 compatibility explicit.
+5. Show the first live card with its provider data and server graphic, then add the registered card set, watch/reconcile, durable actions, stale/offline behavior, localization and branding.
+6. Package the client and systemd service; test signed over-the-air update, health validation, rollback and recovery on hardware before any wider deployment.
+
+## Process
+
+Follow `ONBOARDING.md`, `README.md`, `CI.md` and `TEST_PLAN.md` in the server repository, and CAL's firmware build procedure. Record design and tests before behavior changes; keep feature code on isolated branches. Run both the new host/Pi checks and `bash ci/build-firmware.sh` for shared-source changes. Read printed test/build summaries, not only exit codes. A fresh CI build is not a physical Pi demonstration. No production credential or production database belongs in development fixtures.
+
+## Emulation boundary
+
+The first ARM gate cross-builds the shared scheduler and layout tests for ARMv6 soft-float and runs those processes under `qemu-arm -cpu arm1176`. Ubuntu's available hard-float runtime executes newer ARM instructions, so Raspberry Pi OS ABI compatibility needs a pinned Pi OS ARMv6 sysroot in a later gate. This first gate does not boot an OS or run the display executable. Use QEMU `raspi0` for later original Zero-like ARM1176/512 MB system checks when a pinned bootable image is available. QEMU currently lists no Zero 2 W machine; `raspi3ap` is an approximate Cortex-A53/512 MB profile, not certification of a Zero 2 W. Emulated CPU timing, HDMI-CEC, network radio, GPIO wiring, power, thermal behavior and SD recovery do not establish physical-device behavior. Keep QEMU fixtures in CI as automated checks and reserve the final display/input/update gate for a real board. Reference: https://www.qemu.org/docs/master/system/arm/raspi.html and https://www.qemu.org/docs/master/user/main.html .
+
+## First coding slice: shared due-card logic
+
+Extract the existing `CardManager` active-counter tick and due-interstitial selection into `pi/src/ScheduleCore.h` and call that exact header from the ESP32 `App/CardManager.cpp`. This is a narrow shared-source seam, not the complete scheduler or a Pi executable. Preserve the existing showable filter, order tie break, threshold (`cardsSince > interleaveEvery`), saturation, and reset-on-show behavior. Next extract list cursor and history/dwell transitions without forking behavior.
+
+## First display executable: fixture renderer
+
+The first runnable `pi-card` uses SDL2's software renderer and SDL_ttf to draw a visibly labeled development fixture at the connected screen's runtime output size. `--once output.bmp --width N --height N` runs headlessly for reproducible image/layout checks. `Layout.h` computes safe regions and aspect-preserving contain for a 4:3 graphic fixture across 4:3, 16:9 and portrait viewports. This does not fetch a server asset, display real provider data, rotate cards, enroll a device, or update a package. The fixture is intentionally marked on screen. The graphics backend is provisional until tested on a physical original Zero and Zero 2 W; QEMU/CI does not prove performance or HDMI output.
