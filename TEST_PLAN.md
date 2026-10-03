@@ -1381,6 +1381,66 @@ exactly as it did before:
 
 ---
 
+## 8. Holding BOOT during startup to set up WiFi
+
+CAL commit `2ccaa9c`. The detector polls GPIO 0 from `attemptJoin()`'s wait
+loop, which is where the join ladder spends nearly all of its time, so the
+gesture is live for the whole window a household is standing there watching it
+fail.
+
+**None of this has run on hardware.** It compiles, and the four rows below are
+what would say it works. Row 3 is the one that matters most: it's the row where
+a wrong answer erases a customer's device.
+
+### 8a. The gesture works mid-ladder
+
+Store a wrong passphrase and power on. Let the first attempt time out, then hold
+BOOT during the second.
+
+- Within 3 seconds the panel says to keep holding to set up WiFi.
+- The ladder stops rather than finishing its remaining attempts.
+- The portal comes up and shows the setup code.
+- The journal distinguishes "household asked" from "networks failed".
+
+### 8b. A stray tap does not derail a good join
+
+Store correct credentials and power on. Tap BOOT once, briefly, during the join.
+
+- The join continues and completes.
+- No prompt is drawn, or one is drawn and cleared on release with the panel
+  restored to what it was showing.
+- The timer resets on release, so two taps a second apart do not add up to a
+  hold.
+
+### 8c. Eleven seconds during the ladder does NOT erase identity
+
+Hold BOOT for 11 seconds while the join ladder is running.
+
+- The WiFi portal opens.
+- **Device identity survives.** It still knows its id and its secret, and after
+  the portal takes new credentials it checks in as the same device.
+- The 10-second erase tier is reachable only from power-on, so a reader holding
+  too long to fix WiFi cannot cross into it.
+
+This is the scenario the feature is riskiest for. A household fixing their WiFi
+holds the button for as long as it takes to read the screen, and an erase here
+means the device has to be registered again, by somebody who did nothing wrong.
+
+### 8d. Eleven seconds from power-on still erases, as before
+
+Hold BOOT from the moment power is applied, through 11 seconds.
+
+- Identity is erased, exactly as it was before this change.
+- The power-on gesture and both of its tiers are untouched.
+
+### 8e. Known gaps
+
+- The handover boundary is unobserved. CAL tears its detector down when the App
+  takes over and the App's own `forceUpdateCheckRequested()` takes the pin.
+  Nothing has watched a press land in the gap between them.
+- The prompt's restore path is only as good as `gPanelUsedForGesture`. A release
+  during a panel redraw has not been tried.
+
 ## What a clean compile does and does not prove
 
 Recorded once, because several commits in this repository lean on it:
