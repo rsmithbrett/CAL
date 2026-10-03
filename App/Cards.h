@@ -122,6 +122,9 @@ using StatusFn = String (*)();
 /// whose largest contiguous block is the binding constraint.
 using DescribeFn = String (*)(uint16_t itemIndex);
 
+/// Optional hidden identifiers captured with a press; only Listings supplies these.
+using ListingIdsFn = void (*)(uint16_t itemIndex, String& compassPid, String& mlsNumber);
+
 /// The longest asset id a policy entry can carry. Matches Assets::kMaxIdLength,
 /// which is what actually validates one - Graphic.cpp static_asserts that the
 /// two agree, so a divergence is a compile error rather than a silently
@@ -251,6 +254,7 @@ struct CardSpec {
   /// Optional - see DescribeFn. nullptr for a card with nothing worth naming in
   /// a press notification, which is the honest answer for a clock or a splash.
   DescribeFn describe = nullptr;
+  ListingIdsFn listingIds = nullptr;
 
   // ---- Policy. Built-in defaults until a cardPolicy arrives on check-in,
   // then replaced wholesale by whatever the server said (see

@@ -76,6 +76,8 @@ struct Pending {
   /// it was. Expected to be one line under 200 characters - see Cards::DescribeFn,
   /// and packEntry() in the .cpp for why it is stored last.
   String onScreenSummary;
+  String compassPid;
+  String mlsNumber;
 };
 
 /// A card draws at most this many buttons - what fits on a 320px-wide panel
@@ -108,7 +110,8 @@ uint8_t forCard(const char* cardId, Definition* out, uint8_t maxOut);
 /// and ordinary; see Pending::onScreenSummary. Truncated to
 /// kMaxOnScreenSummaryLength here rather than at the call site, so every path
 /// into the queue gets the same cap.
-bool recordPress(const Definition& definition, const String& onScreenSummary = String());
+bool recordPress(const Definition& definition, const String& onScreenSummary = String(),
+                 const String& compassPid = String(), const String& mlsNumber = String());
 
 /// The longest on-screen summary a press will carry. Matches the server's own
 /// cap and column width (CheckInGatewayService.MaxOnScreenSummaryLength), so the

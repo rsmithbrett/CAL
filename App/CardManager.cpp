@@ -811,7 +811,12 @@ void handleTap(const Touch::Tap& tap) {
       if (gCurrent.card >= 0 && gCards[gCurrent.card].describe != nullptr) {
         onScreen = gCards[gCurrent.card].describe(gCurrent.item);
       }
-      Actions::recordPress(pressed, onScreen);
+      String compassPid;
+      String mlsNumber;
+      if (gCurrent.card >= 0 && gCards[gCurrent.card].listingIds != nullptr) {
+        gCards[gCurrent.card].listingIds(gCurrent.item, compassPid, mlsNumber);
+      }
+      Actions::recordPress(pressed, onScreen, compassPid, mlsNumber);
 
       // A Banner Button's whole reason for existing: pressing it satisfies the
       // announcement, on top of - not instead of - whatever effect the press

@@ -243,8 +243,9 @@ Result fetchMine() {
     f["listings"][0]["distanceMiles"] = true;
     // The one whitelisted field this card never draws. It rides along so a
     // button press can carry it into the press log and the email - see
-    // ListingInfo::mlsNumber and cardDescribe() below.
+    // ListingInfo and cardListingIds() below.
     f["listings"][0]["mlsNumber"] = true;
+    f["listings"][0]["compassPid"] = true;
     return f;
   }();
 
@@ -532,6 +533,7 @@ Result fetchMine() {
     info.daysOnMarket = listing["daysOnMarket"] | 0;
     info.distanceMiles = listing["distanceMiles"] | 0.0;
     info.mlsNumber = String((const char*)(listing["mlsNumber"] | ""));
+    info.compassPid = String((const char*)(listing["compassPid"] | ""));
     result.count++;
   }
 
@@ -770,6 +772,12 @@ void cardDraw(uint16_t itemIndex) {
 /// A status screen returns empty rather than "No listings nearby". A press on a
 /// card showing nothing has nothing to name, and inventing a description would
 /// put a sentence in the press log that reads like content.
+void cardListingIds(uint16_t itemIndex, String& compassPid, String& mlsNumber) {
+  if (gLast.status != Status::Ok || itemIndex >= gLast.count) return;
+  compassPid = gLast.listings[itemIndex].compassPid;
+  mlsNumber = gLast.listings[itemIndex].mlsNumber;
+}
+
 String cardDescribe(uint16_t itemIndex) {
   if (gLast.status != Status::Ok || itemIndex >= gLast.count) {
     return String();
@@ -783,15 +791,6 @@ String cardDescribe(uint16_t itemIndex) {
   if (listing.bedrooms > 0 || listing.bathrooms > 0) {
     summary += " - " + String(listing.bedrooms, 0) + "bd/" + String(listing.bathrooms, 1) + "ba";
   }
-  // The MLS number appears here and nowhere else on this device: never on the
-  // card, only in what a press carries. It is last because it is the one part
-  // written for the recipient rather than for the household - an agent reading
-  // the email can look the listing up by it, and if the 200-character cap ever
-  // truncates this string it is the right thing to lose, since the address
-  // above already identifies the property.
-  if (listing.mlsNumber.length() > 0) {
-    summary += " - MLS " + listing.mlsNumber;
-  }
   return summary;
 }
 
@@ -802,6 +801,7 @@ String cardDescribe(uint16_t itemIndex) {
   spec.fetch = cardFetch;
   spec.itemCount = cardItemCount;
   spec.describe = cardDescribe;
+  spec.listingIds = cardListingIds;
   spec.draw = cardDraw;
   spec.isNotable = cardIsNotable;
   spec.status = cardStatus;

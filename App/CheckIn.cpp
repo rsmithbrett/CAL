@@ -95,6 +95,12 @@ void addPendingActions(JsonDocument& requestDoc) {
     if (pending[i].onScreenSummary.length() > 0) {
       entry["onScreenSummary"] = pending[i].onScreenSummary;
     }
+    if (pending[i].compassPid.length() > 0) {
+      entry["compassPid"] = pending[i].compassPid;
+    }
+    if (pending[i].mlsNumber.length() > 0) {
+      entry["mlsNumber"] = pending[i].mlsNumber;
+    }
   }
   Log::printf("[checkin] carrying %u pending action(s)", count);
 }
