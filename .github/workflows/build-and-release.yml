@@ -170,6 +170,35 @@ jobs:
         # its executable bit into git, and this way it does not matter.
         run: bash ci/build-firmware.sh
 
+
+      - name: Compose the release body
+        # WHAT CHANGED FOR A READER, THEN THE CHECKSUMS. The body was
+        # combined-checksums.txt alone, so every release read as eight SHA-256
+        # lines and nothing else - a person deciding whether to install this
+        # learned nothing from it. Owner, 2026-10-04: "the detail is what fixed
+        # or changed for the user not code description."
+        #
+        # The Unreleased section of RELEASE_NOTES.md is the source, because it
+        # is written at merge time by whoever made the change and knows what a
+        # household will notice. Generating from commit subjects was the
+        # alternative and it produces exactly the code description being asked
+        # against.
+        #
+        # An empty or missing section is not an error: a build with nothing
+        # user-visible in it still has to publish, and it falls through to the
+        # checksums the body already carried.
+        run: |
+          {
+            awk '/^## Unreleased$/{on=1; next} on && /^## /{exit} on' RELEASE_NOTES.md \
+              | sed '/^---$/d'
+            echo
+            echo '### Checksums'
+            echo '```'
+            cat combined-checksums.txt
+            echo '```'
+          } > release-body.md
+          echo "--- release body ---"
+          cat release-body.md
       - name: Publish the "latest" release
         # continue-on-error, deliberately: this step replaces every asset on a
         # tag that never changes name, and that replace-in-place dance
@@ -187,7 +216,7 @@ jobs:
         with:
           tag_name: latest
           name: Latest build (${{ github.sha }})
-          body_path: combined-checksums.txt
+          body_path: release-body.md
           make_latest: true
           # CAL's and App's own per-binary checksums.txt are deliberately not
           # listed here: both build directories produce a file with that
@@ -256,7 +285,7 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.tag }}
-          body_path: combined-checksums.txt
+          body_path: release-body.md
           make_latest: false
           # See the "latest" step above: CAL's and App's per-binary
           # checksums.txt collide on basename and are deliberately left out;
