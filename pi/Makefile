@@ -5,7 +5,7 @@ ARM_FLAGS = -marm -march=armv6 -mfloat-abi=soft
 QEMU_ARM ?= qemu-arm
 ARM_SYSROOT ?= /usr/arm-linux-gnueabi
 
-.PHONY: test test-armv6 demo checkin clean
+.PHONY: test test-armv6 test-checkin-transport demo checkin clean
 
 test: build/schedule_core_test build/layout_test build/installation_config_test
 	./build/schedule_core_test
@@ -22,6 +22,13 @@ test-armv6: build/armv6/schedule_core_test build/armv6/layout_test build/armv6/i
 demo: build/pi-card
 
 checkin: build/pi-checkin
+
+test-checkin-transport: build/pi-checkin-test build/pi-checkin
+	python3 tests/checkin_transport_test.py ./build/pi-checkin-test ./build/pi-checkin
+
+build/pi-checkin-test: src/checkin.cpp src/CheckInTransport.h src/InstallationConfig.h
+	mkdir -p build
+	$(CXX) $(CXXFLAGS) -DPI_CHECKIN_TEST_LOOPBACK -Isrc src/checkin.cpp -o $@ -lcurl
 
 build/pi-checkin: src/checkin.cpp src/CheckInTransport.h src/InstallationConfig.h
 	mkdir -p build

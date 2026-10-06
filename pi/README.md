@@ -15,3 +15,11 @@ The separate `pi-zero-raspios.yml` workflow downloads the pinned official 32-bit
 `InstallationConfig.h` is the first credential storage boundary for a future provisioned Pi. It accepts an owner-only regular file (mode `0600` or stricter), refuses symlinks, and parses exactly `installationId=<UUID>` and `deviceSecret=<43-character unpadded base64url>` on separate newline-terminated lines. The secret comes from the server's one-time provisioning response; this fixture does not enroll or contact a server. Store one unique file per installation, never commit one or reuse an ESP32 credential. `make -C pi test` and `test-armv6` exercise distinct installations and refusal behavior; the Raspberry Pi OS workflow also runs the tests inside the pinned image. No production secret is needed for these tests.
 
 `make -C pi checkin` builds the first check-in **transport probe** (requires libcurl development headers). Once the server PR is deployed and an installation is provisioned and activated, run `pi/build/pi-checkin https://SERVER PRIVATE_CREDENTIAL_FILE PACKAGE_VERSION`. It loads the private credential and posts an HTTPS JSON heartbeat to `/api/checkin` with `X-Device-Secret`; certificate verification, timeouts and a response-size cap are enforced. It reports the HTTP status and byte count without printing the secret or returned content. This probe does **not** parse acknowledgement, policy or actions, and a local build is not evidence of a live check-in. Use a unique credential file for each Pi. Do not point the probe at a production server during development.
+
+`make -C pi test-checkin-transport` runs the actual native probe twice against a
+loopback fake with distinct temporary credentials, revokes one fake identity,
+and verifies the other still checks in. Only the separately compiled test
+binary can use plaintext on numeric `127.0.0.1`; the normal binary still
+requires HTTPS. This is a transport regression, **not** the Bolt 1 exit test:
+the fake does not exercise the server's provisioning, policy resolution, or
+revocation implementation, and the probe does not yet parse policy responses.

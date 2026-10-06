@@ -19,9 +19,18 @@ struct Reply {
 inline Reply post(const std::string& baseUrl,
                   const PiInstallation::Credentials& credentials,
                   const std::string& requestJson) {
-  if (baseUrl.compare(0, 8, "https://") != 0 ||
-      baseUrl.find_first_of("/?#@ \t\r\n", 8) != std::string::npos ||
-      baseUrl.size() <= 8) {
+  bool testLoopback = false;
+#ifdef PI_CHECKIN_TEST_LOOPBACK
+  // Compiled only into the integration-test binary. Never permit non-TLS
+  // traffic to a hostname (including localhost, which can be remapped).
+  testLoopback = baseUrl.compare(0, 17, "http://127.0.0.1:") == 0 &&
+      baseUrl.size() > 17 &&
+      baseUrl.find_first_not_of("0123456789", 17) == std::string::npos;
+#endif
+  if ((!testLoopback && (baseUrl.compare(0, 8, "https://") != 0 ||
+       baseUrl.find_first_of("/?#@ \t\r\n", 8) != std::string::npos ||
+       baseUrl.size() <= 8)) ||
+      (testLoopback && baseUrl.find_first_of("/?#@ \t\r\n", 7) != std::string::npos)) {
     throw std::invalid_argument("check-in requires an HTTPS server origin");
   }
   if (!PiInstallation::validUuid(credentials.installationId) ||
@@ -46,9 +55,9 @@ inline Reply post(const std::string& baseUrl,
     const std::string url = baseUrl + "/api/checkin";
     curl_easy_setopt(handle, CURLOPT_URL, url.c_str());
 #if LIBCURL_VERSION_NUM >= 0x075500
-    curl_easy_setopt(handle, CURLOPT_PROTOCOLS_STR, "https");
+    curl_easy_setopt(handle, CURLOPT_PROTOCOLS_STR, testLoopback ? "http" : "https");
 #else
-    curl_easy_setopt(handle, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+    curl_easy_setopt(handle, CURLOPT_PROTOCOLS, testLoopback ? CURLPROTO_HTTP : CURLPROTO_HTTPS);
 #endif
     curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
