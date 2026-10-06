@@ -45,3 +45,7 @@ Run `make -C pi test` on a clean host compiler and inspect the assertion summary
 ## Fixture display executable gate
 
 Build `make -C pi demo` with SDL2/SDL_ttf development libraries. Run `SDL_VIDEODRIVER=dummy pi/build/pi-card --width 320 --height 240 --once /tmp/pi-320.bmp` and repeat at 1280x720. Inspect BMP dimensions and a nonempty colored frame; unit-test safe bounds and aspect-preserving contain across four viewports with `make -C pi test`. On a real Pi, run fullscreen and verify readable text, screen safe area and sustained use. These are fixture checks, not live card or physical hardware results.
+
+## Native policy boundary — 2026-10-06
+
+Exercise acknowledged policy decoding with distinct IDs, explicit timing/order, absent/null policy preservation, explicit empty replacement and failed replacement preserving prior state. Reject malformed/truncated JSON, duplicate keys/IDs, wrong acknowledgment/scalar types, oversized/deep documents, too many entries and timing overflow. Preserve unknown IDs and optional fields for registry compatibility. Run the same boundary tests on host and ARM1176; keep two-identity native/server revocation CI as the wire-contract check. Renderer/provider acceptance remains a later gate.

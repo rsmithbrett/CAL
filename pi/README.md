@@ -33,3 +33,7 @@ credential files, and two JSON files describing distinct expected `cardPolicy`
 objects (or subsets). Run again with `--revoked-first` after deactivating only the
 first dedicated test device. The second policy must still match. A host run is
 native integration evidence, not ARMv6 emulation or physical Zero acceptance.
+
+## Native policy boundary
+
+Install `nlohmann-json3-dev` alongside the libcurl development package. `make test` and `make test-armv6` include the bounded policy decoder and replacement-state tests. `pi-checkin` now requires an acknowledged, valid policy response before saving private evidence, and reports only validity/presence/count. Unknown card IDs and optional policy fields are retained for the upcoming registry adapter; they are not rendered by this slice. Missing/null policy keeps current state, while an explicit empty cards array replaces it with empty state.

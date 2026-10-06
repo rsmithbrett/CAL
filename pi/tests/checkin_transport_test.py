@@ -22,6 +22,7 @@ def main():
     secrets = [base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("=") for _ in range(2)]
     active = set(secrets)
     observed = []
+    response_override = [None]
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
@@ -31,6 +32,8 @@ def main():
             observed.append((self.path, secret, payload))
             status = 200 if secret in active else 401
             body = json.dumps({"acknowledged": True, "cardPolicy": {"cards": [{"id": str(secrets.index(secret))}]}}) if status == 200 else "{}"
+            if status == 200 and response_override[0] is not None:
+                body = response_override[0]
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -83,6 +86,14 @@ def main():
                 pass
             else:
                 raise AssertionError("Unexpected native policy was accepted")
+            for invalid in ["{", '{"acknowledged": false}', '{"acknowledged":true,"cardPolicy":{"cards":"wrong"}}']:
+                response_override[0] = invalid
+                evidence = pathlib.Path(directory) / "invalid-response.json"
+                rejected = subprocess.run([test_binary, origin, str(files[1]), "pi-test", "--response-file", str(evidence)],
+                                          capture_output=True, text=True, timeout=10)
+                assert rejected.returncode != 0 and not evidence.exists()
+                assert all(secret not in rejected.stdout + rejected.stderr for secret in secrets)
+            response_override[0] = None
             print("native transport: two private identities, isolated revocation, TLS-only production binary passed")
     finally:
         server.shutdown()

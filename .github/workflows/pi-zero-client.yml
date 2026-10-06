@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install check-in transport dependency
-        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev nlohmann-json3-dev
       - name: Build and run shared scheduling tests
         run: make -C pi test checkin test-checkin-transport
 
@@ -27,7 +27,7 @@ jobs:
       - name: Install Pi Zero cross compiler and QEMU user mode
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++-arm-linux-gnueabi qemu-user
+          sudo apt-get install -y g++-arm-linux-gnueabi qemu-user nlohmann-json3-dev
       - name: Build and run tests as ARM1176
         run: |
           arm-linux-gnueabi-g++ --version | head -1

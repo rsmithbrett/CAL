@@ -45,3 +45,9 @@ Extract the existing `CardManager` active-counter tick and due-interstitial sele
 ## First display executable: fixture renderer
 
 The first runnable `pi-card` uses SDL2's software renderer and SDL_ttf to draw a visibly labeled development fixture at the connected screen's runtime output size. `--once output.bmp --width N --height N` runs headlessly for reproducible image/layout checks. `Layout.h` computes safe regions and aspect-preserving contain for a 4:3 graphic fixture across 4:3, 16:9 and portrait viewports. This does not fetch a server asset, display real provider data, rotate cards, enroll a device, or update a package. The fixture is intentionally marked on screen. The graphics backend is provisional until tested on a physical original Zero and Zero 2 W; QEMU/CI does not prove performance or HDMI output.
+
+## Native policy response boundary — 2026-10-06
+
+Before policy reaches a renderer or scheduler, the native client validates the acknowledged check-in response into a bounded, typed policy snapshot. A missing or null `cardPolicy` preserves the previous snapshot; an explicit empty cards array clears it. Malformed JSON, duplicate object keys/card IDs, excessive depth/size, wrong scalar types and out-of-range timing values reject the entire replacement. Unknown card IDs and additional fields remain available for the later registry adapter rather than being mistaken for known rendered content. JSON decoding uses the packaged nlohmann/json header; it introduces no Arduino dependency.
+
+This slice connects that decoder to `pi-checkin` and tests replacement behavior on host and ARM1176. It does not yet claim renderer consumption, provider data, action execution or complete scheduler parity. The existing private response file contains the received bytes; validation must pass before those bytes are saved. Diagnostics describe validity/counts without printing response content or credentials.

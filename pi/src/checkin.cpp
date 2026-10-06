@@ -1,4 +1,5 @@
 #include "CheckInTransport.h"
+#include "PolicyState.h"
 
 #include <ctime>
 #include <iostream>
@@ -49,7 +50,12 @@ int main(int argc, char** argv) {
     const std::string body = std::string("{\"deviceUtcTimestamp\":\"") + timestamp +
         "\",\"firmwareVersion\":\"" + version + "\"}";
     const auto reply = PiCheckIn::post(argv[1], credentials, body);
-    if (reply.status == 200 && argc == 6) savePrivateReply(argv[5], reply.body);
+    if (reply.status == 200) {
+      const auto policy = PiPolicy::decode(reply.body);
+      if (argc == 6) savePrivateReply(argv[5], reply.body);
+      std::cout << "policy response validated, " << (policy ? policy->cards.size() : 0)
+                << " entries, present " << (policy ? "yes" : "no") << '\n';
+    }
     std::cout << "check-in HTTP " << reply.status << ", response bytes "
               << reply.body.size() << '\n';
     return reply.status == 200 ? 0 : 1;

@@ -7,17 +7,19 @@ ARM_SYSROOT ?= /usr/arm-linux-gnueabi
 
 .PHONY: test test-armv6 test-checkin-transport demo checkin clean
 
-test: build/schedule_core_test build/layout_test build/installation_config_test
+test: build/schedule_core_test build/layout_test build/installation_config_test build/policy_state_test
 	./build/schedule_core_test
 	./build/layout_test
 	./build/installation_config_test
+	./build/policy_state_test
 
 # Original Pi Zero (ARM1176, 32-bit). Run the same source on emulated ARM,
 # rather than assuming the host's x86 test proves target compatibility.
-test-armv6: build/armv6/schedule_core_test build/armv6/layout_test build/armv6/installation_config_test
+test-armv6: build/armv6/schedule_core_test build/armv6/layout_test build/armv6/installation_config_test build/armv6/policy_state_test
 	$(QEMU_ARM) -cpu arm1176 -L $(ARM_SYSROOT) ./build/armv6/schedule_core_test
 	$(QEMU_ARM) -cpu arm1176 -L $(ARM_SYSROOT) ./build/armv6/layout_test
 	$(QEMU_ARM) -cpu arm1176 -L $(ARM_SYSROOT) ./build/armv6/installation_config_test
+	$(QEMU_ARM) -cpu arm1176 -L $(ARM_SYSROOT) ./build/armv6/policy_state_test
 
 demo: build/pi-card
 
@@ -26,11 +28,11 @@ checkin: build/pi-checkin
 test-checkin-transport: build/pi-checkin-test build/pi-checkin
 	python3 tests/checkin_transport_test.py ./build/pi-checkin-test ./build/pi-checkin
 
-build/pi-checkin-test: src/checkin.cpp src/CheckInTransport.h src/InstallationConfig.h
+build/pi-checkin-test: src/checkin.cpp src/CheckInTransport.h src/InstallationConfig.h src/PolicyState.h
 	mkdir -p build
 	$(CXX) $(CXXFLAGS) -DPI_CHECKIN_TEST_LOOPBACK -Isrc src/checkin.cpp -o $@ -lcurl
 
-build/pi-checkin: src/checkin.cpp src/CheckInTransport.h src/InstallationConfig.h
+build/pi-checkin: src/checkin.cpp src/CheckInTransport.h src/InstallationConfig.h src/PolicyState.h
 	mkdir -p build
 	$(CXX) $(CXXFLAGS) -Isrc src/checkin.cpp -o $@ -lcurl
 
@@ -62,6 +64,14 @@ build/armv6/layout_test: tests/layout_test.cpp src/Layout.h
 build/armv6/installation_config_test: tests/installation_config_test.cpp src/InstallationConfig.h
 	mkdir -p build/armv6
 	$(ARM_CXX) $(CXXFLAGS) $(ARM_FLAGS) -Isrc tests/installation_config_test.cpp -o $@
+
+build/policy_state_test: tests/policy_state_test.cpp src/PolicyState.h
+	mkdir -p build
+	$(CXX) $(CXXFLAGS) -Isrc tests/policy_state_test.cpp -o $@
+
+build/armv6/policy_state_test: tests/policy_state_test.cpp src/PolicyState.h
+	mkdir -p build/armv6
+	$(ARM_CXX) $(CXXFLAGS) $(ARM_FLAGS) -Isrc tests/policy_state_test.cpp -o $@
 
 clean:
 	rm -rf build
