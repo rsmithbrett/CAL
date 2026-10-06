@@ -4,6 +4,7 @@
 #include <WebServer.h>
 #include <WiFi.h>
 
+#include "BootButton.h"
 #include "Config.h"
 #include "Display.h"
 #include "Identity.h"
@@ -26,13 +27,6 @@ String apName() {
   return String(Config::kSetupApPrefix) + "-" + suffix;
 }
 
-String apPassword() {
-  uint8_t mac[6];
-  WiFi.macAddress(mac);
-  char pass[9];
-  snprintf(pass, sizeof(pass), "dam%02X%02X%02X", mac[3], mac[4], mac[5]);
-  return String(pass);
-}
 
 String scanNetworksHtml() {
   // The portal offers what the device itself scanned rather than a free-text
@@ -115,6 +109,15 @@ struct Candidate {
   int32_t rssi;
 };
 
+/// Set by attemptJoin() when the household holds BOOT during the ladder. Read
+/// and cleared by joinStoredNetwork(), which stops laddering and lets the
+/// caller open the portal.
+bool gSetupRequestedDuringJoin = false;
+
+/// How long BOOT must be held during the ladder. The same three seconds as the
+/// power-on gesture, so there is one hold time to learn.
+constexpr uint32_t kSetupHoldMs = 3000;
+
 bool attemptJoin(const Identity::Network& net) {
   for (uint8_t attempt = 1; attempt <= Config::kWifiJoinAttempts; ++attempt) {
     Display::showStatus("Connecting to WiFi",
@@ -122,6 +125,7 @@ bool attemptJoin(const Identity::Network& net) {
     WiFi.begin(net.ssid.c_str(), net.password.c_str());
 
     const uint32_t deadline = millis() + Config::kWifiJoinTimeoutMs;
+    bool prompted = false;
     while (millis() < deadline) {
       if (WiFi.status() == WL_CONNECTED) {
         Journal::printf("[wifi] joined '%s' on attempt %u of %u", net.ssid.c_str(),
@@ -129,6 +133,30 @@ bool attemptJoin(const Identity::Network& net) {
                         static_cast<unsigned>(Config::kWifiJoinAttempts));
         return true;
       }
+
+      // The household is standing in front of the unit while this runs, and
+      // until now nothing watched the button until the next power-on.
+      if (BootButton::isDown()) {
+        if (!prompted) {
+          Display::showStatus("Keep holding BOOT to set up WiFi", "Release now to cancel");
+          prompted = true;
+        }
+        if (BootButton::heldFor(kSetupHoldMs)) {
+          Journal::line("[wifi] BOOT held during the join ladder - stopping and opening "
+                        "WiFi setup");
+          BootButton::reset();
+          gSetupRequestedDuringJoin = true;
+          WiFi.disconnect();
+          return false;
+        }
+      } else if (prompted) {
+        // Released early. Put the attempt back on the glass so the screen does
+        // not keep telling somebody to hold a button they let go of.
+        Display::showStatus("Connecting to WiFi",
+                            net.ssid + "  (attempt " + String(attempt) + ")");
+        prompted = false;
+      }
+
       delay(250);
     }
     // WiFi.status() at the moment of the timeout separates a wrong passphrase
@@ -147,7 +175,16 @@ bool attemptJoin(const Identity::Network& net) {
 
 }  // namespace
 
+bool setupRequestedDuringJoin() {
+  const bool requested = gSetupRequestedDuringJoin;
+  gSetupRequestedDuringJoin = false;
+  return requested;
+}
+
 bool joinStoredNetwork() {
+  gSetupRequestedDuringJoin = false;
+  BootButton::begin();
+
   const uint8_t known = Identity::networkCount();
   if (known == 0) {
     Journal::line("[wifi] nothing remembered - no join attempted, going straight to the "
@@ -219,6 +256,11 @@ bool joinStoredNetwork() {
       Identity::rememberNetwork(net.ssid, net.password);
       return true;
     }
+    // A hold means the household has told us the network changed. Trying the
+    // rest of the list is the wait they just asked to end.
+    if (gSetupRequestedDuringJoin) {
+      return false;
+    }
   }
 
   // Nothing remembered was in range. Falling back to trying them blind covers
@@ -231,6 +273,9 @@ bool joinStoredNetwork() {
       if (net.ssid.length() > 0 && attemptJoin(net)) {
         Identity::rememberNetwork(net.ssid, net.password);
         return true;
+      }
+      if (gSetupRequestedDuringJoin) {
+        return false;
       }
     }
   } else {
@@ -250,8 +295,24 @@ bool run() {
 
   WiFi.mode(WIFI_AP_STA);
   const String name = apName();
-  const String pass = apPassword();
-  WiFi.softAP(name.c_str(), pass.c_str());
+
+  // OPEN, NOT WPA. The access point carried a MAC-derived passphrase until
+  // 2026-10-04, and it cost the one thing this screen exists for: an iPhone has
+  // to complete a WPA association before iOS raises the captive-portal sheet, so
+  // the household watched a spinner before being shown anything to fill in.
+  // Owner, from the bench: "it slowed the process of joining the iPhone."
+  //
+  // It bought very little. The passphrase was "dam" plus the last three bytes of
+  // the MAC, and the SSID suffix already broadcasts two of them - guessable from
+  // across the room by anyone who had seen one of these before.
+  //
+  // What an open portal exposes, stated rather than assumed: it serves a network
+  // scan list and a form, it renders no stored credential, and the worst a
+  // stranger could do is point this device at a network of their choosing. That
+  // needs them inside WiFi range, during the few minutes the portal is up, of a
+  // device its owner is standing over. A household that cannot join their own
+  // display is the certain cost; that is the unlikely one.
+  WiFi.softAP(name.c_str());
 
   const IPAddress ip = WiFi.softAPIP();
   dns.start(53, "*", ip);
@@ -264,11 +325,16 @@ bool run() {
   server.onNotFound(handleProbe);
   server.begin();
 
-  // The code carries the device's own access point credentials in the format
-  // phone cameras already understand, so scanning it joins the phone to the
-  // device. This removes the step that fails most often: a person hunting for
-  // an unfamiliar network name and typing a passphrase they cannot see.
-  const String joinPayload = "WIFI:S:" + name + ";T:WPA;P:" + pass + ";;";
+  // The code carries the device's own access point in the format phone cameras
+  // already understand, so scanning it joins the phone to the device. This
+  // removes the step that fails most often: hunting for an unfamiliar network
+  // name in a list.
+  //
+  // T:nopass AND NO P: FIELD, matching the open access point above. A payload
+  // that still named WPA would have the phone attempt an encrypted association
+  // against an open radio and fail to join at all - a worse outcome than the
+  // delay this change set out to remove.
+  const String joinPayload = "WIFI:S:" + name + ";T:nopass;;";
   Journal::printf("[portal] access point '%s' raised at %s - waiting up to %lu ms for "
                   "credentials",
                   name.c_str(), ip.toString().c_str(),

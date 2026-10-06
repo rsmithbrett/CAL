@@ -1785,3 +1785,122 @@ the two landed.
   and the `callog` journal is the only record.
 - **The `nvs` write costs a flash write per deliberate restart.** Bounded -
   nothing is written on an ordinary power-on boot - but it is not free.
+
+---
+
+## 14. Pinning a CAL to one device
+
+Phase 0 shipped with one switch: a build is current for the whole fleet or it is
+not installed at all. `FirmwareEndpoints.cs` says why, in a comment that also
+says what would lift it:
+
+> NOT per-device. GetManifestForDeviceAsync resolves a pin for the App pair, and
+> there is deliberately no CAL equivalent: pinning a CAL to one device is refused
+> until the server can tell which devices run an OTA-capable CAL, which needs the
+> CAL-version telemetry. Until then the only answer is the fleet-wide current one.
+
+That condition is now met. Four devices report a `CalVersion` on every check-in,
+so the server can tell exactly who is running a loader that knows how to replace
+itself. This section builds the pin that was deferred.
+
+### 14.1 Why it has to exist before the next CAL ships
+
+The four OTA-capable devices belong to one account. Marking a CAL current is
+therefore not a staged rollout into a wide fleet where a few bad units would be
+noise. It is every display one client owns, changing its factory partition at
+the next check-in, on the strength of a build nobody has watched boot.
+
+CAL is also the partition recovery runs from. A bad App is recoverable because
+`factory` is still there to install another one; a bad CAL is recoverable over
+USB, on each unit, wherever the unit happens to be. The asymmetry is the whole
+argument: the App path can afford to learn from the fleet, and the CAL path
+cannot.
+
+A pin turns the one irreversible move into two reversible ones. Put the build on
+a unit that's on the bench, watch the four scenarios in TEST_PLAN.md §8, then
+mark it current knowing what it does.
+
+### 14.2 `SelfTestOverrideBuildId` is not the mechanism
+
+It looks like one. It's a per-device build id, it already resolves ahead of the
+fleet answer, and `ResolveOverrideAsync` applies no filter on `Kind` — so setting
+it to a CAL build is possible today and does something catastrophic.
+
+That column feeds `GetManifestForDeviceAsync` and `GetBinaryForDeviceAsync`,
+which answer `/api/firmware/manifest` — the **App** routes. A device told its App
+is the 1.35 MB CAL image downloads it into `ota_0` and boots a partition holding
+a loader built to run from `factory`. `FirmwareEndpoints.cs:124` already warns
+about exactly this shape of mistake for uploads. The device ends up with no App,
+and the way back is the factory partition it still has, so it isn't fatal — but
+it's a wasted trip and a confusing one.
+
+So the pin is a second column, resolved on the CAL routes only, and the two
+never share a resolver.
+
+### 14.3 Shape
+
+**Schema.** One nullable column on `devices`:
+
+    CalOverrideBuildId  uuid  null
+
+Nullable is the ordinary state. Every device that has never been pinned reads
+the fleet answer, which is what phase 0 does today, so the migration changes no
+behavior on its own.
+
+**Resolution.** Two methods beside the current-CAL pair, with the same
+signatures as their App equivalents:
+
+    GetCalManifestForDeviceAsync(device, ct)
+    GetCalBinaryForDeviceAsync(device, ct)
+
+Each resolves the pin, falls back to `GetCurrentCalManifestAsync` /
+`GetCurrentCalBinaryAsync` when there is none, and returns the fleet answer when
+the pin names a build that no longer exists. That last case matters: a pin to a
+deleted build must read as "no pin", never as an error and never as an empty
+manifest, for the same reason `ResolveOverrideAsync` documents on the App side —
+a stale pin can't be allowed to strand a device's loader.
+
+**A pin must name a CAL.** `ResolveOverrideAsync` gets away without a `Kind`
+filter because the operator chooses from a list. This one filters on
+`Kind == Cal` at resolution as well as refusing a non-CAL at the API, because
+the failure it prevents is a device installing the wrong image into `factory`,
+and that is worth two guards.
+
+**The endpoints already carry the device.** `/api/firmware/cal/manifest` and
+`/api/firmware/cal/binary` are `RequireDeviceAuth().RequirePhysicalDevice()`, so
+they resolve from the authenticated device the same way the App routes do. No
+new route, no device id in a body, no new authorization surface.
+
+**The check-in answer has to move with them.** `ShouldInstallNewerCalAsync`
+currently takes the request and compares against the fleet manifest. It has to
+take the device and compare against the *resolved* manifest, or a pinned device
+is handed a pinned binary while being told nothing is waiting — the exact
+page-says-one-thing-display-does-another split `CalUpdateRule` was extracted to
+prevent. `CalUpdateRule.UpdateIsWaiting` itself doesn't change: it compares a
+reported version against a manifest, and which manifest it's given is the
+caller's business.
+
+`ICalUpdateStatusService.DescribeAsync` takes a version and no device, by
+deliberate design, and that stays true. What a person is shown about a pinned
+device needs the resolved manifest too, so the device detail page passes the
+device through the same resolution rather than this contract growing a device.
+
+### 14.4 The wire does not change
+
+No new field on `CheckInRequest`, none on `CheckInResponse`. A pinned device is
+told `calUpdateAvailable` by the field that already exists and downloads from
+the route it already uses; the only difference is which bytes come back. The
+compatibility gate closed 2026-09-22, and this clears it by not touching the
+contract at all.
+
+### 14.5 What it does not do
+
+- **No scheduling and no cohorts.** One device, one build, set and cleared by an
+  operator. A real staged rollout is a different feature and this is not a first
+  slice of it.
+- **No automatic unpin.** A pinned device stays pinned after the fleet moves
+  past it, which is the point while testing and a trap afterwards. The device
+  detail page has to show the pin, because a pin nobody can see is a device that
+  silently stops following releases.
+- **It does not make the build safe.** It narrows who finds out. The four
+  scenarios in TEST_PLAN.md §8 are still what says the loader works.
