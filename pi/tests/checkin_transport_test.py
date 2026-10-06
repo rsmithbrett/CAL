@@ -14,6 +14,8 @@ import tempfile
 import threading
 import uuid
 
+from checkin_live_test import verify_pair
+
 
 def main():
     test_binary, production_binary = map(str, sys.argv[1:3])
@@ -28,7 +30,7 @@ def main():
             secret = self.headers.get("X-Device-Secret")
             observed.append((self.path, secret, payload))
             status = 200 if secret in active else 401
-            body = json.dumps({"cardPolicy": {"cards": [{"cardId": str(secrets.index(secret))}]}}) if status == 200 else "{}"
+            body = json.dumps({"acknowledged": True, "cardPolicy": {"cards": [{"id": str(secrets.index(secret))}]}}) if status == 200 else "{}"
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -58,20 +60,29 @@ def main():
             # The production binary cannot be switched to plaintext by an argument.
             denied = run(production_binary, files[0])
             assert denied.returncode != 0 and not observed
-            for path in files:
-                result = run(test_binary, path)
-                assert result.returncode == 0 and "HTTP 200" in result.stdout
-                assert all(secret not in result.stdout + result.stderr for secret in secrets)
+            policies = [{"cards": [{"id": str(index)}]} for index in range(2)]
+            verify_pair(test_binary, origin, files, policies)
 
             active.remove(secrets[0])
-            revoked = run(test_binary, files[0])
-            still_active = run(test_binary, files[1])
-            assert revoked.returncode != 0 and "HTTP 401" in revoked.stdout
-            assert still_active.returncode == 0 and "HTTP 200" in still_active.stdout
+            verify_pair(test_binary, origin, files, policies, revoked_first=True)
             assert [item[1] for item in observed] == [secrets[0], secrets[1], secrets[0], secrets[1]]
             assert all(path == "/api/checkin" and "deviceUtcTimestamp" in payload
-                       and payload["firmwareVersion"] == "pi-test"
+                       and payload["firmwareVersion"] == "pi-live-test"
                        for path, _, payload in observed)
+            # Capturing policy evidence cannot overwrite an existing credential.
+            original = files[1].read_bytes()
+            refused = subprocess.run([test_binary, origin, str(files[1]), "pi-test", "--response-file", str(files[1])],
+                                     capture_output=True, text=True, timeout=10)
+            assert refused.returncode != 0 and files[1].read_bytes() == original
+            assert all(secret not in refused.stdout + refused.stderr for secret in secrets)
+            active.add(secrets[0])
+            try:
+                verify_pair(test_binary, origin, files,
+                            [{"cards": [{"id": "unexpected"}]}, policies[1]])
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("Unexpected native policy was accepted")
             print("native transport: two private identities, isolated revocation, TLS-only production binary passed")
     finally:
         server.shutdown()

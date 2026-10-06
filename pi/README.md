@@ -22,4 +22,14 @@ and verifies the other still checks in. Only the separately compiled test
 binary can use plaintext on numeric `127.0.0.1`; the normal binary still
 requires HTTPS. This is a transport regression, **not** the Bolt 1 exit test:
 the fake does not exercise the server's provisioning, policy resolution, or
-revocation implementation, and the probe does not yet parse policy responses.
+revocation implementation.
+
+For a live check, the native probe can write successful response bytes to a new
+owner-only file using `--response-file PATH`; it refuses existing paths and
+symlinks. The verifier `pi/tests/checkin_live_test.py` parses those exact bytes,
+requires acknowledgment, and checks each installation's expected policy without
+printing returned content. Give it the native binary, HTTPS origin, two private
+credential files, and two JSON files describing distinct expected `cardPolicy`
+objects (or subsets). Run again with `--revoked-first` after deactivating only the
+first dedicated test device. The second policy must still match. A host run is
+native integration evidence, not ARMv6 emulation or physical Zero acceptance.
