@@ -34,7 +34,9 @@ constexpr char kFieldSeparator = '\n';
 
 String packEntry(const Pending& entry) {
   return entry.actionId + kFieldSeparator + entry.instanceId + kFieldSeparator +
-         entry.pressedAtUtc + kFieldSeparator + entry.onScreenSummary;
+         entry.pressedAtUtc + kFieldSeparator + "@ids2" + kFieldSeparator +
+         entry.compassPid + kFieldSeparator + entry.mlsNumber + kFieldSeparator +
+         entry.onScreenSummary;
 }
 
 /// Reads both the three-field and four-field layouts.
@@ -67,11 +69,26 @@ bool unpackEntry(const String& packed, Pending& out) {
   if (third < 0) {
     out.pressedAtUtc = packed.substring(second + 1);
     out.onScreenSummary = "";
+    out.compassPid = "";
+    out.mlsNumber = "";
     return true;
   }
 
   out.pressedAtUtc = packed.substring(second + 1, third);
-  out.onScreenSummary = packed.substring(third + 1);
+  out.compassPid = "";
+  out.mlsNumber = "";
+  const int fourth = packed.indexOf(kFieldSeparator, third + 1);
+  if (fourth >= 0 && packed.substring(third + 1, fourth) == "@ids2") {
+    const int fifth = packed.indexOf(kFieldSeparator, fourth + 1);
+    const int sixth = fifth < 0 ? -1 : packed.indexOf(kFieldSeparator, fifth + 1);
+    if (fifth < 0 || sixth < 0) return false;
+    out.compassPid = packed.substring(fourth + 1, fifth);
+    out.mlsNumber = packed.substring(fifth + 1, sixth);
+    out.onScreenSummary = packed.substring(sixth + 1);
+  } else {
+    // Old four-field queue entries remain valid across an OTA update.
+    out.onScreenSummary = packed.substring(third + 1);
+  }
   return true;
 }
 
@@ -168,7 +185,8 @@ uint8_t forCard(const char* cardId, Definition* out, uint8_t maxOut) {
   return written;
 }
 
-bool recordPress(const Definition& definition, const String& onScreenSummary) {
+bool recordPress(const Definition& definition, const String& onScreenSummary,
+                 const String& compassPid, const String& mlsNumber) {
   if (gPendingCount >= kMaxPending) {
     Log::printf("[actions] queue full (%u) - dropping press of '%s'", gPendingCount,
                 definition.actionId.c_str());
@@ -195,6 +213,12 @@ bool recordPress(const Definition& definition, const String& onScreenSummary) {
   // Capped here rather than at the call site so every path into the queue gets
   // the same limit, and so a card returning something long can never push an NVS
   // write past what the slot holds.
+  entry.compassPid = compassPid;
+  entry.mlsNumber = mlsNumber;
+  entry.compassPid.replace('\n', ' ');
+  entry.mlsNumber.replace('\n', ' ');
+  if (entry.compassPid.length() > 30) entry.compassPid = "";
+  if (entry.mlsNumber.length() > 40) entry.mlsNumber = "";
   entry.onScreenSummary = onScreenSummary;
   if (entry.onScreenSummary.length() > kMaxOnScreenSummaryLength) {
     entry.onScreenSummary = entry.onScreenSummary.substring(0, kMaxOnScreenSummaryLength);
