@@ -122,6 +122,20 @@ using StatusFn = String (*)();
 /// whose largest contiguous block is the binding constraint.
 using DescribeFn = String (*)(uint16_t itemIndex);
 
+/// The listing identifier for the item on screen, where the card has one.
+///
+/// Separate from DescribeFn rather than folded into it because the two answer
+/// different questions and go to different places: the description is prose for
+/// a person to read in an email, and this is an id for a link to be built from.
+/// Returning both from one function would mean every card that names something
+/// also had to say it has no id.
+///
+/// Empty is the ordinary answer. Only the listings card returns anything, and
+/// only when the server resolved a pid for that item - see
+/// Listings::ListingInfo::compassPid. Called once per press, never on the draw
+/// path, for the same reason DescribeFn is.
+using ListingIdFn = String (*)(uint16_t itemIndex);
+
 /// The longest asset id a policy entry can carry. Matches Assets::kMaxIdLength,
 /// which is what actually validates one - Graphic.cpp static_asserts that the
 /// two agree, so a divergence is a compile error rather than a silently
@@ -249,8 +263,11 @@ struct CardSpec {
   /// Optional - see StatusFn. nullptr for every card with no fetch of its own.
   StatusFn status = nullptr;
   /// Optional - see DescribeFn. nullptr for a card with nothing worth naming in
-  /// a press notification, which is the honest answer for a clock or a splash.
+  /// a press notification, which is what a clock or a splash has.
   DescribeFn describe = nullptr;
+
+  /// Optional - see ListingIdFn. nullptr for every card but the listings one.
+  ListingIdFn listingId = nullptr;
 
   // ---- Policy. Built-in defaults until a cardPolicy arrives on check-in,
   // then replaced wholesale by whatever the server said (see

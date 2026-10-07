@@ -6123,7 +6123,9 @@ The card now whitelists `status`, derives one `refreshFailed` boolean from it,
 and splits the empty path: `Aircraft::Status::Empty` keeps "No aircraft within N
 mi right now" and is now reachable **only** when the server reports its own
 refresh succeeded, while `RefreshFailed` draws "Couldn't check overhead just
-now" and states nothing about the sky. `Stale` leaves the cached sightings on
+now" over "The flight data service is not answering right now." and states
+nothing about the sky. The headline names the outcome and the detail names the
+cause. `Stale` leaves the cached sightings on
 screen and tells only the stream, exactly as the listings card does. A new
 `NotConfigured` rests muted rather than claiming an empty sky - this payload has
 no `isConfigured` of its own, so `status` is the only thing that can say so.

@@ -73,7 +73,7 @@ Result fetchMine() {
   if (status == 401) {
     http.end();
     result.status = Status::AuthError;
-    result.message = "Cannot verify this device. Contact support.";
+    result.message = "This display is not signed in to an account. Set it up again from your account page.";
     Log::line("[aircraft] auth rejected (401)");
     return result;
   }
@@ -82,6 +82,32 @@ Result fetchMine() {
     const String body = http.getString();
     http.end();
     return parseRefusal(body);
+  }
+
+  // 404 is "we do not know where this display is", not a server that is down.
+  // The route resolves a position from the display's owner, that owner's home
+  // address, and the connecting address in turn, and answers 404 when all
+  // three come to nothing - a display with no owner reaches this every time.
+  // Named as its own state so the card stops reporting a working server as
+  // unreachable, and so the sentence says the one thing somebody can act on.
+  if (status == 404) {
+    http.end();
+    result.status = Status::NoPosition;
+    result.message = "We do not know where this display is. Add a home address to the account that holds it.";
+    Log::line("[aircraft] no position for this device (404)");
+    return result;
+  }
+
+  // The service answered and could not help - it is reachable, so the card
+  // declines to say anything about the sky rather than blaming the network.
+  // Below 500 that is a refusal we have no better name for; at 500 and above
+  // it is the server's own fault, and either way the reader can only wait.
+  if (status >= 429) {
+    http.end();
+    result.status = Status::RefreshFailed;
+    result.message = "The flight service is busy. This will catch up on its own.";
+    Log::printf("[aircraft] service declined, http status=%d", status);
+    return result;
   }
 
   if (status != 200) {
@@ -244,9 +270,10 @@ Result fetchMine() {
     // passing this message through untouched.
     if (refreshFailed) {
       result.status = Status::RefreshFailed;
-      // Says what did not happen, and pointedly does not say what is or is not
-      // overhead. No claim about the sky, and no count implied.
-      result.message = "Aircraft overhead could not be checked just now.";
+      // Names the cause, where the headline names the outcome, so the two
+      // lines carry different information. No claim about the sky, and no
+      // count implied.
+      result.message = "The flight data service is not answering right now.";
       Log::printf("[aircraft] empty list AND a failed refresh -> RefreshFailed; Empty NOT taken - "
                   "nothing here licenses a claim about the sky. serviceUnreachable stays false: "
                   "our server answered, the upstream feed did not");
@@ -370,6 +397,8 @@ String cardStatus() {
       return "upstream refresh failed (reason is on the server, not the device)";
     case Status::NotConfigured:
       return "resting: no aircraft provider on file";
+    case Status::NoPosition:
+      return "resting: no position for this device";
     case Status::NotActivated:
       return "refused: device not activated";
     case Status::ProviderDisabled:

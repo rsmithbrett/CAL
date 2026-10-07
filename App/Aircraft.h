@@ -56,6 +56,11 @@ enum class Status {
   /// server are all fine, and what is missing is something only an
   /// administrator can restore.
   NotConfigured,
+  /// The server has no position for this display: nobody owns it, or whoever
+  /// does has no home address on file, and the connecting address resolved to
+  /// nothing either. A resting state, not a fault - every part of the chain is
+  /// working and what is missing is an address only the account holder can add.
+  NoPosition,
   NotActivated,      // ContentGateRefusal.DeviceNotActivated
   ProviderDisabled,  // ContentGateRefusal.ProviderDisabled
   AuthError,         // the device's own secret was rejected

@@ -525,13 +525,16 @@ correct. This is the same trap as 3c step 1 and is the first thing to rule out.
 |---|---|---|
 | `Ok` | some | the normal card, unchanged |
 | `Ok` | none | "Nothing overhead right now" - the only state allowed to say so |
-| `Unavailable` | none | "Couldn't check overhead just now" - **no** claim about the sky |
+| `Unavailable` | none | "Couldn't check overhead just now", then "The flight data service is not answering right now." - **no** claim about the sky |
 | `Stale` | some | the normal card, sightings drawn, **no** warning; stream only |
 | `NotConfigured` | any | "Aircraft overhead is not showing yet", muted, array not consulted |
 
 Confirm the `Unavailable` screen contains no number of miles and no word
 implying emptiness. The failure to look for is the card reverting to the
 `Empty` wording, which is the entire defect.
+
+Confirm the headline and the detail line do not repeat each other: the headline
+names the outcome, the detail names the cause.
 
 `Stale` must leave the sightings on screen. The stream says so and the panel
 does not:

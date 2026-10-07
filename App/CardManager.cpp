@@ -811,7 +811,16 @@ void handleTap(const Touch::Tap& tap) {
       if (gCurrent.card >= 0 && gCards[gCurrent.card].describe != nullptr) {
         onScreen = gCards[gCurrent.card].describe(gCurrent.item);
       }
-      Actions::recordPress(pressed, onScreen);
+
+      // The id behind the item, from the same card and the same index, so the
+      // description and the link can never name two different properties. Only
+      // the listings card offers one - see Cards::ListingIdFn.
+      String listingId;
+      if (gCurrent.card >= 0 && gCards[gCurrent.card].listingId != nullptr) {
+        listingId = gCards[gCurrent.card].listingId(gCurrent.item);
+      }
+
+      Actions::recordPress(pressed, onScreen, listingId);
 
       // A Banner Button's whole reason for existing: pressing it satisfies the
       // announcement, on top of - not instead of - whatever effect the press

@@ -241,10 +241,16 @@ Result fetchMine() {
     f["listings"][0]["squareFootage"] = true;
     f["listings"][0]["daysOnMarket"] = true;
     f["listings"][0]["distanceMiles"] = true;
-    // The one whitelisted field this card never draws. It rides along so a
-    // button press can carry it into the press log and the email - see
+    // The two whitelisted fields this card never draws. They ride along so a
+    // button press can carry them into the press log and the email - see
     // ListingInfo::mlsNumber and cardDescribe() below.
     f["listings"][0]["mlsNumber"] = true;
+
+    // ArduinoJson discards every key this filter does not name, so a field the
+    // server sends and this does not list is gone before any code could read
+    // it. That is what happened to this one, and it is why a listing email
+    // carried no property link: the pid was on the wire the whole time.
+    f["listings"][0]["compassPid"] = true;
     return f;
   }();
 
@@ -532,6 +538,7 @@ Result fetchMine() {
     info.daysOnMarket = listing["daysOnMarket"] | 0;
     info.distanceMiles = listing["distanceMiles"] | 0.0;
     info.mlsNumber = String((const char*)(listing["mlsNumber"] | ""));
+    info.compassPid = String((const char*)(listing["compassPid"] | ""));
     result.count++;
   }
 
@@ -770,6 +777,19 @@ void cardDraw(uint16_t itemIndex) {
 /// A status screen returns empty rather than "No listings nearby". A press on a
 /// card showing nothing has nothing to name, and inventing a description would
 /// put a sentence in the press log that reads like content.
+/// The Compass pid for the item on screen - see Cards::ListingIdFn.
+///
+/// Guarded exactly as cardDescribe() is, and for the same reason: a stale or
+/// failed fetch has no item at this index, and an id from the previous fetch
+/// would attach the wrong property to the press.
+String cardListingId(uint16_t itemIndex) {
+  if (gLast.status != Status::Ok || itemIndex >= gLast.count) {
+    return String();
+  }
+
+  return gLast.listings[itemIndex].compassPid;
+}
+
 String cardDescribe(uint16_t itemIndex) {
   if (gLast.status != Status::Ok || itemIndex >= gLast.count) {
     return String();
@@ -802,6 +822,7 @@ String cardDescribe(uint16_t itemIndex) {
   spec.fetch = cardFetch;
   spec.itemCount = cardItemCount;
   spec.describe = cardDescribe;
+  spec.listingId = cardListingId;
   spec.draw = cardDraw;
   spec.isNotable = cardIsNotable;
   spec.status = cardStatus;

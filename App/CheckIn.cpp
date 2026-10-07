@@ -95,6 +95,13 @@ void addPendingActions(JsonDocument& requestDoc) {
     if (pending[i].onScreenSummary.length() > 0) {
       entry["onScreenSummary"] = pending[i].onScreenSummary;
     }
+
+    // Omitted when absent, for the reason above. Every card but listings sends
+    // nothing here, and the server reads a missing field and an empty one the
+    // same way - see PendingDeviceAction.CompassPid.
+    if (pending[i].compassPid.length() > 0) {
+      entry["compassPid"] = pending[i].compassPid;
+    }
   }
   Log::printf("[checkin] carrying %u pending action(s)", count);
 }

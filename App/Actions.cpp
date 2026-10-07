@@ -32,25 +32,50 @@ String slotKey(uint8_t index) { return String("a") + String(index); }
 
 constexpr char kFieldSeparator = '\n';
 
-String packEntry(const Pending& entry) {
-  return entry.actionId + kFieldSeparator + entry.instanceId + kFieldSeparator +
-         entry.pressedAtUtc + kFieldSeparator + entry.onScreenSummary;
+/// Whether a field read back out of NVS is a Compass pid rather than the start
+/// of a summary. Digits only and bounded, which is the same rule the server
+/// applies on the way in - see NormaliseCompassPid.
+bool looksLikeCompassPid(const String& value) {
+  if (value.length() == 0 || value.length() > 30) {
+    return false;
+  }
+  for (unsigned int i = 0; i < value.length(); ++i) {
+    if (value[i] < '0' || value[i] > '9') {
+      return false;
+    }
+  }
+  return true;
 }
 
-/// Reads both the three-field and four-field layouts.
+String packEntry(const Pending& entry) {
+  return entry.actionId + kFieldSeparator + entry.instanceId + kFieldSeparator +
+         entry.pressedAtUtc + kFieldSeparator + entry.compassPid + kFieldSeparator +
+         entry.onScreenSummary;
+}
+
+/// Reads the three-, four- and five-field layouts.
 ///
-/// The fourth field - what was on screen - was added when devices were already in
-/// the field with presses queued in NVS across a reboot. A three-field entry is
-/// not corrupt, it is older, and it has to keep its press rather than have it
-/// dropped by the very update meant to improve things. Absent reads as empty,
-/// which is exactly what the server stores for a card that had nothing to name,
-/// so the two arrive at the same place.
+/// Each later field arrived while devices were already in the field with presses
+/// queued in NVS across a reboot. An older entry is not corrupt, and it has to
+/// keep its press rather than have it dropped by the very update meant to
+/// improve things. Absent reads as empty, which is exactly what the server
+/// stores for a card that had nothing to name, so the two arrive at the same
+/// place.
 ///
 /// The separator is '\n', and the summary is the last field for a reason: it is
 /// the only one composed from provider text rather than from ids this firmware
 /// controls. Being last means even a summary that somehow contained a newline
 /// can only corrupt itself, never the instanceId that dedup depends on. Cards
 /// are expected to return a single line; see Actions.h.
+///
+/// THE FOURTH FIELD IS AMBIGUOUS AND IS RESOLVED BY SHAPE. In the four-field
+/// layout it is the summary; in the five-field layout it is the Compass pid. A
+/// stored entry does not say which it is, and the count of separators cannot
+/// settle it either, because a four-field summary that contained a newline
+/// presents as five. So the fourth field is taken as a pid only when it looks
+/// like one - digits, bounded - and otherwise the whole remainder is the
+/// summary, which is what an older entry meant. A summary is an address and a
+/// price; it does not read as digits alone.
 bool unpackEntry(const String& packed, Pending& out) {
   const int first = packed.indexOf(kFieldSeparator);
   if (first < 0) {
@@ -67,11 +92,28 @@ bool unpackEntry(const String& packed, Pending& out) {
   if (third < 0) {
     out.pressedAtUtc = packed.substring(second + 1);
     out.onScreenSummary = "";
+    out.compassPid = "";
     return true;
   }
 
   out.pressedAtUtc = packed.substring(second + 1, third);
-  out.onScreenSummary = packed.substring(third + 1);
+
+  const String remainder = packed.substring(third + 1);
+  const int fourth = remainder.indexOf(kFieldSeparator);
+
+  if (fourth >= 0) {
+    const String candidate = remainder.substring(0, fourth);
+    if (looksLikeCompassPid(candidate)) {
+      out.compassPid = candidate;
+      out.onScreenSummary = remainder.substring(fourth + 1);
+      return true;
+    }
+  }
+
+  // Four fields, or five whose fourth is not a pid: the remainder is all
+  // summary, newline and all, exactly as the older layout meant it.
+  out.compassPid = "";
+  out.onScreenSummary = remainder;
   return true;
 }
 
@@ -168,7 +210,8 @@ uint8_t forCard(const char* cardId, Definition* out, uint8_t maxOut) {
   return written;
 }
 
-bool recordPress(const Definition& definition, const String& onScreenSummary) {
+bool recordPress(const Definition& definition, const String& onScreenSummary,
+                 const String& compassPid) {
   if (gPendingCount >= kMaxPending) {
     Log::printf("[actions] queue full (%u) - dropping press of '%s'", gPendingCount,
                 definition.actionId.c_str());
@@ -195,6 +238,12 @@ bool recordPress(const Definition& definition, const String& onScreenSummary) {
   // Capped here rather than at the call site so every path into the queue gets
   // the same limit, and so a card returning something long can never push an NVS
   // write past what the slot holds.
+  // Stored only when it is what the server will accept: digits, bounded. A card
+  // handing over anything else would otherwise be written to NVS, read back as
+  // the start of a summary, and corrupt the entry it was meant to enrich - see
+  // unpackEntry().
+  entry.compassPid = looksLikeCompassPid(compassPid) ? compassPid : String();
+
   entry.onScreenSummary = onScreenSummary;
   if (entry.onScreenSummary.length() > kMaxOnScreenSummaryLength) {
     entry.onScreenSummary = entry.onScreenSummary.substring(0, kMaxOnScreenSummaryLength);
