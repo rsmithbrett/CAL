@@ -734,7 +734,10 @@ full height, the same dimensions CYD-Dickey settled on for the same panel
 the 320px panel (106px) per side after real-device feedback that the
 original width was too easy to miss and made edge navigation feel
 unresponsive, matching the approved backlog suggestion to enlarge this
-touch area. The inner ~108px strip is what a card has left to itself.
+touch area. The inner ~108px strip is what a card has left to itself. On a card
+showing a banner it has one further meaning: a tap there clears an announcement
+that has no button to press, which *A notice with no button is cleared by touching
+it* at the end of this file covers.
 
 **Zone priority is fixed, not incidental:** action buttons are tested first,
 edges second. The edge strips have no visible chrome of their own and run the
@@ -2792,13 +2795,15 @@ disposable tag can no longer cost the permanent one.
   only needs generic firmware, not bulk provisioning with per-device secrets.
 - **Banner announcements have never been drawn on a panel.** The whole path -
   parsing `announcements` off a check-in, matching one against an
-  `allowBanner` card, drawing the strip, cycling between two of them, and a
-  press clearing one - is compile-verified only; the test devices were powered
+  `allowBanner` card, drawing the strip, cycling between two of them, a
+  press clearing one, and a tap on the middle of the glass clearing one with
+  no button - is compile-verified only; the test devices were powered
   off when it was written. See *Banners: a per-card theme replaced by the
   announcement queue the server actually speaks* at the end of this file. It
   also rides the pending-action queue listed above, which nothing has
-  exercised either, so its dismissal half cannot be more verified than that
-  is.
+  exercised either, so its press half cannot be more verified than that
+  is, and the tap half adds a `dismissedAnnouncementIds` array that no device
+  has yet put on a real request.
 
 ## A decode failure now retries and self-heals, instead of being a life sentence
 
@@ -4119,7 +4124,9 @@ card's entire reason for existing - and wraps up to three lines of the strip's o
 12pt bold into it. Everything below the strip stays empty apart from the ordinary
 chrome, the button row and the corner clock, and the emptiness is the whole visual
 point: 100px against a `kButtonRowY` of 160 leaves a deliberate band of nothing, so
-the strip reads as a notice stuck onto the glass rather than as one more card. None
+the strip reads as a notice stuck onto the glass rather than as one more card. That
+band of nothing later became the tap target that clears a notice with no button, which
+*A notice with no button is cleared by touching it* below covers. None
 of that drawing code changed in this pass and none of it is what this section is
 about. What changed is everything upstream of it: *who* decides a banner should be
 showing, and *what* it says.
@@ -4198,7 +4205,8 @@ describing different features.
   branch to get wrong.
 - **Banner versus Banner Button is now a property of the announcement**,
   `Cards::Announcement::isAction`, not of the card. This is the conceptual correction
-  above, expressed in one field.
+  above, expressed in one field. It also decides how the notice gets cleared: a Banner
+  Button is pressed, a plain banner is tapped in the middle of the glass.
 - **A new `Cards::Announcement` struct holds what arrives on the wire**: `id`, `text`,
   `isAction`, `actionId`, `targetCardIds[8]` with a `targetCount`, and
   `dismissedLocally`. Fixed char buffers rather than `String`s, for exactly the reason
@@ -4265,14 +4273,19 @@ those from "not mentioned this time" and would leave a withdrawn announcement on
 wall forever - the exact failure the draft's dismissal guessing was also trying, and
 failing, to avoid.
 
-**Exactly one thing is carried across the replacement: a local dismissal, matched on
-`id`.** The server cannot know about a press until that press reaches it on the next
-check-in, so it will legitimately still be listing an announcement this device
-already had pressed. Without the carry-across, the very next response would put the
-banner straight back up and the press would read as having done nothing. With it, the
-flag survives until the server stops sending the announcement of its own accord. Note
-that this is a match on identity, not on content - which is the whole thing the draft
-could not do.
+**Exactly one thing is carried across the replacement: a local clearance, matched on
+`id`.** The server cannot know a notice was cleared until the press or the tap reaches
+it on the next check-in, so it will legitimately still be listing an announcement this
+device has already dealt with. Without the carry-across, the very next response would
+put the banner straight back up and the gesture would read as having done nothing. With
+it, the flag survives until the server stops sending the announcement of its own
+accord. Note that this is a match on identity, not on content - which is the whole thing
+the draft could not do.
+
+The carry-across is also what makes `dismissedAnnouncementIds` repeatable rather than
+needing an acknowledgement of its own: the flag stays set for exactly as long as the
+server keeps listing the announcement, which is exactly as long as the id needs to keep
+appearing on the request.
 
 `setAnnouncements()` emits `"[banner] %u announcement(s) in force"` on every check-in
 that has any, not only when the number changes - the same reasoning as *Re-asserting
@@ -4334,14 +4347,22 @@ mid-sentence. With one match, and with none, nothing observable happens, so this
 bites on the overlapping case. It has not been seen on hardware (see below) and no
 attempt has been made to suppress it.
 
-### Dismissal keys on the announcement, and needed no new wire path
+### Clearing a notice keys on the announcement, and there are two ways to do it
 
-Pressing a banner button dismisses **the announcement**, not the card:
+Clearing a banner clears **the announcement**, not the card:
 `Cards::dismissAnnouncement()` takes an id and sets `dismissedLocally` on whichever
 held announcement matches. The reason to key it that way is that the same reminder can
-be showing on several banner-eligible cards, and pressing it once means it is done
+be showing on several banner-eligible cards, and clearing it once means it is done
 everywhere - which keying on the announcement gets for free and keying on the card
 could not express at all.
+
+**An action announcement is cleared by pressing its button. One with no button is
+cleared by tapping the middle of the glass.** `isAction` is what decides, and the two
+gestures reach the server by different routes: a press rides `pendingActions`, a tap
+rides a `dismissedAnnouncementIds` array on the check-in request. Both end at the same
+`CardAnnouncementDismissal` row on the server. The tap is described under *A notice
+with no button is cleared by touching it*, below; the rest of this section is common to
+both.
 
 `CardManager` records which announcement the current draw actually put up, in
 `gBannerOnScreen`, because the press arrives from the touch handler long after the
@@ -4360,7 +4381,7 @@ announcement and writes the durable `CardAnnouncementDismissal` row. That is why
 `isAction` half of this feature cost no new endpoint, no new handshake, and no new
 retry logic: the one already in place was already the right shape. The
 `dismissedLocally` flag only covers the gap until the press arrives, and it is RAM-only
-on purpose - a press a reboot erases is the honest limit of a fire-and-forget button on
+on purpose - a press a reboot erases is the plain limit of a fire-and-forget button on
 firmware with no automated hardware tests, not a guarantee this firmware claims to
 make. The durable record is the server's, and after that record exists the server
 simply stops sending the announcement.
@@ -4372,15 +4393,81 @@ one still being shown?" is no longer a question anybody has to answer by inspect
 display text. A new announcement is a different id. That is the whole answer, and it
 is the clearest single measure of what moving this off the card bought.
 
-**One behaviour left as it was, with a comment that no longer describes it.** After a
-dismissing press, `handleTap()` advances to the next card rather than redrawing the
-one on screen, and the comment there still explains that as "the card just became
-unshowable". Under the draft that was literally true, because `dismissedByButton` took
-the card out of `showable()`. It is not true now: dismissing an announcement never
-makes a card unshowable, it only means the card would draw its own content instead.
-Advancing is still defensible - a card that visibly reverts to its ordinary self a
-half-second after the checkmark is a reasonable thing to move past - but the stated
-reason is stale, and the code comment is the thing to fix, not this paragraph.
+**Clearing a banner moves the rotation on, and that is a choice rather than a
+consequence.** `handleTap()` shows the centre-screen confirmation, then advances to the
+next card instead of redrawing the one on screen, and holds off the auto-advance so the
+next card gets its full dwell. A card whose banner has just gone is still perfectly
+showable - the announcement was only overlaying it - so redrawing it would put its
+ordinary content up in the same instant, a half-second after the checkmark, which reads
+as the gesture having done something confusing rather than as the notice being dealt
+with. Both routes take this path for the same reason: the press branch calls
+`resetHistory()`/`show(computeNext())`, the tap branch calls `advance()`.
+
+### A notice with no button is cleared by touching it
+
+An action announcement arrives with a Banner Button, and pressing that button is how a
+household says it is handled. An announcement with no button had no gesture at all
+before this - it stayed on the strip until `EffectiveToUtc` passed or somebody cleared
+it from the server. Now a tap anywhere in the middle of the glass clears it while the
+banner is up.
+
+**The middle of a banner card is empty chrome, which is what makes the gesture
+available.** The strip claims the top `kBannerStripHeight` (100px), the button row
+claims the bottom from `kButtonRowY`, and nothing is drawn between them. The ~108px
+inner column that *The coordinate is no longer thrown away* above calls "what a card has
+left to itself" is, on a banner card, a band a household is already looking at and
+already inclined to touch. So the gesture reads as "touch the notice to say you have read it",
+which is the thing a finger reaches for anyway.
+
+**No new touch region was added.** `Touch::poll()` already classified a tap there as
+`Hit::None` rather than consuming it, and `handleTap()`'s `Hit::None` case already
+existed and returned without doing anything. The whole gesture is that case now asking
+whether `gBannerOnScreen` is set and `isAction` is false, calling
+`Cards::dismissAnnouncement()` on that id, and logging
+`"[banner] announcement %s cleared by tap"`. On every card that is not showing a banner,
+and on every action banner, `Hit::None` still does nothing.
+
+**An action banner is excluded on purpose.** Its button is how it is satisfied, and a
+stray tap clearing it would skip whatever that press was bound to do - an email to a
+carer, a command in the server's `Commands` domain - while telling the household it was
+handled. The press is the only route that carries a decision; the tap only carries "I
+have read this".
+
+**The tap needed a wire field, because the press's route cannot carry it.** A press has
+an `actionId` and an `instanceId` and the server maps those back to the announcement; a
+tap has neither. So `Cards::clearedAnnouncementIds()` reports the ids of held
+announcements with `dismissedLocally` set and `isAction` false, and `CheckIn.cpp`'s
+`addClearedAnnouncements()` writes them as a `dismissedAnnouncementIds` array on the
+request, immediately after `addPendingActions()`. Action announcements are filtered out
+inside `clearedAnnouncementIds()` rather than at the call site, so the rule lives beside
+the flag it reads: sending one press down both routes would be two records of one
+gesture.
+
+**The array is omitted entirely when nothing has been cleared**, so an ordinary
+check-in body is byte-identical to what firmware predating this sent. That matters
+because the 6-month backward-compatibility mandate is in force - a field that only
+appears when it has something to say cannot change how any existing server or any
+existing device reads a check-in.
+
+**The ids are re-sent on every check-in while they are still held, not sent once.**
+There is no acknowledgement to wait for, the way `acceptedActionIds` acknowledges a
+press, and the list is RAM only. Repeating it is what makes a lost request cost nothing:
+the server stops listing the announcement once it has heard, `setAnnouncements()` stops
+holding it, and the id stops appearing. A reboot before the first successful check-in
+loses the clearance, the server lists the announcement again, and the household taps
+again - that is the whole cost, and it is the same trade the press route already makes.
+
+**The server side was already there.** `CheckInRequest.DismissedAnnouncementIds` is an
+`IReadOnlyList<Guid>?` and `CheckInGatewayService` calls `RecordDeviceDismissalsAsync`
+on it. That half is deployed. This firmware change is the producer that was missing, so
+nothing on the server needs touching for it.
+
+**UNVERIFIED ON HARDWARE.** Nothing in this gesture has run on a device. The firmware
+has no automated tests, and a clean compile proves that the JSON writes and the id
+copies type-check - not that a finger on the glass clears a notice, not that the id
+reaches the server, and not that the band between the strip and the button row is where
+a household actually touches. See *9. Clearing a notice with no button by tapping the middle of the glass* in
+`TEST_PLAN.md` for what would say it works.
 
 ### One word, two meanings
 
@@ -4476,8 +4563,9 @@ This change is compile-verified only - a clean build, nothing more. The test dev
 were powered off when it was written, so no banner has yet been drawn on a real panel
 from a real announcement: not the strip's three-line wrap against a 160-character
 message, not the cycle advancing between two announcements on one card, not a press
-clearing a banner and the dismissal reaching the server, not the empty band below the
-strip reading the way it is supposed to. A clean compile proves the new logic
+clearing a banner and the dismissal reaching the server, not a tap on that empty band
+clearing a notice with no button and its id arriving on a check-in, not the empty band
+below the strip reading the way it is supposed to. A clean compile proves the new logic
 type-checks. It proves nothing about behaviour on glass, and this codebase's habit of
 saying so in the header of every unverified file (`IssFlyover.h`, `Actions.h`,
 `Touch.h`, and a dozen others) exists precisely so that nobody later mistakes "it

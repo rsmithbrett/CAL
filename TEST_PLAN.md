@@ -1444,6 +1444,121 @@ Hold BOOT from the moment power is applied, through 11 seconds.
 - The prompt's restore path is only as good as `gPanelUsedForGesture`. A release
   during a panel redraw has not been tried.
 
+## 9. Clearing a notice with no button by tapping the middle of the glass
+
+Edits to `App/CardManager.cpp`, `App/Cards.h` and `App/CheckIn.cpp`, uncommitted when
+this was written, so there is no commit hash to name yet. Before this, the only way a
+household could clear a banner was to press its Banner Button, which only an action
+announcement has. One without a button stayed on the strip until `EffectiveToUtc`
+passed or somebody cleared it from the server. Now a tap in the middle of the glass
+clears it while the banner is up, and the id rides the next check-in in a
+`dismissedAnnouncementIds` array that `CheckInGatewayService` already reads.
+
+**None of this has run on hardware, and no compile figures are recorded here because
+the build had not been run when this was written.** The firmware has no automated
+tests. A clean compile would prove that the JSON writes and the id copies type-check,
+and nothing past that: not that a finger in that band clears a notice, not that the
+array reaches the server, not that the band is where a household actually touches. Rows
+9a and 9d are the two that matter most. 9a is the gesture itself; 9d is the row where a
+wrong answer clears an action announcement without doing whatever its press was bound to
+do, which is the one outcome here that costs a household something.
+
+**What this needs on the bench.** A powered device that is checking in, the remote debug
+stream on for it, two announcements effective at once - one plain, one with a Banner
+Button - both targeting a card whose policy has `allowBanner` set, and the server's
+Announcements admin or `/diag` to read the dismissal rows back. Note that the test
+devices have generally been unpowered when banner work was written, which is why nothing
+in section 9 or in the banner sections of `README.md` has an observed result.
+
+### 9a. A tap in the middle clears a notice with no button
+
+Let a card come up carrying the plain announcement, then tap the inner column of the
+panel, below the strip and above the button row.
+
+- `[banner] announcement <id> cleared by tap` appears in the stream, naming the id.
+- The big center-screen confirmation is drawn, the same one a button press draws.
+- The rotation advances to the next card rather than redrawing the one the banner was
+  overlaying, and the next card gets its full dwell rather than being cut short.
+- The banner does not come back on a later draw of that card within the same session.
+- The next check-in logs `[checkin] carrying 1 cleared announcement(s)` and its request
+  body has `dismissedAnnouncementIds` with that id in it.
+- The server writes a `CardAnnouncementDismissal` row for the device's owner key, and
+  stops listing the announcement on subsequent responses.
+
+### 9b. One notice on several cards is cleared everywhere
+
+Target the plain announcement at two cards that both allow banners. Tap it away on the
+first one.
+
+- The second card draws its own ordinary content when its turn comes, with no banner.
+- One dismissal row on the server, not two.
+
+### 9c. The gesture lands where the chrome is empty, and the edges still win
+
+- A tap between the bottom of the strip (`kBannerStripHeight`, 100px) and `kButtonRowY`
+  (160) clears the notice.
+- A tap within roughly 106px of either edge navigates instead, forward or back, and
+  leaves the announcement in force. The edge strips run the panel's full height, so
+  this is the overlap worth checking rather than assuming.
+- A tap on the corner clock or anywhere else that is not a button and not an edge
+  behaves the same as the middle, since `Touch::poll()` reports all of it as
+  `Hit::None`. Decide on hardware whether that reads as generous or as surprising.
+
+### 9d. An action banner is NOT cleared by a tap
+
+Let the card carrying the action announcement come up. Tap the middle of the glass.
+
+- Nothing happens. No confirmation is drawn, the rotation does not advance, and no
+  `cleared by tap` line appears.
+- The banner is still up on the next draw.
+- The next check-in carries no `dismissedAnnouncementIds` for it.
+- Pressing the button still works exactly as it did, riding `pendingActions`, and the
+  server records one dismissal from that press rather than two from two routes.
+
+### 9e. An ordinary card is untouched
+
+Tap the middle of a card that is not showing a banner at all.
+
+- Nothing happens: no advance, no confirmation, nothing in the stream. This is the
+  behaviour `Hit::None` had before the change and it has to survive it.
+
+### 9f. A check-in with nothing cleared is unchanged
+
+Capture a request body from a device that has cleared nothing this session.
+
+- There is no `dismissedAnnouncementIds` key present, not an empty array.
+- The body is otherwise identical to what the previous firmware sent. This is the
+  backward-compatibility row: the field appearing only when it has something to say is
+  what keeps an older server and an older device reading these requests the same way.
+
+### 9g. The id repeats until the server has heard, and a reboot loses it
+
+- After a tap, the id appears on every check-in, not just the first, for as long as the
+  server keeps listing the announcement.
+- Once the server stops listing it, `setAnnouncements()` stops holding it and the id
+  stops appearing. Confirm it does not keep being sent forever.
+- Power-cycle the device after a tap but before its next successful check-in. The
+  server lists the announcement again, the banner comes back, and a second tap clears
+  it. That is the stated cost of keeping the flag in RAM, and this row is what confirms
+  the cost is only that.
+
+### 9h. Known gaps
+
+- Nothing distinguishes the tap confirmation from the press confirmation, so a
+  household that taps an action banner and sees nothing has no feedback explaining why.
+  Whether that reads as a dead screen is an on-glass question.
+- `clearedAnnouncementIds()` fills a `kMaxAnnouncements` by 37-byte local inside
+  `perform()`, roughly 300 bytes on the loop-task stack that *A stack measurement
+  rather than a style preference* in `README.md` is careful about. It is small, and it
+  is unmeasured.
+- With two or more announcements cycling on one card, a tap clears whichever
+  `gBannerOnScreen` names at that instant, which the cursor may have swapped under
+  somebody mid-sentence. That sharp edge predates this change and this gesture inherits
+  it.
+- A server that receives the id and keeps listing the announcement anyway would have
+  the device carrying the id for as long as the announcement is effective. Nothing on
+  the device bounds that, because the announcement list is the bound.
+
 ## What a clean compile does and does not prove
 
 Recorded once, because several commits in this repository lean on it:

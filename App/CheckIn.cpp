@@ -106,6 +106,32 @@ void addPendingActions(JsonDocument& requestDoc) {
   Log::printf("[checkin] carrying %u pending action(s)", count);
 }
 
+/// The announcements a household has cleared by touching the notice, which is
+/// the only way one with no button can be dealt with.
+///
+/// Repeated on every check-in while the id is still held, rather than sent once
+/// and forgotten. There is no acknowledgement to wait for and nothing persists
+/// across a reboot - see Cards::clearedAnnouncementIds - so repeating is what
+/// makes a lost request cost nothing. The server stops listing the announcement
+/// once it has heard, and this stops naming it on the check-in after that.
+///
+/// Omitted entirely when nothing has been cleared, so an ordinary check-in body
+/// stays byte-identical to what firmware predating this sent.
+void addClearedAnnouncements(JsonDocument& requestDoc) {
+  char ids[Cards::kMaxAnnouncements][sizeof(Cards::Announcement::id)] = {};
+  const uint8_t count = Cards::clearedAnnouncementIds(ids, Cards::kMaxAnnouncements);
+  if (count == 0) {
+    return;
+  }
+
+  JsonArray cleared = requestDoc["dismissedAnnouncementIds"].to<JsonArray>();
+  for (uint8_t i = 0; i < count; ++i) {
+    cleared.add(ids[i]);
+  }
+
+  Log::printf("[checkin] carrying %u cleared announcement(s)", count);
+}
+
 /// Turns the response's ISO-8601 `maintenanceUntilUtc` into an epoch second, or
 /// 0 for absent, null, malformed, or already past.
 ///
@@ -535,6 +561,7 @@ Result perform() {
     requestDoc["motionCapability"] = motionCapability;
   }
   addPendingActions(requestDoc);
+  addClearedAnnouncements(requestDoc);
 
   // Reports how the *previous* policy this device received actually turned
   // out - the same "N of M entries known" applyPolicy() already logs to the

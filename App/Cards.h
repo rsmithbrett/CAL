@@ -239,12 +239,19 @@ struct Announcement {
   /// server's own TargetCardIds contract.
   char targetCardIds[kMaxAnnouncementTargets][kMaxAnnouncementCardIdLength + 1] = {};
   uint8_t targetCount = 0;
-  /// Set when this device's own press satisfied it, so the banner stops
-  /// drawing immediately instead of lingering until the next check-in. RAM
-  /// only, deliberately not persisted: a press a reboot erases is the honest
-  /// limit of a fire-and-forget button on firmware with no automated hardware
-  /// tests. The server holds the durable record - it writes the dismissal when
-  /// the press arrives and stops sending the announcement after that.
+  /// Set when this device cleared it - a button press for an action
+  /// announcement, a tap on the notice for one without a button - so the banner
+  /// stops drawing immediately instead of lingering until the next check-in.
+  ///
+  /// RAM only, deliberately not persisted: a clearance a reboot erases is the
+  /// plain limit of a fire-and-forget gesture on firmware with no automated
+  /// hardware tests. The server then lists the announcement again and the
+  /// household deals with it again, which is the whole cost.
+  ///
+  /// The server holds the durable record either way. A press reaches it through
+  /// pendingActions, which it maps back to the announcement; a tap reaches it
+  /// through dismissedAnnouncementIds on the check-in. After either, it stops
+  /// sending the announcement.
   bool dismissedLocally = false;
 };
 
@@ -611,6 +618,22 @@ void advanceAnnouncementCursor();
 /// so it stops drawing at once instead of lingering until the server has
 /// heard. Returns false when the id names nothing currently held.
 bool dismissAnnouncement(const char* announcementId);
+
+/// The ids of announcements this device has cleared BY TAP rather than by a
+/// button press, for CheckIn.cpp to put on the next request. Returns how many
+/// were written to `out`.
+///
+/// An action announcement is left out on purpose. Its press already rides
+/// pendingActions, and the server maps that press back to the announcement and
+/// writes the dismissal from there - sending one tap down two routes would be
+/// two records of it.
+///
+/// Sent on EVERY check-in while the id is still held, not once. The list is RAM
+/// only, so a reboot before the first successful check-in loses it - and then
+/// the server, which never heard, lists the announcement again and the
+/// household taps again. Re-sending until the server stops listing it is what
+/// keeps that the whole cost of a lost tap.
+uint8_t clearedAnnouncementIds(char out[][sizeof(Announcement::id)], uint8_t maxOut);
 
 /// Re-asserts every active card's current fetch status to the debug log, in
 /// one consolidated line, whether or not anything changed since last time.

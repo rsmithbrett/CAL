@@ -15,6 +15,24 @@ above the checksums, so an entry written here before the merge is the entry that
 
 ## Unreleased
 
+### A notice with no button can be cleared by touching it — App
+
+Tap the middle of the screen while a notice is showing and it goes away, the same as
+pressing a notice's button does. Before this, a notice without a button stayed up until it
+reached the end date whoever posted it set, or until somebody cleared it from the website.
+
+Notices that *do* have a button are not affected. Those still need the button pressed,
+because the press is what sends the message the button was set up to send - tapping
+elsewhere on a notice like that does nothing.
+
+Clearing a notice this way is reported the next time the device checks in, so it can take
+up to one check-in interval before the website shows it as read. If the device is unplugged
+in between, the notice comes back and needs tapping again.
+
+**Not yet seen running on a device.** Neither the tap nor the reporting has been tried on
+real hardware, so treat this one as worth checking on a device you can watch before relying
+on it.
+
 ### WiFi setup is reachable without a power cycle — CAL
 
 Hold the button on the back for three seconds at any point while the device is starting up,

@@ -172,6 +172,24 @@ bool dismissAnnouncement(const char* announcementId) {
   return false;
 }
 
+uint8_t clearedAnnouncementIds(char out[][sizeof(Cards::Announcement::id)], uint8_t maxOut) {
+  if (out == nullptr) {
+    return 0;
+  }
+  uint8_t written = 0;
+  for (uint8_t i = 0; i < gAnnouncementCount && written < maxOut; ++i) {
+    // Action announcements are excluded here rather than at the call site, so
+    // the rule lives beside the flag it reads - see Cards.h.
+    if (!gAnnouncements[i].dismissedLocally || gAnnouncements[i].isAction) {
+      continue;
+    }
+    strncpy(out[written], gAnnouncements[i].id, sizeof(out[written]) - 1);
+    out[written][sizeof(out[written]) - 1] = '\0';
+    written++;
+  }
+  return written;
+}
+
 void logProviderStatuses() {
   // Checked before anything else, including walking the registry: with
   // streaming off this must cost nothing at all, and every status()
@@ -900,6 +918,31 @@ void handleTap(const Touch::Tap& tap) {
       holdOffAutoAdvance();
       return;
     case Touch::Hit::None:
+      // A tap in the middle of the glass with no button under it. On every
+      // ordinary card that is nothing, and it stays nothing - but a banner with
+      // no action to press has no other way of being cleared, and the middle of
+      // a banner card is empty chrome: the strip claims the top, the button row
+      // the bottom, and nothing at all is drawn between them.
+      //
+      // So the gesture is "touch the notice to say you have read it", which is
+      // what a household reaches for anyway. An action banner is deliberately
+      // excluded: its button is how it is satisfied, and clearing it with a
+      // stray tap would skip whatever that press was bound to do.
+      if (gBannerOnScreen != nullptr && !gBannerOnScreen->isAction) {
+        if (Cards::dismissAnnouncement(gBannerOnScreen->id)) {
+          Log::printf("[banner] announcement %s cleared by tap", gBannerOnScreen->id);
+          gBannerOnScreen = nullptr;
+
+          // Same reasoning as a dismissing button press: redrawing the card
+          // whose banner just went would put its ordinary content up in the
+          // same instant, which reads as the tap having done something
+          // confusing rather than as the notice being dealt with.
+          Display::showButtonPressConfirmation();
+          advance();
+          holdOffAutoAdvance();
+        }
+      }
+      return;
     default:
       return;
   }
