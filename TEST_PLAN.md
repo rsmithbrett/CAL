@@ -1558,6 +1558,65 @@ Capture a request body from a device that has cleared nothing this session.
 - A server that receives the id and keeps listing the announcement anyway would have
   the device carrying the id for as long as the announcement is effective. Nothing on
   the device bounds that, because the announcement list is the bound.
+## 10. Naming a military aircraft on the overhead card
+
+`App/Aircraft.h`, `App/Aircraft.cpp`. The server classifies the aircraft and resolves the
+service and the airframe; this side reads four more fields, prefers a military sighting
+over the nearest one, and puts the service where the airline's name goes.
+
+**None of this has run on hardware.** The build figures below are from a clean compile on
+2026-10-07: App 1,523,584 of ota_0's 2,097,152 bytes, up 1,072 from the previous build.
+A clean compile proves the filter entries and the String copies type-check, not that a
+Navy helicopter overhead produces the card below.
+
+### What changed
+
+The response filter whitelists `isMilitary`, `militaryBranch`, `aircraftType` and
+`registration`. A field missing from that filter is a field the parse cannot see however
+faithfully the server sends it, which is why the list is the first thing to check when one
+reads back empty.
+
+The featured sighting is the first aircraft in the list with `isMilitary` set, falling back
+to element 0. The list arrives in distance order and the server keeps a place for the
+nearest military aircraft even when its own cap would have dropped it - so drawing element
+0 regardless would spend that place on a sighting nothing ever shows.
+
+The operator line carries `militaryBranch`, plus `aircraftType` after a hyphen when the
+provider named one: "U.S. Navy - MH-60 Seahawk". Composed at the call site, so
+`showAircraftCard()` needs no new parameter and no geometry moves.
+
+### 10a. A military aircraft nearby is the one drawn
+
+Needs a military aircraft within the configured radius and at least one civil aircraft
+nearer. Watch for `[aircraft] response ... callsign=` naming the military one rather than
+the nearest, and the card drawing its service where an airline name usually goes.
+
+### 10b. An ordinary sky is unchanged
+
+Every aircraft civil. The card draws the nearest, with its airline, exactly as before. This
+is the case that runs every other minute of the day and the one a regression would hide in.
+
+### 10c. A military aircraft with a callsign that says nothing
+
+"TSTR" and the like. The card should read "Military" rather than a guessed service, and
+should still draw the airframe when the provider reported a type.
+
+### 10d. An older server
+
+Point the device at a build predating these fields. Every one reads absent, `isMilitary`
+reads false, and the card draws what it drew before - the 6-month compatibility case.
+
+### Known gaps
+
+- **The service and the airframe are the server's answer, not this device's.** A wrong
+  curated row reaches the glass unchanged; there is nothing here that could catch one.
+- **The operator line is longer than it was.** "U.S. Navy - MH-60 Seahawk" is 25 characters
+  against an airline name's usual 8 to 12. `layoutText()` bounds it, so the failure mode is
+  truncation rather than overrun, but nothing has measured where it truncates.
+- **No rotation.** The suggestion offered "rotate through the returned aircraft or show a
+  military sighting when one is present" and this takes the second. The card still features
+  exactly one aircraft.
+
 
 ## What a clean compile does and does not prove
 

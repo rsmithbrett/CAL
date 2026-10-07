@@ -15,6 +15,19 @@ above the checksums, so an entry written here before the merge is the entry that
 
 ## Unreleased
 
+### The overhead card names a military aircraft — App
+
+When a military aircraft is in range, the card shows that one rather than whichever
+airliner happens to be nearest, and it names the service and the aircraft: "U.S. Navy -
+MH-60 Seahawk" where an airline's name usually sits. The callsign, the distance and the
+altitude read the same as always.
+
+A service the callsign does not identify reads "Military", which is what is actually
+known. An ordinary sky is unchanged: the nearest aircraft, with its airline.
+
+Not yet seen running on a device.
+
+
 ### A notice with no button can be cleared by touching it — App
 
 Tap the middle of the screen while a notice is showing and it goes away, the same as

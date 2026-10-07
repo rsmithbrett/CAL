@@ -120,6 +120,31 @@ struct Sighting {
   /// one bare code still shows the resolved half as a name.
   String originName;
   String destinationName;
+
+  /// Whether the provider classifies this as a military aircraft.
+  ///
+  /// False covers two things and the card treats them the same: an aircraft reported as
+  /// civil, and one the provider has no entry for. It is also what a server older than
+  /// this field gives, since an absent key reads as false - so a device talking to one
+  /// draws exactly the card it drew before, which is the compatibility case every other
+  /// optional field here is written for.
+  bool isMilitary = false;
+
+  /// The service it belongs to ("U.S. Navy"), or "Military" when the callsign says only
+  /// that it is one. Resolved server-side from the provider's own classification bit, the
+  /// airframe's hex id and a curated callsign-prefix table - see MilitaryAircraftDirectory.
+  /// Empty on every civil aircraft, so this field alone is enough for the card to decide
+  /// which heading to draw.
+  String militaryBranch;
+
+  /// The airframe in words ("MH-60 Seahawk"), or the bare ICAO type designator for a type
+  /// the directory does not spell out. Empty when the provider reported no type, which is
+  /// ordinary: the branch is still worth drawing without it.
+  String aircraftType;
+
+  /// The tail number ("166562"), where the provider has one. Military sightings only - a
+  /// civil aircraft is named by its airline, which this card already draws.
+  String registration;
 };
 
 struct Result {
