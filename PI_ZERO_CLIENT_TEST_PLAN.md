@@ -1,6 +1,6 @@
 # Raspberry Pi Zero client test plan
 
-Status: proposed gates. No Pi executable, package, physical run, or new server contract exists yet.
+Status: host/ARMv6 executable and isolated wire/display tests exist. Package, physical run and actual-server forecast acceptance remain outstanding.
 
 ## Target inventory and performance
 
@@ -49,3 +49,9 @@ Build `make -C pi demo` with SDL2/SDL_ttf development libraries. Run `SDL_VIDEOD
 ## Native policy boundary — 2026-10-06
 
 Exercise acknowledged policy decoding with distinct IDs, explicit timing/order, absent/null policy preservation, explicit empty replacement and failed replacement preserving prior state. Reject malformed/truncated JSON, duplicate keys/IDs, wrong acknowledgment/scalar types, oversized/deep documents, too many entries and timing overflow. Preserve unknown IDs and optional fields for registry compatibility. Run the same boundary tests on host and ARM1176; keep two-identity native/server revocation CI as the wire-contract check. Renderer/provider acceptance remains a later gate.
+
+## Policy-to-forecast acceptance — 2026-10-07
+
+- Host and ARM1176 runtime tests: registration order/tie breaks, dwell/default, strict interleave and singleton fallback, target selection, omitted/null preservation, explicit empty replacement, malformed replacement, unknown count, bounded forecast parsing and revocation wiping content.
+- `make -C pi test-live-display`: the actual SDL executable checks in with a private temporary credential against an isolated loopback service, renders Home then Target policy, proves the frames differ, suppresses provider calls for an empty policy, refuses revoked identity and verifies the release executable rejects plaintext. This is a transport/display contract test, not an actual-server or physical gate.
+- Run the existing ARMv6 and Raspberry Pi OS display CI with the added curl/JSON dependencies, plus ESP32 regression after shared traversal extraction. Inspect frame readability at 320×240 and 1280×720. Hardware timing, input, assets and OTA remain outstanding.

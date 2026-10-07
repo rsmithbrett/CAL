@@ -398,38 +398,14 @@ bool earlier(uint8_t a, uint8_t b) {
   return a < b;
 }
 
-int8_t firstShowable(Cards::Kind kind) {
-  int8_t best = -1;
-  for (uint8_t i = 0; i < gCardCount; ++i) {
-    if (gCards[i].kind != kind || !showable(i)) {
-      continue;
-    }
-    if (best < 0 || earlier(i, static_cast<uint8_t>(best))) {
-      best = static_cast<int8_t>(i);
-    }
-  }
-  return best;
+int8_t nextShowable(Cards::Kind kind, int8_t after) {
+  return ScheduleCore::nextShowable(gCardCount, after,
+      [kind](uint8_t i) { return gCards[i].kind == kind && showable(i); },
+      [](uint8_t a, uint8_t b) { return earlier(a, b); });
 }
 
-/// The next showable card of `kind` strictly after `after` in the ordering
-/// above, wrapping around to the first. `after` < 0 starts from the top.
-int8_t nextShowable(Cards::Kind kind, int8_t after) {
-  if (after < 0) {
-    return firstShowable(kind);
-  }
-  int8_t best = -1;
-  for (uint8_t i = 0; i < gCardCount; ++i) {
-    if (gCards[i].kind != kind || !showable(i)) {
-      continue;
-    }
-    if (!earlier(static_cast<uint8_t>(after), i)) {
-      continue;
-    }
-    if (best < 0 || earlier(i, static_cast<uint8_t>(best))) {
-      best = static_cast<int8_t>(i);
-    }
-  }
-  return best >= 0 ? best : firstShowable(kind);
+int8_t firstShowable(Cards::Kind kind) {
+  return nextShowable(kind, -1);
 }
 
 /// Which interstitial, if any, has waited long enough. Every registered

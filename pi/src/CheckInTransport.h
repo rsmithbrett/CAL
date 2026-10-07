@@ -16,9 +16,10 @@ struct Reply {
 
 // Only the transport boundary: response policy and actions are handled by the
 // client state machine in a later slice. Never log the request headers or body.
-inline Reply post(const std::string& baseUrl,
+inline Reply request(const std::string& baseUrl,
                   const PiInstallation::Credentials& credentials,
-                  const std::string& requestJson) {
+                  const std::string& requestJson,
+                  const std::string& path = "/api/checkin") {
   bool testLoopback = false;
 #ifdef PI_CHECKIN_TEST_LOOPBACK
   // Compiled only into the integration-test binary. Never permit non-TLS
@@ -37,7 +38,9 @@ inline Reply post(const std::string& baseUrl,
       !PiInstallation::validSecret(credentials.deviceSecret)) {
     throw std::invalid_argument("invalid installation credentials");
   }
-  if (requestJson.empty() || requestJson.size() > 16384)
+  if ((path == "/api/checkin" && requestJson.empty()) || requestJson.size() > 16384 ||
+      (path != "/api/checkin" && path != "/api/myweather/forecast?location=home" &&
+       path != "/api/myweather/forecast?location=target"))
     throw std::invalid_argument("invalid check-in request size");
 
   CURL* handle = curl_easy_init();
@@ -52,7 +55,7 @@ inline Reply post(const std::string& baseUrl,
     if (!added) throw std::runtime_error("could not allocate check-in auth header");
     headers = added;
 
-    const std::string url = baseUrl + "/api/checkin";
+    const std::string url = baseUrl + path;
     curl_easy_setopt(handle, CURLOPT_URL, url.c_str());
 #if LIBCURL_VERSION_NUM >= 0x075500
     curl_easy_setopt(handle, CURLOPT_PROTOCOLS_STR, testLoopback ? "http" : "https");
@@ -61,8 +64,10 @@ inline Reply post(const std::string& baseUrl,
 #endif
     curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(handle, CURLOPT_POSTFIELDS, requestJson.c_str());
-    curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE, static_cast<long>(requestJson.size()));
+    if (path == "/api/checkin") {
+      curl_easy_setopt(handle, CURLOPT_POSTFIELDS, requestJson.c_str());
+      curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE, static_cast<long>(requestJson.size()));
+    }
     curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS, 5000L);
     curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS, 15000L);
     curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L);
@@ -88,6 +93,16 @@ inline Reply post(const std::string& baseUrl,
   curl_slist_free_all(headers);
   curl_easy_cleanup(handle);
   return reply;
+}
+
+inline Reply post(const std::string& origin, const PiInstallation::Credentials& credentials,
+                  const std::string& body) {
+  return request(origin, credentials, body);
+}
+inline Reply forecast(const std::string& origin, const PiInstallation::Credentials& credentials,
+                      bool target) {
+  return request(origin, credentials, {}, target ?
+      "/api/myweather/forecast?location=target" : "/api/myweather/forecast?location=home");
 }
 
 }  // namespace PiCheckIn

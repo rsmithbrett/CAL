@@ -1,8 +1,8 @@
 # Raspberry Pi Zero display client — design proposal
 
-Status: display fixture and first shared scheduler slice implemented. No server enrollment, live cards, hardware run, or package update is implemented on this branch.
+Status: private credential/check-in, bounded policy state, shared scheduling traversal and a live forecast display path implemented. Actual-server display acceptance, hardware and package update remain outstanding.
 
-The Pi credential-file reader is now implemented as an isolated storage boundary, with private-file and per-installation checks. It is not yet connected to a network client. Server-side provisioning and identity are being developed separately in DiscoverAroundMe PR #15.
+The Pi credential-file reader enforces private-file and per-installation checks and is connected to authenticated HTTPS check-in and forecast reads. Server-side provisioning and identity are being developed separately in DiscoverAroundMe PR #15.
 
 ## Goal and scope
 
@@ -51,3 +51,11 @@ The first runnable `pi-card` uses SDL2's software renderer and SDL_ttf to draw a
 Before policy reaches a renderer or scheduler, the native client validates the acknowledged check-in response into a bounded, typed policy snapshot. A missing or null `cardPolicy` preserves the previous snapshot; an explicit empty cards array clears it. Malformed JSON, duplicate object keys/card IDs, excessive depth/size, wrong scalar types and out-of-range timing values reject the entire replacement. Unknown card IDs and additional fields remain available for the later registry adapter rather than being mistaken for known rendered content. JSON decoding uses the packaged nlohmann/json header; it introduces no Arduino dependency.
 
 This slice connects that decoder to `pi-checkin` and tests replacement behavior on host and ARM1176. It does not yet claim renderer consumption, provider data, action execution or complete scheduler parity. The existing private response file contains the received bytes; validation must pass before those bytes are saved. Diagnostics describe validity/counts without printing response content or credentials.
+
+## Policy-to-forecast display slice — 2026-10-07
+
+Implement the existing authenticated `/api/myweather/forecast?location=home|target` contract; no new server route or third-party credential is introduced. The five forecast IDs map to independently configured registrations. Explicit replacement changes active cards, order, dwell, interleave and location; missing/null policy preserves the prior snapshot and empty policy removes all cards. Unknown IDs are counted without logging their values. List traversal now shares `ScheduleCore::nextShowable` with ESP32 in addition to the existing interleave counters/selection.
+
+Live mode loads a private installation credential, checks in before fetching provider content and performs network work off SDL's thread. It polls every 60 seconds and fetches each assigned location once per refresh. 401/403 check-in denial clears policy/content; provider 403 clears that location, while temporary transport or malformed-response failures retain only visibly marked last-received content. No disk cache, watch/action queue, server asset rendering, package updater or full scheduler/history/input parity is claimed by this slice. The current weather projection carries no provider freshness timestamp; reconnect labeling describes client transport state, not upstream freshness.
+
+The combined forecast slide displays up to ten server-returned periods, with no sample data in live mode. Production binaries accept HTTPS only; loopback HTTP is restricted to separately compiled test binaries. Contract tests use isolated responses and never production credentials. Actual-server provider integration and physical display acceptance remain separate gates.

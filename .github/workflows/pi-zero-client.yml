@@ -16,9 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install check-in transport dependency
-        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev nlohmann-json3-dev
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev nlohmann-json3-dev libsdl2-dev libsdl2-ttf-dev fonts-dejavu-core
       - name: Build and run shared scheduling tests
-        run: make -C pi test checkin test-checkin-transport
+        run: make -C pi test checkin test-checkin-transport test-live-display
 
   armv6-emulation:
     runs-on: ubuntu-latest
@@ -46,7 +46,7 @@ jobs:
         run: |
           docker run --rm --platform linux/arm/v6 \
             -v "$PWD:/work" -w /work arm32v6/alpine:3.20.10 sh -ec '
-              apk add --no-cache build-base make pkgconf sdl2-dev sdl2_ttf-dev font-dejavu file
+              apk add --no-cache build-base make pkgconf sdl2-dev sdl2_ttf-dev font-dejavu file curl-dev nlohmann-json
               make -C pi demo CXX=g++
               file pi/build/pi-card
               test "$(readelf -h pi/build/pi-card | sed -n "s/.*Machine: *//p")" = ARM
@@ -78,7 +78,7 @@ jobs:
       - name: Install SDL display dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev fonts-dejavu-core
+          sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev fonts-dejavu-core libcurl4-openssl-dev nlohmann-json3-dev
       - name: Build and render viewport fixtures
         run: |
           make -C pi demo
