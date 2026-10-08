@@ -542,26 +542,36 @@ void cardDraw(uint16_t) {
     //
     // No new parameter and no geometry change. A military sighting has no filed route, so
     // the two airport lines are empty and the card has the room.
+    // THE AIRFRAME IS THE HEADLINE, THE SERVICE SITS UNDER IT, AND BOTH SHOW.
+    //
+    // These two shared the headline as "Military - P-8 Poseidon" and the half
+    // worth reading was cut off - photographed 2026-10-08. Putting the type on
+    // the identifier line instead showed one or the other, never both. So the
+    // type takes the headline, because what the aircraft IS is the more
+    // interesting fact, and the service drops into the space a filed route
+    // would occupy. A military sighting has no route, so that space is free.
+    //
+    // Where no type is known the service keeps the headline, which is the card
+    // as it reads today for an aircraft hexdb has nothing on file for.
     String operatorName = gLast.nearest.airlineName;
+    String noRouteLine;
+
     if (gLast.nearest.isMilitary && gLast.nearest.militaryBranch.length() > 0) {
-      // THE BRANCH ALONE. This appended " - " and the airframe, and the two
-      // together overran the title: photographed 2026-10-08 as "Military -
-      // P-8..." with the interesting half cut off. The type moves to the
-      // identifier line below, which on that same photograph was spending
-      // itself on the word UNKNOWN.
-      operatorName = gLast.nearest.militaryBranch;
+      if (gLast.nearest.aircraftType.length() > 0) {
+        operatorName = gLast.nearest.aircraftType;
+        noRouteLine = gLast.nearest.militaryBranch;
+      } else {
+        operatorName = gLast.nearest.militaryBranch;
+      }
     }
 
-    // WHAT TO CALL IT, in order of how specific it is. A callsign names this
-    // flight; a registration names this airframe; a type names its kind.
-    // Military traffic routinely files no callsign at all, which used to
-    // arrive as the literal "UNKNOWN" and read like one.
+    // The flight, where one was filed, else the airframe. Military traffic
+    // routinely files no callsign, which used to arrive as the literal
+    // "UNKNOWN" and read like one. The type is no longer a fallback here: it
+    // has the headline.
     String identifier = gLast.nearest.callsign;
     if (identifier.length() == 0) {
       identifier = gLast.nearest.registration;
-    }
-    if (identifier.length() == 0) {
-      identifier = gLast.nearest.aircraftType;
     }
 
     Display::showAircraftCard(identifier, operatorName,
@@ -569,7 +579,7 @@ void cardDraw(uint16_t) {
                               gLast.nearest.headingDegrees, gLast.nearest.distanceMiles,
                               gLast.nearest.originCode, gLast.nearest.destinationCode,
                               gLast.nearest.originName, gLast.nearest.destinationName,
-                              describeFreshness(gLastOkMs));
+                              describeFreshness(gLastOkMs), noRouteLine);
 
     // Drawn after showAircraftCard(), not by it - same module boundary
     // Graphic.cpp already keeps with Display.cpp: whoever holds the asset id

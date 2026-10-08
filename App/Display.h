@@ -186,7 +186,14 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
                       double speedKnots, double headingDegrees, double distanceMiles,
                       const String& originCode, const String& destinationCode,
                       const String& originName, const String& destinationName,
-                      const String& updatedAt);
+                      const String& updatedAt,
+
+                      /// A line drawn where a filed route would go, for a sighting that
+                      /// has none. The military card puts the service here once the
+                      /// airframe has taken the headline, so "U.S. Navy" is not lost to
+                      /// make room for "P-8 Poseidon". Empty for anything with a route,
+                      /// which keeps its route.
+                      const String& noRouteLine = String());
 
 /// The rectangle a small airline logo may be drawn into, alongside
 /// showAircraftCard()'s own text - geometry decided here for the same reason

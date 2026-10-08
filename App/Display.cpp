@@ -1582,7 +1582,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
                       double speedKnots, double headingDegrees, double distanceMiles,
                       const String& originCode, const String& destinationCode,
                       const String& originName, const String& destinationName,
-                      const String& updatedAt) {
+                      const String& updatedAt, const String& noRouteLine) {
   lcd.fillScreen(bg());
   drawCardBanner("OVERHEAD", kAircraftBanner, 130);
 
@@ -1610,7 +1610,11 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   // degree ring for the same constraint hit and worked around elsewhere in
   // this file).
   char distanceBuf[32];
-  if (hasAirlineName) {
+  // An empty callsign leaves the distance standing on its own rather than
+  // drawing " - 0.9 mi away" with nothing before the dash. Military traffic
+  // routinely files no flight id, so for that card this is the ordinary case
+  // rather than a rarity.
+  if (hasAirlineName && callsign.length() > 0) {
     snprintf(distanceBuf, sizeof(distanceBuf), "%s - %.1f mi away", callsign.c_str(), distanceMiles);
   } else {
     snprintf(distanceBuf, sizeof(distanceBuf), "%.1f mi away", distanceMiles);
@@ -1690,6 +1694,22 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
     const TextBox routeBox{kCardMargin, 82, kScreenW - kCardMargin * 2, kRouteLineHeight, 2,
                            Align::Left};
     routeLines = layoutText(routeLine, routeBox, muted(), "aircraft.route").lines;
+  }
+  else if (noRouteLine.length() > 0) {
+    // A sighting with no filed route can say something else in the space the
+    // route would have taken. The military card puts the service here once
+    // the airframe has the headline, so "U.S. Navy" is not lost to make room
+    // for "P-8 Poseidon" - the two used to share the headline and the second
+    // half was cut off.
+    //
+    // One line, not the route's two: this is a short phrase rather than a
+    // pair of airport names, and the stat rows below shift by routeLines
+    // either way.
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setTextSize(1);
+    const TextBox box{kCardMargin, 82, kScreenW - kCardMargin * 2, kRouteLineHeight, 1,
+                      Align::Left};
+    routeLines = layoutText(noRouteLine, box, muted(), "aircraft.noroute").lines;
   }
 
   // Stat rows: a muted label on the left, the value right-aligned against the
