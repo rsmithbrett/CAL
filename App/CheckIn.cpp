@@ -4,6 +4,7 @@
 #include <time.h>
 
 #include "Actions.h"
+#include "Impressions.h"
 #include "Assets.h"
 #include "CardManager.h"
 #include "Config.h"
@@ -73,6 +74,84 @@ time_t parseIso8601Utc(const char* text) {
 /// The field is omitted entirely when there is nothing pending, so an
 /// ordinary check-in body is byte-identical to what firmware predating this
 /// sent.
+
+/// How many showings the request in flight carried, so the response clears
+/// exactly those and leaves anything that arrived behind them.
+uint8_t gImpressionsSent = 0;
+
+/// What this display drew since the last acknowledged check-in.
+///
+/// One entry per showing, not a total per card: a total loses the time within
+/// the interval, so a display reporting every five minutes could never produce
+/// the quarter-hour shape of a day - which is what answers when an
+/// announcement should be up. CARD_IMPRESSIONS_DESIGN.md in the server
+/// repository.
+///
+/// Omitted entirely when there is nothing to report, so an ordinary check-in
+/// from a display nobody is watching stays byte-identical to what firmware
+/// predating this sent.
+void addImpressions(JsonDocument& requestDoc) {
+  gImpressionsSent = 0;
+
+  const uint8_t count = Impressions::pendingCount();
+  if (count == 0) {
+    return;
+  }
+
+  gImpressionsSent = count;
+
+  JsonArray array = requestDoc["impressions"].to<JsonArray>();
+  for (uint8_t i = 0; i < count; ++i) {
+    const Impressions::Entry* held = Impressions::entryAt(i);
+    if (held == nullptr) {
+      break;
+    }
+
+    const Impressions::Entry& drawn = *held;
+    JsonObject entry = array.add<JsonObject>();
+    entry["cardId"] = drawn.cardId;
+    entry["instanceId"] = drawn.instanceId;
+    entry["shownAtUtc"] = drawn.shownAtUtc;
+    entry["dwellMs"] = drawn.dwellMs;
+
+    // The three below are omitted at their zero, for the reason
+    // addPendingActions() gives: this request is built with ArduinoJson, which
+    // wants roughly the payload's size again in heap to serialise it, and a key
+    // carrying a default nobody will read is heap spent for nothing on the
+    // device that can least afford it. The server reads an absent field and a
+    // false or zero one identically.
+    if (drawn.fromShuffle) {
+      entry["fromShuffle"] = true;
+    }
+    if (drawn.wasSought) {
+      entry["wasSought"] = true;
+    }
+    if (drawn.seenMs > 0) {
+      entry["seenMs"] = drawn.seenMs;
+    }
+
+    // A flat object of strings. The server composes its own document from what
+    // arrives, so a key this device leaves out is simply absent there.
+    if (drawn.contentKey.length() > 0 || drawn.summary.length() > 0) {
+      JsonObject attributes = entry["attributes"].to<JsonObject>();
+      if (drawn.contentKey.length() > 0) {
+        attributes["contentKey"] = drawn.contentKey;
+      }
+      if (drawn.summary.length() > 0) {
+        attributes["summary"] = drawn.summary;
+      }
+    }
+  }
+
+  const uint16_t dropped = Impressions::droppedCount();
+  if (dropped > 0) {
+    Log::printf("[checkin] carrying %u showing(s), %u dropped when the buffer filled",
+                static_cast<unsigned>(count), static_cast<unsigned>(dropped));
+  } else {
+    Log::printf("[checkin] carrying %u showing(s)", static_cast<unsigned>(count));
+  }
+}
+
 void addPendingActions(JsonDocument& requestDoc) {
   Actions::Pending pending[Actions::kMaxPending];
   const uint8_t count = Actions::pendingSnapshot(pending, Actions::kMaxPending);
@@ -95,8 +174,41 @@ void addPendingActions(JsonDocument& requestDoc) {
     if (pending[i].onScreenSummary.length() > 0) {
       entry["onScreenSummary"] = pending[i].onScreenSummary;
     }
+
+    // Omitted when absent, for the reason above. Every card but listings sends
+    // nothing here, and the server reads a missing field and an empty one the
+    // same way - see PendingDeviceAction.CompassPid.
+    if (pending[i].compassPid.length() > 0) {
+      entry["compassPid"] = pending[i].compassPid;
+    }
   }
   Log::printf("[checkin] carrying %u pending action(s)", count);
+}
+
+/// The announcements a household has cleared by touching the notice, which is
+/// the only way one with no button can be dealt with.
+///
+/// Repeated on every check-in while the id is still held, rather than sent once
+/// and forgotten. There is no acknowledgement to wait for and nothing persists
+/// across a reboot - see Cards::clearedAnnouncementIds - so repeating is what
+/// makes a lost request cost nothing. The server stops listing the announcement
+/// once it has heard, and this stops naming it on the check-in after that.
+///
+/// Omitted entirely when nothing has been cleared, so an ordinary check-in body
+/// stays byte-identical to what firmware predating this sent.
+void addClearedAnnouncements(JsonDocument& requestDoc) {
+  char ids[Cards::kMaxAnnouncements][sizeof(Cards::Announcement::id)] = {};
+  const uint8_t count = Cards::clearedAnnouncementIds(ids, Cards::kMaxAnnouncements);
+  if (count == 0) {
+    return;
+  }
+
+  JsonArray cleared = requestDoc["dismissedAnnouncementIds"].to<JsonArray>();
+  for (uint8_t i = 0; i < count; ++i) {
+    cleared.add(ids[i]);
+  }
+
+  Log::printf("[checkin] carrying %u cleared announcement(s)", count);
 }
 
 /// Turns the response's ISO-8601 `maintenanceUntilUtc` into an epoch second, or
@@ -528,6 +640,8 @@ Result perform() {
     requestDoc["motionCapability"] = motionCapability;
   }
   addPendingActions(requestDoc);
+  addClearedAnnouncements(requestDoc);
+  addImpressions(requestDoc);
 
   // Reports how the *previous* policy this device received actually turned
   // out - the same "N of M entries known" applyPolicy() already logs to the
@@ -703,6 +817,20 @@ Result perform() {
   // successful response confirms was received.
   if (Assets::decodeFailureCount() > 0) {
     Assets::clearDecodeFailures();
+  }
+
+  // The showings this request carried are now the server's. Cleared by COUNT
+  // rather than wholesale, because the buffer keeps filling while the request
+  // is in flight: a draw that finished between the snapshot and this line was
+  // never sent, and clearing everything would lose it with nothing to say so.
+  //
+  // Only on a completed round trip, the same rule the presses and the decode
+  // failures above follow. A failed check-in leaves them buffered for the next
+  // one, and the server deduplicates on the instance id, so a retry cannot
+  // double-count.
+  if (gImpressionsSent > 0) {
+    Impressions::clearReported(gImpressionsSent);
+    gImpressionsSent = 0;
   }
 
   result.acknowledged = responseDoc["acknowledged"] | false;

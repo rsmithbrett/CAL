@@ -73,7 +73,7 @@ Result fetchMine() {
   if (status == 401) {
     http.end();
     result.status = Status::AuthError;
-    result.message = "Cannot verify this device. Contact support.";
+    result.message = "This display is not signed in to an account. Set it up again from your account page.";
     Log::line("[aircraft] auth rejected (401)");
     return result;
   }
@@ -82,6 +82,32 @@ Result fetchMine() {
     const String body = http.getString();
     http.end();
     return parseRefusal(body);
+  }
+
+  // 404 is "we do not know where this display is", not a server that is down.
+  // The route resolves a position from the display's owner, that owner's home
+  // address, and the connecting address in turn, and answers 404 when all
+  // three come to nothing - a display with no owner reaches this every time.
+  // Named as its own state so the card stops reporting a working server as
+  // unreachable, and so the sentence says the one thing somebody can act on.
+  if (status == 404) {
+    http.end();
+    result.status = Status::NoPosition;
+    result.message = "We do not know where this display is. Add a home address to the account that holds it.";
+    Log::line("[aircraft] no position for this device (404)");
+    return result;
+  }
+
+  // The service answered and could not help - it is reachable, so the card
+  // declines to say anything about the sky rather than blaming the network.
+  // Below 500 that is a refusal we have no better name for; at 500 and above
+  // it is the server's own fault, and either way the reader can only wait.
+  if (status >= 429) {
+    http.end();
+    result.status = Status::RefreshFailed;
+    result.message = "The flight service is busy. This will catch up on its own.";
+    Log::printf("[aircraft] service declined, http status=%d", status);
+    return result;
   }
 
   if (status != 200) {
@@ -142,6 +168,13 @@ Result fetchMine() {
     f["aircraft"][0]["originName"] = true;
     f["aircraft"][0]["destinationCode"] = true;
     f["aircraft"][0]["destinationName"] = true;
+    // The military four. Whitelisted like the rest: the filter keeps only the fields
+    // this card draws, so a key missing from it is a key the parse below cannot see
+    // however faithfully the server sends it.
+    f["aircraft"][0]["isMilitary"] = true;
+    f["aircraft"][0]["militaryBranch"] = true;
+    f["aircraft"][0]["aircraftType"] = true;
+    f["aircraft"][0]["registration"] = true;
     return f;
   }();
 
@@ -244,9 +277,10 @@ Result fetchMine() {
     // passing this message through untouched.
     if (refreshFailed) {
       result.status = Status::RefreshFailed;
-      // Says what did not happen, and pointedly does not say what is or is not
-      // overhead. No claim about the sky, and no count implied.
-      result.message = "Aircraft overhead could not be checked just now.";
+      // Names the cause, where the headline names the outcome, so the two
+      // lines carry different information. No claim about the sky, and no
+      // count implied.
+      result.message = "The flight data service is not answering right now.";
       Log::printf("[aircraft] empty list AND a failed refresh -> RefreshFailed; Empty NOT taken - "
                   "nothing here licenses a claim about the sky. serviceUnreachable stays false: "
                   "our server answered, the upstream feed did not");
@@ -276,7 +310,24 @@ Result fetchMine() {
                 static_cast<unsigned>(aircraft.size()));
   }
 
+  // ELEMENT 0 IS THE NEAREST, AND A MILITARY SIGHTING OUTRANKS IT.
+  //
+  // The server sends the list in distance order and keeps a place for the nearest
+  // military aircraft even when the eight-aircraft cap would have dropped it, which is
+  // the whole reason one ever reaches this device. Drawing element 0 regardless would
+  // spend that place on a sighting nothing ever shows: this card features exactly one
+  // aircraft, and an ordinary airliner is what it features every other minute of the day.
+  //
+  // Still the NEAREST military one - the list is ordered, and this takes the first match.
+  // Falls back to element 0 when there is none, which is every ordinary response.
   JsonVariantConst nearest = aircraft[0];
+  for (JsonVariantConst candidate : aircraft) {
+    if (candidate["isMilitary"].as<bool>()) {
+      nearest = candidate;
+      break;
+    }
+  }
+
   result.status = Status::Ok;
   result.nearest.callsign = String((const char*)(nearest["callsign"] | "UNKNOWN"));
   result.nearest.altitudeFeet = nearest["altitudeFeet"] | 0;
@@ -294,6 +345,13 @@ Result fetchMine() {
   result.nearest.originName = String((const char*)(nearest["originName"] | ""));
   result.nearest.destinationCode = String((const char*)(nearest["destinationCode"] | ""));
   result.nearest.destinationName = String((const char*)(nearest["destinationName"] | ""));
+  // Absent on every civil aircraft and on every server old enough to predate the fields,
+  // which land on the same empty String for the reason above. The flag reads false in
+  // both cases, which is what "not a military sighting" means to this card.
+  result.nearest.isMilitary = nearest["isMilitary"].as<bool>();
+  result.nearest.militaryBranch = String((const char*)(nearest["militaryBranch"] | ""));
+  result.nearest.aircraftType = String((const char*)(nearest["aircraftType"] | ""));
+  result.nearest.registration = String((const char*)(nearest["registration"] | ""));
 
   // A lightly-summarized response rather than the raw body - same filtering
   // reasoning as Forecast::fetch()'s own verbose line: this endpoint's
@@ -370,6 +428,8 @@ String cardStatus() {
       return "upstream refresh failed (reason is on the server, not the device)";
     case Status::NotConfigured:
       return "resting: no aircraft provider on file";
+    case Status::NoPosition:
+      return "resting: no position for this device";
     case Status::NotActivated:
       return "refused: device not activated";
     case Status::ProviderDisabled:
@@ -455,7 +515,24 @@ void cardDraw(uint16_t) {
         gLast.nearest.headingDegrees, gLast.nearest.distanceMiles,
         gLast.nearest.airlineLogoAssetId.length() > 0 ? gLast.nearest.airlineLogoAssetId.c_str()
                                                         : "(none)");
-    Display::showAircraftCard(gLast.nearest.callsign, gLast.nearest.airlineName,
+    // THE OPERATOR'S NAME SLOT CARRIES THE SERVICE, because that is what it is for: the
+    // line under the callsign says who is flying this aircraft, and for a military
+    // sighting that is "U.S. Navy" rather than an airline. The airframe joins it when the
+    // provider named one, since "U.S. Navy - MH-60 Seahawk" is the whole answer a
+    // household wants and the slot already goes through layoutText, which bounds it.
+    //
+    // No new parameter and no geometry change. A military sighting has no filed route, so
+    // the two airport lines are empty and the card has the room.
+    String operatorName = gLast.nearest.airlineName;
+    if (gLast.nearest.isMilitary && gLast.nearest.militaryBranch.length() > 0) {
+      operatorName = gLast.nearest.militaryBranch;
+      if (gLast.nearest.aircraftType.length() > 0) {
+        operatorName += " - ";
+        operatorName += gLast.nearest.aircraftType;
+      }
+    }
+
+    Display::showAircraftCard(gLast.nearest.callsign, operatorName,
                               gLast.nearest.altitudeFeet, gLast.nearest.speedKnots,
                               gLast.nearest.headingDegrees, gLast.nearest.distanceMiles,
                               gLast.nearest.originCode, gLast.nearest.destinationCode,

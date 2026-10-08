@@ -525,13 +525,16 @@ correct. This is the same trap as 3c step 1 and is the first thing to rule out.
 |---|---|---|
 | `Ok` | some | the normal card, unchanged |
 | `Ok` | none | "Nothing overhead right now" - the only state allowed to say so |
-| `Unavailable` | none | "Couldn't check overhead just now" - **no** claim about the sky |
+| `Unavailable` | none | "Couldn't check overhead just now", then "The flight data service is not answering right now." - **no** claim about the sky |
 | `Stale` | some | the normal card, sightings drawn, **no** warning; stream only |
 | `NotConfigured` | any | "Aircraft overhead is not showing yet", muted, array not consulted |
 
 Confirm the `Unavailable` screen contains no number of miles and no word
 implying emptiness. The failure to look for is the card reverting to the
 `Empty` wording, which is the entire defect.
+
+Confirm the headline and the detail line do not repeat each other: the headline
+names the outcome, the detail names the cause.
 
 `Stale` must leave the sightings on screen. The stream says so and the panel
 does not:
@@ -1440,6 +1443,180 @@ Hold BOOT from the moment power is applied, through 11 seconds.
   Nothing has watched a press land in the gap between them.
 - The prompt's restore path is only as good as `gPanelUsedForGesture`. A release
   during a panel redraw has not been tried.
+
+## 9. Clearing a notice with no button by tapping the middle of the glass
+
+Edits to `App/CardManager.cpp`, `App/Cards.h` and `App/CheckIn.cpp`, uncommitted when
+this was written, so there is no commit hash to name yet. Before this, the only way a
+household could clear a banner was to press its Banner Button, which only an action
+announcement has. One without a button stayed on the strip until `EffectiveToUtc`
+passed or somebody cleared it from the server. Now a tap in the middle of the glass
+clears it while the banner is up, and the id rides the next check-in in a
+`dismissedAnnouncementIds` array that `CheckInGatewayService` already reads.
+
+**None of this has run on hardware, and no compile figures are recorded here because
+the build had not been run when this was written.** The firmware has no automated
+tests. A clean compile would prove that the JSON writes and the id copies type-check,
+and nothing past that: not that a finger in that band clears a notice, not that the
+array reaches the server, not that the band is where a household actually touches. Rows
+9a and 9d are the two that matter most. 9a is the gesture itself; 9d is the row where a
+wrong answer clears an action announcement without doing whatever its press was bound to
+do, which is the one outcome here that costs a household something.
+
+**What this needs on the bench.** A powered device that is checking in, the remote debug
+stream on for it, two announcements effective at once - one plain, one with a Banner
+Button - both targeting a card whose policy has `allowBanner` set, and the server's
+Announcements admin or `/diag` to read the dismissal rows back. Note that the test
+devices have generally been unpowered when banner work was written, which is why nothing
+in section 9 or in the banner sections of `README.md` has an observed result.
+
+### 9a. A tap in the middle clears a notice with no button
+
+Let a card come up carrying the plain announcement, then tap the inner column of the
+panel, below the strip and above the button row.
+
+- `[banner] announcement <id> cleared by tap` appears in the stream, naming the id.
+- The big center-screen confirmation is drawn, the same one a button press draws.
+- The rotation advances to the next card rather than redrawing the one the banner was
+  overlaying, and the next card gets its full dwell rather than being cut short.
+- The banner does not come back on a later draw of that card within the same session.
+- The next check-in logs `[checkin] carrying 1 cleared announcement(s)` and its request
+  body has `dismissedAnnouncementIds` with that id in it.
+- The server writes a `CardAnnouncementDismissal` row for the device's owner key, and
+  stops listing the announcement on subsequent responses.
+
+### 9b. One notice on several cards is cleared everywhere
+
+Target the plain announcement at two cards that both allow banners. Tap it away on the
+first one.
+
+- The second card draws its own ordinary content when its turn comes, with no banner.
+- One dismissal row on the server, not two.
+
+### 9c. The gesture lands where the chrome is empty, and the edges still win
+
+- A tap between the bottom of the strip (`kBannerStripHeight`, 100px) and `kButtonRowY`
+  (160) clears the notice.
+- A tap within roughly 106px of either edge navigates instead, forward or back, and
+  leaves the announcement in force. The edge strips run the panel's full height, so
+  this is the overlap worth checking rather than assuming.
+- A tap on the corner clock or anywhere else that is not a button and not an edge
+  behaves the same as the middle, since `Touch::poll()` reports all of it as
+  `Hit::None`. Decide on hardware whether that reads as generous or as surprising.
+
+### 9d. An action banner is NOT cleared by a tap
+
+Let the card carrying the action announcement come up. Tap the middle of the glass.
+
+- Nothing happens. No confirmation is drawn, the rotation does not advance, and no
+  `cleared by tap` line appears.
+- The banner is still up on the next draw.
+- The next check-in carries no `dismissedAnnouncementIds` for it.
+- Pressing the button still works exactly as it did, riding `pendingActions`, and the
+  server records one dismissal from that press rather than two from two routes.
+
+### 9e. An ordinary card is untouched
+
+Tap the middle of a card that is not showing a banner at all.
+
+- Nothing happens: no advance, no confirmation, nothing in the stream. This is the
+  behaviour `Hit::None` had before the change and it has to survive it.
+
+### 9f. A check-in with nothing cleared is unchanged
+
+Capture a request body from a device that has cleared nothing this session.
+
+- There is no `dismissedAnnouncementIds` key present, not an empty array.
+- The body is otherwise identical to what the previous firmware sent. This is the
+  backward-compatibility row: the field appearing only when it has something to say is
+  what keeps an older server and an older device reading these requests the same way.
+
+### 9g. The id repeats until the server has heard, and a reboot loses it
+
+- After a tap, the id appears on every check-in, not just the first, for as long as the
+  server keeps listing the announcement.
+- Once the server stops listing it, `setAnnouncements()` stops holding it and the id
+  stops appearing. Confirm it does not keep being sent forever.
+- Power-cycle the device after a tap but before its next successful check-in. The
+  server lists the announcement again, the banner comes back, and a second tap clears
+  it. That is the stated cost of keeping the flag in RAM, and this row is what confirms
+  the cost is only that.
+
+### 9h. Known gaps
+
+- Nothing distinguishes the tap confirmation from the press confirmation, so a
+  household that taps an action banner and sees nothing has no feedback explaining why.
+  Whether that reads as a dead screen is an on-glass question.
+- `clearedAnnouncementIds()` fills a `kMaxAnnouncements` by 37-byte local inside
+  `perform()`, roughly 300 bytes on the loop-task stack that *A stack measurement
+  rather than a style preference* in `README.md` is careful about. It is small, and it
+  is unmeasured.
+- With two or more announcements cycling on one card, a tap clears whichever
+  `gBannerOnScreen` names at that instant, which the cursor may have swapped under
+  somebody mid-sentence. That sharp edge predates this change and this gesture inherits
+  it.
+- A server that receives the id and keeps listing the announcement anyway would have
+  the device carrying the id for as long as the announcement is effective. Nothing on
+  the device bounds that, because the announcement list is the bound.
+## 10. Naming a military aircraft on the overhead card
+
+`App/Aircraft.h`, `App/Aircraft.cpp`. The server classifies the aircraft and resolves the
+service and the airframe; this side reads four more fields, prefers a military sighting
+over the nearest one, and puts the service where the airline's name goes.
+
+**None of this has run on hardware.** The build figures below are from a clean compile on
+2026-10-07: App 1,523,584 of ota_0's 2,097,152 bytes, up 1,072 from the previous build.
+A clean compile proves the filter entries and the String copies type-check, not that a
+Navy helicopter overhead produces the card below.
+
+### What changed
+
+The response filter whitelists `isMilitary`, `militaryBranch`, `aircraftType` and
+`registration`. A field missing from that filter is a field the parse cannot see however
+faithfully the server sends it, which is why the list is the first thing to check when one
+reads back empty.
+
+The featured sighting is the first aircraft in the list with `isMilitary` set, falling back
+to element 0. The list arrives in distance order and the server keeps a place for the
+nearest military aircraft even when its own cap would have dropped it - so drawing element
+0 regardless would spend that place on a sighting nothing ever shows.
+
+The operator line carries `militaryBranch`, plus `aircraftType` after a hyphen when the
+provider named one: "U.S. Navy - MH-60 Seahawk". Composed at the call site, so
+`showAircraftCard()` needs no new parameter and no geometry moves.
+
+### 10a. A military aircraft nearby is the one drawn
+
+Needs a military aircraft within the configured radius and at least one civil aircraft
+nearer. Watch for `[aircraft] response ... callsign=` naming the military one rather than
+the nearest, and the card drawing its service where an airline name usually goes.
+
+### 10b. An ordinary sky is unchanged
+
+Every aircraft civil. The card draws the nearest, with its airline, exactly as before. This
+is the case that runs every other minute of the day and the one a regression would hide in.
+
+### 10c. A military aircraft with a callsign that says nothing
+
+"TSTR" and the like. The card should read "Military" rather than a guessed service, and
+should still draw the airframe when the provider reported a type.
+
+### 10d. An older server
+
+Point the device at a build predating these fields. Every one reads absent, `isMilitary`
+reads false, and the card draws what it drew before - the 6-month compatibility case.
+
+### Known gaps
+
+- **The service and the airframe are the server's answer, not this device's.** A wrong
+  curated row reaches the glass unchanged; there is nothing here that could catch one.
+- **The operator line is longer than it was.** "U.S. Navy - MH-60 Seahawk" is 25 characters
+  against an airline name's usual 8 to 12. `layoutText()` bounds it, so the failure mode is
+  truncation rather than overrun, but nothing has measured where it truncates.
+- **No rotation.** The suggestion offered "rotate through the returned aircraft or show a
+  military sighting when one is present" and this takes the second. The card still features
+  exactly one aircraft.
+
 
 ## What a clean compile does and does not prove
 

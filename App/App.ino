@@ -85,6 +85,7 @@ size_t getArduinoLoopTaskStackSize(void) {
 #include "IssFlyover.h"
 #include "Loader.h"
 #include "Log.h"
+#include "Impressions.h"
 #include "Motion.h"
 // The declared-maintenance-window deadline, which used to be a plain global in
 // this file. It moved out because the cards have to honour it too and cannot see
@@ -2199,6 +2200,11 @@ void setup() {
   // After Display::begin(), because Motion drives brightness THROUGH the display
   // layer rather than owning GPIO21 itself - LovyanGFX already claims that pin.
   Motion::begin();
+
+  // Reads the persisted instance counter, before anything can draw a card and
+  // begin a showing. No flash write here: the first showing reserves a block
+  // of ids, so a device that never draws one never writes at all.
+  Impressions::begin();
 
   // Drawn on every boot, quiet ones included, and deliberately BEFORE
   // decideBootNarration() exists to suppress anything. See the "What a boot is

@@ -207,14 +207,35 @@ Per showing:
 | Times sought | Reached by forward or back rather than by rotation. |
 | Times acted on | The card's action pressed while it was up. |
 
-Rolled up on the device into a small fixed buffer, keyed by card **and content**, and
-uploaded at check-in. The device holds totals, not a log of showings: a per-showing log
-grows without bound between check-ins and has no reader.
+**Superseded on 2026-10-08. The device reports every showing, not totals.**
+
+This said the device rolls up into a fixed buffer keyed by card and content and uploads
+totals, because a per-showing log grows without bound between check-ins and had no
+reader. The owner asked for the other shape on 2026-10-08, and it now has a reader: the
+server keeps every draw for ninety days and rolls it into quarter-hour rows kept for
+thirteen months. `CARD_IMPRESSIONS_DESIGN.md` in the server repository is the current
+design, and the server half of it is built and deployed. The paragraph above is kept
+rather than deleted so nobody builds from it by accident.
+
+What changes for firmware: buffer one entry per showing rather than a total per card.
+Each carries its own instance id, start, dwell, shuffle flag, presence milliseconds,
+sought flag, and content as named attributes.
+
+What does not change: the buffer is still bounded, it still has to say when it
+overflowed, and the entries still ride the ordinary check-in rather than an endpoint of
+their own.
 
 **The buffer is bounded and says when it overflowed.** A listings feed can walk more
 properties between check-ins than a fixed buffer holds. When it fills, the device keeps
 counting into an "other" bucket and reports that it did, so a report can say "and 40
-further listings" rather than quietly dropping them.
+further listings" rather than dropping them with nothing on screen to say so.
+
+Worth recording why the newer shape is also the better one, so this is not read as
+instruction overriding judgement. Totals keyed per card lose the time within the
+check-in interval. A display reporting every half hour could never produce the
+quarter-hour shape of a day, which is what answers *when should my announcement be up*.
+From per-showing entries the server can compute any grain it is later asked for; from
+totals it cannot recover one nobody thought to ask for in advance.
 
 ## The wire, and the rule that constrains it
 
@@ -230,14 +251,24 @@ optional fields**. So:
 
 ## The server side
 
-### The hour is the smallest thing stored
+### Two tiers: every draw for ninety days, quarter hours for thirteen months
 
-One row per device, per card, per content key, per hour. Day, week, month and year are
-all sums over it, so there is one table rather than four and no chance of the four
-disagreeing.
+**Superseded on 2026-10-08.** This said the hour was the smallest thing stored and
+nothing finer was kept. Both halves changed.
 
-Nothing finer is kept. A per-showing log answers no question anybody asks and grows
-with screen time rather than with fleet size.
+`card_impressions` holds one row per showing and is pruned at ninety days.
+`card_impression_periods` holds one row per device, card and content key per **quarter
+hour**, kept thirteen months, and `device_periods` holds the denominators once per
+display per quarter hour. Day, week, month and year are sums over the quarter-hour
+rows, so there is still one table per grain and no chance of them disagreeing.
+
+Fifteen minutes rather than an hour because an impression at 07:30 and one at 03:00 are
+not worth the same, and an agent deciding when to run a campaign needs the shape of the
+day.
+
+The ordering between the tiers is the part that can lose data, and the server enforces
+it: the pruner never deletes a draw past the point the rollup has reached, and a rollup
+that has never run means nothing is deleted at all.
 
 ### Thirteen months, trailing
 

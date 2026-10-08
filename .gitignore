@@ -13,3 +13,6 @@ build/
 Thumbs.db
 .DS_Store
 combined-checksums.txt
+
+# Detached compile output. The script is kept; its log is not.
+app-compile.log

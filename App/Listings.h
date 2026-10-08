@@ -83,6 +83,15 @@ struct ListingInfo {
   /// "only the fields this card actually draws are worth keeping" - so do not
   /// remove it as unused. Roughly 10 bytes per listing, kMaxListings of them.
   String mlsNumber;
+
+  /// The Compass listing identifier, resolved server-side from mlsNumber and
+  /// sent with every listing. Never drawn: it rides a button press so the
+  /// client's email can carry the property link, and a QR can be built from it
+  /// without a second request.
+  ///
+  /// The same deliberate exception the field above records - kept although this
+  /// card draws none of it. Roughly 20 bytes per listing, kMaxListings of them.
+  String compassPid;
 };
 
 struct Result {
