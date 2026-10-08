@@ -638,6 +638,30 @@ void cardDraw(uint16_t) {
 /// Names fall back to codes per side independently, matching how the card itself
 /// draws its route: a flight with one known airport name and one unknown reads
 /// better half-resolved than not at all.
+/// Which aircraft a showing was of, as a key an impression report can group on.
+///
+/// The registration rather than the callsign, because the two answer different
+/// questions and only one is stable: a tail number belongs to an airframe for
+/// its life, while a callsign belongs to a flight and the same aeroplane
+/// carries a different one tomorrow. "Which aircraft has this display shown"
+/// wants the first, and the callsign is already on the label for anyone reading
+/// a single row.
+///
+/// Falls back to the callsign when no registration arrived, on the same
+/// reasoning as the listings card's MLS fallback: a less stable identifier
+/// still names the thing, and no key at all names nothing.
+String cardListingId(uint16_t) {
+  if (gLast.status != Status::Ok) {
+    return String();
+  }
+
+  if (gLast.nearest.registration.length() > 0) {
+    return gLast.nearest.registration;
+  }
+
+  return gLast.nearest.callsign;
+}
+
 String cardDescribe(uint16_t) {
   if (gLast.status != Status::Ok || gLast.nearest.callsign.length() == 0) {
     return String();
@@ -665,6 +689,7 @@ String cardDescribe(uint16_t) {
   spec.fetch = cardFetch;
   spec.itemCount = cardItemCount;
   spec.describe = cardDescribe;
+  spec.listingId = cardListingId;
   spec.draw = cardDraw;
   spec.isNotable = cardIsNotable;
   spec.status = cardStatus;
