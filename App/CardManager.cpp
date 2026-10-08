@@ -4,6 +4,7 @@
 #include "Config.h"
 #include "Display.h"
 #include "HeapRatchet.h"
+#include "Impressions.h"
 #include "Log.h"
 #include "Motion.h"
 #include "Touch.h"
@@ -559,6 +560,48 @@ void resetHistory(const Position& position) {
   gHistoryCursor = 0;
 }
 
+/// Drops one card's recorded positions and keeps everybody else's.
+///
+/// WHY THIS EXISTS RATHER THAN resetHistory() ON EVERY FETCH. A refresh makes
+/// the refreshed card's item indices meaningless - index 3 may now be a
+/// different listing - and that was the whole reason the fetch path collapsed
+/// the ring. But it collapsed it for all the other cards too, and they had not
+/// changed. On a display carrying fourteen cards, something is almost always
+/// due a refresh, so the back history was being wiped continuously and reverse
+/// did nothing at all.
+///
+/// Reported from a device on 2026-10-08: a sports card on screen, several
+/// reverse presses, and it stayed put. rewind() returns early when the cursor
+/// is at zero, which is where every fetch had just put it.
+///
+/// The position on screen survives even when it belongs to the refreshed card.
+/// It is what the glass is showing, so dropping it would leave gCurrent and the
+/// cursor pointing at different cards.
+void forgetHistoryFor(int8_t card) {
+  uint8_t write = 0;
+  uint8_t cursor = 0;
+
+  for (uint8_t read = 0; read < gHistoryCount; ++read) {
+    if (gHistory[read].card == card && read != gHistoryCursor) {
+      continue;
+    }
+
+    if (read <= gHistoryCursor) {
+      cursor = write;
+    }
+
+    gHistory[write++] = gHistory[read];
+  }
+
+  if (write == 0) {
+    resetHistory(gCurrent);
+    return;
+  }
+
+  gHistoryCount = write;
+  gHistoryCursor = cursor < write ? cursor : static_cast<uint8_t>(write - 1);
+}
+
 /// Adopts whatever the history cursor now points at. A list entry also
 /// restores the list cursor, so stepping forward off the end of a rewound
 /// stretch resumes the sequence from the right place.
@@ -738,13 +781,49 @@ void drawCurrent() {
   drawChrome(card);
 }
 
+/// Defined below, beside advance() and rewind(), its other callers.
+void noteShowing(Impressions::Arrival arrival);
+
 void show(const Position& position) {
   gCurrent = position;
   gLastSwitchMs = millis();
+
+  // Rotation, not Manual. Every caller of show() is the server or a data
+  // refresh putting something up - a policy that dropped the card on screen,
+  // the first card after boot - rather than a household reaching for it.
+  noteShowing(Impressions::Arrival::Rotation);
   drawCurrent();
 }
 
-void advance() {
+/// Tells the impression buffer a new showing has started, closing the one
+/// before it.
+///
+/// Called beside every `gLastSwitchMs = millis()`, which is the real choke
+/// point. show(), both of advance()'s paths and rewind() all assign it, and
+/// only show() looks like the obvious place - hooking that alone would have
+/// missed every card reached by the dwell timer or a nav tap, which is almost
+/// all of them.
+///
+/// The content key and the summary come from the card at the moment it goes
+/// up. Nothing else can answer them: the provider cache behind a card is
+/// replaced as feeds refresh, so asking later names a different listing.
+void noteShowing(Impressions::Arrival arrival) {
+  if (gCurrent.card < 0 || gCurrent.card >= static_cast<int8_t>(gCardCount)) {
+    Impressions::endShowing();
+    return;
+  }
+
+  const Cards::CardSpec& card = gCards[gCurrent.card];
+
+  const String contentKey =
+      card.listingId != nullptr ? card.listingId(gCurrent.item) : String();
+  const String summary =
+      card.describe != nullptr ? card.describe(gCurrent.item) : String();
+
+  Impressions::beginShowing(card.id, contentKey.c_str(), summary.c_str(), arrival);
+}
+
+void advance(Impressions::Arrival arrival) {
   // One rotation step, one step through the announcement queue - so a banner
   // gets a full dwell to be read rather than however long until the next
   // incidental redraw. See Cards::advanceAnnouncementCursor().
@@ -758,6 +837,7 @@ void advance() {
     gHistoryCursor++;
     applyHistory();
     gLastSwitchMs = millis();
+    noteShowing(arrival);
     drawCurrent();
     return;
   }
@@ -766,6 +846,7 @@ void advance() {
   pushHistory(next);
   applyHistory();
   gLastSwitchMs = millis();
+  noteShowing(arrival);
   drawCurrent();
 }
 
@@ -795,6 +876,7 @@ void rewind() {
   gHistoryCursor--;
   applyHistory();
   gLastSwitchMs = millis();
+  noteShowing(Impressions::Arrival::Manual);
   drawCurrent();
 }
 
@@ -914,7 +996,7 @@ void handleTap(const Touch::Tap& tap) {
     case Touch::Hit::Forward:
       Log::line("[cards] forward tap");
       Display::flashNavEdge(/*isForward=*/true, /*canReverse=*/gHistoryCursor > 0);
-      advance();
+      advance(Impressions::Arrival::Manual);
       holdOffAutoAdvance();
       return;
     case Touch::Hit::None:
@@ -938,7 +1020,7 @@ void handleTap(const Touch::Tap& tap) {
           // same instant, which reads as the tap having done something
           // confusing rather than as the notice being dealt with.
           Display::showButtonPressConfirmation();
-          advance();
+          advance(Impressions::Arrival::Manual);
           holdOffAutoAdvance();
         }
       }
@@ -980,9 +1062,12 @@ void fetchCard(uint8_t index) {
   card.lastFetchMs = millis();
   card.everFetched = true;
 
-  // Recorded positions can no longer be trusted to mean the same items, so
-  // collapse the ring to wherever we are now.
-  resetHistory(gCurrent);
+  // THIS CARD'S recorded positions can no longer be trusted to mean the same
+  // items. Every other card's still can, and collapsing the whole ring here
+  // took reverse away from a household entirely: with a dozen cards on
+  // refresh timers something is always due, so the cursor was being put back
+  // to zero faster than anybody could press anything.
+  forgetHistoryFor(static_cast<int8_t>(index));
 
   if (gCurrent.card < 0) {
     // Nothing was on screen (boot, or everything empty until now) - put the
@@ -1098,13 +1183,43 @@ void poll() {
 
   pollTouch();
 
+  // PRESENCE, FROM THE SENSOR THAT ALREADY DEBOUNCES IT. Motion holds Active
+  // for activeTimeoutSeconds after the last confirmed event, so a person who
+  // stops moving does not read as gone and a single flicker does not read as
+  // somebody arriving. That is the device-side half of the debounce the
+  // impressions design asks for; the server merges the gaps between runs,
+  // because that threshold is a product judgement somebody will tune and
+  // firmware cannot be re-tuned without a release.
+  //
+  // A unit with no sensor never reaches Active, so it reports seen only for
+  // the cards somebody navigated to. A floor rather than a measure, which the
+  // report says out loud.
+  //
+  // setPresent is idempotent, which is why this can be unconditional.
+  Impressions::setPresent(Motion::state() == Motion::BacklightState::Active);
+
   const uint32_t now = millis();
   // Signed difference rather than a plain `now >= gManualHoldUntilMs`, so a
   // hold set moments before millis() wraps at ~49.7 days does not read as
   // "hold forever".
   const bool holdExpired = static_cast<int32_t>(now - gManualHoldUntilMs) >= 0;
+
+  // SOUGHT: somebody navigated here and stayed. The hold a deliberate press
+  // set has run its course with the card still up, which is this firmware's
+  // own definition of having stayed - the same timer that decides a card
+  // picked on purpose gets a longer look.
+  //
+  // Cleared to zero so it fires once per hold rather than on every tick after
+  // it, and guarded on non-zero because a zero hold reads as long expired.
+  // A server configuring no hold at all records no sought, which is right:
+  // without a hold there is no staying to measure.
+  if (gManualHoldUntilMs != 0 && holdExpired) {
+    Impressions::markSought();
+    gManualHoldUntilMs = 0;
+  }
+
   if (holdExpired && (now - gLastSwitchMs) >= dwellMs()) {
-    advance();
+    advance(Impressions::Arrival::Rotation);
   }
 
   refreshOneDueCard();

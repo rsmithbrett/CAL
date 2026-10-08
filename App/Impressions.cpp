@@ -119,11 +119,19 @@ void closeShowing(uint32_t nowMs) {
 
   const uint32_t dwellMs = nowMs - gStartedMs;
 
+  // Somebody pressed to get here, so they were in front of it. The whole
+  // showing counts as seen, which is what makes a unit with no motion sensor
+  // report a real figure rather than a zero - a floor rather than a measure,
+  // and the report says which displays had a sensor.
+  uint32_t seenMs = gArrival == Arrival::Manual && gSeenMs == 0 ? dwellMs : gSeenMs;
+
   // Seen is carved out of shown rather than counted beside it, so it can never
   // be the larger of the two. A clock that moved mid-showing is the way that
   // would otherwise happen, and an attention rate over a hundred per cent is
   // the sort of figure somebody quotes to a client once.
-  const uint32_t seenMs = gSeenMs > dwellMs ? dwellMs : gSeenMs;
+  if (seenMs > dwellMs) {
+    seenMs = dwellMs;
+  }
 
   gSeenMs = 0;
 
@@ -180,12 +188,15 @@ void beginShowing(const char* cardId, const char* contentKey, const char* summar
   gArrival = arrival;
 
   // A card somebody pressed forward or back to reach was looked at by whoever
-  // pressed, whether or not they stay on it. That is presence, and it is the
-  // whole reason a display with no motion sensor still reports a seen figure.
+  // pressed, whether or not they stay on it - the whole reason a display with
+  // no motion sensor still reports a seen figure.
+  //
+  // Credited when the showing closes, NOT by asserting presence here. Presence
+  // set this way has nothing to turn it off on a unit with no sensor, so one
+  // tap would have marked every card after it as seen, for as long as the
+  // device stayed up. The press proves somebody was there for THIS showing and
+  // says nothing about the next one.
   gSought = false;
-  if (arrival == Arrival::Manual) {
-    setPresent(true);
-  }
 
   gShowing = true;
   gPresentSinceMs = now;
