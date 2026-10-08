@@ -80,6 +80,19 @@ void poll();
 /// and returns false when there is nothing new.
 void pollTouch();
 
+/// Reads the physical button on GPIO27 and, on a debounced press, puts the
+/// clock card up.
+///
+/// GPIO27 is the one free pin on this board - GPIO0 carries CAL's WiFi-reset
+/// gesture, GPIO34 is the onboard LDR and GPIO35 is the PIR - and PowerProbe.h
+/// names it free and deliberately does not probe it. Wired to ground through
+/// the button and read with INPUT_PULLUP, so idle is HIGH.
+///
+/// Safe to call as often as you like, the same as pollTouch(): it debounces
+/// internally and is edge-triggered, so a held or stuck button is one press
+/// rather than one per loop iteration.
+void pollActionButton();
+
 /// Applies a cardPolicy received on check-in. A policy with `present == false`
 /// changes nothing - "the server sent no policy" means keep using whatever is
 /// already in force, never "blank the screen".
