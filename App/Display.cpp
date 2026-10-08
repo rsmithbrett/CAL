@@ -15,6 +15,7 @@
 // and are gated identically - there is no separate per-format JPEG switch to
 // find, and nothing to do here beyond what this include already does.
 #include <SD.h>
+#include <cmath>
 #include <cstdlib>
 // strlen/strncat, for layoutText()'s fixed line buffer. Named explicitly rather
 // than leaned on through whatever Arduino.h happens to drag in, because the
@@ -1746,8 +1747,18 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   rowY += kRowHeight;
 
   layoutLine("Speed", kCardMargin, rowY, rowLabelWidth, muted(), "aircraft.speed.label");
-  snprintf(valueBuf, sizeof(valueBuf), "%d kts", static_cast<int>(speedKnots + 0.5));
-  layoutLine(valueBuf, rightX, rowY, rowValueWidth, ink(), "aircraft.speed", Align::Right);
+
+  // A dash where the feed reported no ground speed, for the reason the
+  // heading below draws one: "0 kts" is a parked aeroplane, and an airborne
+  // aircraft whose feed omitted the field is not parked. The server sends
+  // null and Aircraft.cpp carries it through as NaN.
+  if (isnan(speedKnots)) {
+    Log::line("[display] aircraft.speed: not reported, drawing '--'");
+    layoutLine("--", rightX, rowY, rowValueWidth, ink(), "aircraft.speed", Align::Right);
+  } else {
+    snprintf(valueBuf, sizeof(valueBuf), "%d kts", static_cast<int>(speedKnots + 0.5));
+    layoutLine(valueBuf, rightX, rowY, rowValueWidth, ink(), "aircraft.speed", Align::Right);
+  }
   rowY += kRowHeight;
 
   layoutLine("Heading", kCardMargin, rowY, rowLabelWidth, muted(), "aircraft.heading.label");

@@ -1,5 +1,6 @@
 #include "Aircraft.h"
 
+#include <math.h>
 #include <ArduinoJson.h>
 
 #include "Assets.h"
@@ -329,10 +330,28 @@ Result fetchMine() {
   }
 
   result.status = Status::Ok;
-  result.nearest.callsign = String((const char*)(nearest["callsign"] | "UNKNOWN"));
+  // "UNKNOWN" IS NOT A CALLSIGN AND READS EXACTLY LIKE ONE. A military
+  // aircraft flying without a flight id has none, and the word sat where
+  // SCWTP33 sits on the card beside it - photographed 2026-10-08. Empty
+  // instead, so the card falls back to the registration it already has, or
+  // draws nothing, the way it does for every other missing string.
+  result.nearest.callsign = String((const char*)(nearest["callsign"] | ""));
   result.nearest.altitudeFeet = nearest["altitudeFeet"] | 0;
-  result.nearest.speedKnots = nearest["speedKnots"] | 0.0;
-  result.nearest.headingDegrees = nearest["headingDegrees"] | 0.0;
+
+  // NaN RATHER THAN ZERO, AND THE SERVER HAS BEEN SENDING NULL FOR A
+  // FORTNIGHT WAITING FOR IT. IAdsbClient made both of these nullable
+  // precisely so "not reported" stops reading as a reading: zero knots is a
+  // parked aeroplane and zero degrees is due north. Coalescing here threw
+  // that away on arrival, and the card drew a P-8 at 6,975 feet doing 0 kts
+  // heading N.
+  //
+  // NaN because it is the one double that fails every comparison, so
+  // compassDirection()'s own [0,360) guard already refuses it and draws the
+  // dash it was written to draw. Only speed needed a check of its own.
+  result.nearest.speedKnots =
+      nearest["speedKnots"].is<double>() ? nearest["speedKnots"].as<double>() : NAN;
+  result.nearest.headingDegrees =
+      nearest["headingDegrees"].is<double>() ? nearest["headingDegrees"].as<double>() : NAN;
   result.nearest.distanceMiles = nearest["distanceMiles"] | 0.0;
   // `| ""` reads a JSON null exactly the same as a field an older server
   // never sends at all - both mean "nothing here" to this client, and the
@@ -525,14 +544,27 @@ void cardDraw(uint16_t) {
     // the two airport lines are empty and the card has the room.
     String operatorName = gLast.nearest.airlineName;
     if (gLast.nearest.isMilitary && gLast.nearest.militaryBranch.length() > 0) {
+      // THE BRANCH ALONE. This appended " - " and the airframe, and the two
+      // together overran the title: photographed 2026-10-08 as "Military -
+      // P-8..." with the interesting half cut off. The type moves to the
+      // identifier line below, which on that same photograph was spending
+      // itself on the word UNKNOWN.
       operatorName = gLast.nearest.militaryBranch;
-      if (gLast.nearest.aircraftType.length() > 0) {
-        operatorName += " - ";
-        operatorName += gLast.nearest.aircraftType;
-      }
     }
 
-    Display::showAircraftCard(gLast.nearest.callsign, operatorName,
+    // WHAT TO CALL IT, in order of how specific it is. A callsign names this
+    // flight; a registration names this airframe; a type names its kind.
+    // Military traffic routinely files no callsign at all, which used to
+    // arrive as the literal "UNKNOWN" and read like one.
+    String identifier = gLast.nearest.callsign;
+    if (identifier.length() == 0) {
+      identifier = gLast.nearest.registration;
+    }
+    if (identifier.length() == 0) {
+      identifier = gLast.nearest.aircraftType;
+    }
+
+    Display::showAircraftCard(identifier, operatorName,
                               gLast.nearest.altitudeFeet, gLast.nearest.speedKnots,
                               gLast.nearest.headingDegrees, gLast.nearest.distanceMiles,
                               gLast.nearest.originCode, gLast.nearest.destinationCode,
