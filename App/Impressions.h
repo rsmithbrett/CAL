@@ -129,9 +129,15 @@ uint8_t pendingCount();
 /// showings" rather than dropping them with nothing to say so.
 uint16_t droppedCount();
 
-/// Copies up to `max` finished showings into `out`, oldest first. The showing
-/// currently on screen is not among them: it has no dwell yet.
-uint8_t snapshot(Entry* out, uint8_t max);
+/// One finished showing, oldest first, or null past the end.
+///
+/// READ IN PLACE RATHER THAN COPIED OUT. This was a snapshot that filled a
+/// caller-supplied array, and the only caller gave it a static one of
+/// kMaxEntries - a second full buffer, 4,432 bytes of RAM on a board whose
+/// free heap is measured in tens of kilobytes, holding a copy of what this
+/// module already had. The showing on screen is never among these: it has no
+/// dwell yet.
+const Entry* entryAt(uint8_t index);
 
 /// Forgets the showings the server acknowledged, and the dropped count with
 /// them.

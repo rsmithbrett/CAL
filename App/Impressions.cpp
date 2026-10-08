@@ -220,13 +220,7 @@ uint8_t pendingCount() { return gCount; }
 
 uint16_t droppedCount() { return gDropped; }
 
-uint8_t snapshot(Entry* out, uint8_t max) {
-  const uint8_t count = gCount < max ? gCount : max;
-  for (uint8_t i = 0; i < count; ++i) {
-    out[i] = gEntries[i];
-  }
-  return count;
-}
+const Entry* entryAt(uint8_t index) { return index < gCount ? &gEntries[index] : nullptr; }
 
 void clearReported(uint8_t count) {
   if (count >= gCount) {
