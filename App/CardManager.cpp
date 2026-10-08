@@ -815,8 +815,23 @@ void noteShowing(Impressions::Arrival arrival) {
 
   const Cards::CardSpec& card = gCards[gCurrent.card];
 
-  const String contentKey =
+  String contentKey =
       card.listingId != nullptr ? card.listingId(gCurrent.item) : String();
+
+  // The descriptor's own content, for the cards whose item IS the policy entry.
+  // A graphic card draws one asset and a QR card encodes one payload, both
+  // arriving on the policy and sitting right here, so asking those cards for a
+  // function that returns what is already in front of us would be five
+  // identical one-liners across two files. Reached only when the card offers no
+  // listingId, so a card that names its own item keeps naming it.
+  if (contentKey.length() == 0) {
+    if (card.assetId[0] != '\0') {
+      contentKey = card.assetId;
+    } else if (card.qrData[0] != '\0') {
+      contentKey = card.qrData;
+    }
+  }
+
   const String summary =
       card.describe != nullptr ? card.describe(gCurrent.item) : String();
 

@@ -253,6 +253,99 @@ uint16_t countLive() {
 /// Aircraft uses for an aeroplane nearly overhead.
 bool notableLive(uint16_t) { return anyLive(3); }
 
+/// Which game a showing was of, as a key an impression report can group on.
+///
+/// Composed here rather than carried from the server, because the payload has
+/// no game id to carry: SportsCardPayload sends teams, scores, state, period
+/// and a start time, and the matching struct in Sports.h holds exactly those.
+/// The start instant and the two sides name a fixture between them, and all
+/// three already arrive, so the key costs nothing on the wire and every device
+/// showing the same game reports the same key.
+///
+/// UTC, deliberately. A game at 8pm Eastern falls on the next UTC day, so this
+/// does not read as the date on the card - but two devices in different zones
+/// showing one game have to agree, and the instant is the only thing about a
+/// fixture that every device sees identically.
+///
+/// A start time of 0 means the server did not send one. The teams still name
+/// the fixture, so the key keeps them and drops the date rather than returning
+/// nothing: a key shared by both legs of a double-header is a better answer
+/// than no key at all.
+String listingIdCardAt(uint8_t index, uint16_t itemIndex) {
+  const CardSlot& slot = gCards[index];
+  if (slot.count == 0 || itemIndex >= slot.count) { return String(); }
+
+  const Game& game = slot.games[itemIndex];
+  if (game.away[0] == '\0' && game.home[0] == '\0') { return String(); }
+
+  char key[72];
+  if (game.startsAtUtc != 0) {
+    struct tm utc;
+    gmtime_r(&game.startsAtUtc, &utc);
+    snprintf(key, sizeof(key), "%04d-%02d-%02d:%s@%s",
+             utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday, game.away, game.home);
+  } else {
+    snprintf(key, sizeof(key), "%s@%s", game.away, game.home);
+  }
+
+  return String(key);
+}
+
+/// The same line the verbose log writes, as the label a report shows beside
+/// the key. Away first with the "@" on the host, matching both the panel and
+/// drawCardAt()'s log - a report that reversed them would have somebody
+/// reading last night's result backwards.
+String describeCardAt(uint8_t index, uint16_t itemIndex) {
+  const CardSlot& slot = gCards[index];
+  if (slot.count == 0 || itemIndex >= slot.count) { return String(); }
+
+  const Game& game = slot.games[itemIndex];
+
+  String text = String(game.away);
+  const String awayScore = scoreText(game.awayScore);
+  if (awayScore.length() > 0) { text += " " + awayScore; }
+
+  text += " @ ";
+  text += game.home;
+  const String homeScore = scoreText(game.homeScore);
+  if (homeScore.length() > 0) { text += " " + homeScore; }
+
+  const String status = stateText(game);
+  if (status.length() > 0) { text += " (" + status + ")"; }
+
+  return text;
+}
+
+// Four wrappers each, for the same reason draw0..draw3 exist: CardSpec's hooks
+// are bare function pointers with no user data to bind the instance through.
+String listingId0(uint16_t i) { return listingIdCardAt(0, i); }
+String listingId1(uint16_t i) { return listingIdCardAt(1, i); }
+String listingId2(uint16_t i) { return listingIdCardAt(2, i); }
+String listingId3(uint16_t i) { return listingIdCardAt(3, i); }
+
+String describe0(uint16_t i) { return describeCardAt(0, i); }
+String describe1(uint16_t i) { return describeCardAt(1, i); }
+String describe2(uint16_t i) { return describeCardAt(2, i); }
+String describe3(uint16_t i) { return describeCardAt(3, i); }
+
+Cards::ListingIdFn listingIdFor(uint8_t index) {
+  switch (index) {
+    case 0: return listingId0;
+    case 1: return listingId1;
+    case 2: return listingId2;
+    default: return listingId3;
+  }
+}
+
+Cards::DescribeFn describeFor(uint8_t index) {
+  switch (index) {
+    case 0: return describe0;
+    case 1: return describe1;
+    case 2: return describe2;
+    default: return describe3;
+  }
+}
+
 bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw,
                  int16_t order, uint16_t dwellSeconds) {
   Cards::CardSpec spec;
@@ -262,6 +355,8 @@ bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw
   spec.draw = draw;
   spec.order = order;
   spec.dwellSeconds = dwellSeconds;
+  spec.listingId = listingIdFor(index);
+  spec.describe = describeFor(index);
   return Cards::registerCard(spec);
 }
 
