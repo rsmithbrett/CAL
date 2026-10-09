@@ -969,6 +969,78 @@ void drawCloudShape(int cx, int cy, int radius, uint32_t colour) {
 // that might not be there" reasoning as this file's own compassDirection()
 // 8-point table and drawTemperature()'s hand-drawn degree ring, just applied
 // to trig instead of locale/glyph support.
+/// One channel of a linear blend between two 24-bit colours.
+uint8_t mixChannel(uint32_t from, uint32_t to, int shift, int numerator, int denominator) {
+  const int a = static_cast<int>((from >> shift) & 0xFFu);
+  const int b = static_cast<int>((to >> shift) & 0xFFu);
+  return static_cast<uint8_t>(a + (((b - a) * numerator) / (denominator <= 0 ? 1 : denominator)));
+}
+
+uint32_t mixColour(uint32_t from, uint32_t to, int numerator, int denominator) {
+  return (static_cast<uint32_t>(mixChannel(from, to, 16, numerator, denominator)) << 16)
+       | (static_cast<uint32_t>(mixChannel(from, to, 8, numerator, denominator)) << 8)
+       | static_cast<uint32_t>(mixChannel(from, to, 0, numerator, denominator));
+}
+
+/// A vertical gradient, one horizontal line per row.
+///
+/// Row by row rather than through a sprite because this board has no PSRAM: a
+/// full-screen 16-bit sprite is 153,600 bytes, and the largest contiguous block
+/// these devices report is a fraction of that even when healthy. 240 HLine
+/// calls cost nothing worth measuring on a card that redraws every twelve
+/// seconds, and they allocate nothing at all - which on this fleet is the
+/// property that matters.
+void fillVerticalGradient(int top, int height, uint32_t from, uint32_t to) {
+  for (int row = 0; row < height; ++row) {
+    lcd.drawFastHLine(0, top + row, kScreenW, mixColour(from, to, row, height - 1));
+  }
+}
+
+/// A three-stop vertical sky, which is what both designs use: the middle stop
+/// is where a sky changes character, and a straight two-stop blend across the
+/// same span washes that out.
+void fillSkyGradient(uint32_t top, uint32_t middle, uint32_t bottom, int middleAtY) {
+  fillVerticalGradient(0, middleAtY, top, middle);
+  fillVerticalGradient(middleAtY, kScreenH - middleAtY, middle, bottom);
+}
+
+/// Fills beneath a quadratic Bezier, from the curve down to the bottom of the
+/// screen - the hill silhouettes in the sun design, which are quadratic paths.
+///
+/// Evaluated per column rather than flattened to a polygon: one vertical line
+/// per x needs no vertex buffer and cannot leave the seams a coarse flattening
+/// shows on a curve this shallow.
+void fillUnderQuadratic(int x0, int y0, int cx, int cy, int x1, int y1, uint32_t colour) {
+  (void)cx;
+  if (x1 <= x0) {
+    return;
+  }
+
+  for (int x = x0; x <= x1 && x < kScreenW; ++x) {
+    if (x < 0) {
+      continue;
+    }
+
+    // t taken from the x span rather than solved from the curve. These control
+    // points are near-evenly spaced in x, so the two agree within a pixel at
+    // this size, and solving it properly would be arithmetic nobody could
+    // check against the drawing it is meant to reproduce.
+    const float t = static_cast<float>(x - x0) / static_cast<float>(x1 - x0);
+    const float inverse = 1.0f - t;
+    const float y = (inverse * inverse * static_cast<float>(y0))
+                  + (2.0f * inverse * t * static_cast<float>(cy))
+                  + (t * t * static_cast<float>(y1));
+
+    int topY = static_cast<int>(y + 0.5f);
+    if (topY < 0) {
+      topY = 0;
+    }
+    if (topY < kScreenH) {
+      lcd.drawFastVLine(x, topY, kScreenH - topY, colour);
+    }
+  }
+}
+
 void drawSunIcon(int cx, int cy, int radius) {
   lcd.fillCircle(cx, cy, radius * 0.5f, kIconSun);
   static constexpr float kRayDirs[8][2] = {
@@ -1833,52 +1905,88 @@ void showAircraftStatus(const String& headline, const String& detail, bool isPro
 }
 
 void showSunMoonCard(const String& sunriseText, const String& sunsetText, const String& detail) {
-  lcd.fillScreen(bg());
-  drawCardBanner("SUN", kSunMoonBanner, 70);
+  // THE SKY IS THE CARD. The previous version was a label-and-value table with
+  // two small icons; this is docs/design/sun-moon-redesign, where the sun sits
+  // in a graded sky over two ridgelines and the times are the largest thing on
+  // the panel.
+  //
+  // DAY AND NIGHT ARE THE SAME DRAWING IN TWO PALETTES, which is the whole of
+  // how the rest of this file already works: every other card reads bg(), ink()
+  // and muted(), and a full-bleed card that ignored gIsDaytime would be a dark
+  // rectangle sitting among white ones every afternoon. Geometry, type sizes
+  // and positions are identical between the two - only the colours move - so
+  // the two cannot drift apart the way two separate layouts would.
+  struct SkyPalette {
+    uint32_t skyTop;
+    uint32_t skyMiddle;
+    uint32_t skyBottom;
+    uint32_t glow;
+    uint32_t disc;
+    uint32_t ridgeFar;
+    uint32_t ridgeNear;
+    uint32_t heading;
+    uint32_t label;
+    uint32_t value;
+    uint32_t footnote;
+    int discY;
+    int discRadius;
+  };
 
-  // Two rows, label left and time right-justified, reusing showAircraftCard's
-  // stat-row layout rather than inventing a second one - this card is the same
-  // shape of information (a short label against a short value).
-  const int rightX = kScreenW - kCardMargin;
-  const int rowValueWidth = 150;
-  // Stops at the icon column rather than at the value column: the icons below
-  // are centred at x=130 and span 114-146, so a label allowed to run to x=160
-  // would print through them.
-  const int rowLabelWidth = 104;
+  // Day: a blue sky falling to a pale horizon, the sun high and small, ridges
+  // green. Night: the dusk the design was drawn at, sun low and large on the
+  // horizon, ridges in silhouette. The times stay near-white in both because
+  // they sit over the dark ridges either way.
+  const SkyPalette day{
+      0x4A8FC4u, 0x9FCBE4u, 0xDCECF4u, 0xFFF4C8u, 0xFFF6D2u,
+      0x6F9A7Eu, 0x4F7A60u,
+      0x15303Fu, 0x2B4A5Cu, 0xF7FBFDu, 0xE8F2F7u, 86, 34};
+  const SkyPalette night{
+      0x102641u, 0xD57961u, 0xF4BD71u, 0xFFE9A0u, 0xFFF1BCu,
+      0x243D4Bu, 0x132C3Au,
+      0xFFF5DFu, 0xF4C788u, 0xFFF5DFu, 0xC5D4DCu, 119, 49};
 
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  const SkyPalette& sky = gIsDaytime ? day : night;
+
+  fillSkyGradient(sky.skyTop, sky.skyMiddle, sky.skyBottom, gIsDaytime ? 140 : 132);
+
+  // The glow is three flat rings rather than a radial gradient: a true radial
+  // fill means per-pixel work across a third of the panel, and at this size
+  // three steps are indistinguishable from the smooth version once the sky is
+  // behind them.
+  for (int step = 3; step >= 1; --step) {
+    const int radius = sky.discRadius + (step * (gIsDaytime ? 17 : 17));
+    lcd.fillCircle(160, sky.discY, radius, mixColour(sky.skyMiddle, sky.glow, 4 - step, 6));
+  }
+  lcd.fillCircle(160, sky.discY, sky.discRadius, sky.disc);
+
+  // Two ridgelines, far then near, from the design's own control points.
+  fillUnderQuadratic(0, 144, 95, 126, 320, 140, sky.ridgeFar);
+  fillUnderQuadratic(0, 164, 166, 146, 320, 151, sky.ridgeNear);
+
   lcd.setTextSize(1);
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  layoutLine("SUN · TODAY", kCardMargin, 12, 180, sky.heading, "sunmoon.heading");
 
-  layoutLine("Sunrise", kCardMargin, 44, rowLabelWidth, muted(), "sunmoon.sunrise.label");
-  layoutLine(sunriseText, rightX, 44, rowValueWidth, ink(), "sunmoon.sunrise", Align::Right);
+  layoutLine("↑ SUNRISE", kCardMargin, 166, 140, sky.label, "sunmoon.sunrise.label");
+  layoutLine(
+      "↓ SUNSET", kScreenW - kCardMargin, 166, 140, sky.label, "sunmoon.sunset.label",
+      Align::Right);
 
-  layoutLine("Sunset", kCardMargin, 90, rowLabelWidth, muted(), "sunmoon.sunset.label");
-  layoutLine(sunsetText, rightX, 90, rowValueWidth, ink(), "sunmoon.sunset", Align::Right);
-
-  // One icon per row, in the gap between the label and the right-justified
-  // value column - "Sunrise"/"Sunset" at this font leave roughly x100-160
-  // empty, plenty of room for a 24px icon without touching either column.
-  // Sun for sunrise, a crescent for sunset - the card's own name ("sun and
-  // moon") made this the obvious pairing rather than drawing a sun on both
-  // rows and leaving "moon" in the id unrepresented anywhere on the card.
-  // Radius 16 (32px across) rather than the original 12 - reported too small to
-  // read at a glance on real hardware. Still clears both columns either side:
-  // "Sunrise"/"Sunset" at this font end around x=90, the value column starts at
-  // x=160, and a 32px icon centred at x=130 spans 114-146.
-  constexpr int kIconColumnX = 130;
-  constexpr int kIconRadius = 16;
-  drawSunIcon(kIconColumnX, 44 + 9, kIconRadius);
-  drawMoonIcon(kIconColumnX, 90 + 9, kIconRadius);
+  lcd.setFont(&fonts::FreeSansBold18pt7b);
+  layoutLine(sunriseText, kCardMargin, 186, 150, sky.value, "sunmoon.sunrise");
+  layoutLine(
+      sunsetText, kScreenW - kCardMargin, 186, 150, sky.value, "sunmoon.sunset", Align::Right);
 
   if (detail.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    const TextBox detailBox{kCardMargin, 140, kScreenW - kCardMargin * 2, 20, 2, Align::Left};
-    layoutText(detail, detailBox, muted(), "sunmoon.detail");
+    const TextBox detailBox{kCardMargin, 220, kScreenW - kCardMargin * 2, 18, 1, Align::Centre};
+    layoutText(detail, detailBox, sky.footnote, "sunmoon.detail");
   }
 
   drawClock();
   restoreDefaultFont();
 }
+
 
 void showTidesCard(const String& nextHighTideText, const String& nextLowTideText) {
   lcd.fillScreen(bg());
@@ -2678,45 +2786,105 @@ void showIssNextPassCard(const String& riseTimeText, const String& riseDirection
 //
 // UNVERIFIED ON HARDWARE, same as every other card in this file - checked
 // by a clean compile and by reading, not by a real decode on a real panel.
-void showMoonPhaseCard(const String& phaseName, double phase, double illuminatedFraction) {
-  lcd.fillScreen(bg());
-  drawCardBanner("MOON", kMoonPhaseBanner, 80);
 
-  const int cx = kScreenW / 2;
-  const int cy = 90;
-  const int radius = 50;
+namespace {
 
-  // Defensive clamp only - MoonPhase.cpp's cardItemCount() already keeps this
-  // function from being called at all with the "no data" sentinel (-1), so
-  // this never actually sees an out-of-range value in practice.
+/// The mean synodic month, in days: new moon to new moon. Enough for "in 3
+/// days" on a card; the true interval varies by several hours either way and no
+/// reader of this panel can tell.
+constexpr double kSynodicDays = 29.530588;
+
+/// One moon disc at any phase, lit portion and all.
+///
+/// Pulled out of the card below because the redesign draws five of them - one
+/// hero and four upcoming phases - and five copies of terminator arithmetic is
+/// five places for the lit side to end up on the wrong edge.
+void drawMoonDisc(
+    int cx, int cy, int radius, double illuminatedFraction, bool waxingRight,
+    uint32_t lit, uint32_t dark, uint32_t outline) {
   double k = illuminatedFraction;
-  if (k < 0.0) k = 0.0;
-  if (k > 1.0) k = 1.0;
-  const bool waxingRight = phase < 0.5;
+  if (k < 0.0) { k = 0.0; }
+  if (k > 1.0) { k = 1.0; }
 
-  lcd.fillCircle(cx, cy, radius, muted());
+  lcd.fillCircle(cx, cy, radius, dark);
+
   if (waxingRight) {
-    lcd.fillArc(cx, cy, 0, radius, 270, 90, ink());
+    lcd.fillArc(cx, cy, 0, radius, 270, 90, lit);
   } else {
-    lcd.fillArc(cx, cy, 0, radius, 90, 270, ink());
+    lcd.fillArc(cx, cy, 0, radius, 90, 270, lit);
   }
 
+  // The terminator is an ellipse across the disc: narrow near the quarters,
+  // full width at new and full. Its colour is the side that is GROWING - dark
+  // while under half lit, lit while over - which is what turns a half disc into
+  // a crescent or a gibbous.
   double halfWidthFraction = 2.0 * k - 1.0;
-  if (halfWidthFraction < 0.0) halfWidthFraction = -halfWidthFraction;
+  if (halfWidthFraction < 0.0) { halfWidthFraction = -halfWidthFraction; }
   const int terminatorRx = static_cast<int>(radius * halfWidthFraction + 0.5);
   if (terminatorRx > 0) {
-    const uint32_t terminatorColour = (k <= 0.5) ? muted() : ink();
-    lcd.fillEllipse(cx, cy, terminatorRx, radius, terminatorColour);
+    lcd.fillEllipse(cx, cy, terminatorRx, radius, (k <= 0.5) ? dark : lit);
   }
 
-  // A crisp outline regardless of theme: muted() against bg() is legible
-  // elsewhere in this file as body text, but a ring makes the disc's edge
-  // unambiguous even where the two are close in tone.
-  lcd.drawCircle(cx, cy, radius, ink());
+  lcd.drawCircle(cx, cy, radius, outline);
+}
+
+/// How many days until the moon next reaches `target`, where 0 is new, 0.25
+/// first quarter, 0.5 full and 0.75 last quarter.
+double daysUntilPhase(double currentPhase, double target) {
+  double ahead = target - currentPhase;
+  while (ahead < 0.0) { ahead += 1.0; }
+  while (ahead >= 1.0) { ahead -= 1.0; }
+  return ahead * kSynodicDays;
+}
+
+}  // namespace
+
+void showMoonPhaseCard(const String& phaseName, double phase, double illuminatedFraction) {
+  // docs/design/sun-moon-redesign: the disc moves off centre to sit beside its
+  // own name, and the lower half becomes the four phases still to come.
+  //
+  // DAY AND NIGHT, like the sun card beside it and for the same reason. A moon
+  // is a night subject, but this panel shows it at two in the afternoon among
+  // white cards, and a dark rectangle in that rotation reads as a fault. The
+  // geometry is identical between the two palettes; the day version inverts the
+  // disc - lit portion dark, shadow light - which is how a moon actually looks
+  // against a bright sky, so the phase shapes still read.
+  struct MoonPalette {
+    uint32_t backdropTop;
+    uint32_t backdropBottom;
+    uint32_t lit;
+    uint32_t dark;
+    uint32_t outline;
+    uint32_t heading;
+    uint32_t name;
+    uint32_t detail;
+  };
+
+  const MoonPalette day{
+      0xEEF2F8u, 0xDFE5EFu, 0x3C4660u, 0xC3CBDBu, 0x8D97ACu,
+      0x5A6780u, 0x16203Au, 0x4D5876u};
+  const MoonPalette night{
+      0x101A30u, 0x222440u, 0xF5EDD9u, 0x344258u, 0x9CA9BDu,
+      0xBCC9E2u, 0xF7EFDFu, 0xB4BFD4u};
+
+  const MoonPalette& sky = gIsDaytime ? day : night;
+
+  fillVerticalGradient(0, kScreenH, sky.backdropTop, sky.backdropBottom);
+
+  double k = illuminatedFraction;
+  if (k < 0.0) { k = 0.0; }
+  if (k > 1.0) { k = 1.0; }
+  const bool waxingRight = phase < 0.5;
+
+  lcd.setTextSize(1);
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  layoutLine("MOON · TODAY", kCardMargin, 12, 180, sky.heading, "moon.heading");
+
+  drawMoonDisc(53, 74, 30, k, waxingRight, sky.lit, sky.dark, sky.outline);
 
   if (phaseName.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold12pt7b);
-    layoutLine(phaseName, kScreenW / 2, 150, kBootTextWidth, ink(), "moon.phase", Align::Centre);
+    layoutLine(phaseName, 98, 56, kScreenW - 98 - kCardMargin, sky.name, "moon.phase");
   }
 
   char pctBuffer[24];
@@ -2725,8 +2893,80 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
   // The buffer straight through rather than String(pctBuffer): the temporary
   // that wrapping cost was a heap allocation on the draw path for a string
   // that is already a flat array.
-  layoutLine(pctBuffer, kScreenW / 2, 176, kBootTextWidth, muted(), "moon.illuminated",
-             Align::Centre);
+  layoutLine(pctBuffer, 98, 78, kScreenW - 98 - kCardMargin, sky.detail, "moon.illuminated");
+
+  layoutLine("NEXT MAJOR PHASES", kCardMargin, 122, 200, sky.heading, "moon.upcoming.label");
+
+  // THE FOUR UPCOMING PHASES, IN THE ORDER THEY HAPPEN, computed here rather
+  // than sent. Nothing on the check-in response carries phase dates, and the
+  // arithmetic needs only the phase already on it: each quarter is a fixed
+  // point in a cycle of known length, so "how long until the next full moon" is
+  // a subtraction. Asking the server for it would be a protocol change, a
+  // migration and a simulator edit for a figure the device can work out.
+  //
+  // Sorted rather than listed in a fixed order, because which phase comes next
+  // depends on where the moon is now - the design happens to show a waxing
+  // gibbous, whose next four are full, last quarter, new, first quarter, and a
+  // hardcoded order would be wrong for three quarters of the month.
+  struct Upcoming {
+    const char* label;
+    double target;
+    double illuminated;
+    double days;
+  };
+
+  Upcoming upcoming[4] = {
+      {"Full", 0.50, 1.0, 0.0},
+      {"Last qtr", 0.75, 0.5, 0.0},
+      {"New", 0.00, 0.0, 0.0},
+      {"First qtr", 0.25, 0.5, 0.0},
+  };
+
+  for (auto& item : upcoming) {
+    item.days = daysUntilPhase(phase, item.target);
+  }
+
+  for (int i = 0; i < 3; ++i) {
+    for (int j = 0; j < 3 - i; ++j) {
+      if (upcoming[j].days > upcoming[j + 1].days) {
+        const Upcoming swap = upcoming[j];
+        upcoming[j] = upcoming[j + 1];
+        upcoming[j + 1] = swap;
+      }
+    }
+  }
+
+  constexpr int kUpcomingY = 163;
+  constexpr int kUpcomingRadius = 18;
+  constexpr int kUpcomingX[4] = {43, 121, 199, 277};
+
+  for (int i = 0; i < 4; ++i) {
+    const Upcoming& item = upcoming[i];
+
+    // A quarter is drawn lit on the side it is lit on: first quarter waxes to
+    // the right, last quarter to the left. Passing waxingRight from the CURRENT
+    // phase here would draw both the same way round.
+    const bool itemWaxingRight = item.target < 0.5;
+    drawMoonDisc(
+        kUpcomingX[i], kUpcomingY, kUpcomingRadius, item.illuminated, itemWaxingRight,
+        sky.lit, sky.dark, sky.outline);
+
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    layoutLine(item.label, kUpcomingX[i], 196, 76, sky.name, "moon.upcoming.name", Align::Centre);
+
+    char whenBuffer[24];
+    const int days = static_cast<int>(item.days + 0.5);
+    if (days <= 0) {
+      snprintf(whenBuffer, sizeof(whenBuffer), "today");
+    } else if (days == 1) {
+      snprintf(whenBuffer, sizeof(whenBuffer), "tomorrow");
+    } else {
+      snprintf(whenBuffer, sizeof(whenBuffer), "in %d days", days);
+    }
+
+    layoutLine(
+        whenBuffer, kUpcomingX[i], 214, 76, sky.detail, "moon.upcoming.when", Align::Centre);
+  }
 
   drawClock();
   restoreDefaultFont();
