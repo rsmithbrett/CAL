@@ -93,6 +93,7 @@ size_t getArduinoLoopTaskStackSize(void) {
 // is exactly one copy of this deadline in the firmware.
 #include "Maintenance.h"
 #include "SdStorage.h"
+#include "Sound.h"
 #include "StackWatch.h"
 // Included for setPhase()/setTimes()/setPosition()/setValue() only, not to
 // register any of these five cards - cards still register themselves at
@@ -1967,6 +1968,23 @@ void performCheckIn() {
   // own remarks.
   Log::setStreamingEnabled(result.debugStreamRequested);
 
+  // Reconnection, measured rather than inferred, and only where somebody asked
+  // for it.
+  //
+  // RUN HERE ON PURPOSE - directly after a check-in that SUCCEEDED. The probe's
+  // whole output is log lines, and the one moment this device is known to be
+  // able to deliver a log line is immediately after a round trip that worked.
+  // Run it from anywhere else and a failed reconnect reports into a channel
+  // that is itself broken, which is the trap every heap restart already falls
+  // into: the line explaining the failure needs the thing that failed.
+  //
+  // It costs a handshake and hands back a live session for the next request, so
+  // the only waste is on the probe that fails - which is the one worth paying
+  // for.
+  if (result.tlsReconnectProbeRequested) {
+    Http::probeReconnect();
+  }
+
   // Deliberately AFTER setStreamingEnabled and after applyPolicy: an admin who
   // has just switched streaming on gets a full picture of every active
   // provider on this very check-in rather than having to wait for the next
@@ -2569,6 +2587,21 @@ void setup() {
   WifiJoin::setProgressVisible(true);
 
   CardManager::begin();
+
+  // LAST THING IN setup(), so a chirp means "this device has finished booting"
+  // and nothing else. Earlier in the sequence it would sound while the boot can
+  // still fail, which would make it a worse signal than silence.
+  //
+  // Identifying which GPIO drives the SPEAKER header is the immediate job, and
+  // it needs an ear because it cannot be read back: both candidates are on
+  // ADC2, which this chip cannot sample while WiFi is up - the same constraint
+  // that stops PowerProbe.h probing GPIO27. Telemetry cannot answer this one.
+  //
+  // The restart marker it leaves behind is worth keeping on its own. This fleet
+  // restarts for reasons that have been hard to catch, and a unit that
+  // announces its own restarts can be diagnosed by somebody standing next to it
+  // without reading a log.
+  Sound::chirpBootIdentification();
 }
 
 void loop() {

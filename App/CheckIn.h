@@ -88,6 +88,19 @@ struct Result {
   /// naturally picks the right state back up after a reboot within one check-in
   /// interval, with no flag of its own to persist or fall out of sync.
   bool debugStreamRequested = false;
+  /// Close the TLS session after this check-in and immediately try to open a
+  /// new one, reporting the heap either side of the close and whether the gate
+  /// refused, mbedTLS could not allocate, or the handshake succeeded.
+  ///
+  /// Reconnection has no other way of being observed. Check-in and telemetry
+  /// POST back to back on one client and HTTPClient reuses a live connection,
+  /// so this device can run for hours without ever opening a second session -
+  /// which makes long uptime evidence that memory is bounded and no evidence
+  /// at all that a lost session could be replaced. See Http::probeReconnect().
+  ///
+  /// Server-driven and re-read every check-in, the same shape as
+  /// debugStreamRequested above, so it turns off as cleanly as it turns on.
+  bool tlsReconnectProbeRequested = false;
   /// One-shot, unlike debugStreamRequested above: true means an admin used
   /// DeviceRegistry's "Reformat SD card" button since this device's last
   /// check-in. The server clears the underlying flag the moment it answers

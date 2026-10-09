@@ -871,6 +871,7 @@ Result perform() {
   // degrade to today's behaviour rather than to a reboot loop.
   result.calUpdateAvailable = responseDoc["calUpdateAvailable"] | false;
   result.debugStreamRequested = responseDoc["debugStreamRequested"] | false;
+  result.tlsReconnectProbeRequested = responseDoc["tlsReconnectProbeRequested"] | false;
   result.sdReformatRequested = responseDoc["sdReformatRequested"] | false;
   // An ISO-8601 instant on the wire, converted to an epoch second here so the
   // watchdog compares two integers rather than parsing a string on every health

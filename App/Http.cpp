@@ -68,6 +68,82 @@ size_t largestContiguousBytes() {
 
 bool canOpenNewSession() { return largestContiguousBytes() >= kTlsRecordBufferBytes; }
 
+ReconnectProbe probeReconnect() {
+  ReconnectProbe probe{};
+
+  probe.freeBeforeClose = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  probe.largestBeforeClose = largestContiguousBytes();
+
+  // Step one, and the step no ordinary traffic performs. gHttp.end() finishes a
+  // REQUEST and leaves the connection up for the next one; only stopping the
+  // client tears the session down.
+  gHttp.end();
+  gClient.stop();
+
+  // Step two. Deliberately after the close, because the teardown returns the
+  // record buffers and this is the figure a reconnect is actually decided on.
+  probe.freeAfterClose = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  probe.largestAfterClose = largestContiguousBytes();
+
+  const uint32_t startedMs = millis();
+
+  // Step three. The gate first, so a refusal is recorded as a refusal rather
+  // than disguised as a handshake failure - it is a different finding and wants
+  // a different fix.
+  if (!canOpenNewSession()) {
+    probe.gateRefused = true;
+    probe.elapsedMs = millis() - startedMs;
+    Log::printf("[probe] closed the session: largest block %u -> %u, free %u -> %u. REFUSED by the "
+                "gate - %u contiguous is under the %u one TLS record buffer needs, so no handshake "
+                "was attempted",
+                static_cast<unsigned>(probe.largestBeforeClose),
+                static_cast<unsigned>(probe.largestAfterClose),
+                static_cast<unsigned>(probe.freeBeforeClose),
+                static_cast<unsigned>(probe.freeAfterClose),
+                static_cast<unsigned>(probe.largestAfterClose),
+                static_cast<unsigned>(kTlsRecordBufferBytes));
+    return probe;
+  }
+
+  // Certificate validation is whatever Tls::configure() set on this client at
+  // boot and is untouched here, so a success means a session that would carry a
+  // real request.
+  probe.connected = gClient.connect(Config::kServiceHost, 443);
+  probe.elapsedMs = millis() - startedMs;
+
+  if (probe.connected) {
+    Log::printf("[probe] closed the session: largest block %u -> %u, free %u -> %u. Reconnected in "
+                "%lu ms with the certificate validated - this device can still get a new session",
+                static_cast<unsigned>(probe.largestBeforeClose),
+                static_cast<unsigned>(probe.largestAfterClose),
+                static_cast<unsigned>(probe.freeBeforeClose),
+                static_cast<unsigned>(probe.freeAfterClose),
+                static_cast<unsigned long>(probe.elapsedMs));
+    return probe;
+  }
+
+  char tlsError[80] = {0};
+  probe.tlsError = gClient.lastError(tlsError, sizeof(tlsError));
+
+  // MBEDTLS_ERR_SSL_ALLOC_FAILED. Named rather than compared as a bare number
+  // because out-of-memory and rejected-by-the-peer are the two findings this
+  // probe exists to tell apart, and -32512 on its own says neither.
+  constexpr int kMbedtlsAllocFailed = -0x7F00;
+  probe.allocationFailed = (probe.tlsError == kMbedtlsAllocFailed);
+
+  Log::printf("[probe] closed the session: largest block %u -> %u, free %u -> %u. The gate allowed "
+              "it and the handshake FAILED after %lu ms: %s (%d)%s",
+              static_cast<unsigned>(probe.largestBeforeClose),
+              static_cast<unsigned>(probe.largestAfterClose),
+              static_cast<unsigned>(probe.freeBeforeClose),
+              static_cast<unsigned>(probe.freeAfterClose),
+              static_cast<unsigned long>(probe.elapsedMs), tlsError, probe.tlsError,
+              probe.allocationFailed
+                  ? " - an ALLOCATION failure, so the gate's floor is too low to predict this"
+                  : " - not an allocation failure, so this is the peer or the network, not memory");
+  return probe;
+}
+
 bool beginRequest(const String& url) {
   // Pre-flight, and the reason it is worth a branch on every request: when
   // canOpenNewSession() is false the handshake CANNOT succeed - there is no
