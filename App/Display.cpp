@@ -2188,11 +2188,11 @@ void drawTideRow(int top, int height, const String& label, const String& timeTex
 
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
-  layoutLine(label, textRight, top + 12, textWidth, tide.label, labelWhat, Align::Right,
+  layoutLine(label, textRight, top + 10, textWidth, tide.label, labelWhat, Align::Right,
              kTransparentText);
 
   lcd.setFont(&fonts::FreeSansBold18pt7b);
-  layoutLine(timeText, textRight, top + 31, textWidth, tide.value, valueWhat, Align::Right,
+  layoutLine(timeText, textRight, top + 28, textWidth, tide.value, valueWhat, Align::Right,
              kTransparentText);
 }
 
@@ -2221,10 +2221,15 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
   layoutLine("TIDES", kScreenW / 2, 8, kScreenW - kCardMargin * 2, tide.heading, "tides.heading",
              Align::Centre, kTransparentText);
 
-  constexpr int kRowHeight = 74;
-  drawTideRow(54, kRowHeight, "HIGH TIDE", nextHighTideText, /*rising=*/true, tide,
+  // THE WHOLE STACK FINISHES BY y=220, which is what sizes these rows. Below
+  // that is the band the clock and the touch strip own, and layoutText()
+  // reports anything running into it - which is how the first build of this
+  // card was caught drawing its clock to y=238. Heading 8..44, rows 46..116
+  // and 124..194, clock 198..216.
+  constexpr int kRowHeight = 70;
+  drawTideRow(46, kRowHeight, "HIGH TIDE", nextHighTideText, /*rising=*/true, tide,
               "tides.high.label", "tides.high");
-  drawTideRow(54 + kRowHeight + 8, kRowHeight, "LOW TIDE", nextLowTideText, /*rising=*/false, tide,
+  drawTideRow(46 + kRowHeight + 8, kRowHeight, "LOW TIDE", nextLowTideText, /*rising=*/false, tide,
               "tides.low.label", "tides.low");
 
   // Its own clock rather than drawClock(), for the reason showSunMoonCard()
@@ -2235,7 +2240,7 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
   gmtime_r(&localNow, &localTm);
 
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW / 2, kScreenH - 20,
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW / 2, 198,
              kScreenW - kCardMargin * 2, tide.heading, "tides.clock", Align::Centre,
              kTransparentText);
 
