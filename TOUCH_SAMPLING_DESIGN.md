@@ -108,6 +108,64 @@ The screen won't change until then. If that still reads as slow once this is
 in, the next change is the network one, and by then there'll be evidence about
 which of its six shared pieces actually matters.
 
+## This was built, shipped, and taken back out
+
+Everything above is the design as written. It ran as v2026.10.09.0012 through
+.0014 on 2026-10-09 and was rolled back to v2026.10.09.0011-touchfix the same
+afternoon. **Do not put it back without reading this section.**
+
+What happened: it works on one display out of four. Workstation ran it for
+twenty minutes with a largest contiguous block of 53,236 bytes and no restarts.
+Brett Test, New Jim test and Test2 all fell into a restart loop within about
+fifteen minutes of taking it.
+
+The loop, from their telemetry:
+
+- Each boots with `BootLargestFreeBlockBytes` of 110,580, so there is nothing
+  wrong at startup.
+- At 13 to 42 seconds of uptime the largest contiguous block is 3,000 to 6,600
+  bytes, well under the 16,717 that `Http::kTlsRecordBufferBytes` needs.
+- `canOpenNewSession()` therefore refuses, check-in cannot open a session, five
+  consecutive failures trip the unreachable watchdog, and the device restarts
+  back into the same window. `RestartReason` reads `SOFTWARE_RESET+UNREACHABLE`
+  on all three.
+
+Why: measured on all four, before and after the rollback.
+
+| Display | Largest block without the task | With it | Lost |
+|---|---|---|---|
+| Brett Test | 36,852 | 5,876 | ~31,000 |
+| New Jim test | 36,852 | 3,060 | ~33,800 |
+| Test2 | 42,996 | 3,316 | ~39,700 |
+| Workstation | 86,004 | 51,188 | ~34,800 |
+
+The cost is the same on every display, 30 to 35KB, and it is paid out of the
+**largest contiguous block** rather than out of total free heap, which barely
+moves. Workstation starts with 86KB and can afford it. The other three start at
+37 to 43KB against a 16,717 gate and land underneath.
+
+A 4KB task stack does not consume 30KB. It splits a block. `xTaskCreate`
+allocates the stack and the TCB from the heap, and a 4KB allocation landing
+inside the one large free region leaves two smaller regions where there was
+one. The loss is the half that ends up on the wrong side of the split, which is
+why it is roughly the same size everywhere and unrelated to the 4KB asked for.
+
+So the fix, when this is tried again, is to stop the allocation touching that
+region at all: `xTaskCreateStaticPinnedToCore` with the stack as a BSS array.
+That costs 4KB of RAM permanently and nothing in fragmentation, which is the
+trade the fleet's heap budget already makes everywhere else - the log ring is
+fixed slots for the same reason.
+
+Still unexplained, and worth knowing independently of this: Workstation holds
+roughly twice the free heap of the other three on the identical build. That is
+a standing difference, not something the task caused, and anything else that
+needs a large contiguous block will meet it too.
+
+A procedural note worth as much as the technical one: this was piloted on
+Workstation, confirmed by hand, and then promoted to the fleet. Workstation is
+the one display it works on. A pilot of one proved nothing about the other
+three, and the pilot was treated as if it had.
+
 ## How this is verified
 
 - `[touch] sampled N taps, delivered M, discarded K stale, collapsed J` once

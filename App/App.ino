@@ -2288,10 +2288,6 @@ void setup() {
 
   Display::begin();
 
-  // After Display::begin(), because the sampling task reads the panel through
-  // the LGFX instance Display owns and starts reading on its first tick.
-  Touch::begin();
-
   // After Display::begin(), because Motion drives brightness THROUGH the display
   // layer rather than owning GPIO21 itself - LovyanGFX already claims that pin.
   Motion::begin();
@@ -2613,7 +2609,7 @@ void setup() {
 void loop() {
   // Captured before anything blocking runs - see the instrumentation at the
   // bottom of this function, which reports iterations long enough that a tap
-  // sampled inside them waits a noticeable time to be acted on.
+  // could have been dropped inside them.
   const uint32_t iterationStartMs = millis();
 
   // One sample per iteration, outside every Scope, so the stretches no phase
@@ -2694,11 +2690,6 @@ void loop() {
     // this file was arithmetic on the size of local objects rather than an
     // observation. See StackWatch.h.
     StackWatch::logHighWaterMark("after check-in");
-
-    // On the check-in tick rather than a timer of its own, so one line covers
-    // one interval and the figures line up with the [loop] stall lines from
-    // the same stretch.
-    Touch::logAndResetCounters();
   }
 
   // Belt-and-braces fallback only: performCheckIn() above is the fast path
@@ -2758,35 +2749,37 @@ void loop() {
     Log::poll();
   }
 
-  // ~50ms of pacing, spent draining the tap queue rather than asleep.
+  // ~50ms of pacing, spent sampling touch rather than asleep.
   //
-  // The pacing is not what paces touch - Touch::begin()'s task samples the
-  // panel every 10ms on the other core and nothing in this loop can stop it.
-  // This window decides how fast a sampled tap is acted on, which is a
-  // different question: a tap taken while loop() is idle should move the card
-  // now rather than at the top of the next iteration.
+  // Everything else in this loop is gated on its own millis() comparison and
+  // does not care how often it is asked; touch is the one thing that does,
+  // because a finger is on the glass for a fraction of a second. Sampling
+  // every 5ms across the wait is what closes the gaps between operations.
+  //
+  // It does NOT close the gaps inside one. A tap landing while loop() is in a
+  // card draw or a fetch is still lost, and the instrumentation below measures
+  // how much of the remaining problem that is. TOUCH_SAMPLING_DESIGN.md has the
+  // figures and the account of what moving this to its own task cost.
   constexpr uint32_t kLoopPacingMs = 50;
-  constexpr uint32_t kTouchDrainIntervalMs = 5;
+  constexpr uint32_t kTouchSampleIntervalMs = 5;
   const uint32_t pacingStartMs = millis();
   while ((millis() - pacingStartMs) < kLoopPacingMs) {
     CardManager::pollTouch();
-    delay(kTouchDrainIntervalMs);
+    delay(kTouchSampleIntervalMs);
   }
 
-  // How long this whole iteration took, and therefore the worst delay between
-  // a tap being sampled and the card moving. Logged only when it is bad enough
-  // to matter - an ordinary iteration is the ~50ms above, and saying so every
+  // How long this whole iteration took, and therefore how long touch went
+  // unsampled at the worst point in it. Logged only when it is bad enough to
+  // matter - an ordinary iteration is the ~50ms above, and saying so every
   // 50ms would drown the stream it is written to.
   //
   // kUnresponsiveIterationMs sits just above a normal iteration rather than at
-  // a round number, so every line here is a stretch somebody could feel. Read
-  // these next to the [touch] counters: this line counts the delay, and that
-  // line says whether a tap inside one was delivered late, dropped for age or
-  // collapsed as a repeat.
+  // a round number, so every line here is a stretch where a tap could have
+  // been lost.
   constexpr uint32_t kUnresponsiveIterationMs = 250;
   const uint32_t iterationMs = millis() - iterationStartMs;
   if (iterationMs >= kUnresponsiveIterationMs) {
-    Log::printf("[loop] iteration took %lu ms - a tap sampled inside it waited that long",
+    Log::printf("[loop] iteration took %lu ms - touch was unsampled for most of it",
                 static_cast<unsigned long>(iterationMs));
   }
 }
