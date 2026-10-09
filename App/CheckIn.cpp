@@ -579,6 +579,26 @@ Result perform() {
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
   http.addHeader("Content-Type", "application/json");
 
+  // THE REQUEST IS SCOPED SO IT IS GONE BEFORE THE RESPONSE IS PARSED, and that
+  // brace is the point of this block rather than tidiness.
+  //
+  // Three things used to be alive at deserializeJson() below: this document's
+  // node tree, the serialized copy of it in `body`, and responseDoc growing as
+  // it read. The first two are finished the moment POST returns and were being
+  // held through the one allocation on this device that cannot afford a
+  // neighbour.
+  //
+  // What that costs is measured, not assumed. Averaged over three hours of
+  // device_telemetry_history on 2026-10-09, the check-in phase spent 48,687,
+  // 53,817 and 54,749 bytes on the three live displays while fetch, draw and
+  // idle spent hundreds or nothing. All three were below
+  // Http::kTlsRecordBufferBytes - 16,717 bytes CONTIGUOUS for one TLS record
+  // buffer - against 110,580 at boot, and a device under that floor cannot open
+  // a session, so Http::canOpenNewSession() fails and the device restarts to
+  // reclaim heap. That is SOFTWARE_RESET+UNREACHABLE, which reads like a
+  // network fault and is a heap figure.
+  int status;
+  {
   JsonDocument requestDoc;
   requestDoc["deviceUtcTimestamp"] = nowAsIso8601Utc();
   requestDoc["firmwareVersion"] = Identity::installedAppVersion();
@@ -679,7 +699,9 @@ Result perform() {
   // return.
   Log::verbose("[checkin] POST %s body=%s", url.c_str(), body.c_str());
 
-  const int status = http.POST(body);
+  status = http.POST(body);
+  }  // requestDoc and body released here, before responseDoc exists.
+
   Log::verbose("[checkin] response status=%d", status);
   if (status == 401) {
     result.secretRejected = true;
