@@ -424,6 +424,22 @@ void drawClock() {
 // share the `background` parameter rather than needing a separate bool flag.
 constexpr uint32_t kUseCardBackground = 0xFFFFFFFFu;
 
+// kTransparentText draws glyphs with NO background fill, for a card whose
+// artwork is not one flat colour.
+//
+// The opaque default is right everywhere the card IS bg(), and wrong wherever
+// it is not. On the sun card the near ridgeline is a curve, so at any given y
+// some columns are ridge and some are sky - a text box painted in one flat
+// colour covers the other with a visible rectangle, which is what "the text on
+// sunrise is a block surrounding it" is. No single background value can be
+// correct over a gradient or a silhouette, so the only honest option is not to
+// paint one.
+//
+// Safe only where the card redraws its whole background first, which both the
+// sun and moon cards do: transparent glyphs do not erase what was underneath
+// them, so drawing over stale pixels would smear.
+constexpr uint32_t kTransparentText = 0xFFFFFFFEu;
+
 enum class Align : uint8_t { Left, Centre, Right };
 
 /// The region of panel a card is willing to spend on a string, and how many
@@ -521,7 +537,11 @@ TextResult layoutText(const char* text, const TextBox& box, uint32_t colour, con
     return result;
   }
 
-  lcd.setTextColor(colour, background == kUseCardBackground ? bg() : background);
+  if (background == kTransparentText) {
+    lcd.setTextColor(colour);
+  } else {
+    lcd.setTextColor(colour, background == kUseCardBackground ? bg() : background);
+  }
   switch (box.align) {
     case Align::Centre: lcd.setTextDatum(top_center); break;
     case Align::Right:  lcd.setTextDatum(top_right);  break;
@@ -1537,6 +1557,66 @@ bool readTouchRaw(int32_t& x, int32_t& y) {
   return lcd.getTouch(&x, &y);
 }
 
+namespace {
+
+/// Set by the PENIRQ handler, cleared by takeTouchEdge(). volatile because the
+/// handler and the loop are not the same context.
+volatile bool gTouchEdgeLatched = false;
+
+int gTouchIrqPin = -1;
+
+/// IRAM_ATTR because an interrupt can fire while flash is busy, and a handler
+/// living in flash cannot run then. Does the least possible: no SPI, no
+/// logging, no allocation.
+void IRAM_ATTR onTouchEdge() { gTouchEdgeLatched = true; }
+
+}  // namespace
+
+void beginTouchInterrupt() {
+  auto* touch = lcd.touch();
+  if (touch == nullptr) {
+    Log::line("[touch] no touch device reported by the driver, so there is nothing to "
+              "interrupt on and every tap depends on the loop happening to sample");
+    return;
+  }
+
+  const auto config = touch->config();
+  gTouchIrqPin = config.pin_int;
+
+  // Said out loud whatever it is. This pin was guessed at twice today; the
+  // driver has known it since boot.
+  Log::printf("[touch] driver reports pin_int=%d, bus_shared=%d", static_cast<int>(config.pin_int),
+              config.bus_shared ? 1 : 0);
+
+  if (gTouchIrqPin < 0) {
+    // NOT A SILENT FAILURE. Without PENIRQ a tap during a check-in is erased
+    // rather than delayed, and saying so at boot is the only honest option -
+    // otherwise somebody spends another evening wondering why the glass
+    // ignores them.
+    Log::line("[touch] NO PENIRQ PIN. A tap that lands and lifts during a check-in or a card "
+              "fetch cannot be detected at all: Touch::poll() needs a rising edge and there "
+              "will not be one. Unresponsiveness on this unit is expected rather than a "
+              "fault to chase.");
+    return;
+  }
+
+  pinMode(gTouchIrqPin, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(gTouchIrqPin), onTouchEdge, FALLING);
+  Log::printf("[touch] PENIRQ armed on GPIO%d - a tap is recorded when the glass is pressed "
+              "rather than when the loop next looks",
+              gTouchIrqPin);
+}
+
+bool takeTouchEdge() {
+  if (!gTouchEdgeLatched) {
+    return false;
+  }
+  gTouchEdgeLatched = false;
+  return true;
+}
+
+int touchInterruptPin() { return gTouchIrqPin; }
+
 // The boot-ladder screens. Both take server-supplied wording (a content-gate
 // refusal, a provisioning message) with no length this file controls, which is
 // why they wrapped before layoutText() existed and why the 8px margin either
@@ -2013,7 +2093,7 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   const SkyPalette day{
       0x1F5FA8u, 0x8FC2E4u, 0xEDF4F7u, 0xFFF4C8u, 0xFFF6D2u,
       0x6F9A7Eu, 0x4F7A60u,
-      0x15303Fu, 0x2B4A5Cu, 0xF7FBFDu, 0xE8F2F7u, 86, 34};
+       0xF2F8FCu, 0xDCE9F2u, 0xF7FBFDu, 0xE8F2F7u, 86, 34};
   const SkyPalette night{
       0x102641u, 0xD57961u, 0xF4BD71u, 0xFFE9A0u, 0xFFF1BCu,
       0x243D4Bu, 0x132C3Au,
@@ -2027,9 +2107,16 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   // fill means per-pixel work across a third of the panel, and at this size
   // three steps are indistinguishable from the smooth version once the sky is
   // behind them.
-  for (int step = 3; step >= 1; --step) {
-    const int radius = sky.discRadius + (step * (gIsDaytime ? 17 : 17));
-    lcd.fillCircle(160, sky.discY, radius, mixColour(sky.skyMiddle, sky.glow, 4 - step, 6));
+  // Ten steps, not three. Three left a visible ring edge where each circle met
+  // the next, which on a photographed panel reads as a drawing mistake rather
+  // than as light. Ten circles is still nothing against a full-screen gradient,
+  // and the steps fall below what RGB565 can distinguish anyway.
+  constexpr int kGlowSteps = 10;
+  for (int step = kGlowSteps; step >= 1; --step) {
+    const int radius = sky.discRadius + ((step * 52) / kGlowSteps);
+    lcd.fillCircle(
+        160, sky.discY, radius,
+        mixColour(sky.skyMiddle, sky.glow, kGlowSteps - step + 1, kGlowSteps + 4));
   }
   lcd.fillCircle(160, sky.discY, sky.discRadius, sky.disc);
 
@@ -2065,7 +2152,7 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   lcd.setTextSize(1);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   layoutLine("SUN · TODAY", kCardMargin, 12, 150, sky.heading, "sunmoon.heading",
-             Align::Left, sky.skyTop);
+             Align::Left, kTransparentText);
 
   // The time goes top right, where the design puts it, and drawClock() is NOT
   // called: it writes bottom right in ink(), which on this card landed over the
@@ -2074,23 +2161,23 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   struct tm localTm;
   gmtime_r(&localNow, &localTm);
   layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW - kCardMargin, 12, 120,
-             sky.heading, "sunmoon.clock", Align::Right, sky.skyTop);
+             sky.heading, "sunmoon.clock", Align::Right, kTransparentText);
 
   layoutLine("↑ SUNRISE", kCardMargin, 162, 130, sky.label, "sunmoon.sunrise.label",
-             Align::Left, sky.ridgeNear);
+             Align::Left, kTransparentText);
   layoutLine("↓ SUNSET", kScreenW - kCardMargin, 162, 130, sky.label,
-             "sunmoon.sunset.label", Align::Right, sky.ridgeNear);
+             "sunmoon.sunset.label", Align::Right, kTransparentText);
 
   lcd.setFont(&fonts::FreeSansBold18pt7b);
   layoutLine(sunriseText, kCardMargin, 182, 140, sky.value, "sunmoon.sunrise",
-             Align::Left, sky.ridgeNear);
+             Align::Left, kTransparentText);
   layoutLine(sunsetText, kScreenW - kCardMargin, 182, 140, sky.value, "sunmoon.sunset",
-             Align::Right, sky.ridgeNear);
+             Align::Right, kTransparentText);
 
   if (detail.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     layoutLine(detail, kScreenW / 2, 218, kScreenW - kCardMargin * 2, sky.footnote,
-               "sunmoon.detail", Align::Centre, sky.ridgeNear);
+               "sunmoon.detail", Align::Centre, kTransparentText);
   }
 
   restoreDefaultFont();
@@ -2988,14 +3075,14 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
   lcd.setTextSize(1);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   layoutLine("MOON · TODAY", kCardMargin, 12, 150, sky.heading, "moon.heading",
-             Align::Left, sky.backdropTop);
+             Align::Left, kTransparentText);
 
   drawMoonDisc(53, 74, 30, k, waxingRight, sky.lit, sky.dark, sky.outline);
 
   if (phaseName.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold12pt7b);
     layoutLine(phaseName, 98, 56, kScreenW - 98 - kCardMargin, sky.name, "moon.phase",
-               Align::Left, sky.backdropTop);
+               Align::Left, kTransparentText);
   }
 
   char pctBuffer[24];
@@ -3005,10 +3092,10 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
   // that wrapping cost was a heap allocation on the draw path for a string
   // that is already a flat array.
   layoutLine(pctBuffer, 98, 78, kScreenW - 98 - kCardMargin, sky.detail, "moon.illuminated",
-             Align::Left, sky.backdropTop);
+             Align::Left, kTransparentText);
 
   layoutLine("NEXT MAJOR PHASES", kCardMargin, 122, 200, sky.heading, "moon.upcoming.label",
-             Align::Left, sky.backdropBottom);
+             Align::Left, kTransparentText);
 
   // THE FOUR UPCOMING PHASES, IN THE ORDER THEY HAPPEN, computed here rather
   // than sent. Nothing on the check-in response carries phase dates, and the
@@ -3066,20 +3153,20 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
 
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     layoutLine(item.label, kUpcomingX[i], 196, 76, sky.name, "moon.upcoming.name",
-               Align::Centre, sky.backdropBottom);
+               Align::Centre, kTransparentText);
 
     char whenBuffer[24];
     const int days = static_cast<int>(item.days + 0.5);
     if (days <= 0) {
       snprintf(whenBuffer, sizeof(whenBuffer), "today");
     } else if (days == 1) {
-      snprintf(whenBuffer, sizeof(whenBuffer), "tomorrow");
+      snprintf(whenBuffer, sizeof(whenBuffer), "in 1d");
     } else {
       snprintf(whenBuffer, sizeof(whenBuffer), "in %dd", days);
     }
 
     layoutLine(whenBuffer, kUpcomingX[i], 214, 76, sky.detail, "moon.upcoming.when",
-               Align::Centre, sky.backdropBottom);
+               Align::Centre, kTransparentText);
   }
 
   // Top right, like the design and like the sun card, rather than drawClock()
@@ -3090,7 +3177,7 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
   gmtime_r(&localNow, &localTm);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW - kCardMargin, 12, 120,
-             sky.heading, "moon.clock", Align::Right, sky.backdropTop);
+             sky.heading, "moon.clock", Align::Right, kTransparentText);
 
   restoreDefaultFont();
 }
@@ -3627,10 +3714,49 @@ void showListingsStatus(const String& headline, const String& detail, bool isPro
 // against the real column width, so a font change that makes three characters
 // too wide for 60px ellipsizes and says so instead of printing over the
 // neighbouring column.
+/// Whether NWS gave this period a weekday name rather than a holiday one.
+///
+/// Checked by prefix because NWS also returns "Monday Night" and the like, and
+/// the first three characters of a real weekday are exactly what the strip
+/// wants to print.
+bool isWeekdayName(const String& name) {
+  static const char* const kDays[] = {"Sunday",   "Monday", "Tuesday", "Wednesday",
+                                      "Thursday", "Friday", "Saturday"};
+  for (const char* day : kDays) {
+    if (name.startsWith(day)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 String shortDayLabel(uint8_t index, const String& name) {
   if (index == 0) {
     return "Now";
   }
+
+  // NWS NAMES SOME PERIODS AFTER THE HOLIDAY, NOT THE WEEKDAY. "Columbus Day",
+  // "Thanksgiving Day", "Christmas Day" and "New Year's Day" all come back in
+  // place of the day name, and the first three characters of those say nothing:
+  // a panel photographed on 2026-10-09 showed a column headed "Col" between Sun
+  // and Tue, which reads as a rendering fault rather than as Monday.
+  //
+  // The weekday is recoverable because the period's own position gives it: this
+  // strip runs forward from today, one column per day, so index 1 is tomorrow.
+  // That is cheaper and more reliable than a table of holidays, which would
+  // need maintaining and would still miss a name this service invents next.
+  if (name.length() > 3 && !isWeekdayName(name)) {
+    const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
+    const time_t thatDay = localNow + (static_cast<time_t>(index) * 86400);
+    struct tm dayTm;
+    gmtime_r(&thatDay, &dayTm);
+
+    static const char* const kWeekdays[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    if (dayTm.tm_wday >= 0 && dayTm.tm_wday <= 6) {
+      return kWeekdays[dayTm.tm_wday];
+    }
+  }
+
   return name.length() > 3 ? name.substring(0, 3) : name;
 }
 

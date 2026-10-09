@@ -1285,6 +1285,14 @@ void pollTouch() {
     return;
   }
 
+  // A tap PENIRQ recovered has no usable position - it wakes the panel above
+  // and stops here. Routing it would fire whichever button the rotation
+  // happens to be showing, chosen by timing, which is the mistake the
+  // dark-panel swallow directly above exists to prevent.
+  if (!tap.positionKnown) {
+    return;
+  }
+
   handleTap(tap);
 }
 
