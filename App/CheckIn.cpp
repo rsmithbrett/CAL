@@ -569,6 +569,14 @@ Result perform() {
     return result;
   }
 
+  // Nothing else opens a TLS session while this one is up. The log stream is
+  // the only thing that would, and two sessions each wanting a contiguous
+  // record buffer is a memory event on this board even where either alone
+  // would have been affordable. Released by whichever of this function's
+  // several exits it takes - see Log::UploadSuppression for why that is a
+  // guard rather than a pair of calls.
+  Log::UploadSuppression noOverlappingSession;
+
   const String url = String("https://") + Config::kServiceHost + kPath;
   if (!Http::beginRequest(url)) {
     Log::line("[checkin] could not begin request, skipping this check-in");
