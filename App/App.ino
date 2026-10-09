@@ -2287,10 +2287,6 @@ void setup() {
 
   Display::begin();
 
-  // Straight after the panel, because it reads the touch driver the panel just
-  // configured. Logs the pin whatever it is, and says plainly when there is
-  // none - a tap lost during a check-in is otherwise lost without trace.
-  Display::beginTouchInterrupt();
   // After Display::begin(), because Motion drives brightness THROUGH the display
   // layer rather than owning GPIO21 itself - LovyanGFX already claims that pin.
   Motion::begin();

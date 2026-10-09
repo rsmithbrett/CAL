@@ -62,11 +62,6 @@ struct Tap {
   uint8_t actionIndex = 0;
   int32_t x = 0;
   int32_t y = 0;
-  /// False for a tap PENIRQ caught during a blocking stretch: the press is
-  /// real and x/y are not. A caller may wake the panel on it but must not
-  /// route it to a button, because the coordinates are whatever the last read
-  /// happened to leave behind.
-  bool positionKnown = true;
 };
 
 /// The hit rectangles for whatever buttons are currently drawn. Set after

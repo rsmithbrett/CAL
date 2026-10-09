@@ -1557,65 +1557,6 @@ bool readTouchRaw(int32_t& x, int32_t& y) {
   return lcd.getTouch(&x, &y);
 }
 
-namespace {
-
-/// Set by the PENIRQ handler, cleared by takeTouchEdge(). volatile because the
-/// handler and the loop are not the same context.
-volatile bool gTouchEdgeLatched = false;
-
-int gTouchIrqPin = -1;
-
-/// IRAM_ATTR because an interrupt can fire while flash is busy, and a handler
-/// living in flash cannot run then. Does the least possible: no SPI, no
-/// logging, no allocation.
-void IRAM_ATTR onTouchEdge() { gTouchEdgeLatched = true; }
-
-}  // namespace
-
-void beginTouchInterrupt() {
-  auto* touch = lcd.touch();
-  if (touch == nullptr) {
-    Log::line("[touch] no touch device reported by the driver, so there is nothing to "
-              "interrupt on and every tap depends on the loop happening to sample");
-    return;
-  }
-
-  const auto config = touch->config();
-  gTouchIrqPin = config.pin_int;
-
-  // Said out loud whatever it is. This pin was guessed at twice today; the
-  // driver has known it since boot.
-  Log::printf("[touch] driver reports pin_int=%d, bus_shared=%d", static_cast<int>(config.pin_int),
-              config.bus_shared ? 1 : 0);
-
-  if (gTouchIrqPin < 0) {
-    // NOT A SILENT FAILURE. Without PENIRQ a tap during a check-in is erased
-    // rather than delayed, and saying so at boot is the only honest option -
-    // otherwise somebody spends another evening wondering why the glass
-    // ignores them.
-    Log::line("[touch] NO PENIRQ PIN. A tap that lands and lifts during a check-in or a card "
-              "fetch cannot be detected at all: Touch::poll() needs a rising edge and there "
-              "will not be one. Unresponsiveness on this unit is expected rather than a "
-              "fault to chase.");
-    return;
-  }
-
-  pinMode(gTouchIrqPin, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(gTouchIrqPin), onTouchEdge, FALLING);
-  Log::printf("[touch] PENIRQ armed on GPIO%d - a tap is recorded when the glass is pressed "
-              "rather than when the loop next looks",
-              gTouchIrqPin);
-}
-
-bool takeTouchEdge() {
-  if (!gTouchEdgeLatched) {
-    return false;
-  }
-  gTouchEdgeLatched = false;
-  return true;
-}
-
-int touchInterruptPin() { return gTouchIrqPin; }
 
 // The boot-ladder screens. Both take server-supplied wording (a content-gate
 // refusal, a provisioning message) with no length this file controls, which is

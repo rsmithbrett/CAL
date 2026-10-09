@@ -130,40 +130,6 @@ String describeAnswerAge(time_t observedAtUtc);
 /// (x/y untouched) when nothing is currently touching the panel.
 bool readTouchRaw(int32_t& x, int32_t& y);
 
-/// Attaches an interrupt to the touch controller's PENIRQ line, so a tap is
-/// recorded the instant the glass is pressed rather than only when the loop
-/// next gets round to asking.
-///
-/// <b>Why this is needed.</b> Touch::poll() detects a RISING EDGE - touched
-/// now, not touched last time. The loop samples every 5ms during a 50ms pacing
-/// window and not at all through the rest of an iteration, and an iteration
-/// containing a check-in is a synchronous TLS handshake plus request and
-/// response. Iterations of 2,222ms and 10,865ms are in this fleet's logs. A
-/// finger that goes down AND lifts inside one of those is never seen at all:
-/// `wasTouched` never becomes true, so there is no edge left to find. The tap
-/// is not delayed, it is erased, and nothing records that it happened.
-///
-/// PENIRQ costs no SPI to read - it is a plain GPIO the controller pulls low on
-/// contact - so an interrupt catches that edge while the bus is busy and while
-/// the loop is blocked inside somebody else's library.
-///
-/// <b>What it cannot recover is where.</b> Coordinates need an SPI read, and by
-/// the time the loop is free the finger has usually gone. A latched tap arrives
-/// with no position: enough to wake a dark panel, which needs none, and enough
-/// to be counted and said out loud rather than vanishing.
-///
-/// The pin comes from the touch driver's own configuration rather than a guess.
-/// LGFX_AUTODETECT worked it out for this board, and README.md is explicit that
-/// published CYD pin maps describe a different one.
-void beginTouchInterrupt();
-
-/// True once for each tap the interrupt caught. Clears on read.
-bool takeTouchEdge();
-
-/// The PENIRQ pin in use, or -1 when the driver reported none - in which case
-/// taps during blocking work are still being lost, and boot says so.
-int touchInterruptPin();
-
 /// A single line of status with an optional detail line beneath it.
 void showStatus(const String& headline, const String& detail = "");
 

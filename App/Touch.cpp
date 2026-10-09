@@ -51,33 +51,13 @@ bool poll(Tap& tap) {
   const bool justTapped = isTouched && !wasTouched;
   wasTouched = isTouched;
 
-  // THE EDGE THIS LOOP WAS NOT AWAKE TO SEE. An iteration containing a check-in
-  // blocks for seconds, and a finger that goes down and lifts inside one never
-  // produces a rising edge here: wasTouched is false before and false after, so
-  // the comparison above has nothing to find. Those taps used to disappear with
-  // no record anywhere, which is what "I pressed it and nothing happened" is.
-  //
-  // PENIRQ catches the press itself, costing no SPI. The position does not
-  // survive - reading coordinates needs the bus and the finger has gone - so it
-  // is reported with positionKnown false: enough to wake a dark panel, which
-  // needs no position, and enough to be said out loud.
-  const bool latched = !justTapped && Display::takeTouchEdge();
-
-  if (!justTapped && !latched) {
+  if (!justTapped) {
     return false;
   }
 
   tap = Tap();
   tap.x = x;
   tap.y = y;
-  tap.positionKnown = justTapped;
-
-  if (latched) {
-    Log::line("[touch] a tap arrived while this device was busy. PENIRQ caught the press, but "
-              "the finger lifted before its position could be read, so it wakes the panel and "
-              "goes no further.");
-    return true;
-  }
 
   // Buttons first - see Touch.h on why this ordering is fixed rather than
   // incidental.
