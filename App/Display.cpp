@@ -1004,13 +1004,54 @@ uint32_t mixColour(uint32_t from, uint32_t to, int numerator, int denominator) {
 /// shallow - a few units of each channel across the whole span - the banding is
 /// not visible at arm's length, and the draw cost drops by a factor the touch
 /// sampler can feel.
-constexpr int kGradientBandRows = 8;
+/// The 16-bit value this panel will actually store for a 24-bit colour.
+///
+/// THE PANEL IS RGB565: 32 levels of red, 64 of green, 32 of blue. A gradient
+/// computed in 24-bit and handed over is truncated to that, so a span of a few
+/// dozen 24-bit steps becomes a handful of distinct colours and the eye reads
+/// the result as stripes. Knowing the stored value is what lets the band
+/// boundaries land where the colour genuinely changes.
+uint16_t to565(uint32_t colour) {
+  return static_cast<uint16_t>(
+      (((colour >> 16) & 0xF8u) << 8) | (((colour >> 8) & 0xFCu) << 3) | ((colour & 0xF8u) >> 3));
+}
 
+/// A vertical gradient banded by COLOUR CHANGE rather than by a fixed number of
+/// rows.
+///
+/// Fixed 8-row bands were worse than either alternative: they added visible
+/// steps that did not fall where the colour actually changed, so a gradient the
+/// panel could have rendered in 20 smooth steps came out in 30 arbitrary ones.
+///
+/// Walking the rows and emitting a rect only when the stored 565 value differs
+/// gives the smoothest result this panel can produce AND the fewest operations
+/// to produce it - typically 15 to 30 rects for a full screen, against the 240
+/// drawFastHLine calls the first version used. That matters here beyond
+/// appearance: the panel shares its SPI bus with the touch controller, and
+/// every operation on it is time the glass is not being read.
 void fillVerticalGradient(int top, int height, uint32_t from, uint32_t to) {
-  for (int row = 0; row < height; row += kGradientBandRows) {
-    const int rows = (row + kGradientBandRows > height) ? (height - row) : kGradientBandRows;
-    lcd.fillRect(0, top + row, kScreenW, rows, mixColour(from, to, row, height - 1));
+  if (height <= 0) {
+    return;
   }
+
+  int bandStart = 0;
+  uint32_t bandColour = mixColour(from, to, 0, height - 1);
+  uint16_t bandStored = to565(bandColour);
+
+  for (int row = 1; row < height; ++row) {
+    const uint32_t colour = mixColour(from, to, row, height - 1);
+    const uint16_t stored = to565(colour);
+    if (stored == bandStored) {
+      continue;
+    }
+
+    lcd.fillRect(0, top + bandStart, kScreenW, row - bandStart, bandColour);
+    bandStart = row;
+    bandColour = colour;
+    bandStored = stored;
+  }
+
+  lcd.fillRect(0, top + bandStart, kScreenW, height - bandStart, bandColour);
 }
 
 /// A three-stop vertical sky, which is what both designs use: the middle stop
@@ -1030,7 +1071,7 @@ void fillSkyGradient(uint32_t top, uint32_t middle, uint32_t bottom, int middleA
 /// Four-pixel columns, for the reason the gradient uses bands: one fillRect per
 /// four columns is 80 operations per ridge instead of 320, and a ridgeline this
 /// shallow moves less than a pixel across four columns for most of its span.
-constexpr int kRidgeColumnWidth = 4;
+constexpr int kRidgeColumnWidth = 2;
 
 void fillUnderQuadratic(int x0, int y0, int cx, int cy, int x1, int y1, uint32_t colour) {
   (void)cx;
@@ -1962,8 +2003,15 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   // green. Night: the dusk the design was drawn at, sun low and large on the
   // horizon, ridges in silhouette. The times stay near-white in both because
   // they sit over the dark ridges either way.
+  //
+  // THE DAY SKY SPANS FURTHER THAN THE REFERENCE DOES, deliberately. In RGB565
+  // a gradient can only show as many steps as there are distinct stored values
+  // across its range, and the first attempt ran 0x4A8FC4 to 0xDCECF4 - about
+  // ten usable blues - which arrived on the panel as stripes however finely it
+  // was banded. Starting deeper and ending paler roughly doubles the steps
+  // available, and the extra depth at the top is what a real sky does anyway.
   const SkyPalette day{
-      0x4A8FC4u, 0x9FCBE4u, 0xDCECF4u, 0xFFF4C8u, 0xFFF6D2u,
+      0x1F5FA8u, 0x8FC2E4u, 0xEDF4F7u, 0xFFF4C8u, 0xFFF6D2u,
       0x6F9A7Eu, 0x4F7A60u,
       0x15303Fu, 0x2B4A5Cu, 0xF7FBFDu, 0xE8F2F7u, 86, 34};
   const SkyPalette night{
@@ -1985,9 +2033,21 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   }
   lcd.fillCircle(160, sky.discY, sky.discRadius, sky.disc);
 
-  // Two ridgelines, far then near, from the design's own control points.
-  fillUnderQuadratic(0, 144, 95, 126, 320, 140, sky.ridgeFar);
-  fillUnderQuadratic(0, 164, 166, 146, 320, 151, sky.ridgeNear);
+  // THE DESIGN'S RIDGES ARE MULTI-SEGMENT PATHS AND I DREW EACH AS ONE CURVE.
+  // Collapsing three quadratic segments into a single control point averages
+  // the undulation away; what survived moved 18px across the full width, which
+  // at arm's length is a straight line, and the first photo from hardware shows
+  // exactly that - a flat band where the hills should be.
+  //
+  // These are the design's own segments, drawn as it draws them:
+  //   far   M0 144  Q47 126 95 147   Q180 161 240 140  Q284 127 320 140
+  //   near  M0 164  Q78 143 166 164  Q240 179 320 151
+  fillUnderQuadratic(0, 144, 47, 126, 95, 147, sky.ridgeFar);
+  fillUnderQuadratic(95, 147, 180, 161, 240, 140, sky.ridgeFar);
+  fillUnderQuadratic(240, 140, 284, 127, 320, 140, sky.ridgeFar);
+
+  fillUnderQuadratic(0, 164, 78, 143, 166, 164, sky.ridgeNear);
+  fillUnderQuadratic(166, 164, 240, 179, 320, 151, sky.ridgeNear);
 
   // EVERY STRING IS GIVEN THE COLOUR BEHIND IT, and on a full-bleed card that
   // is not optional. layoutLine paints an OPAQUE box in its background colour
