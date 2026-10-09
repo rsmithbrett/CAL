@@ -95,6 +95,7 @@ size_t getArduinoLoopTaskStackSize(void) {
 #include "SdStorage.h"
 #include "Sound.h"
 #include "StackWatch.h"
+#include "Touch.h"
 // Included for setPhase()/setTimes()/setPosition()/setValue() only, not to
 // register any of these five cards - cards still register themselves at
 // static-init time and App.ino names none of them. All five need a push
@@ -2287,6 +2288,10 @@ void setup() {
 
   Display::begin();
 
+  // After Display::begin(), because the sampling task reads the panel through
+  // the LGFX instance Display owns and starts reading on its first tick.
+  Touch::begin();
+
   // After Display::begin(), because Motion drives brightness THROUGH the display
   // layer rather than owning GPIO21 itself - LovyanGFX already claims that pin.
   Motion::begin();
@@ -2689,6 +2694,11 @@ void loop() {
     // this file was arithmetic on the size of local objects rather than an
     // observation. See StackWatch.h.
     StackWatch::logHighWaterMark("after check-in");
+
+    // On the check-in tick rather than a timer of its own, so one line covers
+    // one interval and the figures line up with the [loop] stall lines from
+    // the same stretch.
+    Touch::logAndResetCounters();
   }
 
   // Belt-and-braces fallback only: performCheckIn() above is the fast path
