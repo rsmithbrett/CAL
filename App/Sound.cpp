@@ -6,55 +6,46 @@ namespace Sound {
 namespace {
 
 /// 8-bit is plenty for a square-wave beep and keeps the LEDC timer's usable
-/// frequency range wide. Nothing here is reproducing audio; it is identifying a
-/// pin and marking a boot.
+/// frequency range wide. Nothing here is reproducing audio; it is marking a
+/// boot.
 constexpr uint8_t kResolutionBits = 8;
 
-/// Half-scale duty, which is the loudest a square wave gets.
-constexpr uint32_t kDuty = 128;
-
 constexpr uint32_t kToneMs = 250;
-constexpr uint32_t kGapMs = 200;
-
-/// Drives one candidate pin for kToneMs, then releases it.
-///
-/// Released rather than left attached, and that matters on this board: either
-/// candidate might turn out to be wired to something other than the amplifier,
-/// and a pin left driving a square wave would hold whatever that is in an
-/// unintended state for the life of the boot. Attach, sound, detach, and the
-/// pin goes back to being an input.
-void beep(uint8_t pin, uint32_t hz) {
-  if (!ledcAttach(pin, hz, kResolutionBits)) {
-    Log::printf("[sound] could not attach LEDC to GPIO%u - no tone from this pin, which is a "
-                "firmware result rather than a wiring one",
-                static_cast<unsigned>(pin));
-    return;
-  }
-
-  ledcWriteTone(pin, hz);
-  delay(kToneMs);
-  ledcWriteTone(pin, 0);
-  ledcDetach(pin);
-  pinMode(pin, INPUT);
-}
 
 }  // namespace
 
 void chirpBootIdentification() {
-  // Said before the tones, not after, so the line survives even if driving
-  // either pin does something unexpected enough to stop the boot. A log that
-  // explains what is about to happen is worth more than one that confirms it
-  // did.
-  Log::printf("[sound] boot chirp: %lu Hz on GPIO%u, then %lu Hz on GPIO%u. The low tone means the "
-              "speaker is on %u, the high tone means %u, and silence means neither - in which case "
-              "the next question is the amplifier's enable line, not the GPIO",
-              static_cast<unsigned long>(kToneAHz), static_cast<unsigned>(kCandidatePinA),
-              static_cast<unsigned long>(kToneBHz), static_cast<unsigned>(kCandidatePinB),
-              static_cast<unsigned>(kCandidatePinA), static_cast<unsigned>(kCandidatePinB));
+  // Said before the tone rather than after, so the line survives even if
+  // driving the pin does something unexpected enough to stop the boot.
+  Log::printf("[sound] boot chirp: %lu Hz on GPIO%u",
+              static_cast<unsigned long>(kToneHz), static_cast<unsigned>(kSpeakerPin));
 
-  beep(kCandidatePinA, kToneAHz);
-  delay(kGapMs);
-  beep(kCandidatePinB, kToneBHz);
+  if (!ledcAttach(kSpeakerPin, kToneHz, kResolutionBits)) {
+    Log::printf("[sound] could not attach LEDC to GPIO%u - no tone, which is a firmware result "
+                "rather than a wiring one",
+                static_cast<unsigned>(kSpeakerPin));
+    return;
+  }
+
+  ledcWriteTone(kSpeakerPin, kToneHz);
+  delay(kToneMs);
+  ledcWriteTone(kSpeakerPin, 0);
+
+  // Detached so the pin stops driving, and left alone afterwards.
+  //
+  // A pinMode() call here would be the thing that broke touch: this function
+  // used to chirp a second pin, GPIO25, and then set it to INPUT. GPIO25 is
+  // the XPT2046's clock, and the software SPI driver moves it by writing the
+  // output register, which does nothing once the output enable is cleared. The
+  // clock stopped, every touch read came back empty, and the panel went dead
+  // to the finger from the end of setup() onward.
+  //
+  // So the rule this function now follows: drive a pin only through attach and
+  // detach, and never put a pin back to a mode of this module's choosing.
+  // Whichever driver owns it set that mode, and this module cannot see who
+  // does - LGFX_AUTODETECT claims its pins from LovyanGFX's board table, not
+  // from anything in this repository.
+  ledcDetach(kSpeakerPin);
 }
 
 }  // namespace Sound
