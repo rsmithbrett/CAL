@@ -990,9 +990,26 @@ uint32_t mixColour(uint32_t from, uint32_t to, int numerator, int denominator) {
 /// calls cost nothing worth measuring on a card that redraws every twelve
 /// seconds, and they allocate nothing at all - which on this fleet is the
 /// property that matters.
+/// Eight-row bands, not one line per row.
+///
+/// THE PER-ROW VERSION STARVED TOUCH. 240 HLine calls for the sky plus 640
+/// VLine calls for the ridges put this card's draw at roughly 900 SPI
+/// operations, and the panel and the touch controller share that bus: the loop
+/// logged iterations of 250 ms to 2.2 s during which, as its own message says,
+/// "touch was unsampled for most of it". A tap then lands in a blind window
+/// more often than not, which is what a person holding the device experiences
+/// as a screen that does not respond.
+///
+/// Eight rows per band is 30 fillRects for the same sky. On a gradient this
+/// shallow - a few units of each channel across the whole span - the banding is
+/// not visible at arm's length, and the draw cost drops by a factor the touch
+/// sampler can feel.
+constexpr int kGradientBandRows = 8;
+
 void fillVerticalGradient(int top, int height, uint32_t from, uint32_t to) {
-  for (int row = 0; row < height; ++row) {
-    lcd.drawFastHLine(0, top + row, kScreenW, mixColour(from, to, row, height - 1));
+  for (int row = 0; row < height; row += kGradientBandRows) {
+    const int rows = (row + kGradientBandRows > height) ? (height - row) : kGradientBandRows;
+    lcd.fillRect(0, top + row, kScreenW, rows, mixColour(from, to, row, height - 1));
   }
 }
 
@@ -1010,13 +1027,18 @@ void fillSkyGradient(uint32_t top, uint32_t middle, uint32_t bottom, int middleA
 /// Evaluated per column rather than flattened to a polygon: one vertical line
 /// per x needs no vertex buffer and cannot leave the seams a coarse flattening
 /// shows on a curve this shallow.
+/// Four-pixel columns, for the reason the gradient uses bands: one fillRect per
+/// four columns is 80 operations per ridge instead of 320, and a ridgeline this
+/// shallow moves less than a pixel across four columns for most of its span.
+constexpr int kRidgeColumnWidth = 4;
+
 void fillUnderQuadratic(int x0, int y0, int cx, int cy, int x1, int y1, uint32_t colour) {
   (void)cx;
   if (x1 <= x0) {
     return;
   }
 
-  for (int x = x0; x <= x1 && x < kScreenW; ++x) {
+  for (int x = x0; x <= x1 && x < kScreenW; x += kRidgeColumnWidth) {
     if (x < 0) {
       continue;
     }
@@ -1036,7 +1058,11 @@ void fillUnderQuadratic(int x0, int y0, int cx, int cy, int x1, int y1, uint32_t
       topY = 0;
     }
     if (topY < kScreenH) {
-      lcd.drawFastVLine(x, topY, kScreenH - topY, colour);
+      int width = kRidgeColumnWidth;
+      if (x + width > kScreenW) {
+        width = kScreenW - x;
+      }
+      lcd.fillRect(x, topY, width, kScreenH - topY, colour);
     }
   }
 }
@@ -1963,27 +1989,50 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   fillUnderQuadratic(0, 144, 95, 126, 320, 140, sky.ridgeFar);
   fillUnderQuadratic(0, 164, 166, 146, 320, 151, sky.ridgeNear);
 
+  // EVERY STRING IS GIVEN THE COLOUR BEHIND IT, and on a full-bleed card that
+  // is not optional. layoutLine paints an OPAQUE box in its background colour
+  // before the glyphs, and the default is bg() - the card background, white in
+  // day mode. On an ordinary card that is exactly right and invisible. Here it
+  // stamped white rectangles over the sky, and the near-white times were then
+  // drawn white on white: the first photo from hardware showed two blank boxes
+  // where the times should be, with the labels above them legible only because
+  // they happen to be dark.
+  //
+  // So each call is told what is actually behind it at that y: sky at the top,
+  // the near ridge below. Approximate within a band - the gradient moves a few
+  // units across the height of one line - and exact enough that nothing shows
+  // an edge.
   lcd.setTextSize(1);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  layoutLine("SUN · TODAY", kCardMargin, 12, 180, sky.heading, "sunmoon.heading");
+  layoutLine("SUN · TODAY", kCardMargin, 12, 150, sky.heading, "sunmoon.heading",
+             Align::Left, sky.skyTop);
 
-  layoutLine("↑ SUNRISE", kCardMargin, 166, 140, sky.label, "sunmoon.sunrise.label");
-  layoutLine(
-      "↓ SUNSET", kScreenW - kCardMargin, 166, 140, sky.label, "sunmoon.sunset.label",
-      Align::Right);
+  // The time goes top right, where the design puts it, and drawClock() is NOT
+  // called: it writes bottom right in ink(), which on this card landed over the
+  // daylight line and in a colour chosen for a white background.
+  const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
+  struct tm localTm;
+  gmtime_r(&localNow, &localTm);
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW - kCardMargin, 12, 120,
+             sky.heading, "sunmoon.clock", Align::Right, sky.skyTop);
+
+  layoutLine("↑ SUNRISE", kCardMargin, 162, 130, sky.label, "sunmoon.sunrise.label",
+             Align::Left, sky.ridgeNear);
+  layoutLine("↓ SUNSET", kScreenW - kCardMargin, 162, 130, sky.label,
+             "sunmoon.sunset.label", Align::Right, sky.ridgeNear);
 
   lcd.setFont(&fonts::FreeSansBold18pt7b);
-  layoutLine(sunriseText, kCardMargin, 186, 150, sky.value, "sunmoon.sunrise");
-  layoutLine(
-      sunsetText, kScreenW - kCardMargin, 186, 150, sky.value, "sunmoon.sunset", Align::Right);
+  layoutLine(sunriseText, kCardMargin, 182, 140, sky.value, "sunmoon.sunrise",
+             Align::Left, sky.ridgeNear);
+  layoutLine(sunsetText, kScreenW - kCardMargin, 182, 140, sky.value, "sunmoon.sunset",
+             Align::Right, sky.ridgeNear);
 
   if (detail.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    const TextBox detailBox{kCardMargin, 220, kScreenW - kCardMargin * 2, 18, 1, Align::Centre};
-    layoutText(detail, detailBox, sky.footnote, "sunmoon.detail");
+    layoutLine(detail, kScreenW / 2, 218, kScreenW - kCardMargin * 2, sky.footnote,
+               "sunmoon.detail", Align::Centre, sky.ridgeNear);
   }
 
-  drawClock();
   restoreDefaultFont();
 }
 
@@ -2878,13 +2927,15 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
 
   lcd.setTextSize(1);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  layoutLine("MOON · TODAY", kCardMargin, 12, 180, sky.heading, "moon.heading");
+  layoutLine("MOON · TODAY", kCardMargin, 12, 150, sky.heading, "moon.heading",
+             Align::Left, sky.backdropTop);
 
   drawMoonDisc(53, 74, 30, k, waxingRight, sky.lit, sky.dark, sky.outline);
 
   if (phaseName.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold12pt7b);
-    layoutLine(phaseName, 98, 56, kScreenW - 98 - kCardMargin, sky.name, "moon.phase");
+    layoutLine(phaseName, 98, 56, kScreenW - 98 - kCardMargin, sky.name, "moon.phase",
+               Align::Left, sky.backdropTop);
   }
 
   char pctBuffer[24];
@@ -2893,9 +2944,11 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
   // The buffer straight through rather than String(pctBuffer): the temporary
   // that wrapping cost was a heap allocation on the draw path for a string
   // that is already a flat array.
-  layoutLine(pctBuffer, 98, 78, kScreenW - 98 - kCardMargin, sky.detail, "moon.illuminated");
+  layoutLine(pctBuffer, 98, 78, kScreenW - 98 - kCardMargin, sky.detail, "moon.illuminated",
+             Align::Left, sky.backdropTop);
 
-  layoutLine("NEXT MAJOR PHASES", kCardMargin, 122, 200, sky.heading, "moon.upcoming.label");
+  layoutLine("NEXT MAJOR PHASES", kCardMargin, 122, 200, sky.heading, "moon.upcoming.label",
+             Align::Left, sky.backdropBottom);
 
   // THE FOUR UPCOMING PHASES, IN THE ORDER THEY HAPPEN, computed here rather
   // than sent. Nothing on the check-in response carries phase dates, and the
@@ -2952,7 +3005,8 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
         sky.lit, sky.dark, sky.outline);
 
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    layoutLine(item.label, kUpcomingX[i], 196, 76, sky.name, "moon.upcoming.name", Align::Centre);
+    layoutLine(item.label, kUpcomingX[i], 196, 76, sky.name, "moon.upcoming.name",
+               Align::Centre, sky.backdropBottom);
 
     char whenBuffer[24];
     const int days = static_cast<int>(item.days + 0.5);
@@ -2961,14 +3015,23 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
     } else if (days == 1) {
       snprintf(whenBuffer, sizeof(whenBuffer), "tomorrow");
     } else {
-      snprintf(whenBuffer, sizeof(whenBuffer), "in %d days", days);
+      snprintf(whenBuffer, sizeof(whenBuffer), "in %dd", days);
     }
 
-    layoutLine(
-        whenBuffer, kUpcomingX[i], 214, 76, sky.detail, "moon.upcoming.when", Align::Centre);
+    layoutLine(whenBuffer, kUpcomingX[i], 214, 76, sky.detail, "moon.upcoming.when",
+               Align::Centre, sky.backdropBottom);
   }
 
-  drawClock();
+  // Top right, like the design and like the sun card, rather than drawClock()
+  // bottom right in ink() - a colour picked for a white card, over the row this
+  // one spends on the upcoming phases.
+  const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
+  struct tm localTm;
+  gmtime_r(&localNow, &localTm);
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW - kCardMargin, 12, 120,
+             sky.heading, "moon.clock", Align::Right, sky.backdropTop);
+
   restoreDefaultFont();
 }
 
