@@ -941,6 +941,42 @@ constexpr uint32_t kBaseMsBetweenSelfRestarts = 20UL * 60UL * 1000UL;
 /// cheap insurance against being permanently wrong.
 constexpr uint32_t kMaxMsBetweenSelfRestarts = 4UL * 60UL * 60UL * 1000UL;
 
+/// How long this device may sit un-associated from WiFi before a restart is
+/// the answer after all.
+///
+/// THE WATCHDOG USED TO EXEMPT THIS CASE ENTIRELY, and the exemption is what
+/// stranded devices. Its reasoning was that a restart cannot fix a network
+/// outage and would only reboot through it, with WifiJoin's reconnect handling
+/// owning the case instead. The first half is true of a brief outage. The
+/// second half was not true at all: WifiJoin::joinStoredNetwork() - the retry
+/// loop, and the only code that re-reads stored credentials and re-joins - runs
+/// in setup() and nowhere else. Once past boot the sole recovery is the SDK's
+/// own WiFi.setAutoReconnect(true), and when that does not take, nothing
+/// escalates.
+///
+/// The resulting state is the worst one this firmware can be in: the device
+/// draws every card perfectly, so it looks healthy on the counter, while being
+/// unreachable for telemetry, card policy and firmware updates, with the one
+/// mechanism that would recover it switched off precisely BECAUSE the network
+/// is what broke. Three devices reached it in two days and each needed somebody
+/// to walk over and power-cycle it - which works for exactly the reason the
+/// exemption assumed it would not: setup() re-runs the join properly.
+///
+/// Ten minutes because a restart costs a few seconds of blank screen and an
+/// un-associated device is doing nothing those seconds would interrupt, while
+/// a router reboot or an AP roam resolves well inside it. Rebooting through a
+/// genuine long outage is the accepted cost: the device can do nothing anyway,
+/// and it rejoins the moment the network returns rather than whenever somebody
+/// next notices it. The self-restart backoff still applies on top of this, so
+/// a device in a sustained outage settles to retrying a few times a day rather
+/// than every ten minutes.
+constexpr uint32_t kMaxMsDisassociated = 10UL * 60UL * 1000UL;
+
+/// When WiFi was first observed down, or 0 while it is up. Cleared on any
+/// successful check-in as well, so a second outage times from its own start
+/// rather than inheriting the first one's clock.
+uint32_t gWifiDownSinceMs = 0;
+
 /// RAM mirror of Identity::selfRestartBackoffSteps(), seeded once in setup().
 ///
 /// Mirrored rather than read through, because selfRestartFloorMs() is called
@@ -1100,7 +1136,7 @@ void checkHeapHealth() {
   // So the next boot reports SOFTWARE_RESET + LOW_HEAP rather than an
   // unexplained software reset. This is the restart that spent a night looking
   // like a crash loop, which is exactly why it should name itself.
-  BootDiag::recordRestartIntent(BootDiag::RestartCause::LowHeap);
+  BootDiag::recordRestartIntent(BootDiag::RestartCause::LowHeap, Http::largestContiguousBytes());
   // Beside the cause, not instead of it: BootDiag says what the LAST restart
   // was for, this says how many in a row this device has now needed. The next
   // boot reads both - the first to decide whether to be quiet, the second to
@@ -1259,16 +1295,39 @@ void checkUnreachableWatchdog() {
                 static_cast<unsigned long>(Http::kTlsRecordBufferBytes));
   }
 
-  // WiFi first. If this device is not associated then the server being
-  // unreachable is a network fact, not a TLS one, and a restart fixes nothing
-  // - it would just reboot repeatedly through an outage that has nothing to do
-  // with this firmware. WifiJoin's own reconnect handling owns that case.
+  // WiFi first, and this branch is now patient rather than exempt. A device
+  // that is not associated has a network problem rather than a TLS one, and
+  // for a short outage a restart really does fix nothing. For a long one it
+  // fixes the thing nothing else will: see kMaxMsDisassociated for why the
+  // reconnect handling this used to defer to does not run outside setup().
   if (WiFi.status() != WL_CONNECTED) {
-    Log::printf("[health] %lu check-ins have failed, but WiFi is not associated (status=%d) - "
-                "this is a network outage, not a stuck TLS client, so NOT restarting",
-                static_cast<unsigned long>(gConsecutiveCheckInFailures),
-                static_cast<int>(WiFi.status()));
-    return;
+    const uint32_t observedAt = millis();
+    if (gWifiDownSinceMs == 0) {
+      gWifiDownSinceMs = observedAt;
+    }
+    const uint32_t downForMs = observedAt - gWifiDownSinceMs;
+
+    if (downForMs < kMaxMsDisassociated) {
+      Log::printf("[health] %lu check-ins have failed and WiFi is not associated (status=%d) for "
+                  "%lu ms - a brief outage is not something a restart fixes, so holding off until "
+                  "%lu ms, after which it is, because nothing re-joins WiFi outside setup()",
+                  static_cast<unsigned long>(gConsecutiveCheckInFailures),
+                  static_cast<int>(WiFi.status()), static_cast<unsigned long>(downForMs),
+                  static_cast<unsigned long>(kMaxMsDisassociated));
+      return;
+    }
+
+    // Past the deadline, so fall through to the restart below rather than
+    // returning. The backoff floor still applies there, which is what stops a
+    // device in a day-long outage rebooting every ten minutes.
+    Log::printf("[health] WiFi has been un-associated (status=%d) for %lu ms, past the %lu ms "
+                "deadline, with %lu check-ins failed. Restarting: setup() re-runs the stored-"
+                "network join, and that is the only code that does",
+                static_cast<int>(WiFi.status()), static_cast<unsigned long>(downForMs),
+                static_cast<unsigned long>(kMaxMsDisassociated),
+                static_cast<unsigned long>(gConsecutiveCheckInFailures));
+  } else {
+    gWifiDownSinceMs = 0;
   }
 
   const uint32_t now = millis();
@@ -1324,6 +1383,11 @@ void checkUnreachableWatchdog() {
     ++gSelfRestartBackoffSteps;
   }
 
+  // Read once, logged and then persisted, so the line below and the figure the
+  // next boot reports are the same measurement rather than two taken moments
+  // apart on a heap that is still moving.
+  const uint32_t largestBlockAtDecision = Http::largestContiguousBytes();
+
   Log::printf(
       "[health] %lu consecutive check-in failures (limit %lu) after %lu ms uptime with WiFi "
       "associated - this device can render but cannot be reached, managed or updated, so it is "
@@ -1334,7 +1398,7 @@ void checkUnreachableWatchdog() {
       static_cast<unsigned long>(gConsecutiveCheckInFailures),
       static_cast<unsigned long>(kMaxConsecutiveCheckInFailures),
       static_cast<unsigned long>(now),
-      static_cast<unsigned>(Http::largestContiguousBytes()),
+      static_cast<unsigned>(largestBlockAtDecision),
       static_cast<unsigned>(Http::kTlsRecordBufferBytes),
       static_cast<unsigned>(gSelfRestartBackoffSteps),
       static_cast<unsigned long>(selfRestartFloorMs()),
@@ -1348,7 +1412,7 @@ void checkUnreachableWatchdog() {
   // asset fetches rather than the log stream it is the whole explanation.
   Log::flushNow();
   AppService::stashTimeForFastReboot();
-  BootDiag::recordRestartIntent(BootDiag::RestartCause::Unreachable);
+  BootDiag::recordRestartIntent(BootDiag::RestartCause::Unreachable, largestBlockAtDecision);
   // Same pairing as checkHeapHealth() above, and this is the watchdog the
   // counter matters most for: an unreachable device that a restart does not fix
   // is precisely the one that would otherwise reboot silently forever with
@@ -1464,7 +1528,8 @@ void checkResponseOomWatchdog() {
   // connection was never in question. The token deliberately contains "LOW_HEAP"
   // so RebootHeatmap.Classify() already sorts it as Recovery rather than as an
   // unknown reason, with no server change needed to stop it reading as alarming.
-  BootDiag::recordRestartIntent(BootDiag::RestartCause::LowHeapResponse);
+  BootDiag::recordRestartIntent(BootDiag::RestartCause::LowHeapResponse,
+                                Http::largestContiguousBytes());
   Identity::recordSelfRestart();
   // Steps the shared backoff, exactly as the connection watchdog does. This is
   // the half of "one shared floor" that would be easy to leave out and would
@@ -1733,6 +1798,12 @@ void performCheckIn() {
   // Cleared on the first success, so a device that recovers on its own - or
   // that was only ever seeing a brief server blip - never restarts. Same
   // shape as the draw-failure counter the heap watchdog uses.
+  // Cleared alongside the failure counter so a second outage is timed from its
+  // own start. Left set, a device that dropped WiFi this morning and recovered
+  // would carry that timestamp into tonight's brief blip and restart on the
+  // first failed check-in rather than waiting out the ten minutes.
+  gWifiDownSinceMs = 0;
+
   if (gConsecutiveCheckInFailures > 0) {
     Log::printf("[checkin] recovered after %lu consecutive failure(s) - restart no longer needed",
                 static_cast<unsigned long>(gConsecutiveCheckInFailures));
