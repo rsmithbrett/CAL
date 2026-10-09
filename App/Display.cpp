@@ -1154,39 +1154,6 @@ void drawMoonIcon(int cx, int cy, int radius) {
   lcd.fillCircle(cx + radius * 0.22f, cy - radius * 0.15f, radius * 0.42f, bg());
 }
 
-// A wave (two stacked shallow arcs, drawn as short line segments rather than
-// a true arc call - see the sun icon's own remarks on not leaning on a
-// platform feature this file does not already use elsewhere) with an arrow
-// above it, for showTidesCard()'s two rows. `rising` picks the arrow
-// direction - up for the next high tide, down for the next low - the same
-// distinction a household actually cares about ("is the water coming in or
-// going out"), which neither row's own label states outright.
-void drawTideIcon(int cx, int cy, int radius, bool rising) {
-  // Each wave is 4 points (5 segments would overrun waveWidth) alternating
-  // above/below waveY, connected point to point - a plain zigzag rather than
-  // a true sine curve, same "shape reads as a wave at icon size" standard
-  // the cloud/lightning-bolt icons above already accept.
-  const int waveWidth = radius * 1.3f;
-  const int x0 = cx - waveWidth / 2;
-  for (int row = 0; row < 2; ++row) {
-    const int waveY = cy + radius * 0.1f + row * radius * 0.45f;
-    int prevX = x0;
-    int prevY = waveY;
-    for (int point = 1; point <= 4; ++point) {
-      const int x = x0 + point * waveWidth / 4;
-      const int y = waveY + ((point % 2 == 0) ? -radius * 0.15f : radius * 0.15f);
-      lcd.drawLine(prevX, prevY, x, y, kIconRain);
-      prevX = x;
-      prevY = y;
-    }
-  }
-
-  const int arrowBaseY = rising ? cy - radius * 0.75f : cy - radius * 0.25f;
-  const int arrowTipY = rising ? arrowBaseY - radius * 0.4f : arrowBaseY + radius * 0.4f;
-  lcd.fillTriangle(cx - radius * 0.22f, arrowBaseY, cx + radius * 0.22f, arrowBaseY, cx, arrowTipY,
-                   ink());
-}
-
 // isDaytime only changes the Sunny case (a clear night is a moon, not a sun
 // with rays reading as daylight it isn't) - every other condition already
 // reads the same after dark as it does before it, so nothing else here
@@ -2123,78 +2090,155 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
 }
 
 
-void showTidesCard(const String& nextHighTideText, const String& nextLowTideText) {
-  lcd.fillScreen(bg());
-  drawCardBanner("TIDES", kTidesBanner, 90);
+namespace {
 
-  // Same stat-row layout as showSunMoonCard() immediately above: two rows,
-  // label left and time right-justified. No third line here - see Tides.h
-  // and this function's own declaration in Display.h for why a tide has no
-  // "detail" worth adding.
-  const int rightX = kScreenW - kCardMargin;
+/// The tides card in two lights, geometry identical between them.
+///
+/// Full-bleed like the sun and moon cards, and for the same reason: a card
+/// that ignored gIsDaytime would be a dark rectangle sitting among pale ones
+/// every afternoon. Only the colours move between day and night, so the two
+/// cannot drift apart the way two layouts would.
+struct TidePalette {
+  uint32_t backdropTop;
+  uint32_t backdropBottom;
+  uint32_t rowFill;
+  uint32_t rowEdge;
+  uint32_t iconWater;
+  uint32_t iconArrow;
+  uint32_t iconRing;
+  uint32_t heading;
+  uint32_t label;
+  uint32_t value;
+};
 
-  // THE THREE COLUMNS, RE-MEASURED 2026-09-27 BECAUSE BOTH LABELS WERE BEING
-  // EATEN. This card drew "Next..." on both rows on every device that had it -
-  // tides.high.label and tides.low.label ellipsized on devices 12, 17 and 23,
-  // which is every device with the card, and a photograph confirms it. The two
-  // rows were then distinguishable only by their arrow icons, so the card no
-  // longer said what it was for.
-  //
-  // The cause is visible in the comment this replaces: the label was squeezed
-  // to 99px to clear an icon that had itself been moved right to clear the
-  // label. At FreeSansBold12pt7b "Next high" measures 110px and "Next low"
-  // 100px, so neither fitted - and because layoutText() wraps on word
-  // boundaries before it ellipsizes, both fell back to the only word that fit
-  // and drew "Next..." (71px). Off by eleven pixels on one row and by one on
-  // the other, with the same useless result on both.
-  //
-  // The room came from the VALUE column, which had it. Every value this card
-  // can draw is a clock time from Display::formatTimeOfDay(): 58px in 24-hour
-  // form, at most 107px in 12-hour form ("11:11 AM", the widest of all 1,440
-  // possibilities), or "--:--" at 38px. It was reserved 150. The columns now
-  // measure:
-  //
-  //   label  x=10..132   (122px) - "Next high" is 110, so 12px spare
-  //   icon   x=147..179  (32px, radius 16 centred at 163)
-  //   value  x=194..310  (116px) - the widest possible time is 107, 9px spare
-  //
-  // with 15px of clear panel either side of the icon. Both rows keep identical
-  // geometry, because a reader compares them.
-  //
-  // Labels are NOT shortened to "High"/"Low" to make them fit. "Next" is the
-  // word that says these are upcoming times rather than the last ones, which
-  // is the whole question somebody looks at this card to answer.
-  const int rowValueWidth = 116;
-  const int rowLabelWidth = 122;
+/// A disc of water with an arrow over it, filling the lower part of the ring.
+///
+/// Drawn as horizontal spans rather than a fill plus a mask, because the water
+/// has to stop at the circle's edge and a rectangle would square off the sides.
+/// For each row inside the disc the half-width comes from the circle equation,
+/// which is the same arithmetic drawMoonDisc() uses for its terminator.
+void drawTideDisc(int cx, int cy, int radius, bool rising, const TidePalette& tide) {
+  lcd.fillCircle(cx, cy, radius, to565(tide.rowFill));
 
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  // Waterline a little below centre, so the disc reads as water in a porthole
+  // rather than as a half-filled circle.
+  const int waterTop = cy + radius / 5;
+
+  for (int y = waterTop; y <= cy + radius; ++y) {
+    const int dy = y - cy;
+    const int halfWidth = static_cast<int>(sqrt(static_cast<double>(radius * radius - dy * dy)));
+    if (halfWidth > 0) {
+      lcd.drawFastHLine(cx - halfWidth, y, halfWidth * 2, to565(tide.iconWater));
+    }
+  }
+
+  // Two shallow zigzags on the waterline, the same "reads as a wave at icon
+  // size" standard the weather icons already accept.
+  const int waveWidth = radius;
+  const int x0 = cx - waveWidth / 2;
+  int prevX = x0;
+  int prevY = waterTop;
+  for (int point = 1; point <= 4; ++point) {
+    const int x = x0 + point * waveWidth / 4;
+    const int y = waterTop + ((point % 2 == 0) ? -radius / 8 : radius / 8);
+    lcd.drawLine(prevX, prevY, x, y, to565(tide.iconArrow));
+    prevX = x;
+    prevY = y;
+  }
+
+  const int arrowHalf = radius / 3;
+  const int arrowTipY = rising ? cy - radius / 2 : cy + radius / 8;
+  const int arrowBaseY = rising ? cy + radius / 8 : cy - radius / 2;
+  lcd.fillTriangle(cx - arrowHalf, arrowBaseY, cx + arrowHalf, arrowBaseY, cx, arrowTipY,
+                   to565(tide.iconArrow));
+  lcd.fillRect(cx - arrowHalf / 3, rising ? cy - radius / 8 : cy - radius / 2,
+               arrowHalf * 2 / 3, radius / 2, to565(tide.iconArrow));
+
+  lcd.drawCircle(cx, cy, radius, to565(tide.iconRing));
+  lcd.drawCircle(cx, cy, radius - 1, to565(tide.iconRing));
+}
+
+/// One waterline row: the disc on the left, the label above the time on the
+/// right.
+///
+/// THE LABEL SITS ABOVE THE TIME RATHER THAN BESIDE IT, and that is a panel
+/// constraint rather than a preference. The design this follows puts them side
+/// by side, which works at the width it was drawn at. Here the widest time
+/// this card can draw is "11:11 AM" - 107px at FreeSansBold12pt7b, so about
+/// 160 at 18pt - and "HIGH TIDE" is another 75. Side by side inside a 296px
+/// row they overlap, and the only way to fit them is to shrink the time back
+/// to the 12pt the old card already used. Stacking is what buys the larger
+/// time, which is the whole point of the change.
+void drawTideRow(int top, int height, const String& label, const String& timeText, bool rising,
+                 const TidePalette& tide, const char* labelWhat, const char* valueWhat) {
+  constexpr int kRowX = 12;
+  constexpr int kRowW = kScreenW - kRowX * 2;
+  constexpr int kRowRadius = 14;
+
+  lcd.fillRoundRect(kRowX, top, kRowW, height, kRowRadius, to565(tide.rowFill));
+  lcd.drawRoundRect(kRowX, top, kRowW, height, kRowRadius, to565(tide.rowEdge));
+
+  const int discRadius = height / 2 - 11;
+  drawTideDisc(kRowX + 14 + discRadius, top + height / 2, discRadius, rising, tide);
+
+  // Right-aligned to a common edge so the two rows' times line up under each
+  // other, which is what a reader compares.
+  const int textRight = kRowX + kRowW - 16;
+  const int textWidth = kRowW - (14 + discRadius * 2) - 34;
+
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
+  layoutLine(label, textRight, top + 12, textWidth, tide.label, labelWhat, Align::Right,
+             kTransparentText);
 
-  layoutLine("Next high", kCardMargin, 44, rowLabelWidth, muted(), "tides.high.label");
-  layoutLine(nextHighTideText, rightX, 44, rowValueWidth, ink(), "tides.high", Align::Right);
+  lcd.setFont(&fonts::FreeSansBold18pt7b);
+  layoutLine(timeText, textRight, top + 31, textWidth, tide.value, valueWhat, Align::Right,
+             kTransparentText);
+}
 
-  layoutLine("Next low", kCardMargin, 90, rowLabelWidth, muted(), "tides.low.label");
-  layoutLine(nextLowTideText, rightX, 90, rowValueWidth, ink(), "tides.low", Align::Right);
+}  // namespace
 
-  // Same icon-in-the-gap placement as showSunMoonCard()'s two rows, and the
-  // same radius 16 for the same reported reason (12 was too small to read at a
-  // glance). It sits further right than showSunMoonCard()'s x=130 because
-  // "Next high"/"Next low" are wider labels than "Sunrise"/"Sunset" - but the
-  // centre is now derived from the two columns either side rather than nudged
-  // by hand, which is what went wrong before: 32px centred in the gap between
-  // the label's right edge (132) and the value column's left edge (194) puts
-  // it at 163, spanning 147-179 with 15px clear on both sides.
-  //
-  // showSunMoonCard() above was checked for the same defect and does NOT have
-  // it: "Sunrise" is 89px and "Sunset" 81px against its 104px label column, so
-  // both fit with room to spare, which is why no sunmoon.*.label ellipsis ever
-  // appeared in the telemetry. It is deliberately left alone.
-  constexpr int kIconColumnX = 163;
-  constexpr int kIconRadius = 16;
-  drawTideIcon(kIconColumnX, 44 + 9, kIconRadius, /*rising=*/true);
-  drawTideIcon(kIconColumnX, 90 + 9, kIconRadius, /*rising=*/false);
+void showTidesCard(const String& nextHighTideText, const String& nextLowTideText) {
+  // Night is the palette the design was drawn in; day is the same card lifted,
+  // so it sits beside the pale cards rather than punching a hole in the
+  // rotation. The water stays blue in both because water is the one thing on
+  // this card that does not change with the light.
+  const TidePalette day{
+      0xDCEBF5u, 0xF4FAFDu, 0xFFFFFFu, 0xBBD4E4u,
+      0x1F7FD0u, 0x0C4C84u, 0x5EA9DAu,
+      0x0C3350u, 0x4A6B82u, 0x0B2338u};
+  const TidePalette night{
+      0x0A1B2Eu, 0x102A44u, 0x16314Eu, 0x24486Du,
+      0x1286D8u, 0x7FE4F2u, 0x3FC2E0u,
+      0xEAF6FCu, 0x8FB6CEu, 0xFFFFFFu};
 
-  drawClock();
+  const TidePalette& tide = gIsDaytime ? day : night;
+
+  fillVerticalGradient(0, kScreenH, tide.backdropTop, tide.backdropBottom);
+
+  lcd.setFont(&fonts::FreeSansBold18pt7b);
+  lcd.setTextSize(1);
+  layoutLine("TIDES", kScreenW / 2, 8, kScreenW - kCardMargin * 2, tide.heading, "tides.heading",
+             Align::Centre, kTransparentText);
+
+  constexpr int kRowHeight = 74;
+  drawTideRow(54, kRowHeight, "HIGH TIDE", nextHighTideText, /*rising=*/true, tide,
+              "tides.high.label", "tides.high");
+  drawTideRow(54 + kRowHeight + 8, kRowHeight, "LOW TIDE", nextLowTideText, /*rising=*/false, tide,
+              "tides.low.label", "tides.low");
+
+  // Its own clock rather than drawClock(), for the reason showSunMoonCard()
+  // has one: drawClock() paints an opaque bg() box behind the text, which on a
+  // full-bleed card is a rectangle of the wrong colour.
+  const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
+  struct tm localTm;
+  gmtime_r(&localNow, &localTm);
+
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW / 2, kScreenH - 20,
+             kScreenW - kCardMargin * 2, tide.heading, "tides.clock", Align::Centre,
+             kTransparentText);
+
   restoreDefaultFont();
 }
 
