@@ -2613,7 +2613,7 @@ void setup() {
 void loop() {
   // Captured before anything blocking runs - see the instrumentation at the
   // bottom of this function, which reports iterations long enough that a tap
-  // could have been dropped inside them.
+  // sampled inside them waits a noticeable time to be acted on.
   const uint32_t iterationStartMs = millis();
 
   // One sample per iteration, outside every Scope, so the stretches no phase
@@ -2758,50 +2758,35 @@ void loop() {
     Log::poll();
   }
 
-  // Still ~50ms of pacing, but spent sampling touch rather than asleep.
+  // ~50ms of pacing, spent draining the tap queue rather than asleep.
   //
-  // The pacing itself was never the problem. Everything else in this loop is
-  // gated on its own millis() comparison and does not care how often it is
-  // asked; touch is the one thing that does, because a finger is on the glass
-  // for a fraction of a second. What made advance/rewind feel unresponsive is
-  // that a tap was only ever seen if it happened to overlap the single
-  // Touch::poll() inside CardManager::poll() - one sample per iteration - and
-  // this loop's iterations are not evenly spaced. performCheckIn() above is a
-  // synchronous TLS handshake plus request and response, and the card refresh
-  // inside CardManager::poll() is a synchronous HTTPS fetch, so the real gap
-  // between two touch samples is sometimes seconds. Taps landing in those
-  // stretches were dropped silently, which is the worst possible failure for a
-  // button whose whole design is that the person gets no confirmation and so
-  // has no way to tell a missed press from a slow one.
-  //
-  // Sampling every 5ms across the wait fixes the between-operations half of
-  // that outright. It does NOT fix sampling during a blocking call - that
-  // needs the network work off this path, which is a much bigger change than
-  // this - so the instrumentation below exists to say how much of the
-  // remaining problem that actually is, measured rather than assumed.
+  // The pacing is not what paces touch - Touch::begin()'s task samples the
+  // panel every 10ms on the other core and nothing in this loop can stop it.
+  // This window decides how fast a sampled tap is acted on, which is a
+  // different question: a tap taken while loop() is idle should move the card
+  // now rather than at the top of the next iteration.
   constexpr uint32_t kLoopPacingMs = 50;
-  constexpr uint32_t kTouchSampleIntervalMs = 5;
+  constexpr uint32_t kTouchDrainIntervalMs = 5;
   const uint32_t pacingStartMs = millis();
   while ((millis() - pacingStartMs) < kLoopPacingMs) {
     CardManager::pollTouch();
-    delay(kTouchSampleIntervalMs);
+    delay(kTouchDrainIntervalMs);
   }
 
-  // How long this whole iteration took, and therefore how long touch went
-  // unsampled at the worst point in it. Logged only when it is bad enough to
-  // matter - an ordinary iteration is the ~50ms above and saying so every
+  // How long this whole iteration took, and therefore the worst delay between
+  // a tap being sampled and the card moving. Logged only when it is bad enough
+  // to matter - an ordinary iteration is the ~50ms above, and saying so every
   // 50ms would drown the stream it is written to.
   //
-  // kUnresponsiveIterationMs is set just above a normal iteration rather than
-  // at some round number, so anything logged here is genuinely a stretch where
-  // a tap could have been lost. Whoever picks up the reported unresponsiveness
-  // next should read these lines first: if they are rare, the 5ms sampling
-  // above was the whole fix, and if they are common, the fix is to get the
-  // request path out of loop().
+  // kUnresponsiveIterationMs sits just above a normal iteration rather than at
+  // a round number, so every line here is a stretch somebody could feel. Read
+  // these next to the [touch] counters: this line counts the delay, and that
+  // line says whether a tap inside one was delivered late, dropped for age or
+  // collapsed as a repeat.
   constexpr uint32_t kUnresponsiveIterationMs = 250;
   const uint32_t iterationMs = millis() - iterationStartMs;
   if (iterationMs >= kUnresponsiveIterationMs) {
-    Log::printf("[loop] iteration took %lu ms - touch was unsampled for most of it",
+    Log::printf("[loop] iteration took %lu ms - a tap sampled inside it waited that long",
                 static_cast<unsigned long>(iterationMs));
   }
 }

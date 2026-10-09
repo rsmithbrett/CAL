@@ -1012,18 +1012,16 @@ uint32_t mixColour(uint32_t from, uint32_t to, int numerator, int denominator) {
 /// property that matters.
 /// Eight-row bands, not one line per row.
 ///
-/// THE PER-ROW VERSION STARVED TOUCH. 240 HLine calls for the sky plus 640
+/// A per-row version held the loop up. 240 HLine calls for the sky plus 640
 /// VLine calls for the ridges put this card's draw at roughly 900 SPI
-/// operations, and the panel and the touch controller share that bus: the loop
-/// logged iterations of 250 ms to 2.2 s during which, as its own message says,
-/// "touch was unsampled for most of it". A tap then lands in a blind window
-/// more often than not, which is what a person holding the device experiences
-/// as a screen that does not respond.
+/// operations, and the loop logged iterations of 250 ms to 2.2 s around it.
+/// Touch keeps being sampled throughout, on its own task and its own bus (see
+/// TOUCH_SAMPLING_DESIGN.md), but a tap taken during a draw this long still
+/// waits for the draw to finish before the card moves.
 ///
 /// Eight rows per band is 30 fillRects for the same sky. On a gradient this
 /// shallow - a few units of each channel across the whole span - the banding is
-/// not visible at arm's length, and the draw cost drops by a factor the touch
-/// sampler can feel.
+/// not visible at arm's length.
 /// The 16-bit value this panel will actually store for a 24-bit colour.
 ///
 /// THE PANEL IS RGB565: 32 levels of red, 64 of green, 32 of blue. A gradient
