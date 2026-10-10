@@ -32,6 +32,12 @@ struct CardSlot {
   /// entire .bss cost of this feature on a board whose .bss budget is the
   /// reason there are four instances here and not eleven.
   time_t staleSinceUtc = 0;
+
+  /// What this card follows, as the server sent it: API-Sports' sport slug and
+  /// the league's display name. 43 bytes a card, 172 across the four, on the
+  /// same .bss budget the comment above is counting against.
+  char sport[kMaxSportLength + 1] = "";
+  char competition[kMaxCompetitionLength + 1] = "";
 };
 
 CardSlot gCards[kMaxCards];
@@ -227,9 +233,19 @@ void drawCardAt(uint8_t index, uint16_t itemIndex) {
   // Live is a flag rather than something the renderer infers from the status
   // word, because that word is prose and would make the badge depend on the
   // reader's language.
+  const String sportLabel = sportChipLabel(slot.sport);
+
+  // Both say what is on, so both are logged: a card drawing no chip because the
+  // server sent no sport and one drawing none because the slug is unrecognised
+  // are the same picture from the front of the display.
+  Log::verbose("[sports] heading: card=%s sport='%s' chip='%s' competition='%s'",
+               kCardIds[index], slot.sport,
+               sportLabel.length() > 0 ? sportLabel.c_str() : "none - no sport sent, or a slug this build does not map",
+               slot.competition[0] != '\0' ? slot.competition : "none - server sent no league name for this card");
+
   Display::showSportsCard(game.home, homeScore, game.away, awayScore, status,
                           itemIndex + 1, slot.count, age,
-                          /*sportLabel=*/"", /*competitionLabel=*/"",
+                          sportLabel, slot.competition,
                           /*progressLabel=*/game.period,
                           /*clockLabel=*/"",
                           /*isLive=*/game.state == State::Live);
@@ -407,7 +423,8 @@ bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw
 
 }  // namespace
 
-void setGames(const char* cardId, const Game* games, uint8_t count, time_t staleSinceUtc) {
+void setGames(const char* cardId, const Game* games, uint8_t count, time_t staleSinceUtc,
+              const char* sport, const char* competition) {
   const int8_t index = indexOf(cardId);
   if (index < 0) {
     // A policy or payload naming an instance this firmware does not register.
@@ -440,6 +457,15 @@ void setGames(const char* cardId, const Game* games, uint8_t count, time_t stale
   slot.count = count;
   slot.staleSinceUtc = staleSinceUtc;
 
+  // Bounded, and terminated by hand: strncpy writes no terminator when the
+  // source fills the buffer, and both of these are the sender's strings rather
+  // than this firmware's. A server sending a longer league name than its own cap
+  // gets its name cut rather than this slot's neighbour overwritten.
+  strncpy(slot.sport, sport != nullptr ? sport : "", kMaxSportLength);
+  slot.sport[kMaxSportLength] = '\0';
+  strncpy(slot.competition, competition != nullptr ? competition : "", kMaxCompetitionLength);
+  slot.competition[kMaxCompetitionLength] = '\0';
+
   // One line, both branches named, on a path that runs once per check-in. The
   // fresh branch is said out loud rather than left as silence because on this
   // field absence IS the answer - "the server did not flag this" and "the
@@ -456,6 +482,26 @@ void setGames(const char* cardId, const Game* games, uint8_t count, time_t stale
                   : "server sent staleSinceUtc - this card will show how old its answer is");
 }
 
+String sportChipLabel(const char* sport) {
+  if (sport == nullptr || sport[0] == '\0') { return String(); }
+
+  // The two football codes, named first and separately. API-Sports calls soccer
+  // "football", so matching a prefix or a substring here would put FOOTBALL over
+  // a soccer score - which is the one label on this card a viewer would act on.
+  // Whole-token comparison, both ways round.
+  if (strcmp(sport, "american-football") == 0) { return String("FOOTBALL"); }
+  if (strcmp(sport, "football") == 0)          { return String("SOCCER"); }
+  if (strcmp(sport, "basketball") == 0)        { return String("BASKETBALL"); }
+  if (strcmp(sport, "baseball") == 0)          { return String("BASEBALL"); }
+  if (strcmp(sport, "hockey") == 0)            { return String("HOCKEY"); }
+
+  // A slug this build has never seen. Empty rather than the raw token: the chip
+  // is small caps on a pill, and "rugby-sevens" rendered into it reads as a bug
+  // where no chip reads as a card that simply does not name its sport.
+  Log::printf("[sports] unmapped sport slug '%s' - drawing no chip", sport);
+  return String();
+}
+
 void clearAll() {
   // The age goes with the games. Leaving a staleSinceUtc behind on an emptied
   // slot would let yesterday's staleness reappear on tomorrow's fixtures the
@@ -464,6 +510,12 @@ void clearAll() {
   for (uint8_t i = 0; i < kMaxCards; ++i) {
     gCards[i].count = 0;
     gCards[i].staleSinceUtc = 0;
+
+    // The heading goes with them, for the reason above applied to the other two
+    // card-level fields: a repopulated slot would otherwise carry the league it
+    // used to follow.
+    gCards[i].sport[0] = '\0';
+    gCards[i].competition[0] = '\0';
   }
   Log::printf("[sports] cleared all cards");
 }

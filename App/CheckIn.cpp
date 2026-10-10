@@ -971,6 +971,18 @@ Result perform() {
         // CARD_ABSENCE_AND_AGE_DESIGN.md section 8.
         const time_t staleSinceUtc = parseIso8601Utc(card["staleSinceUtc"] | "");
 
+        // WHAT THIS CARD IS SHOWING - the sport as API-Sports' own slug, and the
+        // league's display name. Card-level, like the timestamp above and for the
+        // same reason given there.
+        //
+        // `| ""` covers all three of absent, null and a non-string, so a server
+        // predating SportsCardPayload.Sport and .Competition (added 2026-10-09)
+        // produces two empty strings and a card that draws exactly as it did
+        // before the fields existed. That is what makes them additive against the
+        // closed compatibility gate.
+        const char* sport = card["sport"] | "";
+        const char* competition = card["competition"] | "";
+
         Sports::Game games[Sports::kMaxGames];
         uint8_t count = 0;
 
@@ -1015,7 +1027,7 @@ Result perform() {
           ++count;
         }
 
-        Sports::setGames(cardId, games, count, staleSinceUtc);
+        Sports::setGames(cardId, games, count, staleSinceUtc, sport, competition);
       }
     }
   }
