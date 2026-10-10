@@ -2069,20 +2069,31 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW - kCardMargin, 12, 120,
              sky.heading, "sunmoon.clock", Align::Right, kTransparentText);
 
-  layoutLine("↑ SUNRISE", kCardMargin, 162, 130, sky.label, "sunmoon.sunrise.label",
+  // THE WHOLE STACK FINISHES BY y=220, which is what sets these three rows.
+  //
+  // It did not: the detail line sat at 218 and drew to 236, and layoutText reported
+  // that on every draw - 228 complaints an hour across the fleet once the moon card's
+  // own overrun is counted. Nothing was visibly clipped, because both these cards draw
+  // their clock top right and leave the bottom band empty, but a check that cries wolf
+  // is a check nobody reads, and the tides clock was caught by exactly this line.
+  //
+  // Lifted rather than exempted. One rule - nothing draws below 220 - is worth more
+  // than a conditional one that a later card satisfies by claiming the exemption.
+  // Labels 150..168, times 170..206, detail 202..220.
+  layoutLine("↑ SUNRISE", kCardMargin, 150, 130, sky.label, "sunmoon.sunrise.label",
              Align::Left, kTransparentText);
-  layoutLine("↓ SUNSET", kScreenW - kCardMargin, 162, 130, sky.label,
+  layoutLine("↓ SUNSET", kScreenW - kCardMargin, 150, 130, sky.label,
              "sunmoon.sunset.label", Align::Right, kTransparentText);
 
   lcd.setFont(&fonts::FreeSansBold18pt7b);
-  layoutLine(sunriseText, kCardMargin, 182, 140, sky.value, "sunmoon.sunrise",
+  layoutLine(sunriseText, kCardMargin, 170, 140, sky.value, "sunmoon.sunrise",
              Align::Left, kTransparentText);
-  layoutLine(sunsetText, kScreenW - kCardMargin, 182, 140, sky.value, "sunmoon.sunset",
+  layoutLine(sunsetText, kScreenW - kCardMargin, 170, 140, sky.value, "sunmoon.sunset",
              Align::Right, kTransparentText);
 
   if (detail.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    layoutLine(detail, kScreenW / 2, 218, kScreenW - kCardMargin * 2, sky.footnote,
+    layoutLine(detail, kScreenW / 2, 202, kScreenW - kCardMargin * 2, sky.footnote,
                "sunmoon.detail", Align::Centre, kTransparentText);
   }
 
@@ -3140,7 +3151,9 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
         sky.lit, sky.dark, sky.outline);
 
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    layoutLine(item.label, kUpcomingX[i], 196, 76, sky.name, "moon.upcoming.name",
+    // 184..202, directly under the disc, which ends at 181. Moved up with the line
+    // below it: leaving this at 196 while that went to 202 would have overlapped them.
+    layoutLine(item.label, kUpcomingX[i], 184, 76, sky.name, "moon.upcoming.name",
                Align::Centre, kTransparentText);
 
     char whenBuffer[24];
@@ -3153,7 +3166,9 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
       snprintf(whenBuffer, sizeof(whenBuffer), "in %dd", days);
     }
 
-    layoutLine(whenBuffer, kUpcomingX[i], 214, 76, sky.detail, "moon.upcoming.when",
+    // 202..220, for the reason the sun card's own stack states: nothing draws below
+    // 220, and this drew to 232.
+    layoutLine(whenBuffer, kUpcomingX[i], 202, 76, sky.detail, "moon.upcoming.when",
                Align::Centre, kTransparentText);
   }
 
