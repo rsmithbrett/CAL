@@ -328,9 +328,24 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
 ///
 /// This draws, it does not compute - every value arrives already chosen,
 /// ordered and capped by the server. See Sports.h.
+/// <para><b>One renderer for every sport, with no branch on which one.</b>
+/// SPORTS_CARDS_V2_GENERIC_DESIGN.md makes that an acceptance test: a sport
+/// added later needs an adapter and a content mapping, not a case in here. The
+/// sport and the competition are content - strings this draws - exactly like
+/// the team names beside them.</para>
+///
+/// <para>The last five are optional and every one may be absent. A device
+/// whose server has not yet been taught to send a sport code draws no chip; a
+/// provider that names no competition draws none; a sport with no verified
+/// clock draws its period alone. The design forbids substituting a placeholder
+/// for any of them, and a fabricated clock is the costliest of the lot - it
+/// has somebody watching a game that is not running.</para>
 void showSportsCard(const String& homeName, const String& homeScore, const String& awayName,
                     const String& awayScore, const String& status, uint16_t itemNumber,
-                    uint16_t itemCount, const String& ageText);
+                    uint16_t itemCount, const String& ageText,
+                    const String& sportLabel = "", const String& competitionLabel = "",
+                    const String& progressLabel = "", const String& clockLabel = "",
+                    bool isLive = false);
 
 /// The ISS flyover card: distance and compass direction to the International
 /// Space Station's current sub-satellite point, plus a one-line detail

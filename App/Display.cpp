@@ -2505,370 +2505,171 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   restoreDefaultFont();
 }
 
-void showSportsCard(const String& homeName, const String& homeScore, const String& awayName,
-                    const String& awayScore, const String& status, uint16_t itemNumber,
-                    uint16_t itemCount, const String& ageText) {
-  lcd.fillScreen(bg());
-  drawCardBanner("SPORTS", kSportsBanner, 110);
+namespace {
 
-  // Two team rows, each a name on the left and a score hard right. The score
-  // column is reserved first, so a long club name can never push a score off
-  // the edge or onto a second line - the score is the thing somebody crossing
-  // the room is trying to read.
-  constexpr int kScoreColumnWidth = 64;
+/// The generic sports card in two lights - SPORTS_CARDS_V2_GENERIC_DESIGN.md §2.
+struct SportPalette {
+  uint32_t backdrop;
+  uint32_t cardTop;
+  uint32_t cardBottom;
+  uint32_t panel;
+  uint32_t edge;
+  uint32_t chip;
+  uint32_t chipInk;
+  uint32_t heading;
+  uint32_t muted;
+  uint32_t name;
+  uint32_t score;
+  uint32_t liveFill;
+  uint32_t liveInk;
+};
 
-  // EVERYTHING SHIFTS UP WHEN A BUTTON IS BOUND TO THIS CARD, and no
-  // information is given up doing it - which is what makes this the easy one
-  // of the three cards the audit found (CARD_AUDIT_2026_09_27.md section 9.2,
-  // approved).
-  //
-  // Measured against the tight floor of 154 (setContentBudget() drops
-  // gContentBottom to kButtonRowY - kButtonBandGap whenever Actions::forCard()
-  // resolved a button for THIS card), the untight layout runs to y=201: the
-  // second team row at y=116 bottoms at 158 and is 4px past, the 12pt status
-  // at y=172 bottoms at 201 and is 47px past, and the 9pt right-hand slot at
-  // y=176 bottoms at 198 and is 44px past. Three of the four rows on the card
-  // are wholly or partly inside the band drawChrome() paints.
-  //
-  // THE 54px PITCH BETWEEN THE TWO TEAM ROWS IS DELIBERATE AND UNCHANGED.
-  // 44 and 88 are not "62 and 116, scaled" - they are the same 54px gap moved
-  // up as a unit. That gap is what makes the two names read as a pair, one
-  // scoreline, rather than as the first two entries of a list; closing it to
-  // recover a few more pixels would save room and cost the card its shape.
-  //
-  // THE SCORE STAYS 18pt AT EVERY TIER, TIGHT OR NOT, which is this card's
-  // oldest rule and the reason the name ladder below exists at all: the score
-  // is what somebody crossed the room to read. Only the status word gives up
-  // size here, and only when tight.
-  const bool tight = contentIsTight();
-  const int firstRowY = tight ? 44 : 62;
-  const int secondRowY = tight ? 88 : 116;
-  const int nameWidth = kScreenW - kCardMargin * 2 - kScoreColumnWidth;
-  const int rightX = kScreenW - kCardMargin;
-
-  // Said out loud on every tight draw - the remote debug stream is the only
-  // diagnostic a deployed device has, and a card that has quietly rearranged
-  // itself should be explicable from the stream rather than from guesswork.
-  // verbose rather than printf: a bound button is a configuration somebody
-  // chose, not a fault.
-  if (tight) {
-    Log::verbose("[display] sports is tight (floor %d) - team rows at %d and %d, status and "
-                 "age/counter joined at 132 with the status at 9pt instead of 12pt",
-                 contentBottom(), firstRowY, secondRowY);
-  }
-
+/// A filled pill with a label in it, for the sport chip and the LIVE badge.
+int drawSportsPill(int x, int y, const String& label, uint32_t fill, uint32_t ink,
+                   const char* what, bool withDot = false) {
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
 
-  // AWAY FIRST, HOME SECOND, AND THE "@" MOVED WITH THEM.
-  //
-  // This card used to draw home at y=62 unmarked and away at y=116 prefixed
-  // "@ ", on the stated belief that "@ Houston Astros" marks the away team.
-  // It does not. "@ X" is read "at X", so the marker names the HOST, and the
-  // card was therefore stating that the away team was hosting - photographed
-  // as "Yankees / @ Orioles" on a day the Yankees hosted, which is the exact
-  // inversion of the truth and reads as a perfectly ordinary scoreline.
-  //
-  // Two ways to fix it, and only one of them is right. Moving the marker onto
-  // the home row alone is one line and still reads wrong, because no ticker
-  // writes the host first. So the rows swap as well: away on top unmarked,
-  // home underneath carrying the "@", which is the vertical form every
-  // American scoreboard uses -
-  //
-  //     NYY  5
-  //   @ BAL  3
-  //
-  // and that same photographed game now renders "Orioles / @ Yankees".
-  //
-  // THE ROW INDEX PICKS THE POSITION AND THE FLAG PICKS THE TEAM, which is
-  // the part worth being careful about. Name, score and marker are all chosen
-  // by isAway; y is chosen by row. Swapping one of the four and not the
-  // others puts a score against the wrong team, and a scoreline with the
-  // numbers transposed looks exactly as plausible as a correct one - worse
-  // than the bug it came from, because nothing on the panel looks off.
+  const int dotRoom = withDot ? 14 : 0;
+  const int width = lcd.textWidth(label) + 18 + dotRoom;
+  constexpr int kHeight = 22;
+
+  lcd.fillRoundRect(x, y, width, kHeight, kHeight / 2, to565(fill));
+
+  if (withDot) {
+    lcd.fillCircle(x + 11, y + kHeight / 2, 4, to565(ink));
+  }
+
+  layoutLine(label, x + 9 + dotRoom, y + 3, width - 18 - dotRoom, ink, what,
+             Align::Left, kTransparentText);
+
+  return width;
+}
+
+}  // namespace
+
+void showSportsCard(const String& homeName, const String& homeScore, const String& awayName,
+                    const String& awayScore, const String& status, uint16_t itemNumber,
+                    uint16_t itemCount, const String& ageText, const String& sportLabel,
+                    const String& competitionLabel, const String& progressLabel,
+                    const String& clockLabel, bool isLive) {
+  // Day: pale ground, dark navy ink. Night: deep navy, light ink. The LIVE badge
+  // is red in both, because its whole job is to be the one thing that catches an
+  // eye crossing the room.
+  const SportPalette day{
+      0xEEF4FBu, 0xFFFFFFu, 0xF4F8FCu, 0xE8F0F8u, 0xD4E2EEu,
+      0xCFE0F0u, 0x0D2B45u, 0x0D2B45u, 0x5B7490u, 0x0D2B45u, 0x0D2B45u,
+      0xD81E3Fu, 0xFFFFFFu};
+  const SportPalette night{
+      0x0A1626u, 0x15273Du, 0x112033u, 0x1B3048u, 0x27425Fu,
+      0x24405Eu, 0xDCEAF6u, 0xF2F8FDu, 0x8AA4BEu, 0xFFFFFFu, 0xFFFFFFu,
+      0xD81E3Fu, 0xFFFFFFu};
+
+  const SportPalette& sport = gIsDaytime ? day : night;
+
+  fillVerticalGradient(0, kScreenH, sport.cardTop, sport.cardBottom);
+
+  // THE TOP ROW IS WHAT THE GAME IS, and both halves are optional. A device
+  // running firmware older than the sportCode wire field, or a competition the
+  // provider does not name, draws neither rather than a placeholder - the design
+  // is explicit that an unsupported field stays absent.
+  if (sportLabel.length() > 0) {
+    drawSportsPill(kCardMargin, 10, sportLabel, sport.chip, sport.chipInk, "sports.sport");
+  }
+
+  if (competitionLabel.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    layoutLine(competitionLabel, kScreenW - kCardMargin, 13, 150, sport.muted,
+               "sports.competition", Align::Right, kTransparentText);
+  }
+
+  // THE STATE ROW. A live game gets the badge; everything else gets its status
+  // word in the same slot, so the row never collapses and the two team rows
+  // below it never move between states.
+  if (isLive) {
+    drawSportsPill(kCardMargin, 42, "LIVE", sport.liveFill, sport.liveInk, "sports.live",
+                   /*withDot=*/true);
+  } else if (status.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    layoutLine(status, kCardMargin, 45, 150, sport.muted, "sports.status",
+               Align::Left, kTransparentText);
+  }
+
+  // PROGRESS AND CLOCK ARE TWO FIELDS JOINED BY A DOT, and the dot only appears
+  // when both are there. "Q3 · 7:42" when the provider supplies a clock, "Q3"
+  // when it does not, and nothing at all when it supplies neither - a card that
+  // invented 0:00 would have somebody watching a game that is not running.
+  String progress = progressLabel;
+
+  if (clockLabel.length() > 0) {
+    progress = progress.length() > 0 ? progress + " \u00b7 " + clockLabel : clockLabel;
+  }
+
+  if (progress.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    layoutLine(progress, kScreenW - kCardMargin, 42, 150, sport.heading, "sports.progress",
+               Align::Right, kTransparentText);
+  }
+
+  // THE SCORELINE, in a panel of its own so the two rows read as one thing
+  // rather than as the first entries of a list.
+  constexpr int kPanelTop = 74;
+  constexpr int kPanelHeight = 104;
+  constexpr int kRowHeight = kPanelHeight / 2;
+
+  lcd.fillRoundRect(kCardMargin, kPanelTop, kScreenW - kCardMargin * 2, kPanelHeight, 10,
+                    to565(sport.panel));
+  lcd.drawFastHLine(kCardMargin + 10, kPanelTop + kRowHeight, kScreenW - kCardMargin * 2 - 20,
+                    to565(sport.edge));
+
+  // The score column is reserved first, so a long club name can never push a
+  // score off the edge - the score is what somebody crossed the room to read.
+  constexpr int kScoreWidth = 76;
+  const int nameWidth = kScreenW - kCardMargin * 2 - kScoreWidth - 28;
+
+  // AWAY FIRST, HOME SECOND, which is how a scoreline is read aloud.
+  const String rows[2][2] = {{awayName, awayScore}, {homeName, homeScore}};
+
   for (int row = 0; row < 2; ++row) {
-    const bool isAway = (row == 0);
-    const String& name = isAway ? awayName : homeName;
-    const String& score = isAway ? awayScore : homeScore;
-    const int y = (row == 0) ? firstRowY : secondRowY;
+    const int top = kPanelTop + row * kRowHeight;
 
-    // THE HOME ROW CARRIES THE "@", for the reason above: the marker names the
-    // host. Only one row is marked - an unmarked team is the visitor, and
-    // marking both would spend width saying what the absence already says.
-    //
-    // The "@" is joined to the name BEFORE anything is measured, which is the
-    // part that matters here. Added after the fit was computed it would push
-    // the name one glyph further into being cut, and the marker itself could
-    // end up being the thing the ellipsis ate - the layout would have created
-    // the defect it exists to fix.
-    //
-    // 96 bytes against a wire cap of 20 characters (Sports.h's
-    // kMaxTeamNameLength). That is not a guess at what fits the panel, which
-    // is roughly 14 glyphs at this font; it is room for anything a caller
-    // could hand this function, so the join never loses a character behind
-    // layoutText's back. A caller that somehow exceeds it says so out loud.
-    char nameLine[96];
-    const char* nameToDraw = name.c_str();
-    if (!isAway && name.length() > 0) {
-      const int needed = snprintf(nameLine, sizeof(nameLine), "@ %s", name.c_str());
-      if (needed < 0 || static_cast<size_t>(needed) >= sizeof(nameLine)) {
-        Log::printf("[display] sports.home: name is %u characters, longer than the %u byte "
-                    "join buffer, so the '@' row was cut before it was measured",
-                    static_cast<unsigned>(name.length()), static_cast<unsigned>(sizeof(nameLine)));
-      }
-      nameToDraw = nameLine;
-    }
+    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    layoutLine(rows[row][0], kCardMargin + 14, top + 14, nameWidth, sport.name,
+               row == 0 ? "sports.away" : "sports.home", Align::Left, kTransparentText);
 
-    // THREE TIERS, the same technique showAnnouncementCard() uses for its body
-    // text: try the size the card was designed at, and drop a tier whenever
-    // the whole name will not survive it. "Houston Astros" is 14 characters
-    // and does not fit 236px at 18pt, which is how it reached a photograph
-    // reading "Houston Astr"; it fits comfortably at 12pt.
-    //
-    // WHY A THIRD TIER AT 9pt, AND WHY IT COULD NOT BE A WIDER COLUMN
-    // INSTEAD. The obvious cheaper fix is to take width off the score column
-    // and give it to the name. It does not reach: the score column has 7 real
-    // pixels of slack against a shortfall that runs from 9 to 64 pixels
-    // depending on the name, so reapportioning buys back the narrowest case
-    // and nothing else. Measured against the vendored glyph tables, the long
-    // names all clear 236px at 9pt with room to spare - the widest realistic
-    // one, "@ Tampa Bay Buccaneer" at the 20-character wire cap, comes to
-    // 217px and leaves 19.
-    //
-    // AND WHY LONG NAMES ARE NOT RARE. Three separate routes produce one, so
-    // this is not just the nickname-collision case:
-    //   - football is returned untouched by design, full name and all;
-    //   - a market the server does not recognise returns the full name;
-    //   - the collision branch returns market and nickname together.
-    // The common route is the first, not the third.
-    //
-    // The 9pt tier fires only after 12pt has been measured and rejected. That
-    // ordering is the whole point of a tier ladder: a name that fits 12pt must
-    // never be drawn at 9pt, because this card's argument is that it reads
-    // from across the room and 9pt is a third the height of the top tier.
-    // An ellipsis is still the backstop below 9pt, so this is a way of needing
-    // the ellipsis less often rather than a way of avoiding it.
-    //
-    // The score stays at 18pt regardless, at every tier. This card's own
-    // reasoning is that the score is what a reader across the room is after,
-    // so the name is the one that gives up size.
-    const char* const what = isAway ? "sports.away" : "sports.home";
     lcd.setFont(&fonts::FreeSansBold18pt7b);
-    const int largeHeight = lcd.fontHeight();
-    const TextBox largeBox{kCardMargin, static_cast<int16_t>(y), static_cast<int16_t>(nameWidth),
-                           static_cast<int16_t>(largeHeight), 1, Align::Left};
-    const bool cutAt18 = layoutText(nameToDraw, largeBox, ink(), "sports.name", kUseCardBackground,
-                                    /*measureOnly=*/true)
-                             .ellipsized;
-
-    if (!cutAt18) {
-      layoutText(nameToDraw, largeBox, ink(), what);
-    } else {
-      lcd.setFont(&fonts::FreeSansBold12pt7b);
-      // Centred against the 18pt score beside it rather than sharing its top
-      // edge, which would leave the smaller name floating high in the row.
-      // Recomputed per tier, because the nudge is half the height the name
-      // gave up and 9pt gives up more than 12pt does.
-      const int mediumNudge = (largeHeight - lcd.fontHeight()) / 2;
-      const TextBox mediumBox{kCardMargin, static_cast<int16_t>(y + mediumNudge),
-                              static_cast<int16_t>(nameWidth),
-                              static_cast<int16_t>(lcd.fontHeight()), 1, Align::Left};
-      const bool cutAt12 = layoutText(nameToDraw, mediumBox, ink(), "sports.name",
-                                      kUseCardBackground, /*measureOnly=*/true)
-                               .ellipsized;
-
-      if (!cutAt12) {
-        layoutText(nameToDraw, mediumBox, ink(), what);
-      } else {
-        lcd.setFont(&fonts::FreeSansBold9pt7b);
-        const int smallNudge = (largeHeight - lcd.fontHeight()) / 2;
-        // Said out loud, not silently. Dropping two tiers is the card giving
-        // up most of its headline size to keep a name whole, and a household
-        // seeing a noticeably smaller name should be explicable from the
-        // stream rather than from guesswork.
-        Log::printf("[display] %s: '%s' would not fit %dpx at 18pt or 12pt, drawing it at 9pt",
-                    what, nameToDraw, nameWidth);
-        layoutLine(nameToDraw, kCardMargin, y + smallNudge, nameWidth, ink(), what);
-      }
-      lcd.setFont(&fonts::FreeSansBold18pt7b);
-    }
-
-    // Empty before play starts, and that is drawn as nothing rather than as a
-    // zero. Null and zero are different facts here: a nil-nil draw is a real
-    // scoreline and a game that has not started is not 0-0.
-    if (score.length() > 0) {
-      layoutLine(score, rightX, y, kScoreColumnWidth, ink(),
-                 isAway ? "sports.awayscore" : "sports.homescore", Align::Right);
-    }
+    layoutLine(rows[row][1], kScreenW - kCardMargin - 14, top + 8, kScoreWidth, sport.score,
+               row == 0 ? "sports.away.score" : "sports.home.score", Align::Right,
+               kTransparentText);
   }
 
-  // The status row: a clock time before, the provider's own progress text
-  // during, FINAL or PPD after. Empty when the server sent a state this
-  // firmware does not know, and then this row is simply absent - claiming a
-  // game has not started is exactly the claim an unknown state cannot support.
-  //
-  // Bounded short of the "N of M" counter that shares this row, rather than
-  // across the whole card: the counter is drawn after and would otherwise be
-  // printed over by a long enough progress string.
-  // THERE IS NO FOURTH ROW ON THIS CARD, AND THAT IS THE POINT.
-  //
-  // The obvious home for the age line - a line of its own at y=198 - measures
-  // as free and is not. setContentBudget() drops the content floor to
-  // kButtonRowY - kButtonBandGap = 154 whenever this card has an action bound,
-  // and drawChrome() then paints the button row over y=160..220. This card is
-  // also one of the thirteen that never consults contentBottom() and never
-  // calls noteContentOverrun(), so anything placed down there would be covered
-  // silently with nothing in the stream to say so. The status and counter rows
-  // below y=160 are ALREADY being painted over on a device with a button
-  // bound: "nothing is drawn at y=205" is therefore not evidence that the room
-  // is free, it is evidence that the region belongs to the chrome.
-  //
-  // So the age goes on the row that already exists, in the slot the counter
-  // already occupies, and this function draws no pixel lower than it did
-  // before.
-  constexpr int kMarkerColumnWidth = 64;
-  constexpr int kStatusBoxWidth = kScreenW - kCardMargin * 2 - kMarkerColumnWidth;  // 236
+  // The age, when the server has judged this card stale, and the counter when
+  // there is more than one game. Both muted and both below the panel, where
+  // they qualify the figures above without competing with them.
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
 
-  // TIGHT, THE STATUS ROW MOVES TO 132 AND DROPS A FONT SIZE; UNTIGHT IT IS
-  // UNTOUCHED AT 172 AND 12pt.
-  //
-  // 132 plus the 22px fontHeight() reports at 9pt bottoms at 154 exactly,
-  // which is the floor and not a pixel under it. At 12pt the same row would be
-  // 29px tall and would have to start at 125 to fit - close enough to the
-  // second team row's own bottom (88 + 42 = 130 at 18pt) to collide with it.
-  // So the size drop is not a preference, it is what the arithmetic leaves
-  // once the two team rows have kept their 18pt and their 54px pitch.
-  //
-  // A TIGHT-ONLY SUBSTITUTION, NOT A NEW DEFAULT. The 12pt status is worth
-  // keeping wherever there is room for it, and there is room for it on nine of
-  // nine fielded devices today, so the untight card must not change. Whether
-  // 9pt is legible from across the room is the same question section 7.3 of
-  // the audit raises about 9pt team names, and it deserves the same look on
-  // glass rather than the same assumption.
-  //
-  // THE AGE AND COUNTER JOIN IT ON THE SAME LINE, at the same y rather than
-  // 4px below it. That 4px offset exists only to centre an 18px 9pt line
-  // against a 23px 12pt one; tight, both sides of the row are 9pt and there is
-  // nothing to centre against, so a nudge would just push the right-hand slot
-  // 4px past the floor for no optical gain at all.
-  const int statusRowY = tight ? 132 : 172;
-  const int rightSlotY = tight ? 132 : 176;
-  constexpr int kStatusToAgeGap = 10;
-
-  // MEASURED, so the age gets the room the status actually leaves rather than
-  // the room a worst case would leave. The status runs from "T7" (28px) through
-  // a start time ("11:11 AM", 107px) to an eight-character provider period
-  // ("HALFTIME", 124px), and reserving for the widest would deny the age a
-  // place on every ordinary card. Clamped to the box, because layoutLine()
-  // ellipsizes anything longer down to it and the ink on the panel is then
-  // never wider than this.
-  //
-  // Measured at whichever size the status is about to be drawn at, which is
-  // the part that would be easy to get wrong: measuring at 12pt and drawing at
-  // 9pt would reserve about a third more width than the ink actually needs and
-  // would push the age off a tight card that had room for it.
-  lcd.setFont(tight ? &fonts::FreeSansBold9pt7b : &fonts::FreeSansBold12pt7b);
-  int statusInkWidth = 0;
-  if (status.length() > 0) {
-    statusInkWidth = lcd.textWidth(status.c_str());
-    if (statusInkWidth > kStatusBoxWidth) {
-      statusInkWidth = kStatusBoxWidth;
-    }
-    layoutLine(status, kCardMargin, statusRowY, kStatusBoxWidth, muted(), "sports.status");
-  }
-
-  // HOW OLD THIS ANSWER IS - empty, and this whole block skipped, on every card
-  // the server has not flagged as old, which is nearly all of them. See this
-  // function's declaration in Display.h and CARD_ABSENCE_AND_AGE_DESIGN.md
-  // section 8 for why it appears rarely rather than always.
-  //
-  // THE AGE NEVER ELLIPSIZES. It is a qualifier on the card's content and not
-  // the content, so when the status word has not left room for the whole
-  // sentence this draws nothing and says so in the stream. "Updated 47 hou..."
-  // would be worse than no line at all: the card would have spent its one spare
-  // slot on something that no longer states an age, and a reader would have no
-  // way to tell what was lost. The status keeps its natural width either way -
-  // it is the thing somebody crossed the room to read.
-  bool drewAge = false;
   if (ageText.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
-    const int roomForAge = kScreenW - kCardMargin - kCardMargin - statusInkWidth -
-                           (statusInkWidth > 0 ? kStatusToAgeGap : 0);
-    const int ageInkWidth = lcd.textWidth(ageText.c_str());
-    if (ageInkWidth <= roomForAge) {
-      layoutLine(ageText, rightX, rightSlotY, roomForAge, muted(), "sports.age", Align::Right);
-      drewAge = true;
-    } else {
-      // printf rather than verbose: this is the card declining to say something
-      // it was asked to say, on one of the few draws where it had anything to
-      // say at all, and noticing it must not depend on somebody having switched
-      // streaming on first.
-      Log::printf("[display] sports.age: '%s' needs %dpx and the status word left %dpx, so this "
-                  "card draws no age rather than an ellipsized one",
-                  ageText.c_str(), ageInkWidth, roomForAge);
-    }
+    layoutLine(ageText, kCardMargin, 188, 200, sport.muted, "sports.age",
+               Align::Left, kTransparentText);
   }
 
-  // "2 of 4", only on a card actually holding several games, so a one-game team
-  // card is not decorated with a counter that never changes.
-  //
-  // YIELDS TO THE AGE, because they are one 64px slot and both cannot have it.
-  // On the rare card old enough for the server to say so, "this answer is
-  // thirty-one hours old" is worth more than "you are looking at the second of
-  // four": the counter says where you are in a list the rotation will show you
-  // anyway, the age says whether any of it is still true. Announced rather than
-  // silent, because a household used to seeing a counter will notice it gone.
-  if (itemCount > 1 && !drewAge) {
-    char marker[16];
-    snprintf(marker, sizeof(marker), "%u of %u", static_cast<unsigned>(itemNumber),
-             static_cast<unsigned>(itemCount));
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
-    layoutLine(marker, rightX, rightSlotY, kMarkerColumnWidth, muted(), "sports.counter",
-               Align::Right);
-  } else if (itemCount > 1) {
-    Log::printf("[display] sports.counter: '%u of %u' dropped this draw so the age line can have "
-                "its slot - this card is stale, and saying so is worth more than the item number",
-                static_cast<unsigned>(itemNumber), static_cast<unsigned>(itemCount));
+  if (itemCount > 1) {
+    char counter[16];
+    snprintf(counter, sizeof(counter), "%u of %u", itemNumber, itemCount);
+    layoutLine(counter, kScreenW - kCardMargin, 188, 90, sport.muted, "sports.counter",
+               Align::Right, kTransparentText);
   }
 
-  // THIS CARD'S RELATIONSHIP TO THE BUTTON ROW, WHICH IS NO LONGER WRONG.
-  //
-  // What stood here until 2026-09-28 said that whatever was wrong with this
-  // card and the button row "stays exactly as wrong as it was". That was true
-  // when it was written - the age line had just been put on the counter's row
-  // rather than on a fourth row of its own, precisely so the card drew no
-  // pixel lower than before, and nothing about the underlying overrun had been
-  // addressed. It is not true any more, and leaving it would send the next
-  // reader looking for a defect that has been fixed.
-  //
-  // What is true now: this card reads contentIsTight() at the top and lays
-  // itself out twice over. Untight, it is byte-for-byte the card it always
-  // was - team rows at 62 and 116, a 12pt status at 172, the right-hand slot
-  // at 176 - because that is what nine of nine fielded devices draw and a
-  // change they would all see needs a reason none of them have. Tight, the
-  // team rows move to 44 and 88 keeping their 54px pitch and their 18pt
-  // scores, the status drops to 9pt and joins the age and counter on one row
-  // at 132, and the lowest ink on the card bottoms at 154 - the floor
-  // setContentBudget() set, reached exactly and not crossed.
-  //
-  // WHAT IS STILL WORTH KNOWING. This card still does not call
-  // noteContentOverrun() itself, so it does not report its own bottom as a
-  // card. It no longer needs to: every string on it goes through layoutText(),
-  // which compares each box against gContentBottom and says so in the stream
-  // when one runs past, and unlike the forecast card's strip icons there is no
-  // element on this card that draws outside that path. The one thing a table
-  // cannot settle is whether a 9pt status word reads from across the room,
-  // which is the same question section 7.3 of the audit raises about 9pt team
-  // names and is on the list to look at on glass.
-  //
-  // The stray `gContentBottom = 200` that used to close this function is still
-  // gone, and the reason is worth keeping: it was left in place on the
-  // argument that it did nothing, and it does nothing to THIS card, because
-  // CardManager::drawCurrent() calls setContentBudget() immediately before
-  // every card.draw(). What it did do was leave a number behind that no card
-  // had asked for, ready for any draw that reaches the panel outside that
-  // path. Now that layoutText() compares every string against the budget, a
-  // wrong budget is no longer inert: it would make the check report the next
-  // card against 200 instead of against 154 or 220.
+  // Its own clock rather than drawClock(), which paints an opaque bg() box that
+  // on a full-bleed card is a rectangle of the wrong colour.
+  const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
+  struct tm localTm;
+  gmtime_r(&localNow, &localTm);
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW / 2, 204,
+             kScreenW - kCardMargin * 2, sport.muted, "sports.clock", Align::Centre,
+             kTransparentText);
+
+  restoreDefaultFont();
 }
 
 void showIssFlyoverCard(const String& distanceText, const String& directionText,

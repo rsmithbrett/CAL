@@ -216,8 +216,23 @@ void drawCardAt(uint8_t index, uint16_t itemIndex) {
                game.away, awayScore.c_str(), game.home, homeScore.c_str(), status.c_str(),
                age.length() > 0 ? age.c_str() : "no age line - server says this card is current");
 
+  // The period is the design's progressLabel - "Q3", "6TH INN", "78'" - passed
+  // straight through without interpretation, which is what keeps the renderer
+  // free of any branch on sport.
+  //
+  // No clock. Nothing on this device carries one: the wire has no clockLabel
+  // field yet, and deriving a time from the start would be exactly the
+  // fabricated clock the design forbids by name.
+  //
+  // Live is a flag rather than something the renderer infers from the status
+  // word, because that word is prose and would make the badge depend on the
+  // reader's language.
   Display::showSportsCard(game.home, homeScore, game.away, awayScore, status,
-                          itemIndex + 1, slot.count, age);
+                          itemIndex + 1, slot.count, age,
+                          /*sportLabel=*/"", /*competitionLabel=*/"",
+                          /*progressLabel=*/game.period,
+                          /*clockLabel=*/"",
+                          /*isLive=*/game.state == State::Live);
 }
 
 // Four wrappers, one per registration. CardSpec::DrawFn and ItemCountFn are
