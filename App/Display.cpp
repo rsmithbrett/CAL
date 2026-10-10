@@ -2624,8 +2624,15 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
 
   // The score column is reserved first, so a long club name can never push a
   // score off the edge - the score is what somebody crossed the room to read.
-  constexpr int kScoreWidth = 76;
-  const int nameWidth = kScreenW - kCardMargin * 2 - kScoreWidth - 28;
+  //
+  // A GAME THAT HAS NOT STARTED HAS NO SCORE COLUMN. The design forbids a
+  // fabricated 0-0, so both sides arrive empty before first pitch; reserving the
+  // column regardless spent 76 of 320 pixels on nothing and squeezed the two club
+  // names into 196. The names take the whole panel instead, which is where the
+  // longest of them need it - "Golden State Warriors" is 21 characters.
+  const bool hasScores = homeScore.length() > 0 || awayScore.length() > 0;
+  const int scoreWidth = hasScores ? 76 : 0;
+  const int nameWidth = kScreenW - kCardMargin * 2 - scoreWidth - 28;
 
   // AWAY FIRST, HOME SECOND, which is how a scoreline is read aloud.
   const String rows[2][2] = {{awayName, awayScore}, {homeName, homeScore}};
@@ -2637,10 +2644,12 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
     layoutLine(rows[row][0], kCardMargin + 14, top + 14, nameWidth, sport.name,
                row == 0 ? "sports.away" : "sports.home", Align::Left, kTransparentText);
 
-    lcd.setFont(&fonts::FreeSansBold18pt7b);
-    layoutLine(rows[row][1], kScreenW - kCardMargin - 14, top + 8, kScoreWidth, sport.score,
-               row == 0 ? "sports.away.score" : "sports.home.score", Align::Right,
-               kTransparentText);
+    if (hasScores) {
+      lcd.setFont(&fonts::FreeSansBold18pt7b);
+      layoutLine(rows[row][1], kScreenW - kCardMargin - 14, top + 8, scoreWidth, sport.score,
+                 row == 0 ? "sports.away.score" : "sports.home.score", Align::Right,
+                 kTransparentText);
+    }
   }
 
   // The age, when the server has judged this card stale, and the counter when
