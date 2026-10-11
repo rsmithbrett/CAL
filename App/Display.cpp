@@ -53,8 +53,23 @@ namespace {
 // Same panel as CAL - see CAL's own Display.cpp for why autodetect over a pin map.
 LGFX lcd;
 
-constexpr int kScreenW = 320;
-constexpr int kScreenH = 240;
+// THE VIEWPORT IS A RUNTIME FACT, not a compile-time one, because a display can
+// be mounted either way round - see DISPLAY_ORIENTATION_DESIGN.md phase 1 and
+// CheckInResponse.DisplayOrientation. Written once by begin() from the resolved
+// setting and read everywhere else, so every layout in this file computes from
+// the panel it is actually drawing on.
+//
+// 320x240 is the value they hold until begin() runs and the value they keep for
+// every display in the fleet, because landscape is what an unset orientation
+// means. The hundred references below are unchanged and draw exactly what they
+// drew before.
+//
+// Not constexpr any more, which costs three derived constants their constexpr
+// too - see chevronCentreY() and bootTextWidth() below. Those were the only
+// compile-time dependants, which is the whole reason this change is small: the
+// two names never left this file.
+int kScreenW = 320;
+int kScreenH = 240;
 
 // Day/night theme (see Display.h's own remarks on setEnvironment() and the
 // note at the bottom of that file): every screen this file draws - the
@@ -297,7 +312,10 @@ constexpr uint32_t kConfirmInk = 0xFFFFFFu;
 // touch zones without competing with the card for attention.
 constexpr int kChevronHalfHeight = 12;
 constexpr int kChevronWidth = 7;
-constexpr int kChevronCentreY = kScreenH / 2;
+/// Vertically centred on whatever the panel is. A function rather than a
+/// constant because kScreenH is now written at boot, and a namespace-scope
+/// constant would capture 240 before begin() ever ran.
+int kChevronCentreY() { return kScreenH / 2; }
 
 // Mirrors Touch.cpp's own kEdgeZoneWidth exactly (see that file's remarks on
 // why 106, not the original 16). Duplicated rather than shared for the same
@@ -1348,9 +1366,31 @@ uint8_t gBrightnessPercent = 100;
 
 }  // namespace
 
-void begin() {
+void begin(Orientation orientation) {
   lcd.init();
-  lcd.setRotation(1);  // 320x240 landscape
+
+  // ROTATION 1 IS LANDSCAPE AND 2 IS THE CLOCKWISE TURN FROM IT. The owner's
+  // own statement of which way a portrait display faces is that the right side
+  // of the landscape view becomes the bottom, and that is a 90 degree clockwise
+  // turn of the panel.
+  //
+  // To be confirmed on a panel rather than trusted from here. This board's real
+  // configuration lives in LovyanGFX's table, not in this repository, and
+  // reasoning about it from the firmware alone has been wrong twice: a PENIRQ
+  // interrupt on a pin the touch config disables, and a boot chirp on GPIO25,
+  // which is the touch clock. If the picture comes up upside down the answer is
+  // 0, and that is this one line.
+  const bool portrait = orientation == Orientation::Portrait;
+  lcd.setRotation(portrait ? 2 : 1);
+
+  // Read back from the panel rather than assumed from the rotation, so a
+  // rotation this code did not predict still leaves the viewport matching what
+  // is on the glass.
+  kScreenW = lcd.width();
+  kScreenH = lcd.height();
+
+  Log::printf("[display] %s, %dx%d", portrait ? "portrait" : "landscape", kScreenW, kScreenH);
+
   lcd.setBrightness(255);
   clear();
 }
@@ -1526,18 +1566,20 @@ bool readTouchRaw(int32_t& x, int32_t& y) {
 // The boot-ladder screens. Both take server-supplied wording (a content-gate
 // refusal, a provisioning message) with no length this file controls, which is
 // why they wrapped before layoutText() existed and why the 8px margin either
-// side is kept: kBootTextWidth is the old wrappedCenteredText's own
+// side is kept: kBootTextWidth() is the old wrappedCenteredText's own
 // kScreenW - 8 * 2.
-constexpr int16_t kBootTextWidth = kScreenW - 16;
+/// The boot screens. width less an 8px gutter each side, computed at the draw
+/// rather than at compile time, for the reason kChevronCentreY() gives.
+int16_t kBootTextWidth() { return static_cast<int16_t>(kScreenW - 16); }
 
 void showStatus(const String& headline, const String& detail) {
   clear();
   lcd.setTextSize(2);
-  const TextBox headlineBox{kScreenW / 2, 85, kBootTextWidth, 22, 3, Align::Centre};
+  const TextBox headlineBox{kScreenW / 2, 85, kBootTextWidth(), 22, 3, Align::Centre};
   const TextResult drew = layoutText(headline, headlineBox, ink(), "status.headline");
   if (detail.length() > 0) {
     lcd.setTextSize(1);
-    const TextBox detailBox{kScreenW / 2, static_cast<int16_t>(drew.bottom + 12), kBootTextWidth,
+    const TextBox detailBox{kScreenW / 2, static_cast<int16_t>(drew.bottom + 12), kBootTextWidth(),
                             14, 3, Align::Centre};
     layoutText(detail, detailBox, muted(), "status.detail");
   }
@@ -1546,10 +1588,10 @@ void showStatus(const String& headline, const String& detail) {
 void showFailure(const String& headline, const String& whatToDo) {
   clear();
   lcd.setTextSize(2);
-  const TextBox headlineBox{kScreenW / 2, 75, kBootTextWidth, 22, 3, Align::Centre};
+  const TextBox headlineBox{kScreenW / 2, 75, kBootTextWidth(), 22, 3, Align::Centre};
   const TextResult drew = layoutText(headline, headlineBox, kWarn, "failure.headline");
   lcd.setTextSize(1);
-  const TextBox detailBox{kScreenW / 2, static_cast<int16_t>(drew.bottom + 12), kBootTextWidth, 14,
+  const TextBox detailBox{kScreenW / 2, static_cast<int16_t>(drew.bottom + 12), kBootTextWidth(), 14,
                           3, Align::Centre};
   layoutText(whatToDo, detailBox, muted(), "failure.whattodo");
 }
@@ -2183,7 +2225,7 @@ void drawTideDisc(int cx, int cy, int radius, bool rising, const TidePalette& ti
 void drawTideRow(int top, int height, const String& label, const String& timeText, bool rising,
                  const TidePalette& tide, const char* labelWhat, const char* valueWhat) {
   constexpr int kRowX = 12;
-  constexpr int kRowW = kScreenW - kRowX * 2;
+  const int kRowW = kScreenW - kRowX * 2;
   constexpr int kRowRadius = 14;
 
   lcd.fillRoundRect(kRowX, top, kRowW, height, kRowRadius, to565(tide.rowFill));
@@ -3190,13 +3232,13 @@ void showClockDate(const String& timeText, const String& dateText) {
   // face, and the 9pt tier takes kProseSmallLineHeight for the same reason.
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
-  const TextBox oneLineAt12{kScreenW / 2, 145, kBootTextWidth, kProseLargeLineHeight, 1,
+  const TextBox oneLineAt12{kScreenW / 2, 145, kBootTextWidth(), kProseLargeLineHeight, 1,
                             Align::Centre};
   if (layoutText(dateText, oneLineAt12, muted(), "clockdate.date", kUseCardBackground,
                  /*measureOnly=*/true)
           .ellipsized) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    const TextBox twoLinesAt9{kScreenW / 2, 145, kBootTextWidth, kProseSmallLineHeight, 2,
+    const TextBox twoLinesAt9{kScreenW / 2, 145, kBootTextWidth(), kProseSmallLineHeight, 2,
                               Align::Centre};
     Log::verbose("[display] clockdate.date: dropped to the 9pt tier, '%s' will not fit one 12pt "
                  "line",
@@ -4331,16 +4373,16 @@ void drawNavAffordances(bool canReverse) {
   // without being loud.
   const uint32_t reverseColour = canReverse ? muted() : bg();
   const int leftTipX = 5;
-  lcd.drawLine(leftTipX + kChevronWidth, kChevronCentreY - kChevronHalfHeight, leftTipX,
-               kChevronCentreY, reverseColour);
-  lcd.drawLine(leftTipX, kChevronCentreY, leftTipX + kChevronWidth,
-               kChevronCentreY + kChevronHalfHeight, reverseColour);
+  lcd.drawLine(leftTipX + kChevronWidth, kChevronCentreY() - kChevronHalfHeight, leftTipX,
+               kChevronCentreY(), reverseColour);
+  lcd.drawLine(leftTipX, kChevronCentreY(), leftTipX + kChevronWidth,
+               kChevronCentreY() + kChevronHalfHeight, reverseColour);
 
   const int rightTipX = kScreenW - 6;
-  lcd.drawLine(rightTipX - kChevronWidth, kChevronCentreY - kChevronHalfHeight, rightTipX,
-               kChevronCentreY, muted());
-  lcd.drawLine(rightTipX, kChevronCentreY, rightTipX - kChevronWidth,
-               kChevronCentreY + kChevronHalfHeight, muted());
+  lcd.drawLine(rightTipX - kChevronWidth, kChevronCentreY() - kChevronHalfHeight, rightTipX,
+               kChevronCentreY(), muted());
+  lcd.drawLine(rightTipX, kChevronCentreY(), rightTipX - kChevronWidth,
+               kChevronCentreY() + kChevronHalfHeight, muted());
 }
 
 void flashNavEdge(bool isForward, bool canReverse) {

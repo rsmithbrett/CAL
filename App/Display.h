@@ -14,7 +14,30 @@
 /// surface deliberately match.
 namespace Display {
 
-void begin();
+/// Which way round this display's panel is mounted.
+///
+/// <para>Landscape is the default and means it for two different reasons: it is
+/// what every fielded display does, and it is what an absent or unrecognised
+/// setting resolves to. There is no third state - see
+/// CheckInResponse.DisplayOrientation, which carries no value at all for a
+/// landscape display rather than carrying the word.</para>
+enum class Orientation : uint8_t {
+  Landscape,
+  Portrait,
+};
+
+/// Brings the panel up the way round this display is mounted.
+///
+/// <para>The orientation is settled here and not revisited: every layout in
+/// Display.cpp reads a viewport written during this call, and a panel cannot
+/// re-lay out the card it is in the middle of drawing. Changing the setting
+/// restarts the display, which takes a few seconds and is what the editor tells
+/// the person changing it.</para>
+///
+/// <para>Called before any orientation has been received from the server, on
+/// the first boot of a new display and on every boot before the first check-in,
+/// so the default has to be the safe one.</para>
+void begin(Orientation orientation = Orientation::Landscape);
 
 /// Updates the day/night theme and the corner-clock's UTC offset that every
 /// screen below reads when it next draws - not retroactive to whatever is
