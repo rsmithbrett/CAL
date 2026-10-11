@@ -54,8 +54,23 @@ void recordDecodeFailure(const String& assetId) {
 /// from Graphic.cpp's own draw() left the aircraft logo's own decode
 /// failures silent past the generic Display::drawImageFromSd*() line, the
 /// same "loud, not silent" gap this whole mechanism exists to close.
+///
+/// A heap shortage is not charged to the file. invalidate() deletes the cached
+/// copy and schedules a re-fetch, which is right for bytes that will never
+/// decode and wrong for bytes that were never read: an RGB565 asset is ~153,600
+/// bytes over WiFi, and the re-fetch lands on the same heap that just refused a
+/// band buffer. Device 17 on 2026-10-11 did this three times in one minute for
+/// a file that was intact the whole time.
 void giveUpOnDecodeFailure(const String& id) {
   recordDecodeFailure(id);
+
+  if (Display::lastDrawFailedOnAllocation()) {
+    Log::printf("[assets] '%s' could not be drawn after %u attempt(s) - keeping the cached copy, "
+                "this heap had no block to draw it with",
+                id.c_str(), static_cast<unsigned>(kMaxDrawAttempts));
+    return;
+  }
+
   invalidate(id);
   Log::printf("[assets] '%s' would not decode after %u attempt(s) - invalidating the cache",
               id.c_str(), static_cast<unsigned>(kMaxDrawAttempts));

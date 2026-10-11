@@ -4562,6 +4562,12 @@ constexpr size_t kRgb565BandLines = 8;
 /// height from the width instead of trusting kRgb565BandLines outright.
 constexpr size_t kRgb565MaxBandBytes = kRgb565BandLines * 320 * kRgb565BytesPerPixel;
 
+/// Backs Display::lastDrawFailedOnAllocation() - see Display.h for why anyone
+/// needs to tell these two failures apart. Cleared by every public draw entry
+/// point and set only where an allocation is refused, so a stale true cannot
+/// outlive the draw that set it.
+bool gLastDrawFailedOnAllocation = false;
+
 /// Classifies the bytes at the front of an image, wherever they came from.
 ///
 /// Split out from sniffImageFormat() below so the SD path and the
@@ -4868,21 +4874,56 @@ bool drawRgb565FromSd(const String& path, int32_t boxX, int32_t boxY, int32_t bo
   while (bandLines > 1 && bandLines * rowBytes > kRgb565MaxBandBytes) {
     --bandLines;
   }
-  const size_t bandBytes = bandLines * rowBytes;
+  const size_t preferredLines = bandLines;
+  size_t bandBytes = bandLines * rowBytes;
 
-  uint8_t* band = static_cast<uint8_t*>(malloc(bandBytes));
+  // Ask for the preferred band first, then half of it, and so on down to a
+  // single scanline - 640 bytes at 320px. The width loop above sizes the band
+  // against the IMAGE; this one sizes it against the HEAP, which is a separate
+  // question and the one that actually fails in the field: a device whose
+  // largest contiguous block has settled at 3,444 bytes has room for a 2-line
+  // band and 11 KB free in total, and the fixed 5,120-byte request was the only
+  // thing between it and the picture.
+  //
+  // Halving rather than decrementing because each rung has a real cost - a
+  // 1-line band is 240 SD reads and 240 pushImage calls for a full frame
+  // against 30 - so this should land on the largest band the heap will serve
+  // rather than walk to the floor a line at a time.
+  uint8_t* band = nullptr;
+  while (true) {
+    band = static_cast<uint8_t*>(malloc(bandBytes));
+    if (band != nullptr || bandLines <= 1) { break; }
+    bandLines /= 2;
+    bandBytes = bandLines * rowBytes;
+  }
+
   if (band == nullptr) {
     // Reported with the heap figures, like every other allocation failure in
     // this file, because the interesting number is the largest CONTIGUOUS
     // block and not the free total - a distinction this file has paid for
-    // twice (see logHeapSnapshot()).
-    Log::printf("[display] no %u contiguous bytes for an rgb565 band buffer (8BIT largest=%u "
-                "free=%u)",
+    // twice (see logHeapSnapshot()). Names the floor, so the line reads "not
+    // even one scanline" rather than leaving the reader to work out which rung
+    // of the ladder above gave up.
+    gLastDrawFailedOnAllocation = true;
+    Log::printf("[display] no %u contiguous bytes for an rgb565 band buffer of even 1 line "
+                "(8BIT largest=%u free=%u)",
                 static_cast<unsigned>(bandBytes),
                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
     file.close();
     return false;
+  }
+
+  if (bandLines != preferredLines) {
+    // Said out loud because a picture drawing in 2-line bands is a picture
+    // drawing on a device under heap pressure, and that is worth learning from
+    // a log line rather than from the draw time.
+    Log::printf("[display] rgb565 band is %u line(s), not %u - %u contiguous bytes is what this "
+                "heap had (largest=%u free=%u)",
+                static_cast<unsigned>(bandLines), static_cast<unsigned>(preferredLines),
+                static_cast<unsigned>(bandBytes),
+                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
   }
 
   // Centred in the box, exactly as LovyanGFX's own middle_center datum centres
@@ -5035,6 +5076,7 @@ void clearPanel() { lcd.fillScreen(bg()); }
 void releaseDecodeMemory();
 
 bool drawImageFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, int32_t h) {
+  gLastDrawFailedOnAllocation = false;
   // No fillScreen() here, deliberately - see this function's own header
   // comment. Streamed straight from SD, bounded to (w, h) at (x, y) instead of
   // the whole panel; scaleX/scaleY left at 0 is what makes LovyanGFX auto-fit
@@ -5260,6 +5302,7 @@ void releaseDecodeMemory() {
 /// never had this problem - a fact that sat in this codebase's own comments as
 /// an unexplained curiosity for some time.
 bool drawImageFromSd(const String& path) {
+  gLastDrawFailedOnAllocation = false;
   // Sniffed before the panel is cleared, so the log reads in the order things
   // happened: what the file is, then what the heap looked like going in.
   const ImageFormat format = sniffImageFormat(path);
@@ -5366,6 +5409,7 @@ bool drawImageFromSd(const String& path) {
 }
 
 bool drawImageFromBuffer(const uint8_t* data, size_t size) {
+  gLastDrawFailedOnAllocation = false;
   lcd.fillScreen(bg());
   bool ok = false;
   ImageFormat format = ImageFormat::Unknown;
@@ -5477,5 +5521,7 @@ bool drawImageFromBuffer(const uint8_t* data, size_t size) {
   restoreDefaultFont();
   return ok;
 }
+
+bool lastDrawFailedOnAllocation() { return gLastDrawFailedOnAllocation; }
 
 }  // namespace Display

@@ -837,6 +837,26 @@ bool drawImageFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, 
 /// all - cheaper than either decoder by a wide margin.
 bool drawImageFromBuffer(const uint8_t* data, size_t size);
 
+/// Whether the most recent failed draw failed because this heap would not give
+/// up a block, rather than because the bytes were unreadable.
+///
+/// The three draw calls above all answer the same `false`, and for most of
+/// their callers that is enough: nothing was painted. Assets.cpp needs more
+/// than that, because its response to a failed draw is to delete the cached
+/// file and fetch it again - the right answer for a corrupt file and exactly
+/// the wrong one for a full heap. An RGB565 asset is ~153,600 bytes over WiFi,
+/// so charging a heap shortage to the file costs a re-download that will land
+/// on the same heap and fail the same way.
+///
+/// Found live on 2026-10-11: device 17 held 11,016 bytes free with a largest
+/// block of 3,444, declined the 5,120-byte band buffer, and had its graphic
+/// asset invalidated three times for a file that was never read.
+///
+/// Valid only immediately after a draw call returned false, and cleared at the
+/// start of every draw - there is one flag, not one per path, because a draw
+/// is the only thing that sets it and callers ask before drawing anything else.
+bool lastDrawFailedOnAllocation();
+
 }  // namespace Display
 
 // A note on the day/night theme this file implements (see setEnvironment()
