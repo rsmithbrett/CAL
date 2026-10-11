@@ -678,8 +678,41 @@ String cardStatus() {
 }
 
 void cardFetch() {
-  gLast = fetchMine();
+  // A FETCH THAT COULD NOT REACH THE SERVICE DOES NOT ERASE WHAT IS ON THE
+  // GLASS. This assigned the fetch straight over gLast, so one failed request
+  // replaced good content with "Cannot reach the ... service." and the card drew
+  // that until the next success - on a display in a lobby, in front of whoever
+  // was standing at it. The owner, on seeing three of them: this should never
+  // happen, it should use cache if the server isn't reachable.
+  //
+  // The cache was already here. gLast holds the last result and gLastOkMs the
+  // instant it was last Ok, and describeFreshness() has been rendering
+  // "Updated 41 min ago" onto the card all along. The only thing missing was
+  // not throwing it away.
+  //
+  // ONLY FOR serviceUnreachable, and that distinction is the whole safety of
+  // this. The flag means the request never got an answer - no TLS session, no
+  // route, a timeout - so the last answer is still the best available account of
+  // the world and showing it is accurate. Every other failure is the server
+  // answering: a refusal, a disabled provider, a device not activated, an empty
+  // result. Those are real changes of state, and holding stale content over them
+  // would keep a card on screen after an operator turned it off. They still
+  // replace the cache, exactly as before.
+  //
+  // The staleness is visible rather than implied. The freshness line is the
+  // card's own, it keeps counting while the fetch fails, and a reader who wants
+  // to know whether this is current can read it.
+  const Result fresh = fetchMine();
   gEverFetched = true;
+  if (fresh.status != Status::Ok && fresh.serviceUnreachable &&
+      gLast.status == Status::Ok) {
+    Log::printf("[listings] could not reach the service - keeping the last good "
+                "result on screen rather than drawing an error over it (%s)",
+                describeFreshness(gLastOkMs).c_str());
+    return;
+  }
+
+  gLast = fresh;
   if (gLast.status == Status::Ok) {
     gLastOkMs = millis();
     Log::printf("[listings] card updated: %u listing(s), nearest '%s' at %.1fmi",
