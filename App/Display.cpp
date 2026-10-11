@@ -4257,6 +4257,29 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
                  static_cast<unsigned>(dayCount));
   }
 
+  // THE STRIP TURNS WITH THE PANEL, because five columns do not survive the
+  // turn. The band is 300px wide in landscape, so five days get 60px each and
+  // a day name sits above a temperature comfortably. In profile the band is
+  // 220 and each column is 44px - enough for "Mon" or for "72F" but not for
+  // both, so every column would ellipsize one of the two facts it exists to
+  // carry. Nothing overlaps; the card just stops answering its own question.
+  //
+  // A profile panel has the 80 pixels of height that the landscape one does
+  // not, which is exactly what five rows need. So the same five days run down
+  // the card instead of across it: the day on the left, its weather in the
+  // middle, the temperature right-aligned against the other edge. Three
+  // columns of the content band rather than five, and each one full width
+  // enough to hold a word.
+  const bool stackedStrip = kScreenH > kScreenW;
+
+  // Measured from the rule to whatever floor this card actually has, rather
+  // than from a constant: setContentBudget() has already dropped the floor to
+  // clear the button row when a card has one bound, and five rows pitched
+  // against the panel instead would be drawn straight through the buttons.
+  const int stackedTop = (tight ? 112 : 118) + 8;
+  const int stackedRowHeight =
+      stripColumns > 0 ? (gContentBottom - stackedTop) / stripColumns : 0;
+
   for (uint8_t i = firstStripDay; i < availableDays; i++) {
     // Position by column, index by day. The two are the same number on the
     // untight path and differ by one on the tight path, and conflating them is
@@ -4265,6 +4288,59 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
     // weather under Monday's heading.
     const int column = i - firstStripDay;
     const int columnCentreX = kCardMargin + column * columnWidth + columnWidth / 2;
+
+    if (stackedStrip) {
+      // One row per day, and the row is drawn and the iteration ended here so
+      // the column path below stays exactly the code it was. A shared body
+      // with two sets of coordinates threaded through it would make the
+      // landscape layout - the one on every fielded display - depend on a
+      // branch it never takes.
+      if (stackedRowHeight <= 0) {
+        continue;
+      }
+
+      const int rowTop = stackedTop + column * stackedRowHeight;
+      const int rowMiddle = rowTop + stackedRowHeight / 2;
+
+      // The text baseline layoutLine() wants, derived from the row rather
+      // than from the font: a 9pt line is 18px tall, and centring it in the
+      // row is what keeps five rows evenly spaced whether the floor is the
+      // clock or the button band.
+      const int textTop = rowMiddle - 9;
+
+      lcd.setFont(&fonts::FreeSansBold9pt7b);
+      lcd.setTextSize(1);
+
+      // "Now" is dropped from the tight strip for the reason the column path
+      // gives - the hero above already shows it - and shortDayLabel() is the
+      // same single place that decides how a day is worded either way.
+      layoutLine(shortDayLabel(i, dayNames[i]), kContentLeft(), textTop, kColumnWidth(3),
+                 muted(), "forecast.daylabel", Align::Left);
+
+      char stackedTemp[12];
+      snprintf(stackedTemp, sizeof(stackedTemp), "%d%s", dayTemperatures[i],
+               dayUnits[i].c_str());
+      // The unit is kept here, unlike the tight column. A row has the whole
+      // band to itself rather than a 75px slice, so there is no width to buy
+      // by dropping it.
+      layoutLine(stackedTemp, kContentRight(), textTop, kColumnWidth(3), ink(),
+                 "forecast.daytemp", Align::Right);
+
+      // Sized off the row rather than fixed, so the icon shrinks with the
+      // rows when a button row takes the bottom 80 pixels instead of growing
+      // through the day above it. Capped at 12 because past that it is larger
+      // than the text it sits between and reads as the subject of the row.
+      int iconRadius = stackedRowHeight / 2 - 3;
+      if (iconRadius > 12) {
+        iconRadius = 12;
+      }
+      if (iconRadius >= 5) {
+        drawWeatherIcon(classifyCondition(dayConditions[i]), kContentCentreX(), rowMiddle,
+                        iconRadius, /*isDaytime=*/true);
+      }
+
+      continue;
+    }
 
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
