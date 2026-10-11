@@ -46,6 +46,15 @@ void begin(Orientation orientation = Orientation::Landscape);
 /// on, and streaming is only turned on by a check-in response - so anything
 /// begin() says is Serial-only and needs a cable to read. The caller is
 /// App.ino, immediately after Log::setStreamingEnabled().</para>
+/// The panel this display is drawing on, after any rotation begin() applied.
+///
+/// <para>Read rather than assumed: a caller that needs to know the shape of the
+/// glass - Touch, deciding which edges navigation lives on - must not carry its
+/// own copy of 320. That duplicate is what would make a rotated display draw
+/// correctly and navigate wrongly.</para>
+int screenWidth();
+int screenHeight();
+
 void logViewport();
 
 /// Updates the day/night theme and the corner-clock's UTC offset that every

@@ -26,7 +26,23 @@ uint8_t gZoneCount = 0;
 /// button press. Leaves an inner ~108px strip (320 - 2*106) for whatever a
 /// card draws in the middle.
 constexpr int32_t kEdgeZoneWidth = 106;
-constexpr int32_t kScreenWidth = 320;
+
+/// WHICH EDGES NAVIGATION LIVES ON DEPENDS ON THE SHAPE OF THE PANEL, and the
+/// reason is the 106 above. Two strips of it leave a 108px middle on a 320px
+/// landscape panel and a 28px middle on a 240px portrait one - so on a portrait
+/// display the two zones would between them swallow almost the whole screen and
+/// leave nowhere to put a card.
+///
+/// A portrait display therefore navigates on its long axis: previous along the
+/// top, next along the bottom, which leaves the full 240px width for content.
+/// That also keeps the gesture where a hand already learned it. The owner's
+/// description of the rotation is that the right side of the landscape view
+/// becomes the bottom, so the edge that meant "next" physically ends up at the
+/// bottom and means "next" still.
+///
+/// Read from Display rather than stored, so this follows a panel that came up
+/// the other way round without Touch needing to be told.
+bool navigatesVertically() { return Display::screenHeight() > Display::screenWidth(); }
 
 bool contains(const Rect& rect, int32_t x, int32_t y) {
   return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
@@ -69,9 +85,17 @@ bool poll(Tap& tap) {
     }
   }
 
-  if (x < kEdgeZoneWidth) {
+  // The axis the panel is longest on, and the measurement taken from the panel
+  // rather than from a constant - see navigatesVertically() above. In landscape
+  // this is x against a 320px width, which is exactly the comparison this made
+  // when both numbers were compile-time constants.
+  const bool vertical = navigatesVertically();
+  const int32_t along = vertical ? y : x;
+  const int32_t extent = vertical ? Display::screenHeight() : Display::screenWidth();
+
+  if (along < kEdgeZoneWidth) {
     tap.hit = Hit::Reverse;
-  } else if (x > kScreenWidth - kEdgeZoneWidth) {
+  } else if (along > extent - kEdgeZoneWidth) {
     tap.hit = Hit::Forward;
   }
   // A tap in the middle of the card with no button under it is Hit::None -

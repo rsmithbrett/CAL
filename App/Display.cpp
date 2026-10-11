@@ -4374,7 +4374,34 @@ void drawNavAffordances(bool canReverse) {
   // Drawn as three lines rather than a filled triangle: at this size a filled
   // arrow reads as a solid blob, and the point of these is to be noticed
   // without being loud.
+  //
+  // THEY MARK THE EDGES THAT ACTUALLY NAVIGATE, which is not always left and
+  // right. Touch::poll() takes the panel's long axis, so a portrait display
+  // pages on its top and bottom edges - and a chevron left on the side would
+  // point at a strip that does nothing while the live one went unmarked. An
+  // affordance pointing at the wrong place is worse than no affordance.
   const uint32_t reverseColour = canReverse ? muted() : bg();
+  const bool vertical = kScreenH > kScreenW;
+
+  if (vertical) {
+    // Up for previous along the top, down for next along the bottom, both
+    // centred across the width the way the side pair centre down the height.
+    const int centreX = kScreenW / 2;
+
+    const int topTipY = 5;
+    lcd.drawLine(centreX - kChevronHalfHeight, topTipY + kChevronWidth, centreX, topTipY,
+                 reverseColour);
+    lcd.drawLine(centreX, topTipY, centreX + kChevronHalfHeight, topTipY + kChevronWidth,
+                 reverseColour);
+
+    const int bottomTipY = kScreenH - 6;
+    lcd.drawLine(centreX - kChevronHalfHeight, bottomTipY - kChevronWidth, centreX, bottomTipY,
+                 muted());
+    lcd.drawLine(centreX, bottomTipY, centreX + kChevronHalfHeight, bottomTipY - kChevronWidth,
+                 muted());
+    return;
+  }
+
   const int leftTipX = 5;
   lcd.drawLine(leftTipX + kChevronWidth, kChevronCentreY() - kChevronHalfHeight, leftTipX,
                kChevronCentreY(), reverseColour);
@@ -5616,6 +5643,9 @@ bool drawImageFromBuffer(const uint8_t* data, size_t size) {
   restoreDefaultFont();
   return ok;
 }
+
+int screenWidth() { return kScreenW; }
+int screenHeight() { return kScreenH; }
 
 void logViewport() {
   Log::printf("[display] %s, %dx%d", gPortrait ? "portrait" : "landscape", kScreenW, kScreenH);
