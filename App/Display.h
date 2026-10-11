@@ -340,11 +340,11 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
 /// clock draws its period alone. The design forbids substituting a placeholder
 /// for any of them, and a fabricated clock is the costliest of the lot - it
 /// has somebody watching a game that is not running.</para>
-void showSportsCard(const String& homeName, const String& homeScore, const String& awayName,
+void showSportsCard(const char* homeName, const String& homeScore, const char* awayName,
                     const String& awayScore, const String& status, uint16_t itemNumber,
                     uint16_t itemCount, const String& ageText,
-                    const String& sportLabel = "", const String& competitionLabel = "",
-                    const String& progressLabel = "", const String& clockLabel = "",
+                    const char* sportLabel = "", const char* competitionLabel = "",
+                    const char* progressLabel = "", const char* clockLabel = "",
                     bool isLive = false);
 
 /// One row of the multi-game scoreboard: two sides, their scores where play has
@@ -376,7 +376,7 @@ struct SportsBoardRow {
 /// caps at four. Anything beyond is dropped with a log line rather than drawn
 /// over the clock.</para>
 void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ageText,
-                     const String& sportLabel = "", const String& competitionLabel = "");
+                     const char* sportLabel = "", const char* competitionLabel = "");
 
 /// The ISS flyover card: distance and compass direction to the International
 /// Space Station's current sub-satellite point, plus a one-line detail

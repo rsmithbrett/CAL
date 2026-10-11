@@ -173,7 +173,12 @@ void setGames(const char* cardId, const Game* games, uint8_t count, time_t stale
 /// The two football codes are the whole reason this mapping exists. API-Sports
 /// calls soccer "football", and a chip reading FOOTBALL over a soccer score is
 /// the one labelling mistake a viewer here would actually act on.
-String sportChipLabel(const char* sport);
+///
+/// Returns a string literal or the empty string, so a caller that asks on every
+/// frame copies nothing onto the heap. The draw path's small repeated
+/// allocations are the ones that cost this board its largest contiguous block;
+/// see HeapRatchet.h.
+const char* sportChipLabel(const char* sport);
 
 /// Drop everything. Called when a check-in reports no sports content at all, so
 /// yesterday's fixtures cannot linger on screen past their day.

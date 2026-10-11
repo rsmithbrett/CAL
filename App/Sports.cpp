@@ -277,14 +277,14 @@ void drawCardAt(uint8_t index, uint16_t itemIndex) {
   // Live is a flag rather than something the renderer infers from the status
   // word, because that word is prose and would make the badge depend on the
   // reader's language.
-  const String sportLabel = sportChipLabel(slot.sport);
+  const char* const sportLabel = sportChipLabel(slot.sport);
 
   // Both say what is on, so both are logged: a card drawing no chip because the
   // server sent no sport and one drawing none because the slug is unrecognised
   // are the same picture from the front of the display.
   Log::verbose("[sports] heading: card=%s sport='%s' chip='%s' competition='%s'",
                kCardIds[index], slot.sport,
-               sportLabel.length() > 0 ? sportLabel.c_str() : "none - no sport sent, or a slug this build does not map",
+               sportLabel[0] != 0 ? sportLabel : "none - no sport sent, or a slug this build does not map",
                slot.competition[0] != '\0' ? slot.competition : "none - server sent no league name for this card");
 
   Display::showSportsCard(game.home, homeScore, game.away, awayScore, status,
@@ -526,24 +526,24 @@ void setGames(const char* cardId, const Game* games, uint8_t count, time_t stale
                   : "server sent staleSinceUtc - this card will show how old its answer is");
 }
 
-String sportChipLabel(const char* sport) {
-  if (sport == nullptr || sport[0] == '\0') { return String(); }
+const char* sportChipLabel(const char* sport) {
+  if (sport == nullptr || sport[0] == '\0') { return ""; }
 
   // The two football codes, named first and separately. API-Sports calls soccer
   // "football", so matching a prefix or a substring here would put FOOTBALL over
   // a soccer score - which is the one label on this card a viewer would act on.
   // Whole-token comparison, both ways round.
-  if (strcmp(sport, "american-football") == 0) { return String("FOOTBALL"); }
-  if (strcmp(sport, "football") == 0)          { return String("SOCCER"); }
-  if (strcmp(sport, "basketball") == 0)        { return String("BASKETBALL"); }
-  if (strcmp(sport, "baseball") == 0)          { return String("BASEBALL"); }
-  if (strcmp(sport, "hockey") == 0)            { return String("HOCKEY"); }
+  if (strcmp(sport, "american-football") == 0) { return "FOOTBALL"; }
+  if (strcmp(sport, "football") == 0)          { return "SOCCER"; }
+  if (strcmp(sport, "basketball") == 0)        { return "BASKETBALL"; }
+  if (strcmp(sport, "baseball") == 0)          { return "BASEBALL"; }
+  if (strcmp(sport, "hockey") == 0)            { return "HOCKEY"; }
 
   // A slug this build has never seen. Empty rather than the raw token: the chip
   // is small caps on a pill, and "rugby-sevens" rendered into it reads as a bug
   // where no chip reads as a card that simply does not name its sport.
   Log::printf("[sports] unmapped sport slug '%s' - drawing no chip", sport);
-  return String();
+  return "";
 }
 
 void clearAll() {

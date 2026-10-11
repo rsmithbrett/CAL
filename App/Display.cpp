@@ -2525,7 +2525,7 @@ struct SportPalette {
 };
 
 /// A filled pill with a label in it, for the sport chip and the LIVE badge.
-int drawSportsPill(int x, int y, const String& label, uint32_t fill, uint32_t ink,
+int drawSportsPill(int x, int y, const char* label, uint32_t fill, uint32_t ink,
                    const char* what, bool withDot = false) {
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
@@ -2548,11 +2548,11 @@ int drawSportsPill(int x, int y, const String& label, uint32_t fill, uint32_t in
 
 }  // namespace
 
-void showSportsCard(const String& homeName, const String& homeScore, const String& awayName,
+void showSportsCard(const char* homeName, const String& homeScore, const char* awayName,
                     const String& awayScore, const String& status, uint16_t itemNumber,
-                    uint16_t itemCount, const String& ageText, const String& sportLabel,
-                    const String& competitionLabel, const String& progressLabel,
-                    const String& clockLabel, bool isLive) {
+                    uint16_t itemCount, const String& ageText, const char* sportLabel,
+                    const char* competitionLabel, const char* progressLabel,
+                    const char* clockLabel, bool isLive) {
   // Day: pale ground, dark navy ink. Night: deep navy, light ink. The LIVE badge
   // is red in both, because its whole job is to be the one thing that catches an
   // eye crossing the room.
@@ -2573,11 +2573,11 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
   // running firmware older than the sportCode wire field, or a competition the
   // provider does not name, draws neither rather than a placeholder - the design
   // is explicit that an unsupported field stays absent.
-  if (sportLabel.length() > 0) {
+  if (sportLabel != nullptr && sportLabel[0] != '\0') {
     drawSportsPill(kCardMargin, 10, sportLabel, sport.chip, sport.chipInk, "sports.sport");
   }
 
-  if (competitionLabel.length() > 0) {
+  if (competitionLabel != nullptr && competitionLabel[0] != '\0') {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     layoutLine(competitionLabel, kScreenW - kCardMargin, 13, 150, sport.muted,
                "sports.competition", Align::Right, kTransparentText);
@@ -2599,15 +2599,27 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
   // when both are there. "Q3 · 7:42" when the provider supplies a clock, "Q3"
   // when it does not, and nothing at all when it supplies neither - a card that
   // invented 0:00 would have somebody watching a game that is not running.
-  String progress = progressLabel;
+  // Only the case that genuinely joins two labels builds a buffer, and it is a
+  // fixed one on the stack. Either label alone is drawn straight from the
+  // caller's own bytes. Nothing on this path reaches the heap, which is the
+  // whole point: see the scoreline rows below and HeapRatchet.h.
+  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  const bool haveProgress = progressLabel != nullptr && progressLabel[0] != '\0';
+  const bool haveClock = clockLabel != nullptr && clockLabel[0] != '\0';
 
-  if (clockLabel.length() > 0) {
-    progress = progress.length() > 0 ? progress + " \u00b7 " + clockLabel : clockLabel;
-  }
-
-  if (progress.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold12pt7b);
-    layoutLine(progress, kScreenW - kCardMargin, 42, 150, sport.heading, "sports.progress",
+  if (haveProgress && haveClock) {
+    // Both fields are short and bounded by the wire - a period is "6TH INN" at
+    // its longest and a clock "12:00" - so a fixed buffer holds any real pair
+    // and snprintf truncates rather than overruns if the server ever disagrees.
+    char joined[48];
+    snprintf(joined, sizeof(joined), "%s \u00b7 %s", progressLabel, clockLabel);
+    layoutLine(joined, kScreenW - kCardMargin, 42, 150, sport.heading, "sports.progress",
+               Align::Right, kTransparentText);
+  } else if (haveClock) {
+    layoutLine(clockLabel, kScreenW - kCardMargin, 42, 150, sport.heading, "sports.progress",
+               Align::Right, kTransparentText);
+  } else if (haveProgress) {
+    layoutLine(progressLabel, kScreenW - kCardMargin, 42, 150, sport.heading, "sports.progress",
                Align::Right, kTransparentText);
   }
 
@@ -2635,18 +2647,28 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
   const int nameWidth = kScreenW - kCardMargin * 2 - scoreWidth - 28;
 
   // AWAY FIRST, HOME SECOND, which is how a scoreline is read aloud.
-  const String rows[2][2] = {{awayName, awayScore}, {homeName, homeScore}};
+  // Pointers to what the caller already holds, so the table that puts away
+  // above home costs nothing. Copying into it meant four heap allocations on a
+  // card that redraws every twelve seconds, and small repeated allocations in
+  // the draw path are what leave the one large free region in pieces by the
+  // time a TLS session asks for its 33,434 contiguous bytes. See HeapRatchet.h.
+  //
+  // Two arrays rather than one, because the names arrive as the wire's own
+  // char buffers and the scores are built per frame. A single table would make
+  // one of the two convert, which is the allocation this is removing.
+  const char* const names[2] = {awayName, homeName};
+  const String* const scores[2] = {&awayScore, &homeScore};
 
   for (int row = 0; row < 2; ++row) {
     const int top = kPanelTop + row * kRowHeight;
 
     lcd.setFont(&fonts::FreeSansBold12pt7b);
-    layoutLine(rows[row][0], kCardMargin + 14, top + 14, nameWidth, sport.name,
+    layoutLine(names[row], kCardMargin + 14, top + 14, nameWidth, sport.name,
                row == 0 ? "sports.away" : "sports.home", Align::Left, kTransparentText);
 
     if (hasScores) {
       lcd.setFont(&fonts::FreeSansBold18pt7b);
-      layoutLine(rows[row][1], kScreenW - kCardMargin - 14, top + 8, scoreWidth, sport.score,
+      layoutLine(*scores[row], kScreenW - kCardMargin - 14, top + 8, scoreWidth, sport.score,
                  row == 0 ? "sports.away.score" : "sports.home.score", Align::Right,
                  kTransparentText);
     }
@@ -2682,7 +2704,7 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
 }
 
 void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ageText,
-                     const String& sportLabel, const String& competitionLabel) {
+                     const char* sportLabel, const char* competitionLabel) {
   // The same two palettes the single-game card uses, so the two read as one
   // family rather than as two cards that happen to be about sport.
   const SportPalette day{
@@ -2701,11 +2723,11 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
   // THE HEADING IS THE SINGLE-GAME CARD'S HEADING, placed identically. Both
   // halves optional, both absent rather than substituted - a server that has
   // not been taught to send a sport draws no chip.
-  if (sportLabel.length() > 0) {
+  if (sportLabel != nullptr && sportLabel[0] != '\0') {
     drawSportsPill(kCardMargin, 10, sportLabel, sport.chip, sport.chipInk, "board.sport");
   }
 
-  if (competitionLabel.length() > 0) {
+  if (competitionLabel != nullptr && competitionLabel[0] != '\0') {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     layoutLine(competitionLabel, kScreenW - kCardMargin, 13, 150, sport.muted,
                "board.competition", Align::Right, kTransparentText);
