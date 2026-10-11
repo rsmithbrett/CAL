@@ -757,9 +757,9 @@ void verbose(const char* format, ...) {
 void line(const String& text) {
   Serial.println(text);
 
-  if (streaming) {
-    pushToBuffer(text.c_str());
-  }
+  // Unconditional, for the reason the const char* overload above gives at
+  // length. Both overloads have to agree or half the boot window survives.
+  pushToBuffer(text.c_str());
 }
 
 void line(const char* text) {
@@ -769,12 +769,26 @@ void line(const char* text) {
 
   Serial.println(text);
 
-  // No String anywhere on this path now. pushToBuffer copies into a slot it
-  // already owns, so the temporary this branch used to build - once per line,
-  // on the device's busiest code path - is gone rather than merely narrowed.
-  if (streaming) {
-    pushToBuffer(text);
-  }
+  // BUFFERED WHETHER OR NOT ANYBODY IS LISTENING YET, which is the whole point.
+  //
+  // This used to be gated on `streaming`, and streaming is only switched on by
+  // a check-in response - so everything a display said before its first
+  // successful check-in went to a serial cable and nowhere else. That is the
+  // window in which a display is most likely to be in trouble, and twice on
+  // 2026-10-11 it was the reason a fault could not be diagnosed: a boot-time
+  // orientation line that never arrived, and nine silent reboots on an update
+  // that could not install, each one too short to reach a check-in.
+  //
+  // It costs nothing but the copy. gSlots is a fixed 32 x 256 array in .bss,
+  // allocated at link time whether this writes to it or not, and it is a ring -
+  // so a device that never streams simply overwrites the oldest line forever,
+  // and one that starts streaming later finds the most recent boot still in it.
+  // No heap, no growth, no fragmentation, which on this board is the only kind
+  // of cost worth arguing about.
+  //
+  // pushToBuffer copies into a slot it already owns, so there is no String
+  // temporary on what this file calls its busiest code path.
+  pushToBuffer(text);
 }
 
 void setStreamingEnabled(bool enabled) {
@@ -783,9 +797,21 @@ void setStreamingEnabled(bool enabled) {
   }
 
   if (!enabled) {
+    // Flush what is owed, then drop the rest. The clear stays even though
+    // line() now buffers unconditionally: an admin switching the stream off is
+    // asking for this device to stop reporting, and leaving a ring full of
+    // lines from before that decision to be delivered on some later re-enable
+    // would hand them exactly what they turned off.
+    //
+    // The ring refills from the next line onward, so a display is never more
+    // than 32 lines away from being able to explain itself again.
     sendOneBatch();
     clearBuffer();
   } else {
+    // Whatever accumulated while nobody was listening goes out on the next
+    // poll. That is the point of buffering unconditionally: an admin turning
+    // the stream on gets the boot they just missed, not only what happens
+    // from this instant.
     lastFlushMs = millis();
   }
 
