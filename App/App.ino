@@ -1969,6 +1969,17 @@ void performCheckIn() {
   // own remarks.
   Log::setStreamingEnabled(result.debugStreamRequested);
 
+  // THE FIRST THING WORTH SAYING ONCE SOMEBODY IS LISTENING. Log::line() writes
+  // Serial unconditionally but only reaches the ring when streaming is on, and
+  // streaming is only on from the line above - so everything setup() logged,
+  // this panel's own orientation included, needs a USB cable to read. That is
+  // the one window in which a display is most likely to be in trouble.
+  //
+  // Said here rather than inside Display::begin() for that reason, and said on
+  // every check-in that turns streaming on rather than once, because an admin
+  // flipping the toggle days later wants the answer too.
+  Display::logViewport();
+
   // Reconnection, measured rather than inferred, and only where somebody asked
   // for it.
   //

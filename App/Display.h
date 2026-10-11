@@ -39,6 +39,15 @@ enum class Orientation : uint8_t {
 /// so the default has to be the safe one.</para>
 void begin(Orientation orientation = Orientation::Landscape);
 
+/// Says which way round this panel came up and what viewport the layouts are
+/// working against, on the debug stream.
+///
+/// <para>Exists because Log::line() only reaches the ring when streaming is
+/// on, and streaming is only turned on by a check-in response - so anything
+/// begin() says is Serial-only and needs a cable to read. The caller is
+/// App.ino, immediately after Log::setStreamingEnabled().</para>
+void logViewport();
+
 /// Updates the day/night theme and the corner-clock's UTC offset that every
 /// screen below reads when it next draws - not retroactive to whatever is
 /// already on screen. Called once from App.ino's performCheckIn() whenever

@@ -71,6 +71,10 @@ LGFX lcd;
 int kScreenW = 320;
 int kScreenH = 240;
 
+/// Which way begin() was asked to come up, kept only so logViewport() can say
+/// it in words. Every layout reads the two numbers above and never this.
+bool gPortrait = false;
+
 // Day/night theme (see Display.h's own remarks on setEnvironment() and the
 // note at the bottom of that file): every screen this file draws - the
 // boot-ladder screens below and the content-card family further down alike
@@ -1381,6 +1385,7 @@ void begin(Orientation orientation) {
   // which is the touch clock. If the picture comes up upside down the answer is
   // 0, and that is this one line.
   const bool portrait = orientation == Orientation::Portrait;
+  gPortrait = portrait;
   lcd.setRotation(portrait ? 2 : 1);
 
   // Read back from the panel rather than assumed from the rotation, so a
@@ -1388,8 +1393,6 @@ void begin(Orientation orientation) {
   // is on the glass.
   kScreenW = lcd.width();
   kScreenH = lcd.height();
-
-  Log::printf("[display] %s, %dx%d", portrait ? "portrait" : "landscape", kScreenW, kScreenH);
 
   lcd.setBrightness(255);
   clear();
@@ -5612,6 +5615,10 @@ bool drawImageFromBuffer(const uint8_t* data, size_t size) {
   noteDrawOutcome(ok);
   restoreDefaultFont();
   return ok;
+}
+
+void logViewport() {
+  Log::printf("[display] %s, %dx%d", gPortrait ? "portrait" : "landscape", kScreenW, kScreenH);
 }
 
 bool lastDrawFailedOnAllocation() { return gLastDrawFailedOnAllocation; }
