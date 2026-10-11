@@ -3121,6 +3121,10 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
 // clock that would run off both edges of a 320px panel falls back to size 1
 // instead - still exactly the weather hero's own proven size - rather than
 // clipping.
+//
+// The corner clock drawClock() puts on every other card is chrome for a card
+// whose subject is something else. Here the time IS the subject, so the hero
+// carries it and the corner stays empty.
 void showClockDate(const String& timeText, const String& dateText) {
   lcd.fillScreen(bg());
 
@@ -3151,11 +3155,35 @@ void showClockDate(const String& timeText, const String& dateText) {
   // family the rest of this file uses rather than a plain bitmap face, and
   // wrapped rather than assuming a spelled-out weekday and month always fits
   // on one line at this width.
+  // One line at 12pt when the date fits, 9pt over two when it does not - the
+  // same two-tier measure-then-draw drawProseBody() uses, and for the same
+  // reason. "Sunday, October 11" measures within a pixel or two of the 304px
+  // box at 12pt, so this date wraps on some days and not others, and the
+  // wrapped pair needs a line height this card was not giving it.
+  //
+  // The 20px step it used to pass is below FreeSansBold12pt7b's own rendered
+  // height: line one's descenders land inside line two's capitals, which is
+  // why "Sunday," came out with "October 11" drawn through it.
+  // kProseLargeLineHeight is the figure the prose cards settled on for this
+  // face, and the 9pt tier takes kProseSmallLineHeight for the same reason.
   lcd.setFont(&fonts::FreeSansBold12pt7b);
-  const TextBox dateBox{kScreenW / 2, 145, kBootTextWidth, 20, 2, Align::Centre};
-  layoutText(dateText, dateBox, muted(), "clockdate.date");
+  lcd.setTextSize(1);
+  const TextBox oneLineAt12{kScreenW / 2, 145, kBootTextWidth, kProseLargeLineHeight, 1,
+                            Align::Centre};
+  if (layoutText(dateText, oneLineAt12, muted(), "clockdate.date", kUseCardBackground,
+                 /*measureOnly=*/true)
+          .ellipsized) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    const TextBox twoLinesAt9{kScreenW / 2, 145, kBootTextWidth, kProseSmallLineHeight, 2,
+                              Align::Centre};
+    Log::verbose("[display] clockdate.date: dropped to the 9pt tier, '%s' will not fit one 12pt "
+                 "line",
+                 dateText.c_str());
+    layoutText(dateText, twoLinesAt9, muted(), "clockdate.date");
+  } else {
+    layoutText(dateText, oneLineAt12, muted(), "clockdate.date");
+  }
 
-  drawClock();
   restoreDefaultFont();
 }
 
