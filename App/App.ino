@@ -1969,6 +1969,11 @@ void performCheckIn() {
   // own remarks.
   Log::setStreamingEnabled(result.debugStreamRequested);
 
+  // The ladder again, now that somebody can hear it - see replayBootHeapLadder().
+  if (result.debugStreamRequested) {
+    replayBootHeapLadder();
+  }
+
   // THE FIRST THING WORTH SAYING ONCE SOMEBODY IS LISTENING. Log::line() writes
   // Serial unconditionally but only reaches the ring when streaming is on, and
   // streaming is only on from the line above - so everything setup() logged,
@@ -2226,6 +2231,24 @@ void performCheckIn() {
 
 }  // namespace
 
+/// The ladder, kept so it can be said again once anybody is listening.
+///
+/// The rungs are read during setup(), which is before the first check-in and
+/// therefore before the check-in response can turn the debug stream on. They
+/// go into Log's 32-line ring like everything else, and WiFi join and SNTP
+/// between the splash and the check-in produce more than 32 lines - so on the
+/// first device to run the ladder every rung had already been pushed out of
+/// the ring by the time the stream opened. Nine numbers arrived nowhere.
+///
+/// Thirty-six bytes of .bss and one line is the whole remedy. The rungs are
+/// kept as they are read and emitted again immediately after
+/// Log::setStreamingEnabled(), as a single line that cannot be aged out by
+/// the lines around it.
+constexpr uint8_t kBootRungs = 12;
+const char* gBootRungName[kBootRungs];
+uint32_t gBootRungBytes[kBootRungs];
+uint8_t gBootRungCount = 0;
+
 /// One rung of the boot heap ladder, logged by name.
 ///
 /// The ratchet already buckets the whole of setup() as Boot, and on the three
@@ -2240,8 +2263,38 @@ void performCheckIn() {
 /// A line per milestone rather than a smarter instrument, because the question
 /// is "which of nine calls" and nine numbers answer it outright.
 void noteBootHeap(const char* step) {
+  const uint32_t largest = static_cast<uint32_t>(Http::largestContiguousBytes());
+  if (gBootRungCount < kBootRungs) {
+    gBootRungName[gBootRungCount] = step;
+    gBootRungBytes[gBootRungCount] = largest;
+    gBootRungCount++;
+  }
   Log::printf("[boot] %s: largest contiguous 8-bit block %lu", step,
-              static_cast<unsigned long>(Http::largestContiguousBytes()));
+              static_cast<unsigned long>(largest));
+}
+
+/// Says the ladder again, once the stream is open.
+void replayBootHeapLadder() {
+  if (gBootRungCount == 0) {
+    return;
+  }
+  // A fixed buffer rather than a String, for the reason the sports draw path
+  // was rewritten: this runs on the heap-starved boot it exists to measure,
+  // and an instrument that allocates is an instrument that changes its own
+  // reading. Twelve rungs of "boot.impressions=110580 -> " is about 340
+  // characters, and an over-long ladder is truncated rather than grown.
+  char ladder[384];
+  size_t at = 0;
+  for (uint8_t i = 0; i < gBootRungCount && at < sizeof(ladder) - 1; ++i) {
+    const int wrote = snprintf(ladder + at, sizeof(ladder) - at, "%s%s=%lu",
+                               i > 0 ? " -> " : "", gBootRungName[i],
+                               static_cast<unsigned long>(gBootRungBytes[i]));
+    if (wrote <= 0) {
+      break;
+    }
+    at += static_cast<size_t>(wrote);
+  }
+  Log::printf("[boot] heap ladder: %s", ladder);
 }
 
 void setup() {
