@@ -139,6 +139,8 @@ namespace {
 // constraint the ssidN/passN builders above are shaped by.
 constexpr const char* kKeyCalReqVer = "calreqver";
 constexpr const char* kKeyCalReqTries = "calreqtry";
+constexpr const char* kKeyAppReqVer = "appreqver";
+constexpr const char* kKeyAppReqTries = "appreqtry";
 }  // namespace
 
 uint8_t calUpdateAttempts() {
@@ -161,6 +163,32 @@ void noteCalUpdateAttempt() {
       prefs.getString(kKeyCalReqVer, "") == running ? prefs.getUChar(kKeyCalReqTries, 0) : 0;
   prefs.putString(kKeyCalReqVer, running);
   prefs.putUChar(kKeyCalReqTries, previous + 1);
+}
+
+uint8_t appUpdateAttempts() {
+  // The same rule calUpdateAttempts() gives, for the other partition: counted
+  // against the App THIS DEVICE WAS RUNNING WHEN IT ASKED. If that version has
+  // changed since, an install worked and the history is spent.
+  //
+  // It exists because the CAL path had this guard and the App path did not. On
+  // 2026-10-11 device 17 was told to install a build it could not fetch and
+  // rebooted NINE times before somebody pulled its power - each cycle showing
+  // "Cannot reach the internet" for a few seconds, reaching no check-in, and
+  // therefore saying nothing to anybody. A display doing that is dead as far as
+  // the room is concerned, and the server cannot tell it apart from one that is
+  // merely switched off.
+  if (prefs.getString(kKeyAppReqVer, "") != installedAppVersion()) {
+    return 0;
+  }
+  return prefs.getUChar(kKeyAppReqTries, 0);
+}
+
+void noteAppUpdateAttempt() {
+  const String running = installedAppVersion();
+  const uint8_t previous =
+      prefs.getString(kKeyAppReqVer, "") == running ? prefs.getUChar(kKeyAppReqTries, 0) : 0;
+  prefs.putString(kKeyAppReqVer, running);
+  prefs.putUChar(kKeyAppReqTries, previous + 1);
 }
 
 void setInstalledAppVersion(const String& version) {

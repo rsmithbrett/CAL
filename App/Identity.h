@@ -109,6 +109,20 @@ uint8_t calUpdateAttempts();
 /// immediately BEFORE rebooting, never after - there is no "after".
 void noteCalUpdateAttempt();
 
+/// How many times this App has rebooted into CAL for an APP update without the
+/// running version changing.
+///
+/// <para>Resets itself when the App version changes, so a successful install
+/// restores the full allowance. The CAL path has had this guard since the
+/// trampoline was written and the App path had none: on 2026-10-11 device 17
+/// was told to install a build it could not fetch and rebooted nine times
+/// before somebody pulled its power.</para>
+uint8_t appUpdateAttempts();
+
+/// Records that this App is about to hand back to CAL for an APP update. Call
+/// immediately BEFORE rebooting, for the reason noteCalUpdateAttempt() gives.
+void noteAppUpdateAttempt();
+
 void setInstalledAppVersion(const String& version);
 
 /// Set by the application to ask CAL to perform an update on next boot. The

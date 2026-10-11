@@ -2151,16 +2151,54 @@ void performCheckIn() {
   }
 
   if (result.updateAvailable) {
-    Log::line("[checkin] server requested an update - rebooting into CAL");
-    Display::showStatus("Updating", "The server requested an update");
-    // Recorded before handing off, so the next boot can say SOFTWARE_RESET + OTA
+    const uint8_t appAttempts = Identity::appUpdateAttempts();
+    constexpr uint8_t kMaxAppAttempts = 3;
 
-    // rather than just "something restarted us" - see BootDiag.h.
+    if (appAttempts >= kMaxAppAttempts) {
+      // THE GUARD THE CAL PATH HAS HAD ALL ALONG. Without it a device told to
+      // install a build it cannot fetch reboots forever: into CAL, handshake
+      // fails, back to the App, "Cannot reach the internet" for a few seconds,
+      // check in, told again, round again. Device 17 did that nine times on
+      // 2026-10-11 and nothing anywhere said so, because a boot that never
+      // reaches a check-in cannot report anything.
+      //
+      // Refused loudly, and the App carries on running the build it has. A
+      // display showing yesterday's firmware is a working display; one in a
+      // reboot loop is a dead one, and the server cannot tell that apart from
+      // a unit somebody switched off.
+      //
+      // Clears itself the moment the running version changes - see
+      // Identity::appUpdateAttempts() - so an install that does work restores
+      // the full allowance, and a later build that would install cleanly is
+      // never locked out by an earlier one that would not.
+      Log::printf(
+          "[checkin] server wants an App update but this device has already tried %u time(s) "
+          "from '%s' without it taking - REFUSING to reboot again. Something is failing in "
+          "CAL's download or install path, not here. This clears itself as soon as the "
+          "running version changes; until then the App keeps running normally",
+          appAttempts,
+          Identity::installedAppVersion().length() > 0
+              ? Identity::installedAppVersion().c_str()
+              : "(unrecorded)");
+    } else {
+      Log::printf("[checkin] server requested an update (attempt %u of %u from '%s') - "
+                  "rebooting into CAL",
+                  appAttempts + 1, kMaxAppAttempts,
+                  Identity::installedAppVersion().length() > 0
+                      ? Identity::installedAppVersion().c_str()
+                      : "(unrecorded)");
+      Display::showStatus("Updating", "The server requested an update");
+      // Recorded before handing off, so the next boot can say SOFTWARE_RESET + OTA
+      // rather than just "something restarted us" - see BootDiag.h.
+      BootDiag::recordRestartIntent(BootDiag::RestartCause::Ota);
 
-    BootDiag::recordRestartIntent(BootDiag::RestartCause::Ota);
+      // Counted BEFORE the reboot, because there is no after - the same
+      // reasoning noteCalUpdateAttempt()'s caller gives a few lines above.
+      Identity::noteAppUpdateAttempt();
 
-    Loader::requestUpdate();
-    // Unreachable: the call above never returns.
+      Loader::requestUpdate();
+      // Unreachable: the call above never returns.
+    }
   }
 
   // There used to be an Http::releaseTlsSession() call here, and removing it is
