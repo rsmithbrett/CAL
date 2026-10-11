@@ -198,7 +198,7 @@ constexpr uint32_t kBannerStripInk = 0xFFFFFFu;
 // Tall enough for three wrapped lines of the strip's own 12pt bold font
 // (three lines at 26px plus margin - see showBannerCard()) while still
 // leaving the strip read as a partial-screen band rather than the whole
-// panel - kButtonRowY (160) minus this is the empty "not full-screen"
+// panel - kButtonRowY() (160) minus this is the empty "not full-screen"
 // clearance a Banner theme's own visual signature depends on.
 constexpr int kBannerStripHeight = 100;
 
@@ -224,7 +224,7 @@ constexpr int kRouteLineHeight = 18;
 // same motivation as the width increase the next paragraph already
 // documents, just the other axis. The row's bottom edge stays pinned at
 // y=220 (still clearing the clock by 2px); the extra 30px comes out of the
-// top, moving kButtonRowY from 190 to 160 - which is why
+// top, moving kButtonRowY() from 190 to 160 - which is why
 // showAnnouncementCard() and showQrTextCard() below both had their own
 // content budgets re-checked against the new boundary rather than left
 // assuming the old one.
@@ -243,7 +243,16 @@ constexpr int kRouteLineHeight = 18;
 // margin from the true bezel edge kept only because a resistive panel's
 // accuracy is known to degrade right at the glass edge, not because
 // anything would misfire.
-constexpr int kButtonRowY = 160;
+// MEASURED FROM THE BOTTOM OF THE PANEL, not from the top of a 240px one. The
+// button row occupies the last 80 pixels whatever the panel's height is, which
+// on the landscape panel every display ships with is y=160 and arithmetically
+// identical to the constant this replaced.
+//
+// It mattered the moment a display turned. A 320px panel laying its buttons at
+// 160 puts them a hundred pixels above the bottom edge and straight through
+// whatever the card drew there - which is most of what "the text overlaps in
+// portrait" turned out to be.
+int kButtonRowY() { return kScreenH - 80; }
 constexpr int kButtonHeight = 60;
 constexpr int kButtonRowLeft = 8;
 constexpr int kButtonRowRight = 312;
@@ -268,15 +277,19 @@ constexpr int kButtonRadius = 6;
 // noteContentOverrun() below puts it in the debug stream so it stops being
 // invisible.
 //
-// kClockTop is where drawClock() puts its bottom-right corner clock (roughly
+// kClockTop() is where drawClock() puts its bottom-right corner clock (roughly
 // y 222-236), and nothing may overlap it in either mode.
-constexpr int kClockTop = 220;
+// The last 20 pixels of the panel, wherever its bottom is. 220 on the 240px
+// landscape panel, which is the constant this replaced, and 300 on a 320px
+// portrait one - where a fixed 220 left the clock floating in the middle of
+// the card with 80 pixels of empty glass under it.
+int kClockTop() { return kScreenH - 20; }
 constexpr int kButtonBandGap = 6;
 
 /// Set from CardManager before each card draws. Starts at the no-buttons value
 /// so a card drawn outside the normal path (a boot splash, an error screen) sees
 /// a sane budget rather than zero.
-int gContentBottom = kClockTop;
+int gContentBottom = kClockTop();
 
 /// THE ONE EXEMPTION FROM THE BUDGET CHECK INSIDE layoutText().
 ///
@@ -816,7 +829,7 @@ uint8_t linesToBudget(int topY, int lineHeight) {
 // what a line count never could.
 //
 // The line budgets come from linesToBudget() rather than the constants 5 and
-// 7. Those two numbers were measured against kButtonRowY when this card had no
+// 7. Those two numbers were measured against kButtonRowY() when this card had no
 // idea whether a button row was coming, and the 7x18px tier was recorded in
 // README.md as landing 2px inside the button gap. Asking the budget gets the
 // full panel when no button is bound and a correctly shorter block when one
@@ -1397,6 +1410,12 @@ void begin(Orientation orientation) {
   // is on the glass.
   kScreenW = lcd.width();
   kScreenH = lcd.height();
+
+  // gContentBottom was initialised at static-init time, when kScreenH still
+  // held the 240 it starts at. Every card draw calls setContentBudget() and
+  // would correct it, but the boot screens draw before any card does and would
+  // lay themselves out against a floor 80 pixels up the glass.
+  gContentBottom = kClockTop();
 
   lcd.setBrightness(255);
   clear();
@@ -3307,7 +3326,7 @@ void showAnnouncementCard(const String& text) {
   lcd.fillScreen(bg());
   drawCardBanner("NOTICE", kAnnouncementBanner, 90);
 
-  // Starts at y=30 rather than the original y=40 - kButtonRowY moved from 190
+  // Starts at y=30 rather than the original y=40 - kButtonRowY() moved from 190
   // to 160 when the button row doubled in height, and shifting this block's
   // own start up by 10px buys back exactly the clearance that move cost. How
   // many lines fit under that start is now the content budget's answer rather
@@ -3368,7 +3387,7 @@ void showBannerCard(const String& text) {
 // down - CAL's own showQr() owns the whole 240px-tall panel and answers to nothing else.
 //
 // scale is 2 here (a 90px code) rather than CAL's own 3 (135px, on a screen with nothing
-// else on it): kButtonRowY starts at 160 (moved up from 190 when the button row doubled in
+// else on it): kButtonRowY() starts at 160 (moved up from 190 when the button row doubled in
 // height - see that constant's own remarks) and the banner already claims the top 22px, so
 // this card's whole drawable height is roughly 130px against CAL's ~228, and there is a
 // caption line and a fallback data line still to fit beneath the code. A smaller code is the
@@ -3815,8 +3834,8 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
 
   // THE TIGHT LAYOUT, AND WHY IT IS THE STRIP THAT PAYS FOR IT.
   //
-  // setContentBudget() drops the content floor from kClockTop (220) to
-  // kButtonRowY - kButtonBandGap (154) whenever an action is bound TO THIS
+  // setContentBudget() drops the content floor from kClockTop() (220) to
+  // kButtonRowY() - kButtonBandGap (154) whenever an action is bound TO THIS
   // CARD - resolved per card by Actions::forCard() immediately before the
   // draw, not once per device. Measured against that floor the strip as it
   // stands runs to y=200: its icon (cy=155, r=17) reaches 172, which is
@@ -4249,12 +4268,12 @@ void showNoContent(const String& headline, const String& detail) {
 }
 
 void setContentBudget(bool hasActionButtons) {
-  gContentBottom = hasActionButtons ? kButtonRowY - kButtonBandGap : kClockTop;
+  gContentBottom = hasActionButtons ? kButtonRowY() - kButtonBandGap : kClockTop();
 }
 
 int contentBottom() { return gContentBottom; }
 
-bool contentIsTight() { return gContentBottom < kClockTop; }
+bool contentIsTight() { return gContentBottom < kClockTop(); }
 
 void noteContentOverrun(const char* cardName, int reachedY) {
   if (reachedY <= gContentBottom) {
@@ -4282,7 +4301,7 @@ void actionButtonZone(uint8_t index, uint8_t count, int16_t& x, int16_t& y, int1
   const int available = kButtonRowRight - kButtonRowLeft;
   const int width = (available - kButtonGap * (count - 1)) / count;
   x = static_cast<int16_t>(kButtonRowLeft + index * (width + kButtonGap));
-  y = static_cast<int16_t>(kButtonRowY);
+  y = static_cast<int16_t>(kButtonRowY());
   w = static_cast<int16_t>(width);
   h = static_cast<int16_t>(kButtonHeight);
 }
@@ -4422,7 +4441,7 @@ void drawNavAffordances(bool canReverse) {
 void flashNavEdge(bool isForward, bool canReverse) {
   // The same kEdgeZoneWidth-wide strip Touch::poll() classifies as
   // Hit::Reverse/Hit::Forward - see that constant's own remarks above - but
-  // only up to kButtonRowY, not the full kScreenH. Touch::poll() checks
+  // only up to kButtonRowY(), not the full kScreenH. Touch::poll() checks
   // action-button zones before edge zones, so within the button row's own
   // y-range a tap only ever reaches Hit::Reverse/Hit::Forward where no
   // button rect covers it; a taller flash here would still paint over
@@ -4439,13 +4458,13 @@ void flashNavEdge(bool isForward, bool canReverse) {
   // way, rather than teaching the user two different flash colours for two
   // different kinds of button. It reads against either day/night background
   // for the same reason it was chosen for the action row in the first place.
-  lcd.fillRect(x, 0, kEdgeZoneWidth, kButtonRowY, kButtonPressedFill);
+  lcd.fillRect(x, 0, kEdgeZoneWidth, kButtonRowY(), kButtonPressedFill);
   delay(180);
   // Undo the flash before redrawing the chevron on top of it - the resting
   // state here isn't a filled rect the way a button's is, so simply drawing
   // the chevron again over the pressed fill would leave a stray blue bar
   // behind it.
-  lcd.fillRect(x, 0, kEdgeZoneWidth, kButtonRowY, bg());
+  lcd.fillRect(x, 0, kEdgeZoneWidth, kButtonRowY(), bg());
   drawNavAffordances(canReverse);
 }
 
