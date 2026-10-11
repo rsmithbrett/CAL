@@ -836,6 +836,30 @@ void noteShowing(Impressions::Arrival arrival) {
       card.describe != nullptr ? card.describe(gCurrent.item) : String();
 
   Impressions::beginShowing(card.id, contentKey.c_str(), summary.c_str(), arrival);
+
+  // A card that draws several things at once names the rest of them now, so
+  // the showing reports one entry per game rather than one for the whole card.
+  // The first entity went in through beginShowing() above and carries the
+  // frame's time; these carry their own content and none of it.
+  //
+  // Asked by index through the same listingId() and describe() the single-item
+  // path uses, because the sports card already answers both per game. A card
+  // with no frameCountFor draws one thing and this loop never runs, which is
+  // every card but the scoreboard.
+  if (card.frameCountFor == nullptr) {
+    return;
+  }
+
+  const uint8_t entities = card.frameCountFor(gCurrent.item);
+  for (uint8_t i = 1; i < entities; ++i) {
+    const String memberKey = card.listingId != nullptr ? card.listingId(i) : String();
+    if (memberKey.length() == 0) {
+      continue;
+    }
+
+    const String memberSummary = card.describe != nullptr ? card.describe(i) : String();
+    Impressions::addFrameMember(memberKey.c_str(), memberSummary.c_str());
+  }
 }
 
 void advance(Impressions::Arrival arrival) {

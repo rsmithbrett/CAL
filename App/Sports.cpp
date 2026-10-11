@@ -455,6 +455,35 @@ Cards::DescribeFn describeFor(uint8_t index) {
   }
 }
 
+/// How many games this card has on the glass in one showing.
+///
+/// <para>A scoreboard draws all of them at once, so its showing is worth one
+/// impression per game sharing a frame. A single-game card draws one, and
+/// returning one means CardManager's frame loop does nothing - the same answer
+/// a card with no frameCountFor at all gives.</para>
+uint8_t frameCountCardAt(uint8_t index, uint16_t) {
+  if (!isBoard(index)) {
+    return 1;
+  }
+
+  const CardSlot& slot = gCards[index];
+  return slot.count > kMaxGames ? kMaxGames : slot.count;
+}
+
+uint8_t frameCount0(uint16_t i) { return frameCountCardAt(0, i); }
+uint8_t frameCount1(uint16_t i) { return frameCountCardAt(1, i); }
+uint8_t frameCount2(uint16_t i) { return frameCountCardAt(2, i); }
+uint8_t frameCount3(uint16_t i) { return frameCountCardAt(3, i); }
+
+Cards::FrameCountFn frameCountFor(uint8_t index) {
+  switch (index) {
+    case 0: return frameCount0;
+    case 1: return frameCount1;
+    case 2: return frameCount2;
+    default: return frameCount3;
+  }
+}
+
 bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw,
                  int16_t order, uint16_t dwellSeconds) {
   Cards::CardSpec spec;
@@ -466,6 +495,7 @@ bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw
   spec.dwellSeconds = dwellSeconds;
   spec.listingId = listingIdFor(index);
   spec.describe = describeFor(index);
+  spec.frameCountFor = frameCountFor(index);
   return Cards::registerCard(spec);
 }
 

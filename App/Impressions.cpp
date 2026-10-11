@@ -50,6 +50,16 @@ bool gPresent = false;
 uint32_t gPresentSinceMs = 0;
 uint32_t gSeenMs = 0;
 
+/// The extra entities the showing on screen is also displaying - the second,
+/// third and fourth games of a scoreboard. Fixed buffers beside the entry
+/// array and for the same reason: this file does not touch the heap.
+struct FrameMember {
+  char contentKey[kMaxContentKey + 1];
+  char summary[kMaxSummary + 1];
+};
+FrameMember gFrameMembers[kMaxFrameMembers];
+uint8_t gFrameMemberCount = 0;
+
 /// Copies into a fixed destination and terminates by hand. strncpy writes no
 /// terminator when the source fills the buffer, and a summary arrives from a
 /// card that composed it rather than from anything bounded here - so a long one
@@ -169,9 +179,52 @@ void closeShowing(uint32_t nowMs) {
   entry.fromShuffle = gArrival == Arrival::Shuffle;
   entry.wasSought = gSought;
 
+  // No frame unless the card asked for one, which is every card that draws a
+  // single thing. An empty frameId is what the server reads as "this appearance
+  // was one entity", and it is the default on the wire too.
+  entry.frameId[0] = '\0';
+  entry.carriesScreenTime = true;
+
   Log::verbose("[impressions] '%s' for %lums, %lums with somebody there%s",
                entry.cardId, static_cast<unsigned long>(dwellMs),
                static_cast<unsigned long>(seenMs), entry.wasSought ? ", sought" : "");
+
+  if (gFrameMemberCount == 0) {
+    return;
+  }
+
+  // THE FRAME. Its id is the first entry's instance id, which is already unique
+  // per device and costs nothing to generate. The members repeat the card, the
+  // instant and the arrival, carry their own content, and carry no time at all:
+  // the seconds were counted once, on the entry above.
+  copyInto(entry.frameId, sizeof(entry.frameId), entry.instanceId);
+
+  for (uint8_t i = 0; i < gFrameMemberCount; ++i) {
+    if (gCount >= kMaxEntries) {
+      // The frame is short rather than the showing lost. Counted like any other
+      // overflow, so a report can say the attribution is incomplete instead of
+      // quietly showing three games where four were on the glass.
+      gDropped++;
+      continue;
+    }
+
+    Entry& member = gEntries[gCount++];
+    copyInto(member.instanceId, sizeof(member.instanceId), reserveInstanceId().c_str());
+    copyInto(member.cardId, sizeof(member.cardId), entry.cardId);
+    copyInto(member.contentKey, sizeof(member.contentKey), gFrameMembers[i].contentKey);
+    copyInto(member.summary, sizeof(member.summary), gFrameMembers[i].summary);
+    copyInto(member.shownAtUtc, sizeof(member.shownAtUtc), entry.shownAtUtc);
+    copyInto(member.frameId, sizeof(member.frameId), entry.frameId);
+    member.dwellMs = 0;
+    member.seenMs = 0;
+    member.fromShuffle = entry.fromShuffle;
+    member.wasSought = entry.wasSought;
+    member.carriesScreenTime = false;
+  }
+
+  Log::verbose("[impressions] '%s' carried %u more in one frame, sharing its %lums",
+               entry.cardId, static_cast<unsigned>(gFrameMemberCount),
+               static_cast<unsigned long>(dwellMs));
 }
 
 }  // namespace
@@ -201,6 +254,11 @@ void beginShowing(const char* cardId, const char* contentKey, const char* summar
   gStartedMs = now;
   gArrival = arrival;
 
+  // Cleared here rather than after closeShowing() wrote them, so a card that
+  // adds no members cannot inherit the last card's. closeShowing() above has
+  // already consumed whatever the previous showing had.
+  gFrameMemberCount = 0;
+
   // A card somebody pressed forward or back to reach was looked at by whoever
   // pressed, whether or not they stay on it - the whole reason a display with
   // no motion sensor still reports a seen figure.
@@ -217,6 +275,22 @@ void beginShowing(const char* cardId, const char* contentKey, const char* summar
 }
 
 void endShowing() { closeShowing(millis()); }
+
+void addFrameMember(const char* contentKey, const char* summary) {
+  // Every refusal here is silent and costs one row of attribution rather than
+  // the showing - see Impressions.h. A caller that gets this wrong should not
+  // be able to lose the appearance it is describing.
+  if (!gShowing || gFrameMemberCount >= kMaxFrameMembers) {
+    return;
+  }
+  if (contentKey == nullptr || contentKey[0] == 0) {
+    return;
+  }
+
+  FrameMember& member = gFrameMembers[gFrameMemberCount++];
+  copyInto(member.contentKey, sizeof(member.contentKey), contentKey);
+  copyInto(member.summary, sizeof(member.summary), summary);
+}
 
 void setPresent(bool present) {
   if (present == gPresent) {

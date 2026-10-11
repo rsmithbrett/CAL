@@ -130,6 +130,18 @@ void addImpressions(JsonDocument& requestDoc) {
       entry["seenMs"] = drawn.seenMs;
     }
 
+    // Both omitted at their default, like the three above and for the same
+    // reason: every card that draws one thing sends neither, which is every
+    // card except the scoreboard, so the ordinary request is unchanged. The
+    // server defaults a missing frameId to null and a missing
+    // carriesScreenTime to true - see CardImpressionReport.
+    if (drawn.frameId[0] != '\0') {
+      entry["frameId"] = drawn.frameId;
+    }
+    if (!drawn.carriesScreenTime) {
+      entry["carriesScreenTime"] = false;
+    }
+
     // A flat object of strings. The server composes its own document from what
     // arrives, so a key this device leaves out is simply absent there.
     if (drawn.contentKey[0] != '\0' || drawn.summary[0] != '\0') {

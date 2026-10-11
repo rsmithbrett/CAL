@@ -52,6 +52,15 @@ constexpr uint8_t kMaxEntryCardId = 32;
 /// ISO 8601 UTC, "2026-10-11T18:15:00Z", twenty characters.
 constexpr uint8_t kMaxShownAt = 24;
 
+/// A frame identifier, unique only within one check-in's batch - the instance
+/// id of the entry that opened it, which is already unique per device.
+constexpr uint8_t kMaxFrameId = kMaxInstanceId;
+
+/// How many extra entities one showing may carry beside its own. Four games on
+/// a scoreboard is three beside the first, and SportsOptions.MaxGamesPerScoreboard
+/// caps the server at four for a heap reason this shares.
+constexpr uint8_t kMaxFrameMembers = 3;
+
 /// How a showing came up.
 enum class Arrival : uint8_t {
   /// The dwell timer advanced to it.
@@ -106,6 +115,29 @@ struct Entry {
 
   /// Whether somebody navigated to it and stayed.
   bool wasSought;
+
+  /// Ties several entries together as one thing a person looked at, or empty
+  /// for the ordinary card that draws one thing.
+  ///
+  /// <para>A scoreboard draws four games at once. One entry for the card cannot
+  /// say which game was on screen, and four unrelated entries say the card
+  /// appeared four times and give each game the whole dwell. Both are wrong in
+  /// a way nothing downstream can detect - see CardImpressionReport.FrameId on
+  /// the server, which has accepted this since 1496995f.</para>
+  ///
+  /// <para>Only unique within one check-in's batch, because nothing joins
+  /// across batches on it.</para>
+  char frameId[kMaxFrameId + 1];
+
+  /// Whether this entry's dwell and seen time are the frame's, or a repeat of
+  /// a figure already counted.
+  ///
+  /// <para>Exactly one entry in a frame says true. The others carry the same
+  /// card, the same instant and their own content, and zero time - not because
+  /// they were not on screen, but because counting the frame's seconds once per
+  /// game would multiply a display's measured day by the number of games on
+  /// it.</para>
+  bool carriesScreenTime;
 };
 
 /// Reads the persisted instance counter. Call once at startup, before any
@@ -119,6 +151,19 @@ void begin();
 /// because the strings a card hands back are rebuilt on its next draw.
 void beginShowing(const char* cardId, const char* contentKey, const char* summary,
                   Arrival arrival);
+
+/// Adds another thing the showing now on screen is also displaying.
+///
+/// <para>Called after beginShowing(), once per extra entity, by a card that
+/// draws several at a time. A four-game scoreboard calls it three times: the
+/// first game went in through beginShowing() and carries the frame's time, and
+/// these three carry their own content and none of it.</para>
+///
+/// <para>Ignored when no showing is open, when the frame is already full, and
+/// when the content key is empty - all three are a caller mistake rather than a
+/// condition worth refusing, and a dropped member costs one row of attribution
+/// rather than the whole showing.</para>
+void addFrameMember(const char* contentKey, const char* summary);
 
 /// Closes the showing on screen without starting another. For going blank: a
 /// policy that removed every card, or a shutdown.

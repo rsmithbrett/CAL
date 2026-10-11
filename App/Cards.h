@@ -136,6 +136,11 @@ using DescribeFn = String (*)(uint16_t itemIndex);
 /// path, for the same reason DescribeFn is.
 using ListingIdFn = String (*)(uint16_t itemIndex);
 
+/// How many entities one showing of this card is displaying at once. Called
+/// once when the card goes up, never on the draw path - see CardSpec's own
+/// remarks on frameCountFor.
+using FrameCountFn = uint8_t (*)(uint16_t itemIndex);
+
 /// The longest asset id a policy entry can carry. Matches Assets::kMaxIdLength,
 /// which is what actually validates one - Graphic.cpp static_asserts that the
 /// two agree, so a divergence is a compile error rather than a silently
@@ -275,6 +280,19 @@ struct CardSpec {
 
   /// Optional - see ListingIdFn. nullptr for every card but the listings one.
   ListingIdFn listingId = nullptr;
+
+  /// How many distinct things this card puts on the glass in ONE showing.
+  ///
+  /// <para>One for every card that draws a single thing, which is all of them
+  /// but the scoreboard. A scoreboard draws four games at once, and reporting
+  /// that as one impression cannot say which game anybody looked at - while
+  /// four unrelated impressions would say the card appeared four times and
+  /// give each game the whole dwell. See Impressions::addFrameMember().</para>
+  ///
+  /// <para>Each entity is then asked for by index through listingId() and
+  /// describe(), which the sports card already answers per game. nullptr means
+  /// one, so a card that has never heard of frames needs no change.</para>
+  FrameCountFn frameCountFor = nullptr;
 
   // ---- Policy. Built-in defaults until a cardPolicy arrives on check-in,
   // then replaced wholesale by whatever the server said (see
