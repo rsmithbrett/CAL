@@ -260,6 +260,28 @@ int kWidthBeside(int otherColumnWidth) {
 /// column: a path lifted from a design.
 constexpr int kDesignWidth = 320;
 
+/// A width measured against the 300px landscape band, scaled to the band this
+/// panel actually has.
+///
+/// <para>For the columns whose width was measured rather than divided. The
+/// listings footer is the example that found this: it reserves 190px for
+/// "Updated 5 hours ago" and gives the distance whatever is left, which is
+/// 110px of a 300px band and measured exactly right - "99.9 mi away" is
+/// 109px. On a 220px band the same subtraction leaves 30px, and device 17
+/// reported "listings.distance: 9 characters past line 1 of 30px did not fit"
+/// on every draw. The constant was not wrong; it was arithmetic against a band
+/// that changed underneath it.</para>
+///
+/// <para>Scaling keeps the proportion the measurement established - 190 of 300
+/// becomes 139 of 220, leaving the distance 81px - rather than either column
+/// keeping a landscape size the panel cannot afford. Both strings may still
+/// ellipsize on a narrow panel, which is the truthful outcome when there is
+/// genuinely less room; what this prevents is one column taking its full
+/// landscape width and starving the other to nothing.</para>
+int kScaledWidth(int designWidth) {
+  return designWidth * kContentWidth() / (kDesignWidth - kCardMargin * 2);
+}
+
 /// An x from a 320-wide design, placed on the panel actually fitted.
 ///
 /// <para>For the sun/moon card's ridges, which are not a layout at all - they
@@ -3828,7 +3850,7 @@ void showListingsCard(const String& address, const String& propertyType, int pri
   // cases and a margin, the realistic pair ("3.2 mi away" and "Updated 5 hours
   // ago") leaves about 22px of clear space between them, and a tight row beats
   // either string losing its tail.
-  constexpr int kFreshnessWidth = 190;
+  const int kFreshnessWidth = kScaledWidth(190);
   layoutLine(distanceBuf, kCardMargin, footerY, bodyWidth - kFreshnessWidth, muted(),
              "listings.distance");
   if (updatedAt.length() > 0) {
