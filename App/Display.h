@@ -347,6 +347,37 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
                     const String& progressLabel = "", const String& clockLabel = "",
                     bool isLive = false);
 
+/// One row of the multi-game scoreboard: two sides, their scores where play has
+/// started, and whatever the server says about the state.
+struct SportsBoardRow {
+  String awayName;
+  String awayScore;
+  String homeName;
+  String homeScore;
+
+  /// A progress label or the state word, whichever the server supplied. Drawn
+  /// in the live colour only when isLive says so.
+  String status;
+  bool isLive = false;
+};
+
+/// The scoreboard: up to four games of one competition on screen together, for
+/// one dwell, instead of a quarter of the league at a time.
+///
+/// <para>SPORTS_CARDS_V2_GENERIC_DESIGN.md section 12 is the layout, written
+/// before this was. Four rows of 38 pixels between the heading and the clock,
+/// nothing past y=220, and the five fields of a row at fixed x positions.</para>
+///
+/// <para><b>The same heading as the single-game card</b>, so the two read as one
+/// family - sport chip left, competition right, both optional and both absent
+/// rather than substituted when the server says nothing.</para>
+///
+/// <para>More than four rows cannot arrive: Sports.h stores four and the server
+/// caps at four. Anything beyond is dropped with a log line rather than drawn
+/// over the clock.</para>
+void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ageText,
+                     const String& sportLabel = "", const String& competitionLabel = "");
+
 /// The ISS flyover card: distance and compass direction to the International
 /// Space Station's current sub-satellite point, plus a one-line detail
 /// giving the actual coordinates - same two-stat-rows-plus-detail layout as

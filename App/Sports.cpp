@@ -184,7 +184,21 @@ String staleAgeText(const CardSlot& slot) {
   return age;
 }
 
+/// Whether this registration draws the whole league at once rather than one
+/// game per dwell. The scoreboard does; the team cards and the live card follow
+/// one thing each and keep the single-game renderer.
+bool isBoard(uint8_t index) {
+  return strcmp(kCardIds[index], "sportsscores") == 0;
+}
+
 uint16_t itemCountFor(uint8_t index) {
+  // ONE SLOT FOR THE BOARD, not one per game. The rotation asks how many items
+  // a card has and gives it that many dwells; a board showing four games in one
+  // frame wants one, or the same four games would be drawn four times over.
+  if (isBoard(index)) {
+    return gCards[index].count > 0 ? 1 : 0;
+  }
+
   return gCards[index].count;
 }
 
@@ -195,6 +209,36 @@ uint16_t itemCountFor(uint8_t index) {
 void drawCardAt(uint8_t index, uint16_t itemIndex) {
   const CardSlot& slot = gCards[index];
   if (slot.count == 0) { return; }
+
+  // The scoreboard draws every game it holds in one frame. Built here rather
+  // than in Display so the renderer takes strings and knows nothing about
+  // Sports::Game, which is what keeps it usable by anything else that wants a
+  // table of two-sided results.
+  if (isBoard(index)) {
+    Display::SportsBoardRow rows[kMaxGames];
+
+    for (uint8_t i = 0; i < slot.count && i < kMaxGames; ++i) {
+      const Game& g = slot.games[i];
+
+      rows[i].awayName = g.away;
+      rows[i].awayScore = scoreText(g.awayScore);
+      rows[i].homeName = g.home;
+      rows[i].homeScore = scoreText(g.homeScore);
+      rows[i].isLive = g.state == State::Live;
+
+      // The period while a game is on, the state word otherwise. Both come
+      // from the server; nothing here interprets either.
+      rows[i].status = rows[i].isLive && g.period[0] != '\0' ? String(g.period) : stateText(g);
+    }
+
+    Log::verbose("[sports] board on screen: card=%s games=%u", kCardIds[index],
+                 static_cast<unsigned>(slot.count));
+
+    Display::showSportsBoard(rows, slot.count, staleAgeText(slot),
+                             sportChipLabel(slot.sport), slot.competition);
+    return;
+  }
+
   if (itemIndex >= slot.count) { itemIndex = 0; }
 
   const Game& game = slot.games[itemIndex];

@@ -2681,6 +2681,117 @@ void showSportsCard(const String& homeName, const String& homeScore, const Strin
   restoreDefaultFont();
 }
 
+void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ageText,
+                     const String& sportLabel, const String& competitionLabel) {
+  // The same two palettes the single-game card uses, so the two read as one
+  // family rather than as two cards that happen to be about sport.
+  const SportPalette day{
+      0xEEF4FBu, 0xFFFFFFu, 0xF4F8FCu, 0xE8F0F8u, 0xD4E2EEu,
+      0xCFE0F0u, 0x0D2B45u, 0x0D2B45u, 0x5B7490u, 0x0D2B45u, 0x0D2B45u,
+      0xD81E3Fu, 0xFFFFFFu};
+  const SportPalette night{
+      0x0A1626u, 0x15273Du, 0x112033u, 0x1B3048u, 0x27425Fu,
+      0x24405Eu, 0xDCEAF6u, 0xF2F8FDu, 0x8AA4BEu, 0xFFFFFFu, 0xFFFFFFu,
+      0xD81E3Fu, 0xFFFFFFu};
+
+  const SportPalette& sport = gIsDaytime ? day : night;
+
+  fillVerticalGradient(0, kScreenH, sport.cardTop, sport.cardBottom);
+
+  // THE HEADING IS THE SINGLE-GAME CARD'S HEADING, placed identically. Both
+  // halves optional, both absent rather than substituted - a server that has
+  // not been taught to send a sport draws no chip.
+  if (sportLabel.length() > 0) {
+    drawSportsPill(kCardMargin, 10, sportLabel, sport.chip, sport.chipInk, "board.sport");
+  }
+
+  if (competitionLabel.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    layoutLine(competitionLabel, kScreenW - kCardMargin, 13, 150, sport.muted,
+               "board.competition", Align::Right, kTransparentText);
+  }
+
+  // Four rows of 38 between the heading and the clock. More than four cannot
+  // arrive - Sports.h stores four and the server caps at four - and a fifth
+  // would be drawn over the clock, so it is dropped and said out loud.
+  // THE AGE AND CLOCK LINES ARE THE SINGLE-GAME CARD'S, AT 188 AND 204, and the
+  // rows are sized to end above them rather than the other way round. Those two
+  // numbers are proven against the content budget on a card that has been on
+  // hardware; moving them to buy a taller row would be inventing headroom that
+  // layoutText() only reports after the fact, which is how the sun and moon
+  // cards overran y=220 on every draw for eleven hours.
+  constexpr uint8_t kMaxRows = 4;
+  constexpr int kRowTop = 44;
+  constexpr int kRowHeight = 35;
+
+  if (count > kMaxRows) {
+    Log::printf("[sports] board sent %u games, drawing %u", static_cast<unsigned>(count),
+                static_cast<unsigned>(kMaxRows));
+    count = kMaxRows;
+  }
+
+  for (uint8_t i = 0; i < count; ++i) {
+    const SportsBoardRow& row = rows[i];
+    const int top = kRowTop + i * kRowHeight;
+
+    lcd.fillRoundRect(kCardMargin, top, kScreenW - kCardMargin * 2, kRowHeight - 4, 8,
+                      to565(sport.panel));
+
+    const int text = top + 9;
+
+    // AWAY FIRST, HOME SECOND, which is how a scoreline is read aloud and what
+    // the single-game card does. The two score columns stay empty before a game
+    // starts: the state rules forbid a fabricated 0-0, and the status column
+    // carries the start time instead.
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    layoutLine(row.awayName, kCardMargin + 4, text, 86, sport.name,
+               "board.away", Align::Left, kTransparentText);
+    layoutLine(row.homeName, kCardMargin + 126, text, 86, sport.name,
+               "board.home", Align::Left, kTransparentText);
+
+    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    layoutLine(row.awayScore, kCardMargin + 116, text - 2, 26, sport.score,
+               "board.away.score", Align::Right, kTransparentText);
+    layoutLine(row.homeScore, kCardMargin + 238, text - 2, 26, sport.score,
+               "board.home.score", Align::Right, kTransparentText);
+
+    // The state, in the live colour only when the server says the game is on.
+    // Everything else - a start time, a period, FINAL - is muted, so the one
+    // row somebody should look at is the one that catches the eye.
+    if (row.status.length() > 0) {
+      lcd.setFont(&fonts::FreeSansBold9pt7b);
+      layoutLine(row.status, kScreenW - kCardMargin - 4, text, 56,
+                 row.isLive ? sport.liveFill : sport.muted,
+                 "board.status", Align::Right, kTransparentText);
+    }
+  }
+
+  if (count == 0) {
+    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    layoutLine("No games today", kScreenW / 2, 110, kScreenW - kCardMargin * 2, sport.muted,
+               "board.empty", Align::Centre, kTransparentText);
+  }
+
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+
+  if (ageText.length() > 0) {
+    layoutLine(ageText, kCardMargin, 188, 200, sport.muted, "board.age",
+               Align::Left, kTransparentText);
+  }
+
+  // Its own clock rather than drawClock(), for the reason the single-game card
+  // gives: drawClock paints an opaque bg() box, which on a full-bleed card is a
+  // rectangle of the wrong colour.
+  const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
+  struct tm localTm;
+  gmtime_r(&localNow, &localTm);
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW / 2, 204,
+             kScreenW - kCardMargin * 2, sport.muted, "board.clock", Align::Centre,
+             kTransparentText);
+
+  restoreDefaultFont();
+}
+
 void showIssFlyoverCard(const String& distanceText, const String& directionText,
                         const String& detail) {
   lcd.fillScreen(bg());
