@@ -88,6 +88,19 @@ enum class RestartCause : uint32_t {
   /// again, and "CAL updated itself" is the one sentence that explains all of
   /// them to somebody reading a reboot heatmap.
   CalSelfInstall = 9,
+  /// App: an admin changed which way round this display is mounted. Every
+  /// layout in the App's Display.cpp reads its viewport at begin(), so a new
+  /// orientation is applied by coming up again rather than by re-laying out
+  /// the card on screen.
+  ///
+  /// CAL never writes this one. It is here because the number is the wire
+  /// format between the two binaries - the App writes it to NVS before
+  /// restarting and reads it back on the next boot, with a CAL boot in
+  /// between - and ci/build-firmware.sh refuses a build where the two enums
+  /// disagree. That gate is what caught it: the App gained the value on
+  /// 2026-10-11 and CAL did not, and every build for the rest of that day
+  /// stopped here before compiling anything.
+  OrientationChanged = 10,
 };
 
 /// Records what this restart is FOR, unless something has already recorded a
