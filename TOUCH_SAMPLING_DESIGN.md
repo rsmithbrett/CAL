@@ -193,3 +193,41 @@ free:
 Both have the same cause: the pins this board's display and touch use are in
 LovyanGFX's board table, not in this repository. Any future claim that a pin is
 free has to be checked there.
+
+## The static version, costed and with its one trap named
+
+Written 2026-10-11, before the code, because the measurement this document called for can
+be made without running anything and the hazard cannot be found by reading the obvious
+header.
+
+**The cost is about 4.3KB of .bss.** A 4,096-byte stack, a `StaticTask_t` of roughly 100
+bytes, four 12-byte samples of queue storage and a `StaticQueue_t` of roughly 80. Globals
+were measured at 95,380 of 327,680 on the 2026-10-11 build, so this takes them from 29% to
+about 30%. Against that: no heap allocation at all, and therefore no block split, which is
+the entire reason the first attempt took three displays down.
+
+**THE TRAP, and it is not visible in `task.h`.** ESP-IDF's
+`xTaskCreateStaticPinnedToCore` documents its stack parameter as
+
+> The size of the task stack specified as the NUMBER OF BYTES. Note that this differs from
+> vanilla FreeRTOS.
+
+while the buffer beside it "must point to a StackType_t array that has at least
+ulStackDepth indexes". Bytes in one parameter, indexes in the other. Those are the same
+number here only because `portSTACK_TYPE` is `uint8_t` on Xtensa - confirmed in
+`FreeRTOS-Kernel/portable/xtensa/include/freertos/portmacro.h`. On any port where
+`StackType_t` is 32-bit, `StackType_t stack[4096]` with `ulStackDepth = 4096` hands the
+task four times the memory it was told it has, and the overrun is silent until something
+deep runs on it.
+
+So: `StackType_t gStack[kTaskStackBytes]`, and `ulStackDepth = kTaskStackBytes`. Both the
+same constant, with a comment saying why that is correct rather than a coincidence.
+
+**The queue allocates too, and the first version missed it.** `xQueueCreate` is a second
+heap allocation beside the task's. `xQueueCreateStatic` takes a storage array and a
+`StaticQueue_t`, both of which belong in .bss with the stack.
+
+**What has not changed** is the rule this document already states: piloted on one display
+for a full day before any other device gets it, and not merged to main before that pilot,
+because a release cut from main carries it to the fleet whether or not anybody meant it to.
+That is how the first attempt shipped.
