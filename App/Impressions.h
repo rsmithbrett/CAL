@@ -42,6 +42,16 @@ constexpr uint8_t kMaxSummary = 200;
 /// The longest content key carried.
 constexpr uint8_t kMaxContentKey = 64;
 
+/// "AA:BB:CC:DD:EE:FF:" and a counter - 28 characters at the widest the counter
+/// ever gets, so this has room and a terminator.
+constexpr uint8_t kMaxInstanceId = 40;
+
+/// A policy entry's id. The longest this firmware registers is "sportsscores".
+constexpr uint8_t kMaxEntryCardId = 32;
+
+/// ISO 8601 UTC, "2026-10-11T18:15:00Z", twenty characters.
+constexpr uint8_t kMaxShownAt = 24;
+
 /// How a showing came up.
 enum class Arrival : uint8_t {
   /// The dwell timer advanced to it.
@@ -53,25 +63,37 @@ enum class Arrival : uint8_t {
 };
 
 /// One finished showing, in the shape the check-in sends.
+///
+/// <para>FIXED BUFFERS, NOT Strings, and the forty-eight of these are a .bss
+/// array. Five Strings a row across forty-eight rows is up to two hundred and
+/// forty heap allocations held between check-ins, on a board whose largest
+/// contiguous block decides whether it can open a TLS session at all. The same
+/// reasoning Sports::Game and Display::SportsBoardRow already follow - see
+/// SPORTS_CARDS_V2_GENERIC_DESIGN.md section 13 and the 2026-10-11 incident
+/// that produced it.</para>
+///
+/// <para>It costs roughly 14KB more .bss than the String version, which is the
+/// trade this board wants: static memory is allocated once at link time and
+/// cannot fragment, and fragmentation is what actually took the fleet down.</para>
 struct Entry {
   /// Device-local and unique, "<mac>:<counter>". The server deduplicates on
   /// it, which is what makes a retried check-in safe.
-  String instanceId;
+  char instanceId[kMaxInstanceId + 1];
 
   /// The policy entry's own id, as this firmware knows it.
-  String cardId;
+  char cardId[kMaxEntryCardId + 1];
 
   /// Which listing or item was on the glass. Empty for a card that is its own
   /// content, such as a clock.
-  String contentKey;
+  char contentKey[kMaxContentKey + 1];
 
   /// What the card was showing, one line, as the device composed it then.
-  String summary;
+  char summary[kMaxSummary + 1];
 
   /// When it came up, ISO 8601 UTC by this device's clock. A display that has
   /// not reached NTP is wrong here, which the server knows: it stamps its own
   /// arrival time and every report reads that one.
-  String shownAtUtc;
+  char shownAtUtc[kMaxShownAt + 1];
 
   /// How long it stayed up.
   uint32_t dwellMs;

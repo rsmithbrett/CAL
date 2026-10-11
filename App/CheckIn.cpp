@@ -132,12 +132,12 @@ void addImpressions(JsonDocument& requestDoc) {
 
     // A flat object of strings. The server composes its own document from what
     // arrives, so a key this device leaves out is simply absent there.
-    if (drawn.contentKey.length() > 0 || drawn.summary.length() > 0) {
+    if (drawn.contentKey[0] != '\0' || drawn.summary[0] != '\0') {
       JsonObject attributes = entry["attributes"].to<JsonObject>();
-      if (drawn.contentKey.length() > 0) {
+      if (drawn.contentKey[0] != '\0') {
         attributes["contentKey"] = drawn.contentKey;
       }
-      if (drawn.summary.length() > 0) {
+      if (drawn.summary[0] != '\0') {
         attributes["summary"] = drawn.summary;
       }
     }

@@ -50,6 +50,16 @@ bool gPresent = false;
 uint32_t gPresentSinceMs = 0;
 uint32_t gSeenMs = 0;
 
+/// Copies into a fixed destination and terminates by hand. strncpy writes no
+/// terminator when the source fills the buffer, and a summary arrives from a
+/// card that composed it rather than from anything bounded here - so a long one
+/// is cut rather than allowed to run into the next field of the row.
+void copyInto(char* destination, size_t capacity, const char* source) {
+  if (destination == nullptr || capacity == 0) { return; }
+  strncpy(destination, source != nullptr ? source : "", capacity - 1);
+  destination[capacity - 1] = '\0';
+}
+
 String reserveInstanceId() {
   if (gIdsLeftInBlock == 0) {
     Preferences prefs;
@@ -145,18 +155,22 @@ void closeShowing(uint32_t nowMs) {
   }
 
   Entry& entry = gEntries[gCount++];
-  entry.instanceId = reserveInstanceId();
-  entry.cardId = gCardId;
-  entry.contentKey = gContentKey;
-  entry.summary = gSummary;
-  entry.shownAtUtc = gShownAtUtc;
+
+  // Copied into the row's own buffers and terminated by hand, because strncpy
+  // writes no terminator when the source fills the destination. The same shape
+  // Sports.cpp's copyInto() uses on the same board for the same reason.
+  copyInto(entry.instanceId, sizeof(entry.instanceId), reserveInstanceId().c_str());
+  copyInto(entry.cardId, sizeof(entry.cardId), gCardId.c_str());
+  copyInto(entry.contentKey, sizeof(entry.contentKey), gContentKey.c_str());
+  copyInto(entry.summary, sizeof(entry.summary), gSummary.c_str());
+  copyInto(entry.shownAtUtc, sizeof(entry.shownAtUtc), gShownAtUtc.c_str());
   entry.dwellMs = dwellMs;
   entry.seenMs = seenMs;
   entry.fromShuffle = gArrival == Arrival::Shuffle;
   entry.wasSought = gSought;
 
   Log::verbose("[impressions] '%s' for %lums, %lums with somebody there%s",
-               entry.cardId.c_str(), static_cast<unsigned long>(dwellMs),
+               entry.cardId, static_cast<unsigned long>(dwellMs),
                static_cast<unsigned long>(seenMs), entry.wasSought ? ", sought" : "");
 }
 
