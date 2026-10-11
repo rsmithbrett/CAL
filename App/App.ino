@@ -2226,6 +2226,24 @@ void performCheckIn() {
 
 }  // namespace
 
+/// One rung of the boot heap ladder, logged by name.
+///
+/// The ratchet already buckets the whole of setup() as Boot, and on the three
+/// displays with an SD card that bucket comes back around 50,000 bytes while
+/// the two without report nothing at all. One number for the whole of boot
+/// cannot say which step took it, and the step that took it is the only thing
+/// worth knowing: 110,580 bytes at the top of setup() minus roughly 50,000 here
+/// and roughly 52,000 for a TLS session leaves under 9,000, which is half of
+/// the 16,717 one mbedTLS record buffer needs. That is why those three displays
+/// answer every card that fetches with "cannot reach".
+///
+/// A line per milestone rather than a smarter instrument, because the question
+/// is "which of nine calls" and nine numbers answer it outright.
+void noteBootHeap(const char* step) {
+  Log::printf("[boot] %s: largest contiguous 8-bit block %lu", step,
+              static_cast<unsigned long>(Http::largestContiguousBytes()));
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -2285,6 +2303,9 @@ void setup() {
   // rather than to Idle, which is the whole reason Scope restores instead of
   // resetting.
   const HeapRatchet::Scope bootScope(HeapRatchet::Phase::Boot, "setup");
+
+  // The top of the ladder. Every rung below is read against this one.
+  noteBootHeap("boot.start");
 
   // If the previous restart was this device restarting itself for
   // unreachability, start the backoff clock already running rather than at
@@ -2357,16 +2378,28 @@ void setup() {
   // check-in and a display that cannot reach the server still has to come up
   // the right way round. performCheckIn() stores whatever the server resolves;
   // this reads back what it stored last time, and landscape until it ever did.
-  Display::begin(Display::storedOrientation());
+  {
+    const HeapRatchet::Scope step(HeapRatchet::Phase::Boot, "boot.display");
+    Display::begin(Display::storedOrientation());
+    noteBootHeap("boot.display");
+  }
 
   // After Display::begin(), because Motion drives brightness THROUGH the display
   // layer rather than owning GPIO21 itself - LovyanGFX already claims that pin.
-  Motion::begin();
+  {
+    const HeapRatchet::Scope step(HeapRatchet::Phase::Boot, "boot.motion");
+    Motion::begin();
+    noteBootHeap("boot.motion");
+  }
 
   // Reads the persisted instance counter, before anything can draw a card and
   // begin a showing. No flash write here: the first showing reserves a block
   // of ids, so a device that never draws one never writes at all.
-  Impressions::begin();
+  {
+    const HeapRatchet::Scope step(HeapRatchet::Phase::Boot, "boot.impressions");
+    Impressions::begin();
+    noteBootHeap("boot.impressions");
+  }
 
   // Drawn on every boot, quiet ones included, and deliberately BEFORE
   // decideBootNarration() exists to suppress anything. See the "What a boot is
@@ -2380,7 +2413,11 @@ void setup() {
   // decideBootNarration() below reads Identity::consecutiveSelfRestarts(), so
   // prefs.begin() has to have happened by then. Anything that moves this line
   // later has to move that decision later too.
-  Identity::begin();
+  {
+    const HeapRatchet::Scope step(HeapRatchet::Phase::Boot, "boot.identity");
+    Identity::begin();
+    noteBootHeap("boot.identity");
+  }
 
   // Storage and the boot splash come up HERE - before Http/WiFi/TLS - and the
   // ordering is the whole fix, not a cosmetic preference.
@@ -2420,8 +2457,16 @@ void setup() {
   // during setup() - showBootSplash() only reads - and every real cache write
   // happens on check-in, long after the clock is set, so that property is
   // unaffected.
-  Sd::begin();
-  Assets::begin();
+  {
+    const HeapRatchet::Scope step(HeapRatchet::Phase::Boot, "boot.sd");
+    Sd::begin();
+    noteBootHeap("boot.sd");
+  }
+  {
+    const HeapRatchet::Scope step(HeapRatchet::Phase::Boot, "boot.assets");
+    Assets::begin();
+    noteBootHeap("boot.assets");
+  }
 
   // Whether the logo actually reached the screen. When it did, every status
   // screen for the rest of this boot is skipped so it stays up for the whole of
@@ -2447,7 +2492,12 @@ void setup() {
   // WiFi retries is a worse boot than a plain status line. Failure screens (see
   // ensureWifiConnected) are never suppressed on any path: a household that
   // needs to hold BOOT to fix its WiFi has to be told so.
-  const bool splashOnScreen = Assets::showBootSplash();
+  bool splashOnScreen = false;
+  {
+    const HeapRatchet::Scope step(HeapRatchet::Phase::Boot, "boot.splash");
+    splashOnScreen = Assets::showBootSplash();
+    noteBootHeap("boot.splash");
+  }
   if (splashOnScreen) {
     // Read only by holdSplash() at the bottom of setup(), which is what stops
     // the first card replacing the logo before anyone has seen it.
@@ -2470,9 +2520,17 @@ void setup() {
   // order than to work out whether ADC setup and WiFi bring-up interact. They
   // do not - GPIO34/35 are both ADC1, and it is ADC2 that WiFi makes unusable
   // (which is why GPIO27 is not probed at all; see PowerProbe.h).
-  PowerProbe::begin();
+  {
+    const HeapRatchet::Scope step(HeapRatchet::Phase::Boot, "boot.powerprobe");
+    PowerProbe::begin();
+    noteBootHeap("boot.powerprobe");
+  }
 
-  Http::begin();
+  {
+    const HeapRatchet::Scope step(HeapRatchet::Phase::Boot, "boot.http");
+    Http::begin();
+    noteBootHeap("boot.http");
+  }
 
   // Seeded from NVS before WiFi, time sync, or the first check-in - all of
   // which can take a while, or fail and retry, on a device that just powered
