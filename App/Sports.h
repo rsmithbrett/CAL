@@ -70,6 +70,17 @@ static constexpr uint8_t kMaxTeamNameLength = 20;
 /// text, passed through unparsed by the server and undrawn-upon here.
 static constexpr uint8_t kMaxPeriodLength = 8;
 
+/// Longest sport token stored. The server sends API-Sports' own slugs, and
+/// "american-football" at 17 is the longest of the five. Stored as the slug and
+/// turned into a chip label when it is drawn, so the wire stays a token and a
+/// sixth sport costs no new field.
+static constexpr uint8_t kMaxSportLength = 17;
+
+/// Longest competition name stored, matching the cap the server applies before
+/// sending (CheckInGatewayService.MaxCompetitionLabelLength). 24 clears "UEFA
+/// Champions League" at 21.
+static constexpr uint8_t kMaxCompetitionLength = 24;
+
 /// Games stored per card. Matches the server's own cap; see the class remarks.
 static constexpr uint8_t kMaxGames = 4;
 
@@ -141,7 +152,28 @@ struct Game {
 /// ONE TIMESTAMP PER CARD, not per game, also from section 8: the question a
 /// reader has is whether the screen in front of them is current, not which of
 /// four fixtures refreshed most recently.
-void setGames(const char* cardId, const Game* games, uint8_t count, time_t staleSinceUtc);
+/// `sport` is API-Sports' slug for the sport this card follows - "basketball",
+/// "american-football" - and `competition` is the league's own display name,
+/// "NFL" or "UEFA Champions League". Both are card-level for the same reason
+/// the timestamp is: a card follows one league, and the question a reader has
+/// is what they are looking at rather than which fixture carries which name.
+///
+/// Both default to empty, which is what a server predating SportsCardPayload's
+/// `sport` and `competition` fields (added 2026-10-09) sends. Empty draws no
+/// chip and no competition line rather than a placeholder, so the card renders
+/// exactly as it did before those fields existed.
+void setGames(const char* cardId, const Game* games, uint8_t count, time_t staleSinceUtc,
+              const char* sport = "", const char* competition = "");
+
+/// The chip text for a sport slug: "FOOTBALL" for american-football, "SOCCER"
+/// for football, and the slug upper-cased for the other three. An unrecognised
+/// slug returns empty, so a sport this firmware has never heard of draws no
+/// chip instead of a lowercase hyphenated one.
+///
+/// The two football codes are the whole reason this mapping exists. API-Sports
+/// calls soccer "football", and a chip reading FOOTBALL over a soccer score is
+/// the one labelling mistake a viewer here would actually act on.
+String sportChipLabel(const char* sport);
 
 /// Drop everything. Called when a check-in reports no sports content at all, so
 /// yesterday's fixtures cannot linger on screen past their day.

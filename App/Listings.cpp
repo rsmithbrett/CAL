@@ -787,7 +787,25 @@ String cardListingId(uint16_t itemIndex) {
     return String();
   }
 
-  return gLast.listings[itemIndex].compassPid;
+  const ListingInfo& listing = gLast.listings[itemIndex];
+
+  if (listing.compassPid.length() > 0) {
+    return listing.compassPid;
+  }
+
+  // THE MLS NUMBER WHEN THERE IS NO PID, because a listing that is not on
+  // Compass still has an identity and 103 draws of one arrived with no way to
+  // say which property they were. The pid is resolved server-side by MLS
+  // lookup and comes back empty for a listing Compass does not carry - 222
+  // Spring Box Ln, Lake Ariel is the live example, and that empty value is
+  // correct rather than a failed parse.
+  //
+  // Safe to mix the two in one field: a pid is digits only (the server refuses
+  // anything else) and an MLS number here carries a letter or a dash, so the
+  // two cannot collide on the same property. The server already reads either
+  // as a content key - see CardImpressionRollup.ContentKeyNames, which names
+  // compassPid and mlsNumber side by side.
+  return listing.mlsNumber;
 }
 
 String cardDescribe(uint16_t itemIndex) {

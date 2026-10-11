@@ -569,6 +569,14 @@ Result perform() {
     return result;
   }
 
+  // Nothing else opens a TLS session while this one is up. The log stream is
+  // the only thing that would, and two sessions each wanting a contiguous
+  // record buffer is a memory event on this board even where either alone
+  // would have been affordable. Released by whichever of this function's
+  // several exits it takes - see Log::UploadSuppression for why that is a
+  // guard rather than a pair of calls.
+  Log::UploadSuppression noOverlappingSession;
+
   const String url = String("https://") + Config::kServiceHost + kPath;
   if (!Http::beginRequest(url)) {
     Log::line("[checkin] could not begin request, skipping this check-in");
@@ -579,6 +587,26 @@ Result perform() {
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
   http.addHeader("Content-Type", "application/json");
 
+  // THE REQUEST IS SCOPED SO IT IS GONE BEFORE THE RESPONSE IS PARSED, and that
+  // brace is the point of this block rather than tidiness.
+  //
+  // Three things used to be alive at deserializeJson() below: this document's
+  // node tree, the serialized copy of it in `body`, and responseDoc growing as
+  // it read. The first two are finished the moment POST returns and were being
+  // held through the one allocation on this device that cannot afford a
+  // neighbour.
+  //
+  // What that costs is measured, not assumed. Averaged over three hours of
+  // device_telemetry_history on 2026-10-09, the check-in phase spent 48,687,
+  // 53,817 and 54,749 bytes on the three live displays while fetch, draw and
+  // idle spent hundreds or nothing. All three were below
+  // Http::kTlsRecordBufferBytes - 16,717 bytes CONTIGUOUS for one TLS record
+  // buffer - against 110,580 at boot, and a device under that floor cannot open
+  // a session, so Http::canOpenNewSession() fails and the device restarts to
+  // reclaim heap. That is SOFTWARE_RESET+UNREACHABLE, which reads like a
+  // network fault and is a heap figure.
+  int status;
+  {
   JsonDocument requestDoc;
   requestDoc["deviceUtcTimestamp"] = nowAsIso8601Utc();
   requestDoc["firmwareVersion"] = Identity::installedAppVersion();
@@ -679,7 +707,9 @@ Result perform() {
   // return.
   Log::verbose("[checkin] POST %s body=%s", url.c_str(), body.c_str());
 
-  const int status = http.POST(body);
+  status = http.POST(body);
+  }  // requestDoc and body released here, before responseDoc exists.
+
   Log::verbose("[checkin] response status=%d", status);
   if (status == 401) {
     result.secretRejected = true;
@@ -841,6 +871,7 @@ Result perform() {
   // degrade to today's behaviour rather than to a reboot loop.
   result.calUpdateAvailable = responseDoc["calUpdateAvailable"] | false;
   result.debugStreamRequested = responseDoc["debugStreamRequested"] | false;
+  result.tlsReconnectProbeRequested = responseDoc["tlsReconnectProbeRequested"] | false;
   result.sdReformatRequested = responseDoc["sdReformatRequested"] | false;
   // An ISO-8601 instant on the wire, converted to an epoch second here so the
   // watchdog compares two integers rather than parsing a string on every health
@@ -940,6 +971,18 @@ Result perform() {
         // CARD_ABSENCE_AND_AGE_DESIGN.md section 8.
         const time_t staleSinceUtc = parseIso8601Utc(card["staleSinceUtc"] | "");
 
+        // WHAT THIS CARD IS SHOWING - the sport as API-Sports' own slug, and the
+        // league's display name. Card-level, like the timestamp above and for the
+        // same reason given there.
+        //
+        // `| ""` covers all three of absent, null and a non-string, so a server
+        // predating SportsCardPayload.Sport and .Competition (added 2026-10-09)
+        // produces two empty strings and a card that draws exactly as it did
+        // before the fields existed. That is what makes them additive against the
+        // closed compatibility gate.
+        const char* sport = card["sport"] | "";
+        const char* competition = card["competition"] | "";
+
         Sports::Game games[Sports::kMaxGames];
         uint8_t count = 0;
 
@@ -984,7 +1027,7 @@ Result perform() {
           ++count;
         }
 
-        Sports::setGames(cardId, games, count, staleSinceUtc);
+        Sports::setGames(cardId, games, count, staleSinceUtc, sport, competition);
       }
     }
   }

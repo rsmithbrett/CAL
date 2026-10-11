@@ -15,6 +15,7 @@
 // and are gated identically - there is no separate per-format JPEG switch to
 // find, and nothing to do here beyond what this include already does.
 #include <SD.h>
+#include <cmath>
 #include <cstdlib>
 // strlen/strncat, for layoutText()'s fixed line buffer. Named explicitly rather
 // than leaned on through whatever Arduino.h happens to drag in, because the
@@ -423,6 +424,22 @@ void drawClock() {
 // share the `background` parameter rather than needing a separate bool flag.
 constexpr uint32_t kUseCardBackground = 0xFFFFFFFFu;
 
+// kTransparentText draws glyphs with NO background fill, for a card whose
+// artwork is not one flat colour.
+//
+// The opaque default is right everywhere the card IS bg(), and wrong wherever
+// it is not. On the sun card the near ridgeline is a curve, so at any given y
+// some columns are ridge and some are sky - a text box painted in one flat
+// colour covers the other with a visible rectangle, which is what "the text on
+// sunrise is a block surrounding it" is. No single background value can be
+// correct over a gradient or a silhouette, so the only honest option is not to
+// paint one.
+//
+// Safe only where the card redraws its whole background first, which both the
+// sun and moon cards do: transparent glyphs do not erase what was underneath
+// them, so drawing over stale pixels would smear.
+constexpr uint32_t kTransparentText = 0xFFFFFFFEu;
+
 enum class Align : uint8_t { Left, Centre, Right };
 
 /// The region of panel a card is willing to spend on a string, and how many
@@ -520,7 +537,11 @@ TextResult layoutText(const char* text, const TextBox& box, uint32_t colour, con
     return result;
   }
 
-  lcd.setTextColor(colour, background == kUseCardBackground ? bg() : background);
+  if (background == kTransparentText) {
+    lcd.setTextColor(colour);
+  } else {
+    lcd.setTextColor(colour, background == kUseCardBackground ? bg() : background);
+  }
   switch (box.align) {
     case Align::Centre: lcd.setTextDatum(top_center); break;
     case Align::Right:  lcd.setTextDatum(top_right);  break;
@@ -968,6 +989,143 @@ void drawCloudShape(int cx, int cy, int radius, uint32_t colour) {
 // that might not be there" reasoning as this file's own compassDirection()
 // 8-point table and drawTemperature()'s hand-drawn degree ring, just applied
 // to trig instead of locale/glyph support.
+/// One channel of a linear blend between two 24-bit colours.
+uint8_t mixChannel(uint32_t from, uint32_t to, int shift, int numerator, int denominator) {
+  const int a = static_cast<int>((from >> shift) & 0xFFu);
+  const int b = static_cast<int>((to >> shift) & 0xFFu);
+  return static_cast<uint8_t>(a + (((b - a) * numerator) / (denominator <= 0 ? 1 : denominator)));
+}
+
+uint32_t mixColour(uint32_t from, uint32_t to, int numerator, int denominator) {
+  return (static_cast<uint32_t>(mixChannel(from, to, 16, numerator, denominator)) << 16)
+       | (static_cast<uint32_t>(mixChannel(from, to, 8, numerator, denominator)) << 8)
+       | static_cast<uint32_t>(mixChannel(from, to, 0, numerator, denominator));
+}
+
+/// A vertical gradient, one horizontal line per row.
+///
+/// Row by row rather than through a sprite because this board has no PSRAM: a
+/// full-screen 16-bit sprite is 153,600 bytes, and the largest contiguous block
+/// these devices report is a fraction of that even when healthy. 240 HLine
+/// calls cost nothing worth measuring on a card that redraws every twelve
+/// seconds, and they allocate nothing at all - which on this fleet is the
+/// property that matters.
+/// Eight-row bands, not one line per row.
+///
+/// A per-row version held the loop up. 240 HLine calls for the sky plus 640
+/// VLine calls for the ridges put this card's draw at roughly 900 SPI
+/// operations, and the loop logged iterations of 250 ms to 2.2 s around it.
+/// Touch keeps being sampled throughout, on its own task and its own bus (see
+/// TOUCH_SAMPLING_DESIGN.md), but a tap taken during a draw this long still
+/// waits for the draw to finish before the card moves.
+///
+/// Eight rows per band is 30 fillRects for the same sky. On a gradient this
+/// shallow - a few units of each channel across the whole span - the banding is
+/// not visible at arm's length.
+/// The 16-bit value this panel will actually store for a 24-bit colour.
+///
+/// THE PANEL IS RGB565: 32 levels of red, 64 of green, 32 of blue. A gradient
+/// computed in 24-bit and handed over is truncated to that, so a span of a few
+/// dozen 24-bit steps becomes a handful of distinct colours and the eye reads
+/// the result as stripes. Knowing the stored value is what lets the band
+/// boundaries land where the colour genuinely changes.
+uint16_t to565(uint32_t colour) {
+  return static_cast<uint16_t>(
+      (((colour >> 16) & 0xF8u) << 8) | (((colour >> 8) & 0xFCu) << 3) | ((colour & 0xF8u) >> 3));
+}
+
+/// A vertical gradient banded by COLOUR CHANGE rather than by a fixed number of
+/// rows.
+///
+/// Fixed 8-row bands were worse than either alternative: they added visible
+/// steps that did not fall where the colour actually changed, so a gradient the
+/// panel could have rendered in 20 smooth steps came out in 30 arbitrary ones.
+///
+/// Walking the rows and emitting a rect only when the stored 565 value differs
+/// gives the smoothest result this panel can produce AND the fewest operations
+/// to produce it - typically 15 to 30 rects for a full screen, against the 240
+/// drawFastHLine calls the first version used. That matters here beyond
+/// appearance: the panel shares its SPI bus with the touch controller, and
+/// every operation on it is time the glass is not being read.
+void fillVerticalGradient(int top, int height, uint32_t from, uint32_t to) {
+  if (height <= 0) {
+    return;
+  }
+
+  int bandStart = 0;
+  uint32_t bandColour = mixColour(from, to, 0, height - 1);
+  uint16_t bandStored = to565(bandColour);
+
+  for (int row = 1; row < height; ++row) {
+    const uint32_t colour = mixColour(from, to, row, height - 1);
+    const uint16_t stored = to565(colour);
+    if (stored == bandStored) {
+      continue;
+    }
+
+    lcd.fillRect(0, top + bandStart, kScreenW, row - bandStart, bandColour);
+    bandStart = row;
+    bandColour = colour;
+    bandStored = stored;
+  }
+
+  lcd.fillRect(0, top + bandStart, kScreenW, height - bandStart, bandColour);
+}
+
+/// A three-stop vertical sky, which is what both designs use: the middle stop
+/// is where a sky changes character, and a straight two-stop blend across the
+/// same span washes that out.
+void fillSkyGradient(uint32_t top, uint32_t middle, uint32_t bottom, int middleAtY) {
+  fillVerticalGradient(0, middleAtY, top, middle);
+  fillVerticalGradient(middleAtY, kScreenH - middleAtY, middle, bottom);
+}
+
+/// Fills beneath a quadratic Bezier, from the curve down to the bottom of the
+/// screen - the hill silhouettes in the sun design, which are quadratic paths.
+///
+/// Evaluated per column rather than flattened to a polygon: one vertical line
+/// per x needs no vertex buffer and cannot leave the seams a coarse flattening
+/// shows on a curve this shallow.
+/// Four-pixel columns, for the reason the gradient uses bands: one fillRect per
+/// four columns is 80 operations per ridge instead of 320, and a ridgeline this
+/// shallow moves less than a pixel across four columns for most of its span.
+constexpr int kRidgeColumnWidth = 2;
+
+void fillUnderQuadratic(int x0, int y0, int cx, int cy, int x1, int y1, uint32_t colour) {
+  (void)cx;
+  if (x1 <= x0) {
+    return;
+  }
+
+  for (int x = x0; x <= x1 && x < kScreenW; x += kRidgeColumnWidth) {
+    if (x < 0) {
+      continue;
+    }
+
+    // t taken from the x span rather than solved from the curve. These control
+    // points are near-evenly spaced in x, so the two agree within a pixel at
+    // this size, and solving it properly would be arithmetic nobody could
+    // check against the drawing it is meant to reproduce.
+    const float t = static_cast<float>(x - x0) / static_cast<float>(x1 - x0);
+    const float inverse = 1.0f - t;
+    const float y = (inverse * inverse * static_cast<float>(y0))
+                  + (2.0f * inverse * t * static_cast<float>(cy))
+                  + (t * t * static_cast<float>(y1));
+
+    int topY = static_cast<int>(y + 0.5f);
+    if (topY < 0) {
+      topY = 0;
+    }
+    if (topY < kScreenH) {
+      int width = kRidgeColumnWidth;
+      if (x + width > kScreenW) {
+        width = kScreenW - x;
+      }
+      lcd.fillRect(x, topY, width, kScreenH - topY, colour);
+    }
+  }
+}
+
 void drawSunIcon(int cx, int cy, int radius) {
   lcd.fillCircle(cx, cy, radius * 0.5f, kIconSun);
   static constexpr float kRayDirs[8][2] = {
@@ -994,39 +1152,6 @@ void drawSunIcon(int cx, int cy, int radius) {
 void drawMoonIcon(int cx, int cy, int radius) {
   lcd.fillCircle(cx, cy, radius * 0.5f, ink());
   lcd.fillCircle(cx + radius * 0.22f, cy - radius * 0.15f, radius * 0.42f, bg());
-}
-
-// A wave (two stacked shallow arcs, drawn as short line segments rather than
-// a true arc call - see the sun icon's own remarks on not leaning on a
-// platform feature this file does not already use elsewhere) with an arrow
-// above it, for showTidesCard()'s two rows. `rising` picks the arrow
-// direction - up for the next high tide, down for the next low - the same
-// distinction a household actually cares about ("is the water coming in or
-// going out"), which neither row's own label states outright.
-void drawTideIcon(int cx, int cy, int radius, bool rising) {
-  // Each wave is 4 points (5 segments would overrun waveWidth) alternating
-  // above/below waveY, connected point to point - a plain zigzag rather than
-  // a true sine curve, same "shape reads as a wave at icon size" standard
-  // the cloud/lightning-bolt icons above already accept.
-  const int waveWidth = radius * 1.3f;
-  const int x0 = cx - waveWidth / 2;
-  for (int row = 0; row < 2; ++row) {
-    const int waveY = cy + radius * 0.1f + row * radius * 0.45f;
-    int prevX = x0;
-    int prevY = waveY;
-    for (int point = 1; point <= 4; ++point) {
-      const int x = x0 + point * waveWidth / 4;
-      const int y = waveY + ((point % 2 == 0) ? -radius * 0.15f : radius * 0.15f);
-      lcd.drawLine(prevX, prevY, x, y, kIconRain);
-      prevX = x;
-      prevY = y;
-    }
-  }
-
-  const int arrowBaseY = rising ? cy - radius * 0.75f : cy - radius * 0.25f;
-  const int arrowTipY = rising ? arrowBaseY - radius * 0.4f : arrowBaseY + radius * 0.4f;
-  lcd.fillTriangle(cx - radius * 0.22f, arrowBaseY, cx + radius * 0.22f, arrowBaseY, cx, arrowTipY,
-                   ink());
 }
 
 // isDaytime only changes the Sunny case (a clear night is a moon, not a sun
@@ -1397,6 +1522,7 @@ bool readTouchRaw(int32_t& x, int32_t& y) {
   return lcd.getTouch(&x, &y);
 }
 
+
 // The boot-ladder screens. Both take server-supplied wording (a content-gate
 // refusal, a provisioning message) with no length this file controls, which is
 // why they wrapped before layoutText() existed and why the 8px margin either
@@ -1581,7 +1707,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
                       double speedKnots, double headingDegrees, double distanceMiles,
                       const String& originCode, const String& destinationCode,
                       const String& originName, const String& destinationName,
-                      const String& updatedAt) {
+                      const String& updatedAt, const String& noRouteLine) {
   lcd.fillScreen(bg());
   drawCardBanner("OVERHEAD", kAircraftBanner, 130);
 
@@ -1609,7 +1735,11 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   // degree ring for the same constraint hit and worked around elsewhere in
   // this file).
   char distanceBuf[32];
-  if (hasAirlineName) {
+  // An empty callsign leaves the distance standing on its own rather than
+  // drawing " - 0.9 mi away" with nothing before the dash. Military traffic
+  // routinely files no flight id, so for that card this is the ordinary case
+  // rather than a rarity.
+  if (hasAirlineName && callsign.length() > 0) {
     snprintf(distanceBuf, sizeof(distanceBuf), "%s - %.1f mi away", callsign.c_str(), distanceMiles);
   } else {
     snprintf(distanceBuf, sizeof(distanceBuf), "%.1f mi away", distanceMiles);
@@ -1690,6 +1820,22 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
                            Align::Left};
     routeLines = layoutText(routeLine, routeBox, muted(), "aircraft.route").lines;
   }
+  else if (noRouteLine.length() > 0) {
+    // A sighting with no filed route can say something else in the space the
+    // route would have taken. The military card puts the service here once
+    // the airframe has the headline, so "U.S. Navy" is not lost to make room
+    // for "P-8 Poseidon" - the two used to share the headline and the second
+    // half was cut off.
+    //
+    // One line, not the route's two: this is a short phrase rather than a
+    // pair of airport names, and the stat rows below shift by routeLines
+    // either way.
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setTextSize(1);
+    const TextBox box{kCardMargin, 82, kScreenW - kCardMargin * 2, kRouteLineHeight, 1,
+                      Align::Left};
+    routeLines = layoutText(noRouteLine, box, muted(), "aircraft.noroute").lines;
+  }
 
   // Stat rows: a muted label on the left, the value right-aligned against the
   // card's right margin - the same label-left/value-right technique as
@@ -1746,8 +1892,18 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   rowY += kRowHeight;
 
   layoutLine("Speed", kCardMargin, rowY, rowLabelWidth, muted(), "aircraft.speed.label");
-  snprintf(valueBuf, sizeof(valueBuf), "%d kts", static_cast<int>(speedKnots + 0.5));
-  layoutLine(valueBuf, rightX, rowY, rowValueWidth, ink(), "aircraft.speed", Align::Right);
+
+  // A dash where the feed reported no ground speed, for the reason the
+  // heading below draws one: "0 kts" is a parked aeroplane, and an airborne
+  // aircraft whose feed omitted the field is not parked. The server sends
+  // null and Aircraft.cpp carries it through as NaN.
+  if (isnan(speedKnots)) {
+    Log::line("[display] aircraft.speed: not reported, drawing '--'");
+    layoutLine("--", rightX, rowY, rowValueWidth, ink(), "aircraft.speed", Align::Right);
+  } else {
+    snprintf(valueBuf, sizeof(valueBuf), "%d kts", static_cast<int>(speedKnots + 0.5));
+    layoutLine(valueBuf, rightX, rowY, rowValueWidth, ink(), "aircraft.speed", Align::Right);
+  }
   rowY += kRowHeight;
 
   layoutLine("Heading", kCardMargin, rowY, rowLabelWidth, muted(), "aircraft.heading.label");
@@ -1802,125 +1958,303 @@ void showAircraftStatus(const String& headline, const String& detail, bool isPro
 }
 
 void showSunMoonCard(const String& sunriseText, const String& sunsetText, const String& detail) {
-  lcd.fillScreen(bg());
-  drawCardBanner("SUN", kSunMoonBanner, 70);
+  // THE SKY IS THE CARD. The previous version was a label-and-value table with
+  // two small icons; this is docs/design/sun-moon-redesign, where the sun sits
+  // in a graded sky over two ridgelines and the times are the largest thing on
+  // the panel.
+  //
+  // DAY AND NIGHT ARE THE SAME DRAWING IN TWO PALETTES, which is the whole of
+  // how the rest of this file already works: every other card reads bg(), ink()
+  // and muted(), and a full-bleed card that ignored gIsDaytime would be a dark
+  // rectangle sitting among white ones every afternoon. Geometry, type sizes
+  // and positions are identical between the two - only the colours move - so
+  // the two cannot drift apart the way two separate layouts would.
+  struct SkyPalette {
+    uint32_t skyTop;
+    uint32_t skyMiddle;
+    uint32_t skyBottom;
+    uint32_t glow;
+    uint32_t disc;
+    uint32_t ridgeFar;
+    uint32_t ridgeNear;
+    uint32_t heading;
+    uint32_t label;
+    uint32_t value;
+    uint32_t footnote;
+    int discY;
+    int discRadius;
+  };
 
-  // Two rows, label left and time right-justified, reusing showAircraftCard's
-  // stat-row layout rather than inventing a second one - this card is the same
-  // shape of information (a short label against a short value).
-  const int rightX = kScreenW - kCardMargin;
-  const int rowValueWidth = 150;
-  // Stops at the icon column rather than at the value column: the icons below
-  // are centred at x=130 and span 114-146, so a label allowed to run to x=160
-  // would print through them.
-  const int rowLabelWidth = 104;
+  // Day: a blue sky falling to a pale horizon, the sun high and small, ridges
+  // green. Night: the dusk the design was drawn at, sun low and large on the
+  // horizon, ridges in silhouette. The times stay near-white in both because
+  // they sit over the dark ridges either way.
+  //
+  // THE DAY SKY SPANS FURTHER THAN THE REFERENCE DOES, deliberately. In RGB565
+  // a gradient can only show as many steps as there are distinct stored values
+  // across its range, and the first attempt ran 0x4A8FC4 to 0xDCECF4 - about
+  // ten usable blues - which arrived on the panel as stripes however finely it
+  // was banded. Starting deeper and ending paler roughly doubles the steps
+  // available, and the extra depth at the top is what a real sky does anyway.
+  const SkyPalette day{
+      0x1F5FA8u, 0x8FC2E4u, 0xEDF4F7u, 0xFFF4C8u, 0xFFF6D2u,
+      0x6F9A7Eu, 0x4F7A60u,
+       0xF2F8FCu, 0xDCE9F2u, 0xF7FBFDu, 0xE8F2F7u, 86, 34};
+  const SkyPalette night{
+      0x102641u, 0xD57961u, 0xF4BD71u, 0xFFE9A0u, 0xFFF1BCu,
+      0x243D4Bu, 0x132C3Au,
+      0xFFF5DFu, 0xF4C788u, 0xFFF5DFu, 0xC5D4DCu, 119, 49};
 
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  const SkyPalette& sky = gIsDaytime ? day : night;
+
+  fillSkyGradient(sky.skyTop, sky.skyMiddle, sky.skyBottom, gIsDaytime ? 140 : 132);
+
+  // The glow is three flat rings rather than a radial gradient: a true radial
+  // fill means per-pixel work across a third of the panel, and at this size
+  // three steps are indistinguishable from the smooth version once the sky is
+  // behind them.
+  // Ten steps, not three. Three left a visible ring edge where each circle met
+  // the next, which on a photographed panel reads as a drawing mistake rather
+  // than as light. Ten circles is still nothing against a full-screen gradient,
+  // and the steps fall below what RGB565 can distinguish anyway.
+  constexpr int kGlowSteps = 10;
+  for (int step = kGlowSteps; step >= 1; --step) {
+    const int radius = sky.discRadius + ((step * 52) / kGlowSteps);
+    lcd.fillCircle(
+        160, sky.discY, radius,
+        mixColour(sky.skyMiddle, sky.glow, kGlowSteps - step + 1, kGlowSteps + 4));
+  }
+  lcd.fillCircle(160, sky.discY, sky.discRadius, sky.disc);
+
+  // THE DESIGN'S RIDGES ARE MULTI-SEGMENT PATHS AND I DREW EACH AS ONE CURVE.
+  // Collapsing three quadratic segments into a single control point averages
+  // the undulation away; what survived moved 18px across the full width, which
+  // at arm's length is a straight line, and the first photo from hardware shows
+  // exactly that - a flat band where the hills should be.
+  //
+  // These are the design's own segments, drawn as it draws them:
+  //   far   M0 144  Q47 126 95 147   Q180 161 240 140  Q284 127 320 140
+  //   near  M0 164  Q78 143 166 164  Q240 179 320 151
+  fillUnderQuadratic(0, 144, 47, 126, 95, 147, sky.ridgeFar);
+  fillUnderQuadratic(95, 147, 180, 161, 240, 140, sky.ridgeFar);
+  fillUnderQuadratic(240, 140, 284, 127, 320, 140, sky.ridgeFar);
+
+  fillUnderQuadratic(0, 164, 78, 143, 166, 164, sky.ridgeNear);
+  fillUnderQuadratic(166, 164, 240, 179, 320, 151, sky.ridgeNear);
+
+  // EVERY STRING IS GIVEN THE COLOUR BEHIND IT, and on a full-bleed card that
+  // is not optional. layoutLine paints an OPAQUE box in its background colour
+  // before the glyphs, and the default is bg() - the card background, white in
+  // day mode. On an ordinary card that is exactly right and invisible. Here it
+  // stamped white rectangles over the sky, and the near-white times were then
+  // drawn white on white: the first photo from hardware showed two blank boxes
+  // where the times should be, with the labels above them legible only because
+  // they happen to be dark.
+  //
+  // So each call is told what is actually behind it at that y: sky at the top,
+  // the near ridge below. Approximate within a band - the gradient moves a few
+  // units across the height of one line - and exact enough that nothing shows
+  // an edge.
   lcd.setTextSize(1);
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  layoutLine("SUN · TODAY", kCardMargin, 12, 150, sky.heading, "sunmoon.heading",
+             Align::Left, kTransparentText);
 
-  layoutLine("Sunrise", kCardMargin, 44, rowLabelWidth, muted(), "sunmoon.sunrise.label");
-  layoutLine(sunriseText, rightX, 44, rowValueWidth, ink(), "sunmoon.sunrise", Align::Right);
+  // The time goes top right, where the design puts it, and drawClock() is NOT
+  // called: it writes bottom right in ink(), which on this card landed over the
+  // daylight line and in a colour chosen for a white background.
+  const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
+  struct tm localTm;
+  gmtime_r(&localNow, &localTm);
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW - kCardMargin, 12, 120,
+             sky.heading, "sunmoon.clock", Align::Right, kTransparentText);
 
-  layoutLine("Sunset", kCardMargin, 90, rowLabelWidth, muted(), "sunmoon.sunset.label");
-  layoutLine(sunsetText, rightX, 90, rowValueWidth, ink(), "sunmoon.sunset", Align::Right);
+  // THE WHOLE STACK FINISHES BY y=220, which is what sets these three rows.
+  //
+  // It did not: the detail line sat at 218 and drew to 236, and layoutText reported
+  // that on every draw - 228 complaints an hour across the fleet once the moon card's
+  // own overrun is counted. Nothing was visibly clipped, because both these cards draw
+  // their clock top right and leave the bottom band empty, but a check that cries wolf
+  // is a check nobody reads, and the tides clock was caught by exactly this line.
+  //
+  // Lifted rather than exempted. One rule - nothing draws below 220 - is worth more
+  // than a conditional one that a later card satisfies by claiming the exemption.
+  // Labels 150..168, times 170..206, detail 202..220.
+  layoutLine("↑ SUNRISE", kCardMargin, 150, 130, sky.label, "sunmoon.sunrise.label",
+             Align::Left, kTransparentText);
+  layoutLine("↓ SUNSET", kScreenW - kCardMargin, 150, 130, sky.label,
+             "sunmoon.sunset.label", Align::Right, kTransparentText);
 
-  // One icon per row, in the gap between the label and the right-justified
-  // value column - "Sunrise"/"Sunset" at this font leave roughly x100-160
-  // empty, plenty of room for a 24px icon without touching either column.
-  // Sun for sunrise, a crescent for sunset - the card's own name ("sun and
-  // moon") made this the obvious pairing rather than drawing a sun on both
-  // rows and leaving "moon" in the id unrepresented anywhere on the card.
-  // Radius 16 (32px across) rather than the original 12 - reported too small to
-  // read at a glance on real hardware. Still clears both columns either side:
-  // "Sunrise"/"Sunset" at this font end around x=90, the value column starts at
-  // x=160, and a 32px icon centred at x=130 spans 114-146.
-  constexpr int kIconColumnX = 130;
-  constexpr int kIconRadius = 16;
-  drawSunIcon(kIconColumnX, 44 + 9, kIconRadius);
-  drawMoonIcon(kIconColumnX, 90 + 9, kIconRadius);
+  lcd.setFont(&fonts::FreeSansBold18pt7b);
+  layoutLine(sunriseText, kCardMargin, 170, 140, sky.value, "sunmoon.sunrise",
+             Align::Left, kTransparentText);
+  layoutLine(sunsetText, kScreenW - kCardMargin, 170, 140, sky.value, "sunmoon.sunset",
+             Align::Right, kTransparentText);
 
   if (detail.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    const TextBox detailBox{kCardMargin, 140, kScreenW - kCardMargin * 2, 20, 2, Align::Left};
-    layoutText(detail, detailBox, muted(), "sunmoon.detail");
+    layoutLine(detail, kScreenW / 2, 202, kScreenW - kCardMargin * 2, sky.footnote,
+               "sunmoon.detail", Align::Centre, kTransparentText);
   }
 
-  drawClock();
   restoreDefaultFont();
 }
 
-void showTidesCard(const String& nextHighTideText, const String& nextLowTideText) {
-  lcd.fillScreen(bg());
-  drawCardBanner("TIDES", kTidesBanner, 90);
 
-  // Same stat-row layout as showSunMoonCard() immediately above: two rows,
-  // label left and time right-justified. No third line here - see Tides.h
-  // and this function's own declaration in Display.h for why a tide has no
-  // "detail" worth adding.
-  const int rightX = kScreenW - kCardMargin;
+namespace {
 
-  // THE THREE COLUMNS, RE-MEASURED 2026-09-27 BECAUSE BOTH LABELS WERE BEING
-  // EATEN. This card drew "Next..." on both rows on every device that had it -
-  // tides.high.label and tides.low.label ellipsized on devices 12, 17 and 23,
-  // which is every device with the card, and a photograph confirms it. The two
-  // rows were then distinguishable only by their arrow icons, so the card no
-  // longer said what it was for.
-  //
-  // The cause is visible in the comment this replaces: the label was squeezed
-  // to 99px to clear an icon that had itself been moved right to clear the
-  // label. At FreeSansBold12pt7b "Next high" measures 110px and "Next low"
-  // 100px, so neither fitted - and because layoutText() wraps on word
-  // boundaries before it ellipsizes, both fell back to the only word that fit
-  // and drew "Next..." (71px). Off by eleven pixels on one row and by one on
-  // the other, with the same useless result on both.
-  //
-  // The room came from the VALUE column, which had it. Every value this card
-  // can draw is a clock time from Display::formatTimeOfDay(): 58px in 24-hour
-  // form, at most 107px in 12-hour form ("11:11 AM", the widest of all 1,440
-  // possibilities), or "--:--" at 38px. It was reserved 150. The columns now
-  // measure:
-  //
-  //   label  x=10..132   (122px) - "Next high" is 110, so 12px spare
-  //   icon   x=147..179  (32px, radius 16 centred at 163)
-  //   value  x=194..310  (116px) - the widest possible time is 107, 9px spare
-  //
-  // with 15px of clear panel either side of the icon. Both rows keep identical
-  // geometry, because a reader compares them.
-  //
-  // Labels are NOT shortened to "High"/"Low" to make them fit. "Next" is the
-  // word that says these are upcoming times rather than the last ones, which
-  // is the whole question somebody looks at this card to answer.
-  const int rowValueWidth = 116;
-  const int rowLabelWidth = 122;
+/// The tides card in two lights, geometry identical between them.
+///
+/// Full-bleed like the sun and moon cards, and for the same reason: a card
+/// that ignored gIsDaytime would be a dark rectangle sitting among pale ones
+/// every afternoon. Only the colours move between day and night, so the two
+/// cannot drift apart the way two layouts would.
+struct TidePalette {
+  uint32_t backdropTop;
+  uint32_t backdropBottom;
+  uint32_t rowFill;
+  uint32_t rowEdge;
+  uint32_t iconWater;
+  uint32_t iconArrow;
+  uint32_t iconRing;
+  uint32_t heading;
+  uint32_t label;
+  uint32_t value;
+};
 
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
+/// A disc of water with an arrow over it, filling the lower part of the ring.
+///
+/// Drawn as horizontal spans rather than a fill plus a mask, because the water
+/// has to stop at the circle's edge and a rectangle would square off the sides.
+/// For each row inside the disc the half-width comes from the circle equation,
+/// which is the same arithmetic drawMoonDisc() uses for its terminator.
+void drawTideDisc(int cx, int cy, int radius, bool rising, const TidePalette& tide) {
+  lcd.fillCircle(cx, cy, radius, to565(tide.rowFill));
+
+  // Waterline a little below centre, so the disc reads as water in a porthole
+  // rather than as a half-filled circle.
+  const int waterTop = cy + radius / 5;
+
+  for (int y = waterTop; y <= cy + radius; ++y) {
+    const int dy = y - cy;
+    const int halfWidth = static_cast<int>(sqrt(static_cast<double>(radius * radius - dy * dy)));
+    if (halfWidth > 0) {
+      lcd.drawFastHLine(cx - halfWidth, y, halfWidth * 2, to565(tide.iconWater));
+    }
+  }
+
+  // Two shallow zigzags on the waterline, the same "reads as a wave at icon
+  // size" standard the weather icons already accept.
+  const int waveWidth = radius;
+  const int x0 = cx - waveWidth / 2;
+  int prevX = x0;
+  int prevY = waterTop;
+  for (int point = 1; point <= 4; ++point) {
+    const int x = x0 + point * waveWidth / 4;
+    const int y = waterTop + ((point % 2 == 0) ? -radius / 8 : radius / 8);
+    lcd.drawLine(prevX, prevY, x, y, to565(tide.iconArrow));
+    prevX = x;
+    prevY = y;
+  }
+
+  const int arrowHalf = radius / 3;
+  const int arrowTipY = rising ? cy - radius / 2 : cy + radius / 8;
+  const int arrowBaseY = rising ? cy + radius / 8 : cy - radius / 2;
+  lcd.fillTriangle(cx - arrowHalf, arrowBaseY, cx + arrowHalf, arrowBaseY, cx, arrowTipY,
+                   to565(tide.iconArrow));
+  lcd.fillRect(cx - arrowHalf / 3, rising ? cy - radius / 8 : cy - radius / 2,
+               arrowHalf * 2 / 3, radius / 2, to565(tide.iconArrow));
+
+  lcd.drawCircle(cx, cy, radius, to565(tide.iconRing));
+  lcd.drawCircle(cx, cy, radius - 1, to565(tide.iconRing));
+}
+
+/// One waterline row: the disc on the left, the label above the time on the
+/// right.
+///
+/// THE LABEL SITS ABOVE THE TIME RATHER THAN BESIDE IT, and that is a panel
+/// constraint rather than a preference. The design this follows puts them side
+/// by side, which works at the width it was drawn at. Here the widest time
+/// this card can draw is "11:11 AM" - 107px at FreeSansBold12pt7b, so about
+/// 160 at 18pt - and "HIGH TIDE" is another 75. Side by side inside a 296px
+/// row they overlap, and the only way to fit them is to shrink the time back
+/// to the 12pt the old card already used. Stacking is what buys the larger
+/// time, which is the whole point of the change.
+void drawTideRow(int top, int height, const String& label, const String& timeText, bool rising,
+                 const TidePalette& tide, const char* labelWhat, const char* valueWhat) {
+  constexpr int kRowX = 12;
+  constexpr int kRowW = kScreenW - kRowX * 2;
+  constexpr int kRowRadius = 14;
+
+  lcd.fillRoundRect(kRowX, top, kRowW, height, kRowRadius, to565(tide.rowFill));
+  lcd.drawRoundRect(kRowX, top, kRowW, height, kRowRadius, to565(tide.rowEdge));
+
+  const int discRadius = height / 2 - 11;
+  drawTideDisc(kRowX + 14 + discRadius, top + height / 2, discRadius, rising, tide);
+
+  // Right-aligned to a common edge so the two rows' times line up under each
+  // other, which is what a reader compares.
+  const int textRight = kRowX + kRowW - 16;
+  const int textWidth = kRowW - (14 + discRadius * 2) - 34;
+
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
+  layoutLine(label, textRight, top + 10, textWidth, tide.label, labelWhat, Align::Right,
+             kTransparentText);
 
-  layoutLine("Next high", kCardMargin, 44, rowLabelWidth, muted(), "tides.high.label");
-  layoutLine(nextHighTideText, rightX, 44, rowValueWidth, ink(), "tides.high", Align::Right);
+  lcd.setFont(&fonts::FreeSansBold18pt7b);
+  layoutLine(timeText, textRight, top + 28, textWidth, tide.value, valueWhat, Align::Right,
+             kTransparentText);
+}
 
-  layoutLine("Next low", kCardMargin, 90, rowLabelWidth, muted(), "tides.low.label");
-  layoutLine(nextLowTideText, rightX, 90, rowValueWidth, ink(), "tides.low", Align::Right);
+}  // namespace
 
-  // Same icon-in-the-gap placement as showSunMoonCard()'s two rows, and the
-  // same radius 16 for the same reported reason (12 was too small to read at a
-  // glance). It sits further right than showSunMoonCard()'s x=130 because
-  // "Next high"/"Next low" are wider labels than "Sunrise"/"Sunset" - but the
-  // centre is now derived from the two columns either side rather than nudged
-  // by hand, which is what went wrong before: 32px centred in the gap between
-  // the label's right edge (132) and the value column's left edge (194) puts
-  // it at 163, spanning 147-179 with 15px clear on both sides.
-  //
-  // showSunMoonCard() above was checked for the same defect and does NOT have
-  // it: "Sunrise" is 89px and "Sunset" 81px against its 104px label column, so
-  // both fit with room to spare, which is why no sunmoon.*.label ellipsis ever
-  // appeared in the telemetry. It is deliberately left alone.
-  constexpr int kIconColumnX = 163;
-  constexpr int kIconRadius = 16;
-  drawTideIcon(kIconColumnX, 44 + 9, kIconRadius, /*rising=*/true);
-  drawTideIcon(kIconColumnX, 90 + 9, kIconRadius, /*rising=*/false);
+void showTidesCard(const String& nextHighTideText, const String& nextLowTideText) {
+  // Night is the palette the design was drawn in; day is the same card lifted,
+  // so it sits beside the pale cards rather than punching a hole in the
+  // rotation. The water stays blue in both because water is the one thing on
+  // this card that does not change with the light.
+  const TidePalette day{
+      0xDCEBF5u, 0xF4FAFDu, 0xFFFFFFu, 0xBBD4E4u,
+      0x1F7FD0u, 0x0C4C84u, 0x5EA9DAu,
+      0x0C3350u, 0x4A6B82u, 0x0B2338u};
+  const TidePalette night{
+      0x0A1B2Eu, 0x102A44u, 0x16314Eu, 0x24486Du,
+      0x1286D8u, 0x7FE4F2u, 0x3FC2E0u,
+      0xEAF6FCu, 0x8FB6CEu, 0xFFFFFFu};
 
-  drawClock();
+  const TidePalette& tide = gIsDaytime ? day : night;
+
+  fillVerticalGradient(0, kScreenH, tide.backdropTop, tide.backdropBottom);
+
+  lcd.setFont(&fonts::FreeSansBold18pt7b);
+  lcd.setTextSize(1);
+  layoutLine("TIDES", kScreenW / 2, 8, kScreenW - kCardMargin * 2, tide.heading, "tides.heading",
+             Align::Centre, kTransparentText);
+
+  // THE WHOLE STACK FINISHES BY y=220, which is what sizes these rows. Below
+  // that is the band the clock and the touch strip own, and layoutText()
+  // reports anything running into it - which is how the first build of this
+  // card was caught drawing its clock to y=238. Heading 8..44, rows 46..116
+  // and 124..194, clock 198..216.
+  constexpr int kRowHeight = 70;
+  drawTideRow(46, kRowHeight, "HIGH TIDE", nextHighTideText, /*rising=*/true, tide,
+              "tides.high.label", "tides.high");
+  drawTideRow(46 + kRowHeight + 8, kRowHeight, "LOW TIDE", nextLowTideText, /*rising=*/false, tide,
+              "tides.low.label", "tides.low");
+
+  // Its own clock rather than drawClock(), for the reason showSunMoonCard()
+  // has one: drawClock() paints an opaque bg() box behind the text, which on a
+  // full-bleed card is a rectangle of the wrong colour.
+  const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
+  struct tm localTm;
+  gmtime_r(&localNow, &localTm);
+
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW / 2, 198,
+             kScreenW - kCardMargin * 2, tide.heading, "tides.clock", Align::Centre,
+             kTransparentText);
+
   restoreDefaultFont();
 }
 
@@ -2171,370 +2505,180 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   restoreDefaultFont();
 }
 
-void showSportsCard(const String& homeName, const String& homeScore, const String& awayName,
-                    const String& awayScore, const String& status, uint16_t itemNumber,
-                    uint16_t itemCount, const String& ageText) {
-  lcd.fillScreen(bg());
-  drawCardBanner("SPORTS", kSportsBanner, 110);
+namespace {
 
-  // Two team rows, each a name on the left and a score hard right. The score
-  // column is reserved first, so a long club name can never push a score off
-  // the edge or onto a second line - the score is the thing somebody crossing
-  // the room is trying to read.
-  constexpr int kScoreColumnWidth = 64;
+/// The generic sports card in two lights - SPORTS_CARDS_V2_GENERIC_DESIGN.md §2.
+struct SportPalette {
+  uint32_t backdrop;
+  uint32_t cardTop;
+  uint32_t cardBottom;
+  uint32_t panel;
+  uint32_t edge;
+  uint32_t chip;
+  uint32_t chipInk;
+  uint32_t heading;
+  uint32_t muted;
+  uint32_t name;
+  uint32_t score;
+  uint32_t liveFill;
+  uint32_t liveInk;
+};
 
-  // EVERYTHING SHIFTS UP WHEN A BUTTON IS BOUND TO THIS CARD, and no
-  // information is given up doing it - which is what makes this the easy one
-  // of the three cards the audit found (CARD_AUDIT_2026_09_27.md section 9.2,
-  // approved).
-  //
-  // Measured against the tight floor of 154 (setContentBudget() drops
-  // gContentBottom to kButtonRowY - kButtonBandGap whenever Actions::forCard()
-  // resolved a button for THIS card), the untight layout runs to y=201: the
-  // second team row at y=116 bottoms at 158 and is 4px past, the 12pt status
-  // at y=172 bottoms at 201 and is 47px past, and the 9pt right-hand slot at
-  // y=176 bottoms at 198 and is 44px past. Three of the four rows on the card
-  // are wholly or partly inside the band drawChrome() paints.
-  //
-  // THE 54px PITCH BETWEEN THE TWO TEAM ROWS IS DELIBERATE AND UNCHANGED.
-  // 44 and 88 are not "62 and 116, scaled" - they are the same 54px gap moved
-  // up as a unit. That gap is what makes the two names read as a pair, one
-  // scoreline, rather than as the first two entries of a list; closing it to
-  // recover a few more pixels would save room and cost the card its shape.
-  //
-  // THE SCORE STAYS 18pt AT EVERY TIER, TIGHT OR NOT, which is this card's
-  // oldest rule and the reason the name ladder below exists at all: the score
-  // is what somebody crossed the room to read. Only the status word gives up
-  // size here, and only when tight.
-  const bool tight = contentIsTight();
-  const int firstRowY = tight ? 44 : 62;
-  const int secondRowY = tight ? 88 : 116;
-  const int nameWidth = kScreenW - kCardMargin * 2 - kScoreColumnWidth;
-  const int rightX = kScreenW - kCardMargin;
-
-  // Said out loud on every tight draw - the remote debug stream is the only
-  // diagnostic a deployed device has, and a card that has quietly rearranged
-  // itself should be explicable from the stream rather than from guesswork.
-  // verbose rather than printf: a bound button is a configuration somebody
-  // chose, not a fault.
-  if (tight) {
-    Log::verbose("[display] sports is tight (floor %d) - team rows at %d and %d, status and "
-                 "age/counter joined at 132 with the status at 9pt instead of 12pt",
-                 contentBottom(), firstRowY, secondRowY);
-  }
-
+/// A filled pill with a label in it, for the sport chip and the LIVE badge.
+int drawSportsPill(int x, int y, const String& label, uint32_t fill, uint32_t ink,
+                   const char* what, bool withDot = false) {
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
 
-  // AWAY FIRST, HOME SECOND, AND THE "@" MOVED WITH THEM.
+  const int dotRoom = withDot ? 14 : 0;
+  const int width = lcd.textWidth(label) + 18 + dotRoom;
+  constexpr int kHeight = 22;
+
+  lcd.fillRoundRect(x, y, width, kHeight, kHeight / 2, to565(fill));
+
+  if (withDot) {
+    lcd.fillCircle(x + 11, y + kHeight / 2, 4, to565(ink));
+  }
+
+  layoutLine(label, x + 9 + dotRoom, y + 3, width - 18 - dotRoom, ink, what,
+             Align::Left, kTransparentText);
+
+  return width;
+}
+
+}  // namespace
+
+void showSportsCard(const String& homeName, const String& homeScore, const String& awayName,
+                    const String& awayScore, const String& status, uint16_t itemNumber,
+                    uint16_t itemCount, const String& ageText, const String& sportLabel,
+                    const String& competitionLabel, const String& progressLabel,
+                    const String& clockLabel, bool isLive) {
+  // Day: pale ground, dark navy ink. Night: deep navy, light ink. The LIVE badge
+  // is red in both, because its whole job is to be the one thing that catches an
+  // eye crossing the room.
+  const SportPalette day{
+      0xEEF4FBu, 0xFFFFFFu, 0xF4F8FCu, 0xE8F0F8u, 0xD4E2EEu,
+      0xCFE0F0u, 0x0D2B45u, 0x0D2B45u, 0x5B7490u, 0x0D2B45u, 0x0D2B45u,
+      0xD81E3Fu, 0xFFFFFFu};
+  const SportPalette night{
+      0x0A1626u, 0x15273Du, 0x112033u, 0x1B3048u, 0x27425Fu,
+      0x24405Eu, 0xDCEAF6u, 0xF2F8FDu, 0x8AA4BEu, 0xFFFFFFu, 0xFFFFFFu,
+      0xD81E3Fu, 0xFFFFFFu};
+
+  const SportPalette& sport = gIsDaytime ? day : night;
+
+  fillVerticalGradient(0, kScreenH, sport.cardTop, sport.cardBottom);
+
+  // THE TOP ROW IS WHAT THE GAME IS, and both halves are optional. A device
+  // running firmware older than the sportCode wire field, or a competition the
+  // provider does not name, draws neither rather than a placeholder - the design
+  // is explicit that an unsupported field stays absent.
+  if (sportLabel.length() > 0) {
+    drawSportsPill(kCardMargin, 10, sportLabel, sport.chip, sport.chipInk, "sports.sport");
+  }
+
+  if (competitionLabel.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    layoutLine(competitionLabel, kScreenW - kCardMargin, 13, 150, sport.muted,
+               "sports.competition", Align::Right, kTransparentText);
+  }
+
+  // THE STATE ROW. A live game gets the badge; everything else gets its status
+  // word in the same slot, so the row never collapses and the two team rows
+  // below it never move between states.
+  if (isLive) {
+    drawSportsPill(kCardMargin, 42, "LIVE", sport.liveFill, sport.liveInk, "sports.live",
+                   /*withDot=*/true);
+  } else if (status.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    layoutLine(status, kCardMargin, 45, 150, sport.muted, "sports.status",
+               Align::Left, kTransparentText);
+  }
+
+  // PROGRESS AND CLOCK ARE TWO FIELDS JOINED BY A DOT, and the dot only appears
+  // when both are there. "Q3 · 7:42" when the provider supplies a clock, "Q3"
+  // when it does not, and nothing at all when it supplies neither - a card that
+  // invented 0:00 would have somebody watching a game that is not running.
+  String progress = progressLabel;
+
+  if (clockLabel.length() > 0) {
+    progress = progress.length() > 0 ? progress + " \u00b7 " + clockLabel : clockLabel;
+  }
+
+  if (progress.length() > 0) {
+    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    layoutLine(progress, kScreenW - kCardMargin, 42, 150, sport.heading, "sports.progress",
+               Align::Right, kTransparentText);
+  }
+
+  // THE SCORELINE, in a panel of its own so the two rows read as one thing
+  // rather than as the first entries of a list.
+  constexpr int kPanelTop = 74;
+  constexpr int kPanelHeight = 104;
+  constexpr int kRowHeight = kPanelHeight / 2;
+
+  lcd.fillRoundRect(kCardMargin, kPanelTop, kScreenW - kCardMargin * 2, kPanelHeight, 10,
+                    to565(sport.panel));
+  lcd.drawFastHLine(kCardMargin + 10, kPanelTop + kRowHeight, kScreenW - kCardMargin * 2 - 20,
+                    to565(sport.edge));
+
+  // The score column is reserved first, so a long club name can never push a
+  // score off the edge - the score is what somebody crossed the room to read.
   //
-  // This card used to draw home at y=62 unmarked and away at y=116 prefixed
-  // "@ ", on the stated belief that "@ Houston Astros" marks the away team.
-  // It does not. "@ X" is read "at X", so the marker names the HOST, and the
-  // card was therefore stating that the away team was hosting - photographed
-  // as "Yankees / @ Orioles" on a day the Yankees hosted, which is the exact
-  // inversion of the truth and reads as a perfectly ordinary scoreline.
-  //
-  // Two ways to fix it, and only one of them is right. Moving the marker onto
-  // the home row alone is one line and still reads wrong, because no ticker
-  // writes the host first. So the rows swap as well: away on top unmarked,
-  // home underneath carrying the "@", which is the vertical form every
-  // American scoreboard uses -
-  //
-  //     NYY  5
-  //   @ BAL  3
-  //
-  // and that same photographed game now renders "Orioles / @ Yankees".
-  //
-  // THE ROW INDEX PICKS THE POSITION AND THE FLAG PICKS THE TEAM, which is
-  // the part worth being careful about. Name, score and marker are all chosen
-  // by isAway; y is chosen by row. Swapping one of the four and not the
-  // others puts a score against the wrong team, and a scoreline with the
-  // numbers transposed looks exactly as plausible as a correct one - worse
-  // than the bug it came from, because nothing on the panel looks off.
+  // A GAME THAT HAS NOT STARTED HAS NO SCORE COLUMN. The design forbids a
+  // fabricated 0-0, so both sides arrive empty before first pitch; reserving the
+  // column regardless spent 76 of 320 pixels on nothing and squeezed the two club
+  // names into 196. The names take the whole panel instead, which is where the
+  // longest of them need it - "Golden State Warriors" is 21 characters.
+  const bool hasScores = homeScore.length() > 0 || awayScore.length() > 0;
+  const int scoreWidth = hasScores ? 76 : 0;
+  const int nameWidth = kScreenW - kCardMargin * 2 - scoreWidth - 28;
+
+  // AWAY FIRST, HOME SECOND, which is how a scoreline is read aloud.
+  const String rows[2][2] = {{awayName, awayScore}, {homeName, homeScore}};
+
   for (int row = 0; row < 2; ++row) {
-    const bool isAway = (row == 0);
-    const String& name = isAway ? awayName : homeName;
-    const String& score = isAway ? awayScore : homeScore;
-    const int y = (row == 0) ? firstRowY : secondRowY;
+    const int top = kPanelTop + row * kRowHeight;
 
-    // THE HOME ROW CARRIES THE "@", for the reason above: the marker names the
-    // host. Only one row is marked - an unmarked team is the visitor, and
-    // marking both would spend width saying what the absence already says.
-    //
-    // The "@" is joined to the name BEFORE anything is measured, which is the
-    // part that matters here. Added after the fit was computed it would push
-    // the name one glyph further into being cut, and the marker itself could
-    // end up being the thing the ellipsis ate - the layout would have created
-    // the defect it exists to fix.
-    //
-    // 96 bytes against a wire cap of 20 characters (Sports.h's
-    // kMaxTeamNameLength). That is not a guess at what fits the panel, which
-    // is roughly 14 glyphs at this font; it is room for anything a caller
-    // could hand this function, so the join never loses a character behind
-    // layoutText's back. A caller that somehow exceeds it says so out loud.
-    char nameLine[96];
-    const char* nameToDraw = name.c_str();
-    if (!isAway && name.length() > 0) {
-      const int needed = snprintf(nameLine, sizeof(nameLine), "@ %s", name.c_str());
-      if (needed < 0 || static_cast<size_t>(needed) >= sizeof(nameLine)) {
-        Log::printf("[display] sports.home: name is %u characters, longer than the %u byte "
-                    "join buffer, so the '@' row was cut before it was measured",
-                    static_cast<unsigned>(name.length()), static_cast<unsigned>(sizeof(nameLine)));
-      }
-      nameToDraw = nameLine;
-    }
+    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    layoutLine(rows[row][0], kCardMargin + 14, top + 14, nameWidth, sport.name,
+               row == 0 ? "sports.away" : "sports.home", Align::Left, kTransparentText);
 
-    // THREE TIERS, the same technique showAnnouncementCard() uses for its body
-    // text: try the size the card was designed at, and drop a tier whenever
-    // the whole name will not survive it. "Houston Astros" is 14 characters
-    // and does not fit 236px at 18pt, which is how it reached a photograph
-    // reading "Houston Astr"; it fits comfortably at 12pt.
-    //
-    // WHY A THIRD TIER AT 9pt, AND WHY IT COULD NOT BE A WIDER COLUMN
-    // INSTEAD. The obvious cheaper fix is to take width off the score column
-    // and give it to the name. It does not reach: the score column has 7 real
-    // pixels of slack against a shortfall that runs from 9 to 64 pixels
-    // depending on the name, so reapportioning buys back the narrowest case
-    // and nothing else. Measured against the vendored glyph tables, the long
-    // names all clear 236px at 9pt with room to spare - the widest realistic
-    // one, "@ Tampa Bay Buccaneer" at the 20-character wire cap, comes to
-    // 217px and leaves 19.
-    //
-    // AND WHY LONG NAMES ARE NOT RARE. Three separate routes produce one, so
-    // this is not just the nickname-collision case:
-    //   - football is returned untouched by design, full name and all;
-    //   - a market the server does not recognise returns the full name;
-    //   - the collision branch returns market and nickname together.
-    // The common route is the first, not the third.
-    //
-    // The 9pt tier fires only after 12pt has been measured and rejected. That
-    // ordering is the whole point of a tier ladder: a name that fits 12pt must
-    // never be drawn at 9pt, because this card's argument is that it reads
-    // from across the room and 9pt is a third the height of the top tier.
-    // An ellipsis is still the backstop below 9pt, so this is a way of needing
-    // the ellipsis less often rather than a way of avoiding it.
-    //
-    // The score stays at 18pt regardless, at every tier. This card's own
-    // reasoning is that the score is what a reader across the room is after,
-    // so the name is the one that gives up size.
-    const char* const what = isAway ? "sports.away" : "sports.home";
-    lcd.setFont(&fonts::FreeSansBold18pt7b);
-    const int largeHeight = lcd.fontHeight();
-    const TextBox largeBox{kCardMargin, static_cast<int16_t>(y), static_cast<int16_t>(nameWidth),
-                           static_cast<int16_t>(largeHeight), 1, Align::Left};
-    const bool cutAt18 = layoutText(nameToDraw, largeBox, ink(), "sports.name", kUseCardBackground,
-                                    /*measureOnly=*/true)
-                             .ellipsized;
-
-    if (!cutAt18) {
-      layoutText(nameToDraw, largeBox, ink(), what);
-    } else {
-      lcd.setFont(&fonts::FreeSansBold12pt7b);
-      // Centred against the 18pt score beside it rather than sharing its top
-      // edge, which would leave the smaller name floating high in the row.
-      // Recomputed per tier, because the nudge is half the height the name
-      // gave up and 9pt gives up more than 12pt does.
-      const int mediumNudge = (largeHeight - lcd.fontHeight()) / 2;
-      const TextBox mediumBox{kCardMargin, static_cast<int16_t>(y + mediumNudge),
-                              static_cast<int16_t>(nameWidth),
-                              static_cast<int16_t>(lcd.fontHeight()), 1, Align::Left};
-      const bool cutAt12 = layoutText(nameToDraw, mediumBox, ink(), "sports.name",
-                                      kUseCardBackground, /*measureOnly=*/true)
-                               .ellipsized;
-
-      if (!cutAt12) {
-        layoutText(nameToDraw, mediumBox, ink(), what);
-      } else {
-        lcd.setFont(&fonts::FreeSansBold9pt7b);
-        const int smallNudge = (largeHeight - lcd.fontHeight()) / 2;
-        // Said out loud, not silently. Dropping two tiers is the card giving
-        // up most of its headline size to keep a name whole, and a household
-        // seeing a noticeably smaller name should be explicable from the
-        // stream rather than from guesswork.
-        Log::printf("[display] %s: '%s' would not fit %dpx at 18pt or 12pt, drawing it at 9pt",
-                    what, nameToDraw, nameWidth);
-        layoutLine(nameToDraw, kCardMargin, y + smallNudge, nameWidth, ink(), what);
-      }
+    if (hasScores) {
       lcd.setFont(&fonts::FreeSansBold18pt7b);
-    }
-
-    // Empty before play starts, and that is drawn as nothing rather than as a
-    // zero. Null and zero are different facts here: a nil-nil draw is a real
-    // scoreline and a game that has not started is not 0-0.
-    if (score.length() > 0) {
-      layoutLine(score, rightX, y, kScoreColumnWidth, ink(),
-                 isAway ? "sports.awayscore" : "sports.homescore", Align::Right);
+      layoutLine(rows[row][1], kScreenW - kCardMargin - 14, top + 8, scoreWidth, sport.score,
+                 row == 0 ? "sports.away.score" : "sports.home.score", Align::Right,
+                 kTransparentText);
     }
   }
 
-  // The status row: a clock time before, the provider's own progress text
-  // during, FINAL or PPD after. Empty when the server sent a state this
-  // firmware does not know, and then this row is simply absent - claiming a
-  // game has not started is exactly the claim an unknown state cannot support.
-  //
-  // Bounded short of the "N of M" counter that shares this row, rather than
-  // across the whole card: the counter is drawn after and would otherwise be
-  // printed over by a long enough progress string.
-  // THERE IS NO FOURTH ROW ON THIS CARD, AND THAT IS THE POINT.
-  //
-  // The obvious home for the age line - a line of its own at y=198 - measures
-  // as free and is not. setContentBudget() drops the content floor to
-  // kButtonRowY - kButtonBandGap = 154 whenever this card has an action bound,
-  // and drawChrome() then paints the button row over y=160..220. This card is
-  // also one of the thirteen that never consults contentBottom() and never
-  // calls noteContentOverrun(), so anything placed down there would be covered
-  // silently with nothing in the stream to say so. The status and counter rows
-  // below y=160 are ALREADY being painted over on a device with a button
-  // bound: "nothing is drawn at y=205" is therefore not evidence that the room
-  // is free, it is evidence that the region belongs to the chrome.
-  //
-  // So the age goes on the row that already exists, in the slot the counter
-  // already occupies, and this function draws no pixel lower than it did
-  // before.
-  constexpr int kMarkerColumnWidth = 64;
-  constexpr int kStatusBoxWidth = kScreenW - kCardMargin * 2 - kMarkerColumnWidth;  // 236
+  // The age, when the server has judged this card stale, and the counter when
+  // there is more than one game. Both muted and both below the panel, where
+  // they qualify the figures above without competing with them.
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
 
-  // TIGHT, THE STATUS ROW MOVES TO 132 AND DROPS A FONT SIZE; UNTIGHT IT IS
-  // UNTOUCHED AT 172 AND 12pt.
-  //
-  // 132 plus the 22px fontHeight() reports at 9pt bottoms at 154 exactly,
-  // which is the floor and not a pixel under it. At 12pt the same row would be
-  // 29px tall and would have to start at 125 to fit - close enough to the
-  // second team row's own bottom (88 + 42 = 130 at 18pt) to collide with it.
-  // So the size drop is not a preference, it is what the arithmetic leaves
-  // once the two team rows have kept their 18pt and their 54px pitch.
-  //
-  // A TIGHT-ONLY SUBSTITUTION, NOT A NEW DEFAULT. The 12pt status is worth
-  // keeping wherever there is room for it, and there is room for it on nine of
-  // nine fielded devices today, so the untight card must not change. Whether
-  // 9pt is legible from across the room is the same question section 7.3 of
-  // the audit raises about 9pt team names, and it deserves the same look on
-  // glass rather than the same assumption.
-  //
-  // THE AGE AND COUNTER JOIN IT ON THE SAME LINE, at the same y rather than
-  // 4px below it. That 4px offset exists only to centre an 18px 9pt line
-  // against a 23px 12pt one; tight, both sides of the row are 9pt and there is
-  // nothing to centre against, so a nudge would just push the right-hand slot
-  // 4px past the floor for no optical gain at all.
-  const int statusRowY = tight ? 132 : 172;
-  const int rightSlotY = tight ? 132 : 176;
-  constexpr int kStatusToAgeGap = 10;
-
-  // MEASURED, so the age gets the room the status actually leaves rather than
-  // the room a worst case would leave. The status runs from "T7" (28px) through
-  // a start time ("11:11 AM", 107px) to an eight-character provider period
-  // ("HALFTIME", 124px), and reserving for the widest would deny the age a
-  // place on every ordinary card. Clamped to the box, because layoutLine()
-  // ellipsizes anything longer down to it and the ink on the panel is then
-  // never wider than this.
-  //
-  // Measured at whichever size the status is about to be drawn at, which is
-  // the part that would be easy to get wrong: measuring at 12pt and drawing at
-  // 9pt would reserve about a third more width than the ink actually needs and
-  // would push the age off a tight card that had room for it.
-  lcd.setFont(tight ? &fonts::FreeSansBold9pt7b : &fonts::FreeSansBold12pt7b);
-  int statusInkWidth = 0;
-  if (status.length() > 0) {
-    statusInkWidth = lcd.textWidth(status.c_str());
-    if (statusInkWidth > kStatusBoxWidth) {
-      statusInkWidth = kStatusBoxWidth;
-    }
-    layoutLine(status, kCardMargin, statusRowY, kStatusBoxWidth, muted(), "sports.status");
-  }
-
-  // HOW OLD THIS ANSWER IS - empty, and this whole block skipped, on every card
-  // the server has not flagged as old, which is nearly all of them. See this
-  // function's declaration in Display.h and CARD_ABSENCE_AND_AGE_DESIGN.md
-  // section 8 for why it appears rarely rather than always.
-  //
-  // THE AGE NEVER ELLIPSIZES. It is a qualifier on the card's content and not
-  // the content, so when the status word has not left room for the whole
-  // sentence this draws nothing and says so in the stream. "Updated 47 hou..."
-  // would be worse than no line at all: the card would have spent its one spare
-  // slot on something that no longer states an age, and a reader would have no
-  // way to tell what was lost. The status keeps its natural width either way -
-  // it is the thing somebody crossed the room to read.
-  bool drewAge = false;
   if (ageText.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
-    const int roomForAge = kScreenW - kCardMargin - kCardMargin - statusInkWidth -
-                           (statusInkWidth > 0 ? kStatusToAgeGap : 0);
-    const int ageInkWidth = lcd.textWidth(ageText.c_str());
-    if (ageInkWidth <= roomForAge) {
-      layoutLine(ageText, rightX, rightSlotY, roomForAge, muted(), "sports.age", Align::Right);
-      drewAge = true;
-    } else {
-      // printf rather than verbose: this is the card declining to say something
-      // it was asked to say, on one of the few draws where it had anything to
-      // say at all, and noticing it must not depend on somebody having switched
-      // streaming on first.
-      Log::printf("[display] sports.age: '%s' needs %dpx and the status word left %dpx, so this "
-                  "card draws no age rather than an ellipsized one",
-                  ageText.c_str(), ageInkWidth, roomForAge);
-    }
+    layoutLine(ageText, kCardMargin, 188, 200, sport.muted, "sports.age",
+               Align::Left, kTransparentText);
   }
 
-  // "2 of 4", only on a card actually holding several games, so a one-game team
-  // card is not decorated with a counter that never changes.
-  //
-  // YIELDS TO THE AGE, because they are one 64px slot and both cannot have it.
-  // On the rare card old enough for the server to say so, "this answer is
-  // thirty-one hours old" is worth more than "you are looking at the second of
-  // four": the counter says where you are in a list the rotation will show you
-  // anyway, the age says whether any of it is still true. Announced rather than
-  // silent, because a household used to seeing a counter will notice it gone.
-  if (itemCount > 1 && !drewAge) {
-    char marker[16];
-    snprintf(marker, sizeof(marker), "%u of %u", static_cast<unsigned>(itemNumber),
-             static_cast<unsigned>(itemCount));
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
-    layoutLine(marker, rightX, rightSlotY, kMarkerColumnWidth, muted(), "sports.counter",
-               Align::Right);
-  } else if (itemCount > 1) {
-    Log::printf("[display] sports.counter: '%u of %u' dropped this draw so the age line can have "
-                "its slot - this card is stale, and saying so is worth more than the item number",
-                static_cast<unsigned>(itemNumber), static_cast<unsigned>(itemCount));
+  if (itemCount > 1) {
+    char counter[16];
+    snprintf(counter, sizeof(counter), "%u of %u", itemNumber, itemCount);
+    layoutLine(counter, kScreenW - kCardMargin, 188, 90, sport.muted, "sports.counter",
+               Align::Right, kTransparentText);
   }
 
-  // THIS CARD'S RELATIONSHIP TO THE BUTTON ROW, WHICH IS NO LONGER WRONG.
-  //
-  // What stood here until 2026-09-28 said that whatever was wrong with this
-  // card and the button row "stays exactly as wrong as it was". That was true
-  // when it was written - the age line had just been put on the counter's row
-  // rather than on a fourth row of its own, precisely so the card drew no
-  // pixel lower than before, and nothing about the underlying overrun had been
-  // addressed. It is not true any more, and leaving it would send the next
-  // reader looking for a defect that has been fixed.
-  //
-  // What is true now: this card reads contentIsTight() at the top and lays
-  // itself out twice over. Untight, it is byte-for-byte the card it always
-  // was - team rows at 62 and 116, a 12pt status at 172, the right-hand slot
-  // at 176 - because that is what nine of nine fielded devices draw and a
-  // change they would all see needs a reason none of them have. Tight, the
-  // team rows move to 44 and 88 keeping their 54px pitch and their 18pt
-  // scores, the status drops to 9pt and joins the age and counter on one row
-  // at 132, and the lowest ink on the card bottoms at 154 - the floor
-  // setContentBudget() set, reached exactly and not crossed.
-  //
-  // WHAT IS STILL WORTH KNOWING. This card still does not call
-  // noteContentOverrun() itself, so it does not report its own bottom as a
-  // card. It no longer needs to: every string on it goes through layoutText(),
-  // which compares each box against gContentBottom and says so in the stream
-  // when one runs past, and unlike the forecast card's strip icons there is no
-  // element on this card that draws outside that path. The one thing a table
-  // cannot settle is whether a 9pt status word reads from across the room,
-  // which is the same question section 7.3 of the audit raises about 9pt team
-  // names and is on the list to look at on glass.
-  //
-  // The stray `gContentBottom = 200` that used to close this function is still
-  // gone, and the reason is worth keeping: it was left in place on the
-  // argument that it did nothing, and it does nothing to THIS card, because
-  // CardManager::drawCurrent() calls setContentBudget() immediately before
-  // every card.draw(). What it did do was leave a number behind that no card
-  // had asked for, ready for any draw that reaches the panel outside that
-  // path. Now that layoutText() compares every string against the budget, a
-  // wrong budget is no longer inert: it would make the check report the next
-  // card against 200 instead of against 154 or 220.
+  // Its own clock rather than drawClock(), which paints an opaque bg() box that
+  // on a full-bleed card is a rectangle of the wrong colour.
+  const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
+  struct tm localTm;
+  gmtime_r(&localNow, &localTm);
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW / 2, 204,
+             kScreenW - kCardMargin * 2, sport.muted, "sports.clock", Align::Centre,
+             kTransparentText);
+
+  restoreDefaultFont();
 }
 
 void showIssFlyoverCard(const String& distanceText, const String& directionText,
@@ -2647,45 +2791,107 @@ void showIssNextPassCard(const String& riseTimeText, const String& riseDirection
 //
 // UNVERIFIED ON HARDWARE, same as every other card in this file - checked
 // by a clean compile and by reading, not by a real decode on a real panel.
-void showMoonPhaseCard(const String& phaseName, double phase, double illuminatedFraction) {
-  lcd.fillScreen(bg());
-  drawCardBanner("MOON", kMoonPhaseBanner, 80);
 
-  const int cx = kScreenW / 2;
-  const int cy = 90;
-  const int radius = 50;
+namespace {
 
-  // Defensive clamp only - MoonPhase.cpp's cardItemCount() already keeps this
-  // function from being called at all with the "no data" sentinel (-1), so
-  // this never actually sees an out-of-range value in practice.
+/// The mean synodic month, in days: new moon to new moon. Enough for "in 3
+/// days" on a card; the true interval varies by several hours either way and no
+/// reader of this panel can tell.
+constexpr double kSynodicDays = 29.530588;
+
+/// One moon disc at any phase, lit portion and all.
+///
+/// Pulled out of the card below because the redesign draws five of them - one
+/// hero and four upcoming phases - and five copies of terminator arithmetic is
+/// five places for the lit side to end up on the wrong edge.
+void drawMoonDisc(
+    int cx, int cy, int radius, double illuminatedFraction, bool waxingRight,
+    uint32_t lit, uint32_t dark, uint32_t outline) {
   double k = illuminatedFraction;
-  if (k < 0.0) k = 0.0;
-  if (k > 1.0) k = 1.0;
-  const bool waxingRight = phase < 0.5;
+  if (k < 0.0) { k = 0.0; }
+  if (k > 1.0) { k = 1.0; }
 
-  lcd.fillCircle(cx, cy, radius, muted());
+  lcd.fillCircle(cx, cy, radius, dark);
+
   if (waxingRight) {
-    lcd.fillArc(cx, cy, 0, radius, 270, 90, ink());
+    lcd.fillArc(cx, cy, 0, radius, 270, 90, lit);
   } else {
-    lcd.fillArc(cx, cy, 0, radius, 90, 270, ink());
+    lcd.fillArc(cx, cy, 0, radius, 90, 270, lit);
   }
 
+  // The terminator is an ellipse across the disc: narrow near the quarters,
+  // full width at new and full. Its colour is the side that is GROWING - dark
+  // while under half lit, lit while over - which is what turns a half disc into
+  // a crescent or a gibbous.
   double halfWidthFraction = 2.0 * k - 1.0;
-  if (halfWidthFraction < 0.0) halfWidthFraction = -halfWidthFraction;
+  if (halfWidthFraction < 0.0) { halfWidthFraction = -halfWidthFraction; }
   const int terminatorRx = static_cast<int>(radius * halfWidthFraction + 0.5);
   if (terminatorRx > 0) {
-    const uint32_t terminatorColour = (k <= 0.5) ? muted() : ink();
-    lcd.fillEllipse(cx, cy, terminatorRx, radius, terminatorColour);
+    lcd.fillEllipse(cx, cy, terminatorRx, radius, (k <= 0.5) ? dark : lit);
   }
 
-  // A crisp outline regardless of theme: muted() against bg() is legible
-  // elsewhere in this file as body text, but a ring makes the disc's edge
-  // unambiguous even where the two are close in tone.
-  lcd.drawCircle(cx, cy, radius, ink());
+  lcd.drawCircle(cx, cy, radius, outline);
+}
+
+/// How many days until the moon next reaches `target`, where 0 is new, 0.25
+/// first quarter, 0.5 full and 0.75 last quarter.
+double daysUntilPhase(double currentPhase, double target) {
+  double ahead = target - currentPhase;
+  while (ahead < 0.0) { ahead += 1.0; }
+  while (ahead >= 1.0) { ahead -= 1.0; }
+  return ahead * kSynodicDays;
+}
+
+}  // namespace
+
+void showMoonPhaseCard(const String& phaseName, double phase, double illuminatedFraction) {
+  // docs/design/sun-moon-redesign: the disc moves off centre to sit beside its
+  // own name, and the lower half becomes the four phases still to come.
+  //
+  // DAY AND NIGHT, like the sun card beside it and for the same reason. A moon
+  // is a night subject, but this panel shows it at two in the afternoon among
+  // white cards, and a dark rectangle in that rotation reads as a fault. The
+  // geometry is identical between the two palettes; the day version inverts the
+  // disc - lit portion dark, shadow light - which is how a moon actually looks
+  // against a bright sky, so the phase shapes still read.
+  struct MoonPalette {
+    uint32_t backdropTop;
+    uint32_t backdropBottom;
+    uint32_t lit;
+    uint32_t dark;
+    uint32_t outline;
+    uint32_t heading;
+    uint32_t name;
+    uint32_t detail;
+  };
+
+  const MoonPalette day{
+      0xEEF2F8u, 0xDFE5EFu, 0x3C4660u, 0xC3CBDBu, 0x8D97ACu,
+      0x5A6780u, 0x16203Au, 0x4D5876u};
+  const MoonPalette night{
+      0x101A30u, 0x222440u, 0xF5EDD9u, 0x344258u, 0x9CA9BDu,
+      0xBCC9E2u, 0xF7EFDFu, 0xB4BFD4u};
+
+  const MoonPalette& sky = gIsDaytime ? day : night;
+
+  fillVerticalGradient(0, kScreenH, sky.backdropTop, sky.backdropBottom);
+
+  double k = illuminatedFraction;
+  if (k < 0.0) { k = 0.0; }
+  if (k > 1.0) { k = 1.0; }
+  const bool waxingRight = phase < 0.5;
+
+  lcd.setTextSize(1);
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  layoutLine("MOON · TODAY", kCardMargin, 12, 150, sky.heading, "moon.heading",
+             Align::Left, kTransparentText);
+
+  drawMoonDisc(53, 74, 30, k, waxingRight, sky.lit, sky.dark, sky.outline);
 
   if (phaseName.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold12pt7b);
-    layoutLine(phaseName, kScreenW / 2, 150, kBootTextWidth, ink(), "moon.phase", Align::Centre);
+    layoutLine(phaseName, 98, 56, kScreenW - 98 - kCardMargin, sky.name, "moon.phase",
+               Align::Left, kTransparentText);
   }
 
   char pctBuffer[24];
@@ -2694,10 +2900,98 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
   // The buffer straight through rather than String(pctBuffer): the temporary
   // that wrapping cost was a heap allocation on the draw path for a string
   // that is already a flat array.
-  layoutLine(pctBuffer, kScreenW / 2, 176, kBootTextWidth, muted(), "moon.illuminated",
-             Align::Centre);
+  layoutLine(pctBuffer, 98, 78, kScreenW - 98 - kCardMargin, sky.detail, "moon.illuminated",
+             Align::Left, kTransparentText);
 
-  drawClock();
+  layoutLine("NEXT MAJOR PHASES", kCardMargin, 122, 200, sky.heading, "moon.upcoming.label",
+             Align::Left, kTransparentText);
+
+  // THE FOUR UPCOMING PHASES, IN THE ORDER THEY HAPPEN, computed here rather
+  // than sent. Nothing on the check-in response carries phase dates, and the
+  // arithmetic needs only the phase already on it: each quarter is a fixed
+  // point in a cycle of known length, so "how long until the next full moon" is
+  // a subtraction. Asking the server for it would be a protocol change, a
+  // migration and a simulator edit for a figure the device can work out.
+  //
+  // Sorted rather than listed in a fixed order, because which phase comes next
+  // depends on where the moon is now - the design happens to show a waxing
+  // gibbous, whose next four are full, last quarter, new, first quarter, and a
+  // hardcoded order would be wrong for three quarters of the month.
+  struct Upcoming {
+    const char* label;
+    double target;
+    double illuminated;
+    double days;
+  };
+
+  Upcoming upcoming[4] = {
+      {"Full", 0.50, 1.0, 0.0},
+      {"Last qtr", 0.75, 0.5, 0.0},
+      {"New", 0.00, 0.0, 0.0},
+      {"First qtr", 0.25, 0.5, 0.0},
+  };
+
+  for (auto& item : upcoming) {
+    item.days = daysUntilPhase(phase, item.target);
+  }
+
+  for (int i = 0; i < 3; ++i) {
+    for (int j = 0; j < 3 - i; ++j) {
+      if (upcoming[j].days > upcoming[j + 1].days) {
+        const Upcoming swap = upcoming[j];
+        upcoming[j] = upcoming[j + 1];
+        upcoming[j + 1] = swap;
+      }
+    }
+  }
+
+  constexpr int kUpcomingY = 163;
+  constexpr int kUpcomingRadius = 18;
+  constexpr int kUpcomingX[4] = {43, 121, 199, 277};
+
+  for (int i = 0; i < 4; ++i) {
+    const Upcoming& item = upcoming[i];
+
+    // A quarter is drawn lit on the side it is lit on: first quarter waxes to
+    // the right, last quarter to the left. Passing waxingRight from the CURRENT
+    // phase here would draw both the same way round.
+    const bool itemWaxingRight = item.target < 0.5;
+    drawMoonDisc(
+        kUpcomingX[i], kUpcomingY, kUpcomingRadius, item.illuminated, itemWaxingRight,
+        sky.lit, sky.dark, sky.outline);
+
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    // 184..202, directly under the disc, which ends at 181. Moved up with the line
+    // below it: leaving this at 196 while that went to 202 would have overlapped them.
+    layoutLine(item.label, kUpcomingX[i], 184, 76, sky.name, "moon.upcoming.name",
+               Align::Centre, kTransparentText);
+
+    char whenBuffer[24];
+    const int days = static_cast<int>(item.days + 0.5);
+    if (days <= 0) {
+      snprintf(whenBuffer, sizeof(whenBuffer), "today");
+    } else if (days == 1) {
+      snprintf(whenBuffer, sizeof(whenBuffer), "in 1d");
+    } else {
+      snprintf(whenBuffer, sizeof(whenBuffer), "in %dd", days);
+    }
+
+    // 202..220, for the reason the sun card's own stack states: nothing draws below
+    // 220, and this drew to 232.
+    layoutLine(whenBuffer, kUpcomingX[i], 202, 76, sky.detail, "moon.upcoming.when",
+               Align::Centre, kTransparentText);
+  }
+
+  // Top right, like the design and like the sun card, rather than drawClock()
+  // bottom right in ink() - a colour picked for a white card, over the row this
+  // one spends on the upcoming phases.
+  const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
+  struct tm localTm;
+  gmtime_r(&localNow, &localTm);
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW - kCardMargin, 12, 120,
+             sky.heading, "moon.clock", Align::Right, kTransparentText);
+
   restoreDefaultFont();
 }
 
@@ -3233,10 +3527,49 @@ void showListingsStatus(const String& headline, const String& detail, bool isPro
 // against the real column width, so a font change that makes three characters
 // too wide for 60px ellipsizes and says so instead of printing over the
 // neighbouring column.
+/// Whether NWS gave this period a weekday name rather than a holiday one.
+///
+/// Checked by prefix because NWS also returns "Monday Night" and the like, and
+/// the first three characters of a real weekday are exactly what the strip
+/// wants to print.
+bool isWeekdayName(const String& name) {
+  static const char* const kDays[] = {"Sunday",   "Monday", "Tuesday", "Wednesday",
+                                      "Thursday", "Friday", "Saturday"};
+  for (const char* day : kDays) {
+    if (name.startsWith(day)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 String shortDayLabel(uint8_t index, const String& name) {
   if (index == 0) {
     return "Now";
   }
+
+  // NWS NAMES SOME PERIODS AFTER THE HOLIDAY, NOT THE WEEKDAY. "Columbus Day",
+  // "Thanksgiving Day", "Christmas Day" and "New Year's Day" all come back in
+  // place of the day name, and the first three characters of those say nothing:
+  // a panel photographed on 2026-10-09 showed a column headed "Col" between Sun
+  // and Tue, which reads as a rendering fault rather than as Monday.
+  //
+  // The weekday is recoverable because the period's own position gives it: this
+  // strip runs forward from today, one column per day, so index 1 is tomorrow.
+  // That is cheaper and more reliable than a table of holidays, which would
+  // need maintaining and would still miss a name this service invents next.
+  if (name.length() > 3 && !isWeekdayName(name)) {
+    const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
+    const time_t thatDay = localNow + (static_cast<time_t>(index) * 86400);
+    struct tm dayTm;
+    gmtime_r(&thatDay, &dayTm);
+
+    static const char* const kWeekdays[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    if (dayTm.tm_wday >= 0 && dayTm.tm_wday <= 6) {
+      return kWeekdays[dayTm.tm_wday];
+    }
+  }
+
   return name.length() > 3 ? name.substring(0, 3) : name;
 }
 

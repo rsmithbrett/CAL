@@ -1,5 +1,6 @@
 #include "Aircraft.h"
 
+#include <math.h>
 #include <ArduinoJson.h>
 
 #include "Assets.h"
@@ -329,10 +330,28 @@ Result fetchMine() {
   }
 
   result.status = Status::Ok;
-  result.nearest.callsign = String((const char*)(nearest["callsign"] | "UNKNOWN"));
+  // "UNKNOWN" IS NOT A CALLSIGN AND READS EXACTLY LIKE ONE. A military
+  // aircraft flying without a flight id has none, and the word sat where
+  // SCWTP33 sits on the card beside it - photographed 2026-10-08. Empty
+  // instead, so the card falls back to the registration it already has, or
+  // draws nothing, the way it does for every other missing string.
+  result.nearest.callsign = String((const char*)(nearest["callsign"] | ""));
   result.nearest.altitudeFeet = nearest["altitudeFeet"] | 0;
-  result.nearest.speedKnots = nearest["speedKnots"] | 0.0;
-  result.nearest.headingDegrees = nearest["headingDegrees"] | 0.0;
+
+  // NaN RATHER THAN ZERO, AND THE SERVER HAS BEEN SENDING NULL FOR A
+  // FORTNIGHT WAITING FOR IT. IAdsbClient made both of these nullable
+  // precisely so "not reported" stops reading as a reading: zero knots is a
+  // parked aeroplane and zero degrees is due north. Coalescing here threw
+  // that away on arrival, and the card drew a P-8 at 6,975 feet doing 0 kts
+  // heading N.
+  //
+  // NaN because it is the one double that fails every comparison, so
+  // compassDirection()'s own [0,360) guard already refuses it and draws the
+  // dash it was written to draw. Only speed needed a check of its own.
+  result.nearest.speedKnots =
+      nearest["speedKnots"].is<double>() ? nearest["speedKnots"].as<double>() : NAN;
+  result.nearest.headingDegrees =
+      nearest["headingDegrees"].is<double>() ? nearest["headingDegrees"].as<double>() : NAN;
   result.nearest.distanceMiles = nearest["distanceMiles"] | 0.0;
   // `| ""` reads a JSON null exactly the same as a field an older server
   // never sends at all - both mean "nothing here" to this client, and the
@@ -523,21 +542,44 @@ void cardDraw(uint16_t) {
     //
     // No new parameter and no geometry change. A military sighting has no filed route, so
     // the two airport lines are empty and the card has the room.
+    // THE AIRFRAME IS THE HEADLINE, THE SERVICE SITS UNDER IT, AND BOTH SHOW.
+    //
+    // These two shared the headline as "Military - P-8 Poseidon" and the half
+    // worth reading was cut off - photographed 2026-10-08. Putting the type on
+    // the identifier line instead showed one or the other, never both. So the
+    // type takes the headline, because what the aircraft IS is the more
+    // interesting fact, and the service drops into the space a filed route
+    // would occupy. A military sighting has no route, so that space is free.
+    //
+    // Where no type is known the service keeps the headline, which is the card
+    // as it reads today for an aircraft hexdb has nothing on file for.
     String operatorName = gLast.nearest.airlineName;
+    String noRouteLine;
+
     if (gLast.nearest.isMilitary && gLast.nearest.militaryBranch.length() > 0) {
-      operatorName = gLast.nearest.militaryBranch;
       if (gLast.nearest.aircraftType.length() > 0) {
-        operatorName += " - ";
-        operatorName += gLast.nearest.aircraftType;
+        operatorName = gLast.nearest.aircraftType;
+        noRouteLine = gLast.nearest.militaryBranch;
+      } else {
+        operatorName = gLast.nearest.militaryBranch;
       }
     }
 
-    Display::showAircraftCard(gLast.nearest.callsign, operatorName,
+    // The flight, where one was filed, else the airframe. Military traffic
+    // routinely files no callsign, which used to arrive as the literal
+    // "UNKNOWN" and read like one. The type is no longer a fallback here: it
+    // has the headline.
+    String identifier = gLast.nearest.callsign;
+    if (identifier.length() == 0) {
+      identifier = gLast.nearest.registration;
+    }
+
+    Display::showAircraftCard(identifier, operatorName,
                               gLast.nearest.altitudeFeet, gLast.nearest.speedKnots,
                               gLast.nearest.headingDegrees, gLast.nearest.distanceMiles,
                               gLast.nearest.originCode, gLast.nearest.destinationCode,
                               gLast.nearest.originName, gLast.nearest.destinationName,
-                              describeFreshness(gLastOkMs));
+                              describeFreshness(gLastOkMs), noRouteLine);
 
     // Drawn after showAircraftCard(), not by it - same module boundary
     // Graphic.cpp already keeps with Display.cpp: whoever holds the asset id
@@ -596,6 +638,30 @@ void cardDraw(uint16_t) {
 /// Names fall back to codes per side independently, matching how the card itself
 /// draws its route: a flight with one known airport name and one unknown reads
 /// better half-resolved than not at all.
+/// Which aircraft a showing was of, as a key an impression report can group on.
+///
+/// The registration rather than the callsign, because the two answer different
+/// questions and only one is stable: a tail number belongs to an airframe for
+/// its life, while a callsign belongs to a flight and the same aeroplane
+/// carries a different one tomorrow. "Which aircraft has this display shown"
+/// wants the first, and the callsign is already on the label for anyone reading
+/// a single row.
+///
+/// Falls back to the callsign when no registration arrived, on the same
+/// reasoning as the listings card's MLS fallback: a less stable identifier
+/// still names the thing, and no key at all names nothing.
+String cardListingId(uint16_t) {
+  if (gLast.status != Status::Ok) {
+    return String();
+  }
+
+  if (gLast.nearest.registration.length() > 0) {
+    return gLast.nearest.registration;
+  }
+
+  return gLast.nearest.callsign;
+}
+
 String cardDescribe(uint16_t) {
   if (gLast.status != Status::Ok || gLast.nearest.callsign.length() == 0) {
     return String();
@@ -623,6 +689,7 @@ String cardDescribe(uint16_t) {
   spec.fetch = cardFetch;
   spec.itemCount = cardItemCount;
   spec.describe = cardDescribe;
+  spec.listingId = cardListingId;
   spec.draw = cardDraw;
   spec.isNotable = cardIsNotable;
   spec.status = cardStatus;

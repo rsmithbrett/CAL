@@ -360,6 +360,23 @@ void report(const char* lastCheckInOutcome) {
   // wrongly twice in one evening.
   requestDoc["bootLargestFreeBlockBytes"] = BootDiag::bootLargestFreeBlock();
 
+  // And the third figure, which closes the pair: what was left when the PREVIOUS
+  // boot gave up. Sent only when there is one, so an ordinary power-on carries no
+  // field rather than a zero the server would have to know to disregard.
+  //
+  // This is the figure the restart's own log line already names and then loses.
+  // Every heap restart calls Log::flushNow() first, and every heap restart is one
+  // where the log stream is the broken channel - a device restarting because it
+  // cannot open a TLS session cannot POST the line explaining that. So the
+  // explanation was always written and never arrived, and the gap was filled by
+  // reading largestFreeBlock8BitBytes from whatever report happened to land and
+  // guessing how close to the floor the device had been. It is not a guess now:
+  // restartReason says what the device decided, and this says what it was looking
+  // at when it decided.
+  if (const uint32_t atDecision = BootDiag::lastRestartLargestFreeBlock(); atDecision > 0) {
+    requestDoc["restartLargestFreeBlockBytes"] = atDecision;
+  }
+
   // ---- Where the contiguous heap actually went, by phase of the rotation ----
   //
   // bootLargestFreeBlockBytes above and largestFreeBlock8BitBytes further up

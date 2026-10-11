@@ -255,9 +255,40 @@ jobs:
       - name: Check out esp32-arduino-lib-builder
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch master \
+
+          # PINNED, because master broke this between two runs of the same
+          # workflow. 34555017889 succeeded on 2026-09-11 against eb36458;
+          # 37870399475 failed in 2m39s on 2026-10-09 against whatever master
+          # was by then, in a step with nothing to do with this fleet:
+          #
+          #   Patching TinyUSB with 0001-host-esp32s2s3-lowspeed-hub.diff...
+          #   error: patch failed: src/host/usbh.c:205
+          #   error: src/host/usbh.c: patch does not apply
+          #
+          # lib-builder clones TinyUSB at a floating ref and patches it for
+          # ESP32-S2/S3 USB host mode. TinyUSB moved, the patch stopped
+          # applying, and build.sh updates every component before building the
+          # one target asked for - so a `-t esp32` build dies on a patch for a
+          # chip this fleet does not contain.
+          #
+          # The IDF check below already prescribes this remedy for a different
+          # drift: "Pin this checkout to a lib-builder commit that still targets
+          # release/v5.5". One pin covers both, and it is right on its own
+          # merits - libraries dropped into a fleet's core should come from a
+          # known tree rather than from whatever upstream looked like that
+          # morning.
+          #
+          # Moving this pin is a deliberate edit. Read the IDF check below
+          # first: a newer lib-builder targeting a different IDF minor must not
+          # be dropped into arduino-esp32 3.3.11.
+          LIB_BUILDER_REF=eb36458
+
+          # No --depth 1: a shallow clone of master cannot check out an older
+          # commit.
+          git clone --branch master \
             https://github.com/espressif/esp32-arduino-lib-builder.git lib-builder
           cd lib-builder
+          git checkout --detach "$LIB_BUILDER_REF"
           git log -1 --format='lib-builder at %h %ci %s'
 
           PINNED=$(grep -oP 'IDF_BRANCH="\K[^"]+' tools/config.sh | head -1)

@@ -21,6 +21,9 @@ namespace {
 /// representable and there is no uninitialised-noise case to defend against.
 constexpr const char* kNvsNamespace = "bootdiag";
 constexpr const char* kKeyCause = "cause";
+/// The largest contiguous 8-bit block at the moment a restart was decided on.
+/// NVS keys are capped at 15 characters, hence the short name.
+constexpr const char* kKeyCauseBlock = "causeblk";
 
 /// What logResetReason() concluded, kept so lastRestartCause() can answer
 /// after the fact. Not read from NVS on demand: the key is cleared during
@@ -42,6 +45,19 @@ char gReasonToken[48] = "UNREPORTED+NONE";
 // missing figure rather than as a device with no memory, and the pairing with
 // the live figure is simply unavailable for that report.
 uint32_t gBootLargestFreeBlock = 0;
+
+/// The largest contiguous 8-bit block as it stood when the PREVIOUS boot decided
+/// to restart, read out of NVS by takeRecordedCause() and 0 when nothing was
+/// recorded.
+///
+/// This exists because the figure cannot reach the server any other way. The
+/// restart sites log it and call Log::flushNow() first, but the heap restarts are
+/// exactly the ones where the log stream is the broken channel - a device that
+/// restarts because it cannot open a TLS session cannot POST the line explaining
+/// why. The line is written and lost. Carried on the next boot's telemetry it
+/// travels over a session that works, and answers the question the lost line was
+/// asked: how much contiguous memory was left when this device gave up.
+uint32_t gLastRestartLargestFreeBlock = 0;
 
 /// The reason, in words, plus what it actually implies. The second half is the
 /// point: `ESP_RST_TASK_WDT` means nothing to someone who has not just been
@@ -151,8 +167,15 @@ RestartCause takeRecordedCause() {
 
   const uint8_t stored = prefs.getUChar(kKeyCause, static_cast<uint8_t>(RestartCause::None));
 
+  // Read in the same session as the cause, and cleared on the same condition, so
+  // the pair can never come apart: a figure left behind by a cleared cause would
+  // be attributed to the next restart, which is the mistake the cause's own clear
+  // exists to prevent.
+  gLastRestartLargestFreeBlock = prefs.getUInt(kKeyCauseBlock, 0);
+
   if (stored != static_cast<uint8_t>(RestartCause::None)) {
     prefs.putUChar(kKeyCause, static_cast<uint8_t>(RestartCause::None));
+    prefs.putUInt(kKeyCauseBlock, 0);
   }
   prefs.end();
 
@@ -176,13 +199,14 @@ RestartCause takeRecordedCause() {
 
 }  // namespace
 
-void recordRestartIntent(RestartCause cause) {
+void recordRestartIntent(RestartCause cause, uint32_t largestFreeBlockAtDecision) {
   Preferences prefs;
   if (!prefs.begin(kNvsNamespace, /*readOnly=*/false)) {
     Log::line("[boot] could not open NVS to record the restart cause - the next boot will say NONE");
     return;
   }
   prefs.putUChar(kKeyCause, static_cast<uint8_t>(cause));
+  prefs.putUInt(kKeyCauseBlock, largestFreeBlockAtDecision);
   // Explicit, not left to the destructor: this is called immediately before a
   // restart, and the commit has to have happened by the time the reset lands.
   prefs.end();
@@ -203,6 +227,8 @@ void recordBootHeap() {
 }
 
 uint32_t bootLargestFreeBlock() { return gBootLargestFreeBlock; }
+
+uint32_t lastRestartLargestFreeBlock() { return gLastRestartLargestFreeBlock; }
 
 void logResetReason() {
   const esp_reset_reason_t reason = esp_reset_reason();

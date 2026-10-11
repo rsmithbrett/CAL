@@ -185,7 +185,18 @@ enum class RestartCause : uint32_t {
 /// Call it as late as possible, once the restart is certain. A recorded intent
 /// that is then not acted on would make the NEXT genuine crash report a cause
 /// it had nothing to do with.
-void recordRestartIntent(RestartCause cause);
+/// `largestFreeBlockAtDecision` is the largest contiguous 8-bit block as it stood
+/// when this restart was decided on, read back by lastRestartLargestFreeBlock()
+/// on the boot that follows. 0, the default, means the caller had no figure worth
+/// carrying, which is correct for the restarts that have nothing to do with
+/// memory - Ota and Reprovision among them.
+///
+/// Pass a value already held in a local rather than calling
+/// Http::largestContiguousBytes() again here. The heap moves between two calls,
+/// and a persisted figure that disagrees with the one in the log line beside it
+/// sends a reader hunting a discrepancy that is an artifact of having measured
+/// twice.
+void recordRestartIntent(RestartCause cause, uint32_t largestFreeBlockAtDecision = 0);
 
 /// Logs the two-part reason for the restart that just happened, and then
 /// clears the recorded intent.
@@ -273,5 +284,20 @@ void recordBootHeap();
 /// twenty-six minutes and the only way anyone knew was reading log lines by
 /// hand - during which the same plateau was called wrongly twice.
 uint32_t bootLargestFreeBlock();
+
+/// The largest contiguous 8-bit block as it stood when the PREVIOUS boot decided
+/// to restart, or 0 when the last restart recorded no figure.
+///
+/// Completes the pair above. bootLargestFreeBlock() says what this device had to
+/// work with; this says what was left when it gave up. Both travel on telemetry,
+/// so the span a heap restart happened across is readable per device from stored
+/// reports, which is what the live figure alone has never supported.
+///
+/// It exists because the figure has no other route off the device. The restart
+/// sites log it and flush first, but a device restarting because it cannot open a
+/// TLS session cannot POST the line that says so, and the heap restarts are
+/// precisely those. The line is written and lost; this rides the next boot's
+/// telemetry, over a session that works.
+uint32_t lastRestartLargestFreeBlock();
 
 }  // namespace BootDiag

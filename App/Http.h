@@ -186,4 +186,51 @@ bool canOpenNewSession();
 /// device with several failing subsystems stays readable in one stream.
 void diagnoseFailure(const char* tag);
 
+/// What one reconnect attempt actually did, at each step.
+struct ReconnectProbe {
+  size_t freeBeforeClose;
+  size_t largestBeforeClose;
+  /// Measured AFTER the session is torn down, which is the figure that decides
+  /// a reconnect and is NOT the one a live sample shows: an open session is
+  /// holding its record buffers, so closing it hands memory back and the block
+  /// here is normally larger than anything measured while connected. Reading a
+  /// live figure and reasoning about reconnection from it compares the wrong
+  /// number.
+  size_t freeAfterClose;
+  size_t largestAfterClose;
+  /// True when canOpenNewSession() refused before a handshake was attempted.
+  bool gateRefused;
+  /// True when mbedTLS reported it could not allocate, as against any other
+  /// handshake failure. The distinction is the point of the probe: out of
+  /// memory and rejected-by-the-peer want opposite investigations.
+  bool allocationFailed;
+  bool connected;
+  int tlsError;
+  uint32_t elapsedMs;
+};
+
+/// Closes the shared TLS session and immediately tries to build a new one,
+/// reporting what happened at each step.
+///
+/// WHY THIS CANNOT BE INFERRED FROM ORDINARY TRAFFIC. Check-in and telemetry
+/// POST back to back on one client, and HTTPClient reuses a live connection, so
+/// a device can run for hours without ever opening a second session. Uptime on
+/// a kept-alive connection therefore says nothing about whether this device
+/// could reconnect if it lost that one - which is the thing that actually
+/// decides whether it goes dark. Those are two different properties and only
+/// one of them was ever being measured.
+///
+/// Three outcomes, kept apart because they want different fixes: the gate
+/// refused on the contiguous-block floor, mbedTLS could not allocate, or the
+/// handshake completed. Certificate validation stays on - Tls::configure()'s
+/// real root, never setInsecure() - so a success here means a session that
+/// would carry a real request, not one that merely opened a socket.
+///
+/// COSTS A HANDSHAKE, and leaves the new session open for the next request to
+/// use, so nothing is wasted when it succeeds. Call it right after a SUCCESSFUL
+/// check-in: the log stream is demonstrably working at that moment, which is
+/// what gets the result off the device. A probe run while the device is already
+/// in trouble reports into a channel that cannot send.
+ReconnectProbe probeReconnect();
+
 }  // namespace Http

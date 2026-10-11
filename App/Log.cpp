@@ -16,16 +16,15 @@ constexpr const char* kPath = "/api/debuglog";
 
 // The pending-buffer ceiling: this is what actually bounds memory if the
 // network is down for a while, independent of (and larger than) the
-// per-POST batch cap below. Once either limit here is hit, the oldest
-// buffered line is dropped to make room for the newest, rather than growing
-// forever or risking a failed allocation on a board this RAM-constrained.
-// 200 lines / 16KB is generous headroom for several minutes of this
-// firmware's actual log volume (roughly one line every few seconds in
-// normal operation, brief bursts during WiFi join/check-in/update) while
-// still being a small, fixed slice of the ESP32's ~320KB SRAM - and it is
-// only ever paid while an admin has actually turned streaming on.
-constexpr size_t kMaxBufferedLines = 200;
-constexpr size_t kMaxBufferedBytes = 16384;
+// per-POST batch cap below. Once either limit is hit, the oldest buffered
+// message is dropped to make room for the newest, rather than growing forever
+// or risking a failed allocation on a board this RAM-constrained.
+//
+// It used to be 200 lines / 16KB of Strings. It is now 32 slots of 256 bytes,
+// declared with the rest of the storage further down - the depth came down
+// because a buffer that deep was only ever worth having if the device stayed
+// up long enough to send it, and this one is reserved whether streaming is on
+// or not. See the cost table at kSlotCount.
 
 // THE THIRD CAP, AND THE ONLY ONE THAT LOOKS OUTSIDE THIS MODULE.
 //
@@ -132,11 +131,141 @@ constexpr size_t kMaxBatchBytes = 4096;
 // would.
 constexpr uint32_t kBatchIntervalMs = 1000;
 
+// ---- The two budgets this module has to bound, and why one is not enough ----
+//
+// A log module on this board spends memory in two separate places, and capping
+// only the first leaves the second free to do the damage:
+//
+//   1. THE STORED MESSAGES. Bounded below by one fixed byte ring, allocated
+//      once as static storage and reused forever.
+//   2. THE UPLOAD THAT DRAINS THEM. Bounded below by one fixed body buffer, so
+//      composing a POST never allocates, and by a cap on attempts, so a server
+//      that is not answering cannot keep re-running the allocation path.
+//
+// Budget 2 is the one that was invisible. The previous implementation built a
+// JsonDocument holding the batch and then serialized it into a growing String -
+// two transient copies of the same 4KB, peaking at exactly the moment the TLS
+// session wanted its own record buffer. Bounding the queue alone would not have
+// touched that overlap.
+//
+// WHAT WAS HERE BEFORE, so the change reads as a correction rather than taste:
+// `String buffer[kMaxBufferedLines]` - 200 String objects whose text storage
+// allocated and reallocated as messages came and went. Not 200 live allocations
+// at rest, which is a thing worth being accurate about; the cost was the churn,
+// a stream of differently-sized blocks taken and returned on every rotation.
+// That bounds total bytes and says nothing about the SHAPE of the heap it
+// leaves behind, which is what decides whether a contiguous TLS record buffer
+// can still be found. Device 17 on 2026-10-09 sat at 24,356 bytes free 8-bit
+// with a largest block of 14,836 - memory enough, in pieces too small.
+//
+// The ring below is 8KB rather than the old 16KB ceiling, deliberately: a
+// 16,384-byte reservation is the same order as the 16,717-byte contiguous
+// allocation it must never be the reason for failing, and the depth was only
+// ever worth having if the device stayed up to send it.
+// WHAT THIS COSTS, STATED PLAINLY, because static storage is not free memory -
+// it is heap given up permanently in exchange for never having to find it:
+//
+//     slots     32 x 256 = 8,192 bytes
+//     lengths   32 x   2 =    64 bytes
+//     body                = 3,072 bytes
+//     ------------------------------------
+//     total               = 11,328 bytes
+//
+// That is ~11KB this device no longer has for anything else, on every boot,
+// whether or not anybody ever turns streaming on. It buys a heap that cannot be
+// fragmented by logging and an upload path that cannot fail to allocate. On a
+// board whose defect is a contiguous 16,717-byte block that intermittently does
+// not exist, a fixed cost that removes a variable one is the right trade - but
+// it IS a trade, and shrinking the batch below is what keeps the bill at 11KB
+// instead of 17KB.
+constexpr size_t kSlotCount = 32;
+
+/// 255 bytes of text plus the terminator. A message longer than that is stored
+/// clipped and counted as a truncation, which is a different event from a drop:
+/// a truncated line still tells the reader what happened, a dropped one does not.
+constexpr size_t kSlotBytes = 256;
+constexpr size_t kMaxTextBytes = kSlotBytes - 1;
+
+/// The upload buffer, sized for the JSON as it is actually emitted rather than
+/// for a worst-case escaping multiplier.
+///
+/// Escaping is accounted for by measuring each line's escaped length as the body
+/// is built and stopping when the next one will not fit, so this is a hard
+/// ceiling the composer respects rather than an estimate it hopes to stay under.
+/// That removes the x2 headroom a worst-case sizing would have had to reserve,
+/// which is 5KB of permanent RAM saved for a few lines of arithmetic.
+constexpr size_t kBodyBytes = 3072;
+
+/// How many times one batch may be offered before it is given up on.
+///
+/// Bounded work, not only bounded memory. A queue cap already stops the backlog
+/// growing while a server is unreachable, but it does nothing about rebuilding
+/// and re-POSTing the same batch every second forever - which re-runs the whole
+/// allocation path indefinitely. After this many refusals the batch is dropped
+/// and counted, exactly as a capacity eviction is.
+constexpr uint8_t kMaxDeliveryAttempts = 3;
+
+/// How long to wait after giving up on a batch before trying the next one.
+constexpr uint32_t kBackoffMsAfterFailure = 15000;
+
 bool streaming = false;
-String buffer[kMaxBufferedLines];
+
+// ---- Budget 1: the stored messages ----
+//
+// Static, not heap. The strongest reading of "allocate once and reuse" is to
+// never take it from the allocator at all: static storage is reserved at link
+// time, cannot fail, needs no init hook to run before the first log line, and
+// can never be the block that fragments the heap it was taken from.
+//
+// Fixed slots rather than a packed byte ring. A byte ring packs better, and the
+// packing is not worth what it costs to read: every drain path grows a
+// does-this-record-wrap case, and that is the half of a ring buffer that gets
+// written wrong. This is the only diagnostic channel a deployed device has, so
+// the indexing stays something that can be checked by eye - `head` plus an
+// offset, modulo the slot count, and nothing else.
+//
+// The cost of the simplicity is the tail of each slot that a short line leaves
+// unused. That is wasted address space, not wasted heap: the slots are reserved
+// either way, so a half-empty one costs nothing that a packed one would have
+// given back.
+char gSlots[kSlotCount][kSlotBytes];
+uint16_t gLens[kSlotCount];
 size_t head = 0;
 size_t count = 0;
 size_t bufferedBytes = 0;
+
+// ---- Budget 2: the upload ----
+//
+// Also static, and sized for the worst case rather than grown to fit. Composing
+// a POST allocates nothing, so the batch that drains the queue cannot be what
+// denies the TLS session underneath it the contiguous block it needs.
+char gBody[kBodyBytes];
+
+/// Refusals for the batch currently at the head of the ring.
+uint8_t gDeliveryAttempts = 0;
+
+/// Set when a batch is abandoned, so the next attempt waits rather than
+/// following straight on.
+uint32_t gBackoffUntilMs = 0;
+
+/// Lines given up on after kMaxDeliveryAttempts, counted separately from
+/// capacity evictions because they say a different thing: not "this device
+/// logged faster than it could send" but "the server did not take these".
+uint32_t droppedUndeliverable = 0;
+
+/// Messages stored clipped at kMaxTextBytes. Counted apart from every drop
+/// counter on purpose: a truncation and a drop are different losses, and a
+/// reader who sees the stream thinning needs to know which one is happening.
+/// Folded into one total they would be indistinguishable, and the remedies are
+/// opposite - a truncation says a call site is too verbose for one line, a drop
+/// says the device cannot keep up at all.
+uint32_t truncatedSinceFlush = 0;
+
+/// Set while a check-in is in flight. See Log::setUploadsSuppressed - this is
+/// the whole of budget 2's second half, which is that two TLS sessions wanting
+/// a record buffer at the same moment is a memory event even when each one
+/// would have been affordable alone.
+bool gUploadsSuppressed = false;
 uint32_t droppedSinceFlush = 0;
 
 // The subset of droppedSinceFlush that went for heap reasons rather than for
@@ -151,26 +280,59 @@ size_t largestBlockAtLastHeapDrop = 0;
 
 uint32_t lastFlushMs = 0;
 
-void clearBuffer() {
-  for (size_t i = 0; i < kMaxBufferedLines; ++i) {
-    buffer[i] = String();
+/// The slot holding the nth-oldest message. The whole of this module's indexing.
+size_t slotAt(size_t offsetFromOldest) { return (head + offsetFromOldest) % kSlotCount; }
+
+/// Removes the oldest message. The caller owns the drop counters, because the
+/// two reasons a message leaves early - no capacity, or nobody would take it -
+/// are counted separately and read differently.
+void evictOldest() {
+  if (count == 0) {
+    return;
   }
+  bufferedBytes -= gLens[head] + 1;
+  gLens[head] = 0;
+  gSlots[head][0] = '\0';
+  head = (head + 1) % kSlotCount;
+  --count;
+}
+
+void clearBuffer() {
   head = 0;
   count = 0;
   bufferedBytes = 0;
   droppedSinceFlush = 0;
   droppedForHeapSinceFlush = 0;
   largestBlockAtLastHeapDrop = 0;
+  droppedUndeliverable = 0;
+  truncatedSinceFlush = 0;
+  gDeliveryAttempts = 0;
+  gBackoffUntilMs = 0;
 }
 
-void pushToBuffer(const String& text) {
-  const size_t textCost = text.length() + 1;  // +1 for the newline joining it to the next line
+void pushToBuffer(const char* text) {
+  if (text == nullptr) {
+    return;
+  }
+
+  size_t length = strlen(text);
+  if (length > kMaxTextBytes) {
+    // 255 bytes of text plus the terminator is what a slot holds. printf() and
+    // verbose() already format into a scratch buffer of the same size, so this
+    // only fires for a caller that built a longer string by other means.
+    // Clipping beats refusing, and it is counted apart from the drops so the
+    // two losses stay distinguishable.
+    length = kMaxTextBytes;
+    ++truncatedSinceFlush;
+  }
+
+  const size_t textCost = length + 1;
 
   // The ceilings in force for THIS push. Normally the line/byte caps; one
   // batch's worth when the heap says the full ceiling is not affordable (see
   // kMinLargestBlockBytes).
-  size_t lineCeiling = kMaxBufferedLines;
-  size_t byteCeiling = kMaxBufferedBytes;
+  size_t lineCeiling = kSlotCount;
+  size_t byteCeiling = kSlotCount * kSlotBytes;
   bool heapConstrained = false;
   size_t largestBlock = 0;
 
@@ -215,15 +377,16 @@ void pushToBuffer(const String& text) {
   // unreadable. And the newest lines are the ones describing the condition
   // being diagnosed right now, which is what a reader opened the stream for.
   while (count > 0 && (count >= lineCeiling || bufferedBytes + textCost > byteCeiling)) {
-    bufferedBytes -= buffer[head].length() + 1;
-    buffer[head] = String();
-    head = (head + 1) % kMaxBufferedLines;
-    --count;
+    evictOldest();
     ++droppedSinceFlush;
     if (heapConstrained) {
       ++droppedForHeapSinceFlush;
       largestBlockAtLastHeapDrop = largestBlock;
     }
+    // Evicting the head retires whatever the in-flight batch was counting from,
+    // so the attempt tally restarts against whatever is now oldest rather than
+    // condemning it for refusals it was never offered in.
+    gDeliveryAttempts = 0;
   }
 
   if (count >= lineCeiling) {
@@ -234,27 +397,171 @@ void pushToBuffer(const String& text) {
     return;
   }
 
-  const size_t tail = (head + count) % kMaxBufferedLines;
-  buffer[tail] = text;
+  const size_t slot = slotAt(count);
+  memcpy(gSlots[slot], text, length);
+  gSlots[slot][length] = '\0';
+  gLens[slot] = static_cast<uint16_t>(length);
   bufferedBytes += textCost;
   ++count;
 }
 
-/// Sends up to kMaxBatchLines/kMaxBatchBytes worth of the oldest buffered
-/// lines. Only what the server actually accepted (HTTP 200) is removed from
-/// the buffer - a failed POST leaves it untouched so nothing is lost beyond
-/// what the buffer-cap eviction above already dropped for capacity reasons,
-/// and the same lines are simply retried on the next poll().
-void sendOneBatch() {
-  if (count == 0 && droppedSinceFlush == 0) {
+/// How much of gBody is composed so far.
+size_t gBodyLen = 0;
+
+/// The closing "]}" every composed body needs. Reserved by every capacity check
+/// below rather than hoped for at the end, so a body can never be filled to a
+/// point where it cannot be finished.
+constexpr size_t kClosingBytes = 2;
+
+bool bodyAppendRaw(const char* text, size_t length) {
+  if (gBodyLen + length + kClosingBytes > kBodyBytes) {
+    return false;
+  }
+  memcpy(gBody + gBodyLen, text, length);
+  gBodyLen += length;
+  return true;
+}
+
+/// Appends one JSON string element, escaped, with its separating comma when it
+/// is not the first.
+///
+/// MEASURED IN FULL BEFORE A BYTE IS WRITTEN. A half-written element is worse
+/// than a dropped one: it is a body that parses as nothing, so the batch that
+/// would have told somebody what was happening becomes a 400 instead. The
+/// measuring pass is why capping by escaped bytes is affordable at all - it is
+/// what lets gBody be 3KB rather than the 8.5KB a worst-case x2 reservation
+/// would have cost in permanent RAM.
+bool bodyAppendLine(const char* text, size_t length, bool first) {
+  size_t needed = first ? 2 : 3;  // the two quotes, plus a comma when not first
+  for (size_t i = 0; i < length; ++i) {
+    const unsigned char c = static_cast<unsigned char>(text[i]);
+    if (c == '"' || c == '\\') {
+      needed += 2;
+    } else if (c < 0x20) {
+      needed += 6;  // \u00XX
+    } else {
+      needed += 1;
+    }
+  }
+
+  if (gBodyLen + needed + kClosingBytes > kBodyBytes) {
+    return false;
+  }
+
+  if (!first) {
+    gBody[gBodyLen++] = ',';
+  }
+  gBody[gBodyLen++] = '"';
+  for (size_t i = 0; i < length; ++i) {
+    const unsigned char c = static_cast<unsigned char>(text[i]);
+    if (c == '"' || c == '\\') {
+      gBody[gBodyLen++] = '\\';
+      gBody[gBodyLen++] = static_cast<char>(c);
+    } else if (c < 0x20) {
+      static const char kHex[] = "0123456789abcdef";
+      gBody[gBodyLen++] = '\\';
+      gBody[gBodyLen++] = 'u';
+      gBody[gBodyLen++] = '0';
+      gBody[gBodyLen++] = '0';
+      gBody[gBodyLen++] = kHex[(c >> 4) & 0x0F];
+      gBody[gBodyLen++] = kHex[c & 0x0F];
+    } else {
+      gBody[gBodyLen++] = static_cast<char>(c);
+    }
+  }
+  gBody[gBodyLen++] = '"';
+  return true;
+}
+
+/// Appends a marker the buffer writes about itself, composed into a stack
+/// scratch rather than built with String concatenation - the old markers each
+/// allocated several temporaries at precisely the moment the device was short
+/// of memory, which is the moment they exist to describe.
+bool bodyAppendMarker(bool first, const char* format, ...) {
+  char scratch[192];
+  va_list args;
+  va_start(args, format);
+  const int written = vsnprintf(scratch, sizeof(scratch), format, args);
+  va_end(args);
+  if (written <= 0) {
+    return false;
+  }
+  size_t length = static_cast<size_t>(written);
+  if (length > sizeof(scratch) - 1) {
+    length = sizeof(scratch) - 1;
+  }
+  return bodyAppendLine(scratch, length, first);
+}
+
+/// Sends the oldest messages that fit one bounded batch.
+///
+/// Only what the server accepted (HTTP 200) leaves the buffer. A refusal keeps
+/// the batch exactly as it is and offers it again, up to kMaxDeliveryAttempts -
+/// and then gives it up and backs off, because retrying forever bounds memory
+/// without bounding WORK, and re-running the compose-and-POST path every second
+/// against a server that is not answering is the allocation churn this rewrite
+/// exists to remove.
+void sendOneBatch(bool ignoreSuppression = false) {
+  if (count == 0 && droppedSinceFlush == 0 && truncatedSinceFlush == 0 &&
+      droppedUndeliverable == 0) {
     return;
   }
 
-  JsonDocument doc;
-  JsonArray lines = doc["lines"].to<JsonArray>();
+  // Budget 2's second half. A log POST and a check-in POST each want a TLS
+  // record buffer, and two of them live at once is a memory event even where
+  // either alone would have been affordable. The log is the one that yields:
+  // a check-in carries the card policy, the firmware manifest and the device's
+  // only means of being managed, and a log batch waits a second with no loss.
+  //
+  // flushNow() passes ignoreSuppression, and that exception is the point rather
+  // than an escape hatch: the pre-restart flush has no later poll() to fall
+  // back on, so deferring it is not deferring anything - it is discarding the
+  // lines that say why the device is about to restart.
+  if (gUploadsSuppressed && !ignoreSuppression) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (gBackoffUntilMs != 0 && static_cast<int32_t>(now - gBackoffUntilMs) < 0) {
+    return;
+  }
+
+  gBodyLen = 0;
+  if (!bodyAppendRaw("{\"lines\":[", 10)) {
+    return;
+  }
+  bool first = true;
 
   if (droppedSinceFlush > 0) {
-    lines.add("[" + String(droppedSinceFlush) + " lines dropped]");
+    if (bodyAppendMarker(first, "[%lu lines dropped]",
+                         static_cast<unsigned long>(droppedSinceFlush))) {
+      first = false;
+    }
+  }
+
+  if (truncatedSinceFlush > 0) {
+    // A DIFFERENT LOSS FROM A DROP, and said separately for that reason. A
+    // truncated line still carries its prefix and most of its content, so the
+    // reader learns what happened and loses only the tail; a dropped line is
+    // gone entirely. Folded into one total they would be indistinguishable, and
+    // they want opposite remedies - a truncation says one call site writes
+    // lines too long for a slot, a drop says the device cannot keep up at all.
+    if (bodyAppendMarker(first, "[%lu lines truncated at %u bytes]",
+                         static_cast<unsigned long>(truncatedSinceFlush),
+                         static_cast<unsigned>(kMaxTextBytes))) {
+      first = false;
+    }
+  }
+
+  if (droppedUndeliverable > 0) {
+    if (bodyAppendMarker(first,
+                         "[%lu lines given up on after %u refusals - the server was answering "
+                         "something other than 200 and holding them would have kept rebuilding "
+                         "this batch forever]",
+                         static_cast<unsigned long>(droppedUndeliverable),
+                         static_cast<unsigned>(kMaxDeliveryAttempts))) {
+      first = false;
+    }
   }
 
   if (droppedForHeapSinceFlush > 0) {
@@ -282,26 +589,45 @@ void sendOneBatch() {
     // cable. The drop is a property of the remote stream alone, which is what
     // Log.h's "fallback of last resort" requires and why this change could
     // not regress it even in principle.
-    lines.add("[" + String(droppedForHeapSinceFlush) +
-              " of those dropped for heap: largest free block was " +
-              String(static_cast<unsigned long>(largestBlockAtLastHeapDrop)) +
-              " and a fresh TLS session needs " +
-              String(static_cast<unsigned long>(Http::kTlsRecordBufferBytes)) +
-              " twice, so this buffer held one batch instead of its full ceiling rather than pin "
-              "the memory the POST draining it needs]");
+    if (bodyAppendMarker(first,
+                         "[%lu of those dropped for heap: largest free block was %lu and a fresh "
+                         "TLS session needs %lu, so this buffer held one batch instead of its "
+                         "full ceiling rather than pin the memory the POST draining it needs]",
+                         static_cast<unsigned long>(droppedForHeapSinceFlush),
+                         static_cast<unsigned long>(largestBlockAtLastHeapDrop),
+                         static_cast<unsigned long>(Http::kTlsRecordBufferBytes))) {
+      first = false;
+    }
   }
 
+  // Capped by what actually fits the body once escaped, not by an estimate of
+  // it. A message that will not fit stays queued and leads the next batch,
+  // which is why this breaks rather than skipping: the buffer is ordered, and
+  // stepping over one line to fit a later one would deliver the stream out of
+  // sequence.
   size_t taken = 0;
-  size_t bytesTaken = 0;
   while (taken < count && taken < kMaxBatchLines) {
-    const String& candidate = buffer[(head + taken) % kMaxBufferedLines];
-    const size_t cost = candidate.length() + 1;
-    if (taken > 0 && bytesTaken + cost > kMaxBatchBytes) {
+    const size_t slot = slotAt(taken);
+    if (!bodyAppendLine(gSlots[slot], gLens[slot], first)) {
       break;
     }
-    lines.add(candidate);
-    bytesTaken += cost;
+    first = false;
     ++taken;
+  }
+
+  // GUARANTEED PROGRESS. The arithmetic says this cannot happen - the longest
+  // permitted message is 255 bytes, which escapes to at most 1,530, and the
+  // body is 3,072 - but a batch that can never fit even one line would retry
+  // forever and take the stream down with it, so the one case that would spin
+  // is made to terminate rather than left to a proof.
+  if (taken == 0 && count > 0 && gBodyLen == 10) {
+    evictOldest();
+    ++droppedUndeliverable;
+    return;
+  }
+
+  if (!bodyAppendRaw("]}", kClosingBytes)) {
+    return;
   }
 
   if (!Http::ready()) {
@@ -317,23 +643,42 @@ void sendOneBatch() {
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
   http.addHeader("Content-Type", "application/json");
 
-  String body;
-  serializeJson(doc, body);
-  const int status = http.POST(body);
+  // The composed bytes go straight out. No serializeJson into a String, and no
+  // JsonDocument behind it - those were two transient copies of the batch,
+  // peaking exactly while the session underneath wanted its record buffer.
+  const int status = http.POST(reinterpret_cast<uint8_t*>(gBody), gBodyLen);
   http.end();
 
   if (status != 200) {
-    // Left in the buffer to retry on the next poll(); the eviction cap above
-    // is still what keeps this from growing unbounded if the outage lasts.
+    ++gDeliveryAttempts;
+    if (gDeliveryAttempts < kMaxDeliveryAttempts) {
+      // Held exactly as composed and offered again. The buffer is untouched,
+      // so the retry carries the same lines in the same order.
+      return;
+    }
+
+    // Given up on. Bounded memory was never the whole requirement - bounded
+    // work is the other half, and a batch retried without limit re-runs the
+    // compose-and-POST path every second for as long as the outage lasts.
+    for (size_t i = 0; i < taken; ++i) {
+      evictOldest();
+    }
+    droppedUndeliverable += taken;
+    gDeliveryAttempts = 0;
+    gBackoffUntilMs = now + kBackoffMsAfterFailure;
+    if (gBackoffUntilMs == 0) {
+      gBackoffUntilMs = 1;  // 0 is the "no backoff" sentinel
+    }
     return;
   }
 
   for (size_t i = 0; i < taken; ++i) {
-    bufferedBytes -= buffer[head].length() + 1;
-    buffer[head] = String();
-    head = (head + 1) % kMaxBufferedLines;
-    --count;
+    evictOldest();
   }
+  gDeliveryAttempts = 0;
+  gBackoffUntilMs = 0;
+  truncatedSinceFlush = 0;
+  droppedUndeliverable = 0;
   droppedSinceFlush = 0;
   // Cleared together with the total, and only on the HTTP 200 path, so the
   // heap marker is retried alongside the lines it explains rather than being
@@ -413,7 +758,7 @@ void line(const String& text) {
   Serial.println(text);
 
   if (streaming) {
-    pushToBuffer(text);
+    pushToBuffer(text.c_str());
   }
 }
 
@@ -424,13 +769,11 @@ void line(const char* text) {
 
   Serial.println(text);
 
-  // The String is constructed HERE and nowhere else - inside the one branch
-  // that genuinely needs one, because pushToBuffer stores a String. With
-  // streaming off, which is every device almost all of the time, this
-  // performs no heap allocation at all. See Log.h's remarks on why that
-  // matters specifically at this call site's frequency.
+  // No String anywhere on this path now. pushToBuffer copies into a slot it
+  // already owns, so the temporary this branch used to build - once per line,
+  // on the device's busiest code path - is gone rather than merely narrowed.
   if (streaming) {
-    pushToBuffer(String(text));
+    pushToBuffer(text);
   }
 }
 
@@ -451,8 +794,19 @@ void setStreamingEnabled(bool enabled) {
 
 bool streamingEnabled() { return streaming; }
 
+void setUploadsSuppressed(bool suppressed) { gUploadsSuppressed = suppressed; }
+
+bool uploadsSuppressed() { return gUploadsSuppressed; }
+
 void poll() {
   if (!streaming) {
+    return;
+  }
+
+  // Checked before the timer, so a suppressed window does not burn the flush
+  // slot it was going to use: lastFlushMs is left alone and the batch goes out
+  // on the first poll after the check-in finishes rather than a second later.
+  if (gUploadsSuppressed) {
     return;
   }
 
@@ -471,7 +825,7 @@ void flushNow() {
   if (!streaming) {
     return;
   }
-  sendOneBatch();
+  sendOneBatch(/*ignoreSuppression=*/true);
   lastFlushMs = millis();
 }
 

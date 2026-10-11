@@ -1,6 +1,7 @@
 #include "Touch.h"
 
 #include "Display.h"
+#include "Log.h"
 
 namespace Touch {
 namespace {
@@ -49,6 +50,7 @@ bool poll(Tap& tap) {
   const bool isTouched = Display::readTouchRaw(x, y);
   const bool justTapped = isTouched && !wasTouched;
   wasTouched = isTouched;
+
   if (!justTapped) {
     return false;
   }

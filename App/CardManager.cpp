@@ -777,8 +777,23 @@ void noteShowing(Impressions::Arrival arrival) {
 
   const Cards::CardSpec& card = gCards[gCurrent.card];
 
-  const String contentKey =
+  String contentKey =
       card.listingId != nullptr ? card.listingId(gCurrent.item) : String();
+
+  // The descriptor's own content, for the cards whose item IS the policy entry.
+  // A graphic card draws one asset and a QR card encodes one payload, both
+  // arriving on the policy and sitting right here, so asking those cards for a
+  // function that returns what is already in front of us would be five
+  // identical one-liners across two files. Reached only when the card offers no
+  // listingId, so a card that names its own item keeps naming it.
+  if (contentKey.length() == 0) {
+    if (card.assetId[0] != '\0') {
+      contentKey = card.assetId;
+    } else if (card.qrData[0] != '\0') {
+      contentKey = card.qrData;
+    }
+  }
+
   const String summary =
       card.describe != nullptr ? card.describe(gCurrent.item) : String();
 
@@ -1068,7 +1083,144 @@ void refreshOneDueCard() {
   }
 }
 
+// --- The physical button on GPIO27 -------------------------------------------
+//
+// GPIO27 because it is the one free pin on this board: GPIO0 is the BOOT button
+// and carries CAL's WiFi-reset gesture, GPIO34 is the onboard LDR, and GPIO35 is
+// the PIR (shared with the adc35Millivolts probe). PowerProbe.h names 27 as free
+// and ADC-capable and deliberately does not probe it.
+//
+// Wired to ground through the button, read with INPUT_PULLUP, so idle is HIGH and
+// a press is LOW.
+constexpr uint8_t kActionButtonPin = 27;
+
+// Long enough to outlast contact bounce on a mechanical switch, short enough
+// that a deliberate press is never missed. The same order as Motion's own
+// debounce on GPIO35 and for the same reason: the electrical flicker is the
+// device's problem, not the server's.
+constexpr uint32_t kActionButtonDebounceMs = 40;
+
+bool gActionButtonReady = false;
+bool gActionButtonDown = false;
+uint32_t gActionButtonChangedMs = 0;
+
+/// A debounced falling edge on GPIO27, true for exactly one loop iteration per
+/// press - the same contract Touch::poll() offers, so the caller can treat the
+/// two identically.
+///
+/// Edge-triggered rather than level-triggered: a finger held on the button is
+/// one press, not one per loop iteration, and a stuck button is then one press
+/// at boot rather than a flood for as long as it is stuck.
+bool actionButtonPressed() {
+  if (!gActionButtonReady) {
+    pinMode(kActionButtonPin, INPUT_PULLUP);
+    gActionButtonReady = true;
+    gActionButtonDown = digitalRead(kActionButtonPin) == LOW;
+    gActionButtonChangedMs = millis();
+
+    // A button already down at the first read is the stuck case, and reporting
+    // it as a press would fire whichever card happened to be up at boot.
+    return false;
+  }
+
+  const bool down = digitalRead(kActionButtonPin) == LOW;
+  const uint32_t now = millis();
+
+  if (down == gActionButtonDown) {
+    return false;
+  }
+
+  // Signed difference, so a press either side of millis() wrapping at ~49.7
+  // days is still measured correctly - the same arithmetic the manual-nav hold
+  // above uses.
+  if (static_cast<int32_t>(now - gActionButtonChangedMs) <
+      static_cast<int32_t>(kActionButtonDebounceMs)) {
+    return false;
+  }
+
+  gActionButtonDown = down;
+  gActionButtonChangedMs = now;
+
+  return down;
+}
+
 }  // namespace
+
+void pollActionButton() {
+  if (!actionButtonPressed()) {
+    return;
+  }
+
+  // THROUGH MOTION FIRST, exactly as pollTouch() does, and for the same reason
+  // (BL 07): on a dark panel the first press wakes it and is not delivered. The
+  // button is always in the same place, but what it is bound to is whatever card
+  // is up, and a household cannot choose that without seeing the screen. Firing
+  // it blind would pick an action by timing.
+  if (Motion::noteTouchAndShouldSwallow()) {
+    Log::line("[button] GPIO27 press woke the panel and was not delivered");
+    return;
+  }
+
+  // THE CLOCK, BY ID RATHER THAN BY INDEX. Registration order is not fixed -
+  // it depends on which card modules are compiled in and in what order their
+  // static initialisers run - so a hardcoded index would point at a different
+  // card after any change to that set.
+  int8_t clock = -1;
+  for (uint8_t i = 0; i < gCardCount; ++i) {
+    if (strcmp(gCards[i].id, "clockdate") == 0) {
+      clock = static_cast<int8_t>(i);
+      break;
+    }
+  }
+
+  // A device whose policy does not include the clock, or whose clock reports no
+  // items, has nothing to show. Said out loud rather than ignored: a button that
+  // does nothing and reports nothing cannot be told from one that is wired
+  // wrong, which is the question somebody holding a meter is trying to answer.
+  if (clock < 0) {
+    Log::line("[button] GPIO27 pressed - no 'clockdate' card is registered, nothing to show");
+    return;
+  }
+
+  if (!showable(static_cast<uint8_t>(clock))) {
+    Log::line("[button] GPIO27 pressed - 'clockdate' is registered but not showable right now");
+    return;
+  }
+
+  if (gCurrent.card == clock) {
+    // Already there. Held rather than redrawn, so a second press extends the
+    // look at it instead of restarting the dwell and flickering the panel.
+    holdOffAutoAdvance();
+    Log::line("[button] GPIO27 pressed - already on 'clockdate', holding it");
+    return;
+  }
+
+  Log::printf("[button] GPIO27 pressed - showing 'clockdate' (was '%s')",
+              gCurrent.card >= 0 ? gCards[gCurrent.card].id : "none");
+
+  // Recorded in history before moving, so a reverse tap afterwards goes back to
+  // whatever the household was looking at rather than losing it - the same
+  // courtesy a forward tap already extends.
+  if (gCurrent.card >= 0) {
+    pushHistory(gCurrent);
+  }
+
+  gCurrent = Position{clock, 0};
+  gLastSwitchMs = millis();
+
+  // MANUAL, not Rotation. A finger reached for this card, which is the whole
+  // distinction the arrival carries: it is what makes the showing count as
+  // sought, and on a display with no motion sensor it is what makes the showing
+  // count as seen at all.
+  noteShowing(Impressions::Arrival::Manual);
+  Impressions::markSought();
+
+  // The same hold a nav tap gets, so the clock stays up long enough to read
+  // instead of being rotated away a second later.
+  holdOffAutoAdvance();
+
+  drawCurrent();
+}
 
 void pollTouch() {
   Touch::Tap tap;
@@ -1144,6 +1296,10 @@ void poll() {
   }
 
   pollTouch();
+
+  // The physical button beside the touch panel, polled on the same iteration so
+  // the two controls cannot disagree about which card is up.
+  pollActionButton();
 
   // PRESENCE, FROM THE SENSOR THAT ALREADY DEBOUNCES IT. Motion holds Active
   // for activeTimeoutSeconds after the last confirmed event, so a person who

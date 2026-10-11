@@ -120,4 +120,46 @@ void poll();
 /// RAM at restart.
 void flushNow();
 
+/// Holds log uploads off the air while something more important is using it.
+///
+/// There are two memory budgets in this module, not one: the stored messages,
+/// and the TLS session that drains them. Bounding the first does nothing about
+/// the second, and the second is what matters here - a log POST and a check-in
+/// POST each want a contiguous record buffer, and two of them alive at once is
+/// a memory event on this board even where either alone would have been
+/// affordable.
+///
+/// The log is the side that yields, always. A check-in carries the card policy,
+/// the firmware manifest and the device's only means of being managed; a log
+/// batch waits a second and loses nothing, because nothing is consumed from the
+/// buffer until a send succeeds.
+///
+/// Wrap the check-in, not the whole loop. Suppressing for longer than the
+/// request takes would starve the stream on a device that is checking in
+/// frequently, which is the same device somebody most likely has the stream
+/// open on. flushNow() deliberately ignores this - the pre-restart flush has no
+/// later poll() to fall back on.
+void setUploadsSuppressed(bool suppressed);
+
+bool uploadsSuppressed();
+
+/// Suppresses log uploads for the lifetime of the scope it is declared in.
+///
+/// A GUARD RATHER THAN PAIRED CALLS, and the reason is the shape of the code it
+/// wraps. Check-in returns early on a 401, on any non-200, and on a parse
+/// failure, and a release that one of those paths stepped over would leave the
+/// stream suppressed forever - taking out the only diagnostic channel a
+/// deployed device has, on the failure paths where somebody is most likely
+/// watching it. A destructor cannot be stepped over.
+///
+/// Not re-entrant, deliberately: nesting two would release on the inner one's
+/// destructor. There is one call site and it wraps one request.
+class UploadSuppression {
+ public:
+  UploadSuppression() { setUploadsSuppressed(true); }
+  ~UploadSuppression() { setUploadsSuppressed(false); }
+  UploadSuppression(const UploadSuppression&) = delete;
+  UploadSuppression& operator=(const UploadSuppression&) = delete;
+};
+
 }  // namespace Log

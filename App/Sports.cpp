@@ -32,6 +32,12 @@ struct CardSlot {
   /// entire .bss cost of this feature on a board whose .bss budget is the
   /// reason there are four instances here and not eleven.
   time_t staleSinceUtc = 0;
+
+  /// What this card follows, as the server sent it: API-Sports' sport slug and
+  /// the league's display name. 43 bytes a card, 172 across the four, on the
+  /// same .bss budget the comment above is counting against.
+  char sport[kMaxSportLength + 1] = "";
+  char competition[kMaxCompetitionLength + 1] = "";
 };
 
 CardSlot gCards[kMaxCards];
@@ -216,8 +222,33 @@ void drawCardAt(uint8_t index, uint16_t itemIndex) {
                game.away, awayScore.c_str(), game.home, homeScore.c_str(), status.c_str(),
                age.length() > 0 ? age.c_str() : "no age line - server says this card is current");
 
+  // The period is the design's progressLabel - "Q3", "6TH INN", "78'" - passed
+  // straight through without interpretation, which is what keeps the renderer
+  // free of any branch on sport.
+  //
+  // No clock. Nothing on this device carries one: the wire has no clockLabel
+  // field yet, and deriving a time from the start would be exactly the
+  // fabricated clock the design forbids by name.
+  //
+  // Live is a flag rather than something the renderer infers from the status
+  // word, because that word is prose and would make the badge depend on the
+  // reader's language.
+  const String sportLabel = sportChipLabel(slot.sport);
+
+  // Both say what is on, so both are logged: a card drawing no chip because the
+  // server sent no sport and one drawing none because the slug is unrecognised
+  // are the same picture from the front of the display.
+  Log::verbose("[sports] heading: card=%s sport='%s' chip='%s' competition='%s'",
+               kCardIds[index], slot.sport,
+               sportLabel.length() > 0 ? sportLabel.c_str() : "none - no sport sent, or a slug this build does not map",
+               slot.competition[0] != '\0' ? slot.competition : "none - server sent no league name for this card");
+
   Display::showSportsCard(game.home, homeScore, game.away, awayScore, status,
-                          itemIndex + 1, slot.count, age);
+                          itemIndex + 1, slot.count, age,
+                          sportLabel, slot.competition,
+                          /*progressLabel=*/game.period,
+                          /*clockLabel=*/"",
+                          /*isLive=*/game.state == State::Live);
 }
 
 // Four wrappers, one per registration. CardSpec::DrawFn and ItemCountFn are
@@ -253,6 +284,99 @@ uint16_t countLive() {
 /// Aircraft uses for an aeroplane nearly overhead.
 bool notableLive(uint16_t) { return anyLive(3); }
 
+/// Which game a showing was of, as a key an impression report can group on.
+///
+/// Composed here rather than carried from the server, because the payload has
+/// no game id to carry: SportsCardPayload sends teams, scores, state, period
+/// and a start time, and the matching struct in Sports.h holds exactly those.
+/// The start instant and the two sides name a fixture between them, and all
+/// three already arrive, so the key costs nothing on the wire and every device
+/// showing the same game reports the same key.
+///
+/// UTC, deliberately. A game at 8pm Eastern falls on the next UTC day, so this
+/// does not read as the date on the card - but two devices in different zones
+/// showing one game have to agree, and the instant is the only thing about a
+/// fixture that every device sees identically.
+///
+/// A start time of 0 means the server did not send one. The teams still name
+/// the fixture, so the key keeps them and drops the date rather than returning
+/// nothing: a key shared by both legs of a double-header is a better answer
+/// than no key at all.
+String listingIdCardAt(uint8_t index, uint16_t itemIndex) {
+  const CardSlot& slot = gCards[index];
+  if (slot.count == 0 || itemIndex >= slot.count) { return String(); }
+
+  const Game& game = slot.games[itemIndex];
+  if (game.away[0] == '\0' && game.home[0] == '\0') { return String(); }
+
+  char key[72];
+  if (game.startsAtUtc != 0) {
+    struct tm utc;
+    gmtime_r(&game.startsAtUtc, &utc);
+    snprintf(key, sizeof(key), "%04d-%02d-%02d:%s@%s",
+             utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday, game.away, game.home);
+  } else {
+    snprintf(key, sizeof(key), "%s@%s", game.away, game.home);
+  }
+
+  return String(key);
+}
+
+/// The same line the verbose log writes, as the label a report shows beside
+/// the key. Away first with the "@" on the host, matching both the panel and
+/// drawCardAt()'s log - a report that reversed them would have somebody
+/// reading last night's result backwards.
+String describeCardAt(uint8_t index, uint16_t itemIndex) {
+  const CardSlot& slot = gCards[index];
+  if (slot.count == 0 || itemIndex >= slot.count) { return String(); }
+
+  const Game& game = slot.games[itemIndex];
+
+  String text = String(game.away);
+  const String awayScore = scoreText(game.awayScore);
+  if (awayScore.length() > 0) { text += " " + awayScore; }
+
+  text += " @ ";
+  text += game.home;
+  const String homeScore = scoreText(game.homeScore);
+  if (homeScore.length() > 0) { text += " " + homeScore; }
+
+  const String status = stateText(game);
+  if (status.length() > 0) { text += " (" + status + ")"; }
+
+  return text;
+}
+
+// Four wrappers each, for the same reason draw0..draw3 exist: CardSpec's hooks
+// are bare function pointers with no user data to bind the instance through.
+String listingId0(uint16_t i) { return listingIdCardAt(0, i); }
+String listingId1(uint16_t i) { return listingIdCardAt(1, i); }
+String listingId2(uint16_t i) { return listingIdCardAt(2, i); }
+String listingId3(uint16_t i) { return listingIdCardAt(3, i); }
+
+String describe0(uint16_t i) { return describeCardAt(0, i); }
+String describe1(uint16_t i) { return describeCardAt(1, i); }
+String describe2(uint16_t i) { return describeCardAt(2, i); }
+String describe3(uint16_t i) { return describeCardAt(3, i); }
+
+Cards::ListingIdFn listingIdFor(uint8_t index) {
+  switch (index) {
+    case 0: return listingId0;
+    case 1: return listingId1;
+    case 2: return listingId2;
+    default: return listingId3;
+  }
+}
+
+Cards::DescribeFn describeFor(uint8_t index) {
+  switch (index) {
+    case 0: return describe0;
+    case 1: return describe1;
+    case 2: return describe2;
+    default: return describe3;
+  }
+}
+
 bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw,
                  int16_t order, uint16_t dwellSeconds) {
   Cards::CardSpec spec;
@@ -262,6 +386,8 @@ bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw
   spec.draw = draw;
   spec.order = order;
   spec.dwellSeconds = dwellSeconds;
+  spec.listingId = listingIdFor(index);
+  spec.describe = describeFor(index);
   return Cards::registerCard(spec);
 }
 
@@ -297,7 +423,8 @@ bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw
 
 }  // namespace
 
-void setGames(const char* cardId, const Game* games, uint8_t count, time_t staleSinceUtc) {
+void setGames(const char* cardId, const Game* games, uint8_t count, time_t staleSinceUtc,
+              const char* sport, const char* competition) {
   const int8_t index = indexOf(cardId);
   if (index < 0) {
     // A policy or payload naming an instance this firmware does not register.
@@ -330,6 +457,15 @@ void setGames(const char* cardId, const Game* games, uint8_t count, time_t stale
   slot.count = count;
   slot.staleSinceUtc = staleSinceUtc;
 
+  // Bounded, and terminated by hand: strncpy writes no terminator when the
+  // source fills the buffer, and both of these are the sender's strings rather
+  // than this firmware's. A server sending a longer league name than its own cap
+  // gets its name cut rather than this slot's neighbour overwritten.
+  strncpy(slot.sport, sport != nullptr ? sport : "", kMaxSportLength);
+  slot.sport[kMaxSportLength] = '\0';
+  strncpy(slot.competition, competition != nullptr ? competition : "", kMaxCompetitionLength);
+  slot.competition[kMaxCompetitionLength] = '\0';
+
   // One line, both branches named, on a path that runs once per check-in. The
   // fresh branch is said out loud rather than left as silence because on this
   // field absence IS the answer - "the server did not flag this" and "the
@@ -346,6 +482,26 @@ void setGames(const char* cardId, const Game* games, uint8_t count, time_t stale
                   : "server sent staleSinceUtc - this card will show how old its answer is");
 }
 
+String sportChipLabel(const char* sport) {
+  if (sport == nullptr || sport[0] == '\0') { return String(); }
+
+  // The two football codes, named first and separately. API-Sports calls soccer
+  // "football", so matching a prefix or a substring here would put FOOTBALL over
+  // a soccer score - which is the one label on this card a viewer would act on.
+  // Whole-token comparison, both ways round.
+  if (strcmp(sport, "american-football") == 0) { return String("FOOTBALL"); }
+  if (strcmp(sport, "football") == 0)          { return String("SOCCER"); }
+  if (strcmp(sport, "basketball") == 0)        { return String("BASKETBALL"); }
+  if (strcmp(sport, "baseball") == 0)          { return String("BASEBALL"); }
+  if (strcmp(sport, "hockey") == 0)            { return String("HOCKEY"); }
+
+  // A slug this build has never seen. Empty rather than the raw token: the chip
+  // is small caps on a pill, and "rugby-sevens" rendered into it reads as a bug
+  // where no chip reads as a card that simply does not name its sport.
+  Log::printf("[sports] unmapped sport slug '%s' - drawing no chip", sport);
+  return String();
+}
+
 void clearAll() {
   // The age goes with the games. Leaving a staleSinceUtc behind on an emptied
   // slot would let yesterday's staleness reappear on tomorrow's fixtures the
@@ -354,6 +510,12 @@ void clearAll() {
   for (uint8_t i = 0; i < kMaxCards; ++i) {
     gCards[i].count = 0;
     gCards[i].staleSinceUtc = 0;
+
+    // The heading goes with them, for the reason above applied to the other two
+    // card-level fields: a repopulated slot would otherwise carry the league it
+    // used to follow.
+    gCards[i].sport[0] = '\0';
+    gCards[i].competition[0] = '\0';
   }
   Log::printf("[sports] cleared all cards");
 }
