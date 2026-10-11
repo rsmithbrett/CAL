@@ -55,6 +55,24 @@ void begin(Orientation orientation = Orientation::Landscape);
 int screenWidth();
 int screenHeight();
 
+/// The orientation this display came up in last time it was told one, from NVS.
+///
+/// <para>Read at boot, before any check-in has happened, because a display that
+/// cannot reach the server still has to come up the right way round. Landscape
+/// when nothing has ever been stored, which is every display until somebody
+/// turns one.</para>
+Orientation storedOrientation();
+
+/// Stores the orientation the server resolved, and says whether it changed.
+///
+/// <para>True means a restart is needed to apply it - the panel cannot re-lay
+/// out the card it is drawing, and every layout in this file read its viewport
+/// at begin(). The caller decides when to act on that; this only records it.</para>
+///
+/// <para>Writes nothing when the value is unchanged, which is the ordinary case
+/// on every check-in a display ever makes.</para>
+bool rememberOrientation(Orientation orientation);
+
 void logViewport();
 
 /// Updates the day/night theme and the corner-clock's UTC offset that every

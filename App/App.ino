@@ -1980,6 +1980,24 @@ void performCheckIn() {
   // flipping the toggle days later wants the answer too.
   Display::logViewport();
 
+  // WHICH WAY ROUND THE SERVER SAYS THIS PANEL IS MOUNTED. Stored rather than
+  // applied, because every layout in Display.cpp read its viewport at begin()
+  // and a panel cannot re-lay out the card it is already drawing. The write is
+  // skipped when nothing changed, which is every check-in a display ever makes
+  // after the first - see Display::rememberOrientation().
+  //
+  // Restarting is the whole mechanism, and it is honest: a few seconds, and the
+  // editor tells the person changing it that the display restarts. Recorded as
+  // its own cause so the next boot reads SOFTWARE_RESET+ORIENTATION rather than
+  // looking like one of the faults this fleet spent a day chasing.
+  if (Display::rememberOrientation(result.portraitRequested ? Display::Orientation::Portrait
+                                                            : Display::Orientation::Landscape)) {
+    Log::line("[display] orientation changed - restarting to apply it");
+    BootDiag::recordRestartIntent(BootDiag::RestartCause::OrientationChanged);
+    Log::flushNow();
+    ESP.restart();
+  }
+
   // Reconnection, measured rather than inferred, and only where somebody asked
   // for it.
   //
@@ -2297,7 +2315,11 @@ void setup() {
                 static_cast<unsigned long>(kBaseMsBetweenSelfRestarts));
   }
 
-  Display::begin();
+  // FROM NVS, NOT FROM THE SERVER, because this runs long before the first
+  // check-in and a display that cannot reach the server still has to come up
+  // the right way round. performCheckIn() stores whatever the server resolves;
+  // this reads back what it stored last time, and landscape until it ever did.
+  Display::begin(Display::storedOrientation());
 
   // After Display::begin(), because Motion drives brightness THROUGH the display
   // layer rather than owning GPIO21 itself - LovyanGFX already claims that pin.

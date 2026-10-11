@@ -29,6 +29,7 @@
 #include <esp_heap_caps.h>
 
 #define LGFX_AUTODETECT
+#include <Preferences.h>
 #include <LovyanGFX.hpp>
 #include <LGFX_AUTODETECT.hpp>
 #include <time.h>
@@ -70,6 +71,9 @@ LGFX lcd;
 // two names never left this file.
 int kScreenW = 320;
 int kScreenH = 240;
+
+constexpr const char* kNvsNamespace = "display";
+constexpr const char* kKeyOrientation = "orient";
 
 /// Which way begin() was asked to come up, kept only so logViewport() can say
 /// it in words. Every layout reads the two numbers above and never this.
@@ -5652,5 +5656,47 @@ void logViewport() {
 }
 
 bool lastDrawFailedOnAllocation() { return gLastDrawFailedOnAllocation; }
+
+Orientation storedOrientation() {
+  Preferences prefs;
+  if (!prefs.begin(kNvsNamespace, /*readOnly=*/true)) {
+    // The namespace has never been written, which is every display until
+    // somebody turns one. Landscape, which is what an unset orientation means
+    // everywhere else in this product.
+    return Orientation::Landscape;
+  }
+
+  const uint8_t stored =
+      prefs.getUChar(kKeyOrientation, static_cast<uint8_t>(Orientation::Landscape));
+  prefs.end();
+
+  // Anything this build does not recognise is landscape, for the reason the
+  // server gives for the same rule: a display mounted sideways and drawing
+  // landscape can be read with a tilted head, and one mounted normally and
+  // drawing portrait can be read by nobody.
+  return stored == static_cast<uint8_t>(Orientation::Portrait) ? Orientation::Portrait
+                                                               : Orientation::Landscape;
+}
+
+bool rememberOrientation(Orientation orientation) {
+  if (orientation == storedOrientation()) {
+    // Compared before writing, not written every time. This is called once per
+    // check-in for the life of a display, and flash has a write budget.
+    return false;
+  }
+
+  Preferences prefs;
+  if (!prefs.begin(kNvsNamespace, /*readOnly=*/false)) {
+    Log::line("[display] could not open NVS to store the orientation - leaving it as it is");
+    return false;
+  }
+
+  prefs.putUChar(kKeyOrientation, static_cast<uint8_t>(orientation));
+  prefs.end();
+
+  Log::printf("[display] orientation stored as %s - a restart applies it",
+              orientation == Orientation::Portrait ? "portrait" : "landscape");
+  return true;
+}
 
 }  // namespace Display

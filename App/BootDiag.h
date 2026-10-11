@@ -166,6 +166,11 @@ enum class RestartCause : uint32_t {
   /// runs again, and this cause is recorded at the first of them so the whole
   /// burst has one explanation rather than none.
   CalSelfInstall = 9,
+  /// An admin changed which way round this display is mounted. The panel cannot
+  /// re-lay out the card it is drawing - every layout in Display.cpp read its
+  /// viewport at begin() - so applying a new orientation means coming up again.
+  /// A few seconds, and the editor says so before anybody presses save.
+  OrientationChanged = 10,
 };
 
 /// Records what this restart is FOR, immediately before calling

@@ -88,6 +88,14 @@ struct Result {
   /// naturally picks the right state back up after a reboot within one check-in
   /// interval, with no flag of its own to persist or fall out of sync.
   bool debugStreamRequested = false;
+
+  /// Which way round the server says this panel is mounted: true only when it
+  /// sent the exact token "portrait".
+  ///
+  /// An absent field, an empty one and a word this build does not know are all
+  /// false, which is landscape - the same rule the server applies before
+  /// sending, and the reason firmware predating the field needs no change.
+  bool portraitRequested = false;
   /// Close the TLS session after this check-in and immediately try to open a
   /// new one, reporting the heap either side of the close and whether the gate
   /// refused, mbedTLS could not allocate, or the handshake succeeded.

@@ -871,6 +871,12 @@ Result perform() {
   // degrade to today's behaviour rather than to a reboot loop.
   result.calUpdateAvailable = responseDoc["calUpdateAvailable"] | false;
   result.debugStreamRequested = responseDoc["debugStreamRequested"] | false;
+
+  // Compared against the one token rather than parsed, because there is exactly
+  // one value that turns a display and everything else is landscape. `| ""`
+  // covers absent, null and a non-string together, so a server predating this
+  // field leaves the display exactly as it was.
+  result.portraitRequested = strcmp(responseDoc["displayOrientation"] | "", "portrait") == 0;
   result.tlsReconnectProbeRequested = responseDoc["tlsReconnectProbeRequested"] | false;
   result.sdReformatRequested = responseDoc["sdReformatRequested"] | false;
   // An ISO-8601 instant on the wire, converted to an epoch second here so the

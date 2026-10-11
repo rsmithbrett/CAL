@@ -147,6 +147,8 @@ const char* describeCause(RestartCause cause) {
       return "CAL_INSTALLED_APP";
     case RestartCause::CalSelfInstall:
       return "CAL_SELF_INSTALL";
+    case RestartCause::OrientationChanged:
+      return "ORIENTATION";
   }
   return "UNRECOGNISED";
 }
@@ -190,6 +192,7 @@ RestartCause takeRecordedCause() {
     case RestartCause::CalHandover:
     case RestartCause::CalInstalledApp:
     case RestartCause::CalSelfInstall:
+    case RestartCause::OrientationChanged:
       return static_cast<RestartCause>(stored);
   }
   // A value this build does not recognise - most likely an older or newer
