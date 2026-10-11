@@ -2942,7 +2942,24 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
   // cards overran y=220 on every draw for eleven hours.
   constexpr uint8_t kMaxRows = 4;
   constexpr int kRowTop = 44;
-  constexpr int kRowHeight = 35;
+
+  // THE FOOTER MEASURES UP FROM THE BOTTOM, like the chrome does, because 188
+  // and 204 are a 240px panel written down. On a 320px one they put the age
+  // and the clock two thirds of the way up the card with a hundred pixels of
+  // empty glass under them, and the real clock at kScreenH - 4 below that.
+  // kClockTop() is 220 on the landscape panel, so these are exactly the two
+  // numbers they replace.
+  const int kAgeY = kClockTop() - 32;
+  const int kBoardClockY = kClockTop() - 16;
+
+  // Four rows between the heading and the age line, and in profile that gap
+  // is 224px rather than 144. Landscape keeps its measured 35 exactly - the
+  // division would give 36, and a row height that moves by a pixel on every
+  // fielded display is not worth the symmetry. Profile spends the height it
+  // has: 56px rows instead of 35px ones, on a card whose team names have 220
+  // pixels of width rather than 300 and need the room back somewhere.
+  const int kRowHeight =
+      kScreenH > kScreenW ? (kAgeY - kRowTop) / kMaxRows : 35;
 
   if (count > kMaxRows) {
     Log::printf("[sports] board sent %u games, drawing %u", static_cast<unsigned>(count),
@@ -2995,7 +3012,7 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
   lcd.setFont(&fonts::FreeSansBold9pt7b);
 
   if (ageText.length() > 0) {
-    layoutLine(ageText, kCardMargin, 188, kWidthBeside(90), sport.muted, "board.age",
+    layoutLine(ageText, kCardMargin, kAgeY, kWidthBeside(90), sport.muted, "board.age",
                Align::Left, kTransparentText);
   }
 
@@ -3005,7 +3022,7 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
   const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
   struct tm localTm;
   gmtime_r(&localNow, &localTm);
-  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kContentCentreX(), 204,
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kContentCentreX(), kBoardClockY,
              kContentWidth(), sport.muted, "board.clock", Align::Centre,
              kTransparentText);
 
