@@ -185,6 +185,100 @@ constexpr uint32_t kSportsBanner = 0xA3195Bu;
 constexpr int kBannerHeight = 22;
 constexpr int kCardMargin = 10;
 
+// ---- The content band ---------------------------------------------------
+//
+// Where a card may draw horizontally, as a handful of functions rather than as
+// the literal each card worked out for itself.
+//
+// Every card in this file was written against a 300px band: kCardMargin on
+// each side of a 320px panel. Two things followed from that, and both of them
+// are what "the text overlaps in portrait" turned out to mean once the panel
+// could be 240 wide.
+//
+// The first is the half-column. A card with a label on the left and a value on
+// the right passes a width to layoutLine() for each, and that width was
+// written as the literal 150 - half of 300 - in nineteen places. On a 240px
+// panel the band is 220, so two 150s ask for 300 pixels of a 220-pixel row and
+// the two columns are drawn through each other. Nothing clipped, nothing
+// logged: the right-hand column simply starts inside the left-hand one.
+//
+// The second is the centre. A disc or an icon centred with the literal 160 sits
+// 40px right of centre on a 240px panel, which on the sun/moon card put the sun
+// half off the glass.
+//
+// So: ask for a column, do not compute one.
+//
+// The division is gapless, which is this file's own existing convention rather
+// than a new one - showForecastCard() already says of its five-day strip that
+// "every divisor divides 300 exactly (4->75, 3->100, 2->150, 1->300)". A split
+// row here is a label aligned against one edge and a value against the other,
+// so the whitespace between them is whatever the two strings do not use, and a
+// reserved gap would narrow both of them for nothing. It also means every
+// landscape number these replace comes back unchanged: 300/2 is the 150 that
+// was written out nineteen times.
+int kContentLeft() { return kCardMargin; }
+int kContentRight() { return kScreenW - kCardMargin; }
+int kContentWidth() { return kScreenW - kCardMargin * 2; }
+int kContentCentreX() { return kScreenW / 2; }
+
+/// One column of an n-column split of the content band.
+///
+/// <para>Clamped at one column rather than trusting the caller, because zero
+/// would divide by zero and a count past the band's width would hand back a
+/// negative that layoutLine() reads as "no room at all" and draws nothing - a
+/// blank card being the one failure mode harder to diagnose from a photograph
+/// than overlapping text.</para>
+int kColumnWidth(int columns) {
+  if (columns < 1) {
+    columns = 1;
+  }
+  const int width = kContentWidth() / columns;
+  return width > 0 ? width : 0;
+}
+
+/// The two-column split, which is what nineteen hardcoded 150s meant.
+int kHalfColumnWidth() { return kColumnWidth(2); }
+
+/// The rest of the band, beside a column whose width the caller fixed.
+///
+/// <para>For the rows that are NOT an even split: a wrapping label beside a
+/// counter like "3 of 4", or a heading beside a clock. Those have a column
+/// whose content is the same handful of characters on any panel, so it keeps
+/// its measured width and the other one takes what is left.
+///
+/// The ten pixels are a real gap here, unlike the even split above, because
+/// both columns are expected to be full - without one the counter would touch
+/// the label. 300 - 90 - 10 is the 200 that was written out beside the 90.</para>
+constexpr int kColumnGap = 10;
+int kWidthBeside(int otherColumnWidth) {
+  const int width = kContentWidth() - otherColumnWidth - kColumnGap;
+  return width > 0 ? width : 0;
+}
+
+/// The width the cards were drawn against, for the one case that is not a
+/// column: a path lifted from a design.
+constexpr int kDesignWidth = 320;
+
+/// An x from a 320-wide design, placed on the panel actually fitted.
+///
+/// <para>For the sun/moon card's ridges, which are not a layout at all - they
+/// are five quadratic segments copied out of the design with their control
+/// points, and "M0 144 Q47 126 95 147" has no label and no value to align. A
+/// column helper cannot express that, and reading the numbers as absolute
+/// pixels put the far hill's crest a third of the way off a portrait panel.
+///
+/// So the shape is kept and the canvas is scaled. 0 stays 0, 320 becomes the
+/// right edge whatever that is, and everything between keeps its proportion -
+/// the hills get steeper on a narrow panel, which is what cropping a landscape
+/// photograph does, and is the one result that reads as deliberate rather than
+/// as a drawing mistake.
+///
+/// Deliberately NOT for text. A glyph does not scale with the panel, so an x
+/// scaled this way would place a string proportionally and then draw it at its
+/// own fixed size - which is how a right-hand column ends up overhanging the
+/// edge it was computed to sit inside. Text gets a column.</para>
+int kScaledX(int designX) { return designX * kScreenW / kDesignWidth; }
+
 // The Banner/Banner Button themes' own header strip - see showBannerCard()
 // below. A warm amber-red, deliberately louder than every showCardBanner()
 // label colour above: those are a small corner tag on an otherwise ordinary
@@ -254,8 +348,21 @@ constexpr int kRouteLineHeight = 18;
 // portrait" turned out to be.
 int kButtonRowY() { return kScreenH - 80; }
 constexpr int kButtonHeight = 60;
-constexpr int kButtonRowLeft = 8;
-constexpr int kButtonRowRight = 312;
+
+// MEASURED FROM BOTH EDGES, for the same reason kButtonRowY() is measured from
+// the bottom. These were 8 and 312, and 312 is 320 minus the same 8 - so on a
+// 240px portrait panel the row ran from x=8 to x=312, which is 72 pixels past
+// the right edge of the glass. A two-button card drew its second button
+// starting at x=163 and 149 wide: the visible half of one button, and nothing
+// at all of the other.
+//
+// It is not only what the glass shows. actionButtonZone() is the one place both
+// the painting and the touch hit-test get a button's rectangle from, so a
+// portrait display was testing presses against a region most of which did not
+// exist. A tap on the right-hand button landed in the left-hand button's zone.
+constexpr int kButtonRowInset = 8;
+int kButtonRowLeft() { return kButtonRowInset; }
+int kButtonRowRight() { return kScreenW - kButtonRowInset; }
 constexpr int kButtonGap = 6;
 constexpr int kButtonRadius = 6;
 
@@ -839,7 +946,7 @@ constexpr int16_t kProseLargeLineHeight = 24;
 constexpr int16_t kProseSmallLineHeight = 18;
 
 TextResult drawProseBody(const String& text, const char* what) {
-  const int16_t bodyWidth = kScreenW - kCardMargin * 2;
+  const int16_t bodyWidth = kContentWidth();
 
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
@@ -1601,11 +1708,11 @@ int16_t kBootTextWidth() { return static_cast<int16_t>(kScreenW - 16); }
 void showStatus(const String& headline, const String& detail) {
   clear();
   lcd.setTextSize(2);
-  const TextBox headlineBox{kScreenW / 2, 85, kBootTextWidth(), 22, 3, Align::Centre};
+  const TextBox headlineBox{kContentCentreX(), 85, kBootTextWidth(), 22, 3, Align::Centre};
   const TextResult drew = layoutText(headline, headlineBox, ink(), "status.headline");
   if (detail.length() > 0) {
     lcd.setTextSize(1);
-    const TextBox detailBox{kScreenW / 2, static_cast<int16_t>(drew.bottom + 12), kBootTextWidth(),
+    const TextBox detailBox{kContentCentreX(), static_cast<int16_t>(drew.bottom + 12), kBootTextWidth(),
                             14, 3, Align::Centre};
     layoutText(detail, detailBox, muted(), "status.detail");
   }
@@ -1614,10 +1721,10 @@ void showStatus(const String& headline, const String& detail) {
 void showFailure(const String& headline, const String& whatToDo) {
   clear();
   lcd.setTextSize(2);
-  const TextBox headlineBox{kScreenW / 2, 75, kBootTextWidth(), 22, 3, Align::Centre};
+  const TextBox headlineBox{kContentCentreX(), 75, kBootTextWidth(), 22, 3, Align::Centre};
   const TextResult drew = layoutText(headline, headlineBox, kWarn, "failure.headline");
   lcd.setTextSize(1);
-  const TextBox detailBox{kScreenW / 2, static_cast<int16_t>(drew.bottom + 12), kBootTextWidth(), 14,
+  const TextBox detailBox{kContentCentreX(), static_cast<int16_t>(drew.bottom + 12), kBootTextWidth(), 14,
                           3, Align::Centre};
   layoutText(whatToDo, detailBox, muted(), "failure.whattodo");
 }
@@ -1812,7 +1919,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   } else {
     snprintf(distanceBuf, sizeof(distanceBuf), "%.1f mi away", distanceMiles);
   }
-  layoutLine(distanceBuf, kCardMargin, 64, kScreenW - kCardMargin * 2, muted(),
+  layoutLine(distanceBuf, kCardMargin, 64, kContentWidth(), muted(),
              "aircraft.distance");
 
   // Route, in the gap between the distance line and the stat rows.
@@ -1884,7 +1991,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
     // deliberately different strings: the log says what the server sent, this
     // says what fits, and a diagnostic that quietly adopted the display's
     // abbreviations would stop being able to show a bad name upstream.
-    const TextBox routeBox{kCardMargin, 82, kScreenW - kCardMargin * 2, kRouteLineHeight, 2,
+    const TextBox routeBox{kCardMargin, 82, kContentWidth(), kRouteLineHeight, 2,
                            Align::Left};
     routeLines = layoutText(routeLine, routeBox, muted(), "aircraft.route").lines;
   }
@@ -1900,7 +2007,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
     // either way.
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
-    const TextBox box{kCardMargin, 82, kScreenW - kCardMargin * 2, kRouteLineHeight, 1,
+    const TextBox box{kCardMargin, 82, kContentWidth(), kRouteLineHeight, 1,
                       Align::Left};
     routeLines = layoutText(noRouteLine, box, muted(), "aircraft.noroute").lines;
   }
@@ -1920,8 +2027,8 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   // two-line name-based route pushes the rows down by exactly one more line
   // height instead of overlapping it. See Display.h's own remarks on why
   // this grows down rather than shrinking the font or truncating.
-  const int rightX = kScreenW - kCardMargin;
-  const int rowValueWidth = 150;
+  const int rightX = kContentRight();
+  const int rowValueWidth = kHalfColumnWidth();
   // The label's own bound, which used to be nothing at all. The value column
   // is reserved first and the label gets what is left, so a label can never
   // push a value off the edge - the same ordering the sports card already
@@ -1993,7 +2100,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   if (updatedAt.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
-    layoutLine(updatedAt, kCardMargin, rowY + 4, kScreenW - kCardMargin * 2, muted(),
+    layoutLine(updatedAt, kCardMargin, rowY + 4, kContentWidth(), muted(),
                "aircraft.updated");
   }
 
@@ -2013,11 +2120,11 @@ void showAircraftStatus(const String& headline, const String& detail, bool isPro
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
   const uint32_t headlineColour = isProblem ? kWarn : muted();
-  const TextBox headlineBox{kCardMargin, 40, kScreenW - kCardMargin * 2, 22, 3, Align::Left};
+  const TextBox headlineBox{kCardMargin, 40, kContentWidth(), 22, 3, Align::Left};
   const TextResult drew = layoutText(headline, headlineBox, headlineColour, "aircraft.status");
   if (detail.length() > 0) {
     const TextBox detailBox{kCardMargin, static_cast<int16_t>(drew.bottom + 12),
-                            kScreenW - kCardMargin * 2, 18, 3, Align::Left};
+                            kContentWidth(), 18, 3, Align::Left};
     layoutText(detail, detailBox, ink(), "aircraft.status.detail");
   }
 
@@ -2089,10 +2196,10 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   for (int step = kGlowSteps; step >= 1; --step) {
     const int radius = sky.discRadius + ((step * 52) / kGlowSteps);
     lcd.fillCircle(
-        160, sky.discY, radius,
+        kContentCentreX(), sky.discY, radius,
         mixColour(sky.skyMiddle, sky.glow, kGlowSteps - step + 1, kGlowSteps + 4));
   }
-  lcd.fillCircle(160, sky.discY, sky.discRadius, sky.disc);
+  lcd.fillCircle(kContentCentreX(), sky.discY, sky.discRadius, sky.disc);
 
   // THE DESIGN'S RIDGES ARE MULTI-SEGMENT PATHS AND I DREW EACH AS ONE CURVE.
   // Collapsing three quadratic segments into a single control point averages
@@ -2103,12 +2210,12 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   // These are the design's own segments, drawn as it draws them:
   //   far   M0 144  Q47 126 95 147   Q180 161 240 140  Q284 127 320 140
   //   near  M0 164  Q78 143 166 164  Q240 179 320 151
-  fillUnderQuadratic(0, 144, 47, 126, 95, 147, sky.ridgeFar);
-  fillUnderQuadratic(95, 147, 180, 161, 240, 140, sky.ridgeFar);
-  fillUnderQuadratic(240, 140, 284, 127, 320, 140, sky.ridgeFar);
+  fillUnderQuadratic(kScaledX(0), 144, kScaledX(47), 126, kScaledX(95), 147, sky.ridgeFar);
+  fillUnderQuadratic(kScaledX(95), 147, kScaledX(180), 161, kScaledX(240), 140, sky.ridgeFar);
+  fillUnderQuadratic(kScaledX(240), 140, kScaledX(284), 127, kScaledX(320), 140, sky.ridgeFar);
 
-  fillUnderQuadratic(0, 164, 78, 143, 166, 164, sky.ridgeNear);
-  fillUnderQuadratic(166, 164, 240, 179, 320, 151, sky.ridgeNear);
+  fillUnderQuadratic(kScaledX(0), 164, kScaledX(78), 143, kScaledX(166), 164, sky.ridgeNear);
+  fillUnderQuadratic(kScaledX(166), 164, kScaledX(240), 179, kScaledX(320), 151, sky.ridgeNear);
 
   // EVERY STRING IS GIVEN THE COLOUR BEHIND IT, and on a full-bleed card that
   // is not optional. layoutLine paints an OPAQUE box in its background colour
@@ -2125,7 +2232,7 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   // an edge.
   lcd.setTextSize(1);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  layoutLine("SUN · TODAY", kCardMargin, 12, 150, sky.heading, "sunmoon.heading",
+  layoutLine("SUN · TODAY", kCardMargin, 12, kWidthBeside(120), sky.heading, "sunmoon.heading",
              Align::Left, kTransparentText);
 
   // The time goes top right, where the design puts it, and drawClock() is NOT
@@ -2134,7 +2241,7 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
   struct tm localTm;
   gmtime_r(&localNow, &localTm);
-  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW - kCardMargin, 12, 120,
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kContentRight(), 12, 120,
              sky.heading, "sunmoon.clock", Align::Right, kTransparentText);
 
   // THE WHOLE STACK FINISHES BY y=220, which is what sets these three rows.
@@ -2148,20 +2255,20 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   // Lifted rather than exempted. One rule - nothing draws below 220 - is worth more
   // than a conditional one that a later card satisfies by claiming the exemption.
   // Labels 150..168, times 170..206, detail 202..220.
-  layoutLine("↑ SUNRISE", kCardMargin, 150, 130, sky.label, "sunmoon.sunrise.label",
+  layoutLine("↑ SUNRISE", kCardMargin, 150, kHalfColumnWidth(), sky.label, "sunmoon.sunrise.label",
              Align::Left, kTransparentText);
-  layoutLine("↓ SUNSET", kScreenW - kCardMargin, 150, 130, sky.label,
+  layoutLine("↓ SUNSET", kContentRight(), 150, kHalfColumnWidth(), sky.label,
              "sunmoon.sunset.label", Align::Right, kTransparentText);
 
   lcd.setFont(&fonts::FreeSansBold18pt7b);
-  layoutLine(sunriseText, kCardMargin, 170, 140, sky.value, "sunmoon.sunrise",
+  layoutLine(sunriseText, kCardMargin, 170, kHalfColumnWidth(), sky.value, "sunmoon.sunrise",
              Align::Left, kTransparentText);
-  layoutLine(sunsetText, kScreenW - kCardMargin, 170, 140, sky.value, "sunmoon.sunset",
+  layoutLine(sunsetText, kContentRight(), 170, kHalfColumnWidth(), sky.value, "sunmoon.sunset",
              Align::Right, kTransparentText);
 
   if (detail.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    layoutLine(detail, kScreenW / 2, 202, kScreenW - kCardMargin * 2, sky.footnote,
+    layoutLine(detail, kContentCentreX(), 202, kContentWidth(), sky.footnote,
                "sunmoon.detail", Align::Centre, kTransparentText);
   }
 
@@ -2297,7 +2404,7 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
 
   lcd.setFont(&fonts::FreeSansBold18pt7b);
   lcd.setTextSize(1);
-  layoutLine("TIDES", kScreenW / 2, 8, kScreenW - kCardMargin * 2, tide.heading, "tides.heading",
+  layoutLine("TIDES", kContentCentreX(), 8, kContentWidth(), tide.heading, "tides.heading",
              Align::Centre, kTransparentText);
 
   // THE WHOLE STACK FINISHES BY y=220, which is what sizes these rows. Below
@@ -2319,8 +2426,8 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
   gmtime_r(&localNow, &localTm);
 
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW / 2, 198,
-             kScreenW - kCardMargin * 2, tide.heading, "tides.clock", Align::Centre,
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kContentCentreX(), 198,
+             kContentWidth(), tide.heading, "tides.clock", Align::Centre,
              kTransparentText);
 
   restoreDefaultFont();
@@ -2384,7 +2491,7 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   if (drawAddress) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
-    const TextBox addressBox{kCardMargin, 30, kScreenW - kCardMargin * 2, kAddressLineHeight,
+    const TextBox addressBox{kCardMargin, 30, kContentWidth(), kAddressLineHeight,
                              kAddressLines, Align::Left};
     layoutText(address, addressBox, ink(), "homevalue.address");
   }
@@ -2432,7 +2539,7 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // formatThousands() remarks for why a fully-precise range does not fit
   // this column without either colliding with the label or being
   // character-truncated into a wrong number.
-  const int rightX = kScreenW - kCardMargin;
+  const int rightX = kContentRight();
 
   // A SPLIT PER ROW, NOT ONE SHARED SPLIT. Both rows used to divide the 300px
   // of content width as 150/150, which is the wrong answer for both of them:
@@ -2544,7 +2651,7 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
     if (detailLinesAllowed >= 1) {
       lcd.setFont(&fonts::FreeSansBold9pt7b);
       const TextBox detailBox{
-          kCardMargin, static_cast<int16_t>(nextY), kScreenW - kCardMargin * 2, 18,
+          kCardMargin, static_cast<int16_t>(nextY), kContentWidth(), 18,
           static_cast<uint8_t>(detailLinesAllowed > 2 ? 2 : detailLinesAllowed), Align::Left};
       nextY = layoutText(detail, detailBox, muted(), "homevalue.detail").bottom + 6;
     } else {
@@ -2563,7 +2670,7 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   const int drawComplianceAt = nextY > complianceY ? nextY : complianceY;
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   const TextBox complianceBox{kCardMargin, static_cast<int16_t>(drawComplianceAt),
-                              kScreenW - kCardMargin * 2, kComplianceLineHeight,
+                              kContentWidth(), kComplianceLineHeight,
                               kComplianceLines, Align::Left};
   layoutText("Automated estimate, not an appraisal.", complianceBox, muted(),
              "homevalue.compliance");
@@ -2647,7 +2754,7 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
 
   if (competitionLabel != nullptr && competitionLabel[0] != '\0') {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    layoutLine(competitionLabel, kScreenW - kCardMargin, 13, 150, sport.muted,
+    layoutLine(competitionLabel, kContentRight(), 13, kHalfColumnWidth(), sport.muted,
                "sports.competition", Align::Right, kTransparentText);
   }
 
@@ -2659,7 +2766,7 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
                    /*withDot=*/true);
   } else if (status.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    layoutLine(status, kCardMargin, 45, 150, sport.muted, "sports.status",
+    layoutLine(status, kCardMargin, 45, kHalfColumnWidth(), sport.muted, "sports.status",
                Align::Left, kTransparentText);
   }
 
@@ -2681,13 +2788,13 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
     // and snprintf truncates rather than overruns if the server ever disagrees.
     char joined[48];
     snprintf(joined, sizeof(joined), "%s \u00b7 %s", progressLabel, clockLabel);
-    layoutLine(joined, kScreenW - kCardMargin, 42, 150, sport.heading, "sports.progress",
+    layoutLine(joined, kContentRight(), 42, kHalfColumnWidth(), sport.heading, "sports.progress",
                Align::Right, kTransparentText);
   } else if (haveClock) {
-    layoutLine(clockLabel, kScreenW - kCardMargin, 42, 150, sport.heading, "sports.progress",
+    layoutLine(clockLabel, kContentRight(), 42, kHalfColumnWidth(), sport.heading, "sports.progress",
                Align::Right, kTransparentText);
   } else if (haveProgress) {
-    layoutLine(progressLabel, kScreenW - kCardMargin, 42, 150, sport.heading, "sports.progress",
+    layoutLine(progressLabel, kContentRight(), 42, kHalfColumnWidth(), sport.heading, "sports.progress",
                Align::Right, kTransparentText);
   }
 
@@ -2697,9 +2804,9 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
   constexpr int kPanelHeight = 104;
   constexpr int kRowHeight = kPanelHeight / 2;
 
-  lcd.fillRoundRect(kCardMargin, kPanelTop, kScreenW - kCardMargin * 2, kPanelHeight, 10,
+  lcd.fillRoundRect(kCardMargin, kPanelTop, kContentWidth(), kPanelHeight, 10,
                     to565(sport.panel));
-  lcd.drawFastHLine(kCardMargin + 10, kPanelTop + kRowHeight, kScreenW - kCardMargin * 2 - 20,
+  lcd.drawFastHLine(kCardMargin + 10, kPanelTop + kRowHeight, kContentWidth() - 20,
                     to565(sport.edge));
 
   // The score column is reserved first, so a long club name can never push a
@@ -2712,7 +2819,7 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
   // longest of them need it - "Golden State Warriors" is 21 characters.
   const bool hasScores = homeScore.length() > 0 || awayScore.length() > 0;
   const int scoreWidth = hasScores ? 76 : 0;
-  const int nameWidth = kScreenW - kCardMargin * 2 - scoreWidth - 28;
+  const int nameWidth = kContentWidth() - scoreWidth - 28;
 
   // AWAY FIRST, HOME SECOND, which is how a scoreline is read aloud.
   // Pointers to what the caller already holds, so the table that puts away
@@ -2736,7 +2843,7 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
 
     if (hasScores) {
       lcd.setFont(&fonts::FreeSansBold18pt7b);
-      layoutLine(*scores[row], kScreenW - kCardMargin - 14, top + 8, scoreWidth, sport.score,
+      layoutLine(*scores[row], kContentRight() - 14, top + 8, scoreWidth, sport.score,
                  row == 0 ? "sports.away.score" : "sports.home.score", Align::Right,
                  kTransparentText);
     }
@@ -2748,14 +2855,14 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
   lcd.setFont(&fonts::FreeSansBold9pt7b);
 
   if (ageText.length() > 0) {
-    layoutLine(ageText, kCardMargin, 188, 200, sport.muted, "sports.age",
+    layoutLine(ageText, kCardMargin, 188, kWidthBeside(90), sport.muted, "sports.age",
                Align::Left, kTransparentText);
   }
 
   if (itemCount > 1) {
     char counter[16];
     snprintf(counter, sizeof(counter), "%u of %u", itemNumber, itemCount);
-    layoutLine(counter, kScreenW - kCardMargin, 188, 90, sport.muted, "sports.counter",
+    layoutLine(counter, kContentRight(), 188, 90, sport.muted, "sports.counter",
                Align::Right, kTransparentText);
   }
 
@@ -2764,8 +2871,8 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
   const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
   struct tm localTm;
   gmtime_r(&localNow, &localTm);
-  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW / 2, 204,
-             kScreenW - kCardMargin * 2, sport.muted, "sports.clock", Align::Centre,
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kContentCentreX(), 204,
+             kContentWidth(), sport.muted, "sports.clock", Align::Centre,
              kTransparentText);
 
   restoreDefaultFont();
@@ -2797,7 +2904,7 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
 
   if (competitionLabel != nullptr && competitionLabel[0] != '\0') {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    layoutLine(competitionLabel, kScreenW - kCardMargin, 13, 150, sport.muted,
+    layoutLine(competitionLabel, kContentRight(), 13, kHalfColumnWidth(), sport.muted,
                "board.competition", Align::Right, kTransparentText);
   }
 
@@ -2824,7 +2931,7 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     const SportsBoardRow& row = rows[i];
     const int top = kRowTop + i * kRowHeight;
 
-    lcd.fillRoundRect(kCardMargin, top, kScreenW - kCardMargin * 2, kRowHeight - 4, 8,
+    lcd.fillRoundRect(kCardMargin, top, kContentWidth(), kRowHeight - 4, 8,
                       to565(sport.panel));
 
     const int text = top + 9;
@@ -2850,7 +2957,7 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     // row somebody should look at is the one that catches the eye.
     if (row.status[0] != '\0') {
       lcd.setFont(&fonts::FreeSansBold9pt7b);
-      layoutLine(row.status, kScreenW - kCardMargin - 4, text, 56,
+      layoutLine(row.status, kContentRight() - 4, text, 56,
                  row.isLive ? sport.liveFill : sport.muted,
                  "board.status", Align::Right, kTransparentText);
     }
@@ -2858,14 +2965,14 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
 
   if (count == 0) {
     lcd.setFont(&fonts::FreeSansBold12pt7b);
-    layoutLine("No games today", kScreenW / 2, 110, kScreenW - kCardMargin * 2, sport.muted,
+    layoutLine("No games today", kContentCentreX(), 110, kContentWidth(), sport.muted,
                "board.empty", Align::Centre, kTransparentText);
   }
 
   lcd.setFont(&fonts::FreeSansBold9pt7b);
 
   if (ageText.length() > 0) {
-    layoutLine(ageText, kCardMargin, 188, 200, sport.muted, "board.age",
+    layoutLine(ageText, kCardMargin, 188, kWidthBeside(90), sport.muted, "board.age",
                Align::Left, kTransparentText);
   }
 
@@ -2875,8 +2982,8 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
   const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
   struct tm localTm;
   gmtime_r(&localNow, &localTm);
-  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW / 2, 204,
-             kScreenW - kCardMargin * 2, sport.muted, "board.clock", Align::Centre,
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kContentCentreX(), 204,
+             kContentWidth(), sport.muted, "board.clock", Align::Centre,
              kTransparentText);
 
   restoreDefaultFont();
@@ -2890,8 +2997,8 @@ void showIssFlyoverCard(const String& distanceText, const String& directionText,
   // Same stat-row layout as showSunMoonCard()/showTidesCard(): two rows,
   // label left and value right-justified, plus the same third `detail` line
   // showSunMoonCard() uses for day length - here, the actual coordinates.
-  const int rightX = kScreenW - kCardMargin;
-  const int rowValueWidth = 150;
+  const int rightX = kContentRight();
+  const int rowValueWidth = kHalfColumnWidth();
   const int rowLabelWidth = rightX - rowValueWidth - kCardMargin;
 
   lcd.setFont(&fonts::FreeSansBold12pt7b);
@@ -2905,7 +3012,7 @@ void showIssFlyoverCard(const String& distanceText, const String& directionText,
 
   if (detail.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    const TextBox detailBox{kCardMargin, 140, kScreenW - kCardMargin * 2, 20, 2, Align::Left};
+    const TextBox detailBox{kCardMargin, 140, kContentWidth(), 20, 2, Align::Left};
     layoutText(detail, detailBox, muted(), "iss.detail");
   }
 
@@ -2924,8 +3031,8 @@ void showIssNextPassCard(const String& riseTimeText, const String& riseDirection
   // rows for a future rise instead of "Distance"/"Direction" for a live
   // position, and a detail line about the peak of the pass instead of the
   // live coordinates.
-  const int rightX = kScreenW - kCardMargin;
-  const int rowValueWidth = 150;
+  const int rightX = kContentRight();
+  const int rowValueWidth = kHalfColumnWidth();
   const int rowLabelWidth = rightX - rowValueWidth - kCardMargin;
 
   lcd.setFont(&fonts::FreeSansBold12pt7b);
@@ -2939,7 +3046,7 @@ void showIssNextPassCard(const String& riseTimeText, const String& riseDirection
 
   if (detail.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    const TextBox detailBox{kCardMargin, 140, kScreenW - kCardMargin * 2, 20, 2, Align::Left};
+    const TextBox detailBox{kCardMargin, 140, kContentWidth(), 20, 2, Align::Left};
     layoutText(detail, detailBox, muted(), "iss.detail");
   }
 
@@ -3084,7 +3191,7 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
 
   lcd.setTextSize(1);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  layoutLine("MOON · TODAY", kCardMargin, 12, 150, sky.heading, "moon.heading",
+  layoutLine("MOON · TODAY", kCardMargin, 12, kWidthBeside(120), sky.heading, "moon.heading",
              Align::Left, kTransparentText);
 
   drawMoonDisc(53, 74, 30, k, waxingRight, sky.lit, sky.dark, sky.outline);
@@ -3148,23 +3255,31 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
 
   constexpr int kUpcomingY = 163;
   constexpr int kUpcomingRadius = 18;
-  constexpr int kUpcomingX[4] = {43, 121, 199, 277};
+
+  // Four columns of the content band, not the four absolute centres this held
+  // ({43, 121, 199, 277}, lifted from the design). The last of those is 37px
+  // past the right edge of a portrait panel, so the fourth phase was drawn
+  // mostly off the glass and the third was crowding it. On the landscape panel
+  // the columns come out at 47/122/197/272 - within four pixels of the design's
+  // own numbers, and evenly spaced where the design's were not quite.
+  const int kUpcomingColumn = kColumnWidth(4);
 
   for (int i = 0; i < 4; ++i) {
     const Upcoming& item = upcoming[i];
+    const int upcomingX = kContentLeft() + i * kUpcomingColumn + kUpcomingColumn / 2;
 
     // A quarter is drawn lit on the side it is lit on: first quarter waxes to
     // the right, last quarter to the left. Passing waxingRight from the CURRENT
     // phase here would draw both the same way round.
     const bool itemWaxingRight = item.target < 0.5;
     drawMoonDisc(
-        kUpcomingX[i], kUpcomingY, kUpcomingRadius, item.illuminated, itemWaxingRight,
+        upcomingX, kUpcomingY, kUpcomingRadius, item.illuminated, itemWaxingRight,
         sky.lit, sky.dark, sky.outline);
 
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     // 184..202, directly under the disc, which ends at 181. Moved up with the line
     // below it: leaving this at 196 while that went to 202 would have overlapped them.
-    layoutLine(item.label, kUpcomingX[i], 184, 76, sky.name, "moon.upcoming.name",
+    layoutLine(item.label, upcomingX, 184, kUpcomingColumn, sky.name, "moon.upcoming.name",
                Align::Centre, kTransparentText);
 
     char whenBuffer[24];
@@ -3179,7 +3294,7 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
 
     // 202..220, for the reason the sun card's own stack states: nothing draws below
     // 220, and this drew to 232.
-    layoutLine(whenBuffer, kUpcomingX[i], 202, 76, sky.detail, "moon.upcoming.when",
+    layoutLine(whenBuffer, upcomingX, 202, kUpcomingColumn, sky.detail, "moon.upcoming.when",
                Align::Centre, kTransparentText);
   }
 
@@ -3190,7 +3305,7 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
   struct tm localTm;
   gmtime_r(&localNow, &localTm);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kScreenW - kCardMargin, 12, 120,
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kContentRight(), 12, 120,
              sky.heading, "moon.clock", Align::Right, kTransparentText);
 
   restoreDefaultFont();
@@ -3223,7 +3338,7 @@ void showClockDate(const String& timeText, const String& dateText) {
   lcd.setTextDatum(middle_center);
 
   lcd.setTextSize(2);
-  const int maxTimeWidth = kScreenW - kCardMargin * 2;
+  const int maxTimeWidth = kContentWidth();
   if (lcd.textWidth(timeText) > maxTimeWidth) {
     lcd.setTextSize(1);
   }
@@ -3238,7 +3353,7 @@ void showClockDate(const String& timeText, const String& dateText) {
     Log::printf("[display] clockdate: '%s' is %dpx wide at the smallest size, past the %dpx card",
                 timeText.c_str(), lcd.textWidth(timeText), maxTimeWidth);
   }
-  lcd.drawString(timeText, kScreenW / 2, 100);  // LAYOUT-PRIMITIVE
+  lcd.drawString(timeText, kContentCentreX(), 100);  // LAYOUT-PRIMITIVE
 
   // The date, secondary to the time both in size and in colour (muted(),
   // same as every other card's supporting line) - the same bold 9pt/12pt
@@ -3258,13 +3373,13 @@ void showClockDate(const String& timeText, const String& dateText) {
   // face, and the 9pt tier takes kProseSmallLineHeight for the same reason.
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
-  const TextBox oneLineAt12{kScreenW / 2, 145, kBootTextWidth(), kProseLargeLineHeight, 1,
+  const TextBox oneLineAt12{kContentCentreX(), 145, kBootTextWidth(), kProseLargeLineHeight, 1,
                             Align::Centre};
   if (layoutText(dateText, oneLineAt12, muted(), "clockdate.date", kUseCardBackground,
                  /*measureOnly=*/true)
           .ellipsized) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    const TextBox twoLinesAt9{kScreenW / 2, 145, kBootTextWidth(), kProseSmallLineHeight, 2,
+    const TextBox twoLinesAt9{kContentCentreX(), 145, kBootTextWidth(), kProseSmallLineHeight, 2,
                               Align::Centre};
     Log::verbose("[display] clockdate.date: dropped to the 9pt tier, '%s' will not fit one 12pt "
                  "line",
@@ -3306,7 +3421,7 @@ void showCalendarCard(const String& text, uint8_t itemNumber, uint8_t itemCount)
     char counter[16];
     snprintf(counter, sizeof(counter), "%u of %u", static_cast<unsigned>(itemNumber),
              static_cast<unsigned>(itemCount));
-    layoutLine(counter, kScreenW - kCardMargin, 8, 64, muted(), "calendar.counter", Align::Right);
+    layoutLine(counter, kContentRight(), 8, 64, muted(), "calendar.counter", Align::Right);
   }
 
   // The body reuses the announcement card's two-tier wrap verbatim rather than
@@ -3369,7 +3484,7 @@ void showBannerCard(const String& text) {
     // strip than ranged left against an edge nothing else in the strip lines
     // up with. Three lines at 26px (78px) inside a 100px-tall strip leaves
     // an 11px margin top and bottom.
-    const TextBox stripBox{kScreenW / 2, 11, kScreenW - kCardMargin * 2, 26, 3, Align::Centre};
+    const TextBox stripBox{kContentCentreX(), 11, kContentWidth(), 26, 3, Align::Centre};
     layoutText(text, stripBox, kBannerStripInk, "banner.strip", kBannerStripFill);
   }
 
@@ -3411,7 +3526,7 @@ void showQrTextCard(const String& qrData, const String& caption) {
   lcd.fillScreen(bg());
   drawCardBanner("SCAN", kQrTextBanner, 90);
 
-  const int bodyWidth = kScreenW - kCardMargin * 2;
+  const int bodyWidth = kContentWidth();
 
   // Same fixed QR parameters as CAL's own bootloader showQr(): version 6 at ECC LOW, a
   // ~134-byte byte-mode capacity comfortably above CardPolicyEditing.MaxQrDataLength (100) -
@@ -3492,13 +3607,13 @@ void showQrTextCard(const String& qrData, const String& caption) {
     // The layout is the same layout; it has simply stopped disagreeing with
     // the face drawn into it.
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    layoutLine(caption, kScreenW / 2, y, bodyWidth, ink(), "qr.caption", Align::Centre);
+    layoutLine(caption, kContentCentreX(), y, bodyWidth, ink(), "qr.caption", Align::Centre);
     y += 22 + 2;
   }
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   // One line, not two, once a caption is already on screen - see this
   // function's own header comment for why.
-  const TextBox dataBox{kScreenW / 2, static_cast<int16_t>(y), static_cast<int16_t>(bodyWidth),
+  const TextBox dataBox{kContentCentreX(), static_cast<int16_t>(y), static_cast<int16_t>(bodyWidth),
                         16, static_cast<uint8_t>(hasCaption ? 1 : 2), Align::Centre};
   layoutText(qrData, dataBox, muted(), "qr.data");
 
@@ -3532,7 +3647,7 @@ void showListingsCard(const String& address, const String& propertyType, int pri
     char caption[16];
     snprintf(caption, sizeof(caption), "%u of %u", static_cast<unsigned>(index) + 1,
              static_cast<unsigned>(total));
-    layoutLine(caption, kScreenW - kCardMargin, 4, kCounterWidth, muted(), "listings.counter",
+    layoutLine(caption, kContentRight(), 4, kCounterWidth, muted(), "listings.counter",
                Align::Right);
   }
 
@@ -3565,7 +3680,7 @@ void showListingsCard(const String& address, const String& propertyType, int pri
   constexpr int kAddressLineHeight = 18;
   constexpr int kAddressLines = 2;
   constexpr int kBodyLineHeight = 22;  // FreeSansBold9pt7b's own fontHeight()
-  const int bodyWidth = kScreenW - kCardMargin * 2;
+  const int bodyWidth = kContentWidth();
   const bool tight = contentIsTight();
 
   lcd.setFont(&fonts::FreeSansBold9pt7b);
@@ -3603,8 +3718,8 @@ void showListingsCard(const String& address, const String& propertyType, int pri
   // card gives: the distance and the freshness are what say whether this
   // listing is near you and whether the answer is current, and a stat row is
   // not worth pushing either off the panel.
-  const int rightX = kScreenW - kCardMargin;
-  const int rowValueWidth = 150;
+  const int rightX = kContentRight();
+  const int rowValueWidth = kHalfColumnWidth();
   const int rowLabelWidth = rightX - rowValueWidth - kCardMargin;
   constexpr int kFooterHeight = kBodyLineHeight;
   const int footerY = contentBottom() - kFooterHeight;
@@ -3731,11 +3846,11 @@ void showListingsStatus(const String& headline, const String& detail, bool isPro
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
   const uint32_t headlineColour = isProblem ? kWarn : muted();
-  const TextBox headlineBox{kCardMargin, 40, kScreenW - kCardMargin * 2, 22, 3, Align::Left};
+  const TextBox headlineBox{kCardMargin, 40, kContentWidth(), 22, 3, Align::Left};
   const TextResult drew = layoutText(headline, headlineBox, headlineColour, "listings.status");
   if (detail.length() > 0) {
     const TextBox detailBox{kCardMargin, static_cast<int16_t>(drew.bottom + 12),
-                            kScreenW - kCardMargin * 2, 18, 3, Align::Left};
+                            kContentWidth(), 18, 3, Align::Left};
     layoutText(detail, detailBox, ink(), "listings.status.detail");
   }
 
@@ -3819,7 +3934,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
                       const String& updatedAt) {
   lcd.fillScreen(bg());
   drawCardBanner("FORECAST", kForecastBanner, 130);
-  const int bodyWidth = kScreenW - kCardMargin * 2;
+  const int bodyWidth = kContentWidth();
 
   // Day/Night, in the banner row's own right-hand corner where this card's
   // old "N of M" paging caption used to sit - there is nothing left to page
@@ -3829,7 +3944,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
   constexpr int kDayNightWidth = 64;
-  layoutLine(currentIsDaytime ? "Day" : "Night", kScreenW - kCardMargin, 4, kDayNightWidth,
+  layoutLine(currentIsDaytime ? "Day" : "Night", kContentRight(), 4, kDayNightWidth,
              muted(), "forecast.daynight", Align::Right);
 
   // THE TIGHT LAYOUT, AND WHY IT IS THE STRIP THAT PAYS FOR IT.
@@ -3990,7 +4105,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // left to right in source order; they cannot overlap either way, because the
   // location box was narrowed by exactly this much.
   if (tight && updatedInkWidth > 0) {
-    layoutLine(updatedAt, kScreenW - kCardMargin, 28, updatedInkWidth, muted(),
+    layoutLine(updatedAt, kContentRight(), 28, updatedInkWidth, muted(),
                "forecast.updated", Align::Right);
   }
 
@@ -4238,11 +4353,11 @@ void showForecastStatus(const String& headline, const String& detail, bool isPro
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
   const uint32_t headlineColour = isProblem ? kWarn : muted();
-  const TextBox headlineBox{kCardMargin, 40, kScreenW - kCardMargin * 2, 22, 3, Align::Left};
+  const TextBox headlineBox{kCardMargin, 40, kContentWidth(), 22, 3, Align::Left};
   const TextResult drew = layoutText(headline, headlineBox, headlineColour, "forecast.status");
   if (detail.length() > 0) {
     const TextBox detailBox{kCardMargin, static_cast<int16_t>(drew.bottom + 12),
-                            kScreenW - kCardMargin * 2, 18, 3, Align::Left};
+                            kContentWidth(), 18, 3, Align::Left};
     layoutText(detail, detailBox, ink(), "forecast.status.detail");
   }
 
@@ -4255,11 +4370,11 @@ void showNoContent(const String& headline, const String& detail) {
 
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
-  const TextBox headlineBox{kCardMargin, 60, kScreenW - kCardMargin * 2, 22, 3, Align::Left};
+  const TextBox headlineBox{kCardMargin, 60, kContentWidth(), 22, 3, Align::Left};
   const TextResult drew = layoutText(headline, headlineBox, muted(), "nocontent.headline");
   if (detail.length() > 0) {
     const TextBox detailBox{kCardMargin, static_cast<int16_t>(drew.bottom + 12),
-                            kScreenW - kCardMargin * 2, 18, 3, Align::Left};
+                            kContentWidth(), 18, 3, Align::Left};
     layoutText(detail, detailBox, muted(), "nocontent.detail");
   }
 
@@ -4298,9 +4413,9 @@ void actionButtonZone(uint8_t index, uint8_t count, int16_t& x, int16_t& y, int1
   if (count == 0 || index >= count) {
     return;
   }
-  const int available = kButtonRowRight - kButtonRowLeft;
+  const int available = kButtonRowRight() - kButtonRowLeft();
   const int width = (available - kButtonGap * (count - 1)) / count;
-  x = static_cast<int16_t>(kButtonRowLeft + index * (width + kButtonGap));
+  x = static_cast<int16_t>(kButtonRowLeft() + index * (width + kButtonGap));
   y = static_cast<int16_t>(kButtonRowY());
   w = static_cast<int16_t>(width);
   h = static_cast<int16_t>(kButtonHeight);
@@ -4369,7 +4484,7 @@ void drawActionButtons(const String* labels, uint8_t count) {
 }
 
 void showButtonPressConfirmation() {
-  const int cx = kScreenW / 2;
+  const int cx = kContentCentreX();
   const int cy = kScreenH / 2;
   const int radius = 46;
   lcd.fillCircle(cx, cy, radius, kConfirmFill);
@@ -4409,7 +4524,7 @@ void drawNavAffordances(bool canReverse) {
   if (vertical) {
     // Up for previous along the top, down for next along the bottom, both
     // centred across the width the way the side pair centre down the height.
-    const int centreX = kScreenW / 2;
+    const int centreX = kContentCentreX();
 
     const int topTipY = 5;
     lcd.drawLine(centreX - kChevronHalfHeight, topTipY + kChevronWidth, centreX, topTipY,
@@ -4452,19 +4567,55 @@ void flashNavEdge(bool isForward, bool canReverse) {
   // - that returns without redrawing at all, which would leave a bite
   // taken out of a real button until some unrelated later redraw happened
   // to fix it.
-  const int x = isForward ? kScreenW - kEdgeZoneWidth : 0;
+  //
+  // AND IT FLASHES THE EDGE THAT NAVIGATES, which on a portrait panel is the
+  // top or the bottom. This painted a side strip unconditionally, so a portrait
+  // display answered a tap on its bottom edge by flashing a tall bar down its
+  // right-hand side - a response at the opposite end of the glass from the
+  // finger that caused it, which reads as a fault rather than as feedback.
+  // drawNavAffordances() above already draws its chevrons on the live edges;
+  // this is the same decision, made from the same two numbers.
+  const bool vertical = kScreenH > kScreenW;
+
+  int x = 0;
+  int y = 0;
+  int w = 0;
+  int h = 0;
+
+  if (vertical) {
+    w = kScreenW;
+    h = kEdgeZoneWidth;
+    y = isForward ? kScreenH - kEdgeZoneWidth : 0;
+
+    // Clipped off the button row for the reason stated above, which in portrait
+    // bites rather than being merely prudent: the bottom edge zone starts at
+    // y=214 and the button row at y=240, so an unclipped forward flash would
+    // cover the top third of every button on the card.
+    if (y + h > kButtonRowY()) {
+      h = kButtonRowY() - y;
+    }
+  } else {
+    w = kEdgeZoneWidth;
+    h = kButtonRowY();
+    x = isForward ? kScreenW - kEdgeZoneWidth : 0;
+  }
+
+  if (w <= 0 || h <= 0) {
+    drawNavAffordances(canReverse);
+    return;
+  }
   // kButtonPressedFill, not a new colour: reusing the action row's own
   // "pressed" shade makes every touch on this panel answer back the same
   // way, rather than teaching the user two different flash colours for two
   // different kinds of button. It reads against either day/night background
   // for the same reason it was chosen for the action row in the first place.
-  lcd.fillRect(x, 0, kEdgeZoneWidth, kButtonRowY(), kButtonPressedFill);
+  lcd.fillRect(x, y, w, h, kButtonPressedFill);
   delay(180);
   // Undo the flash before redrawing the chevron on top of it - the resting
   // state here isn't a filled rect the way a button's is, so simply drawing
   // the chevron again over the pressed fill would leave a stray blue bar
   // behind it.
-  lcd.fillRect(x, 0, kEdgeZoneWidth, kButtonRowY(), bg());
+  lcd.fillRect(x, y, w, h, bg());
   drawNavAffordances(canReverse);
 }
 

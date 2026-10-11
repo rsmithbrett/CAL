@@ -15,6 +15,108 @@ above the checksums, so an entry written here before the merge is the entry that
 
 ## Unreleased
 
+### Displays stopped restarting themselves every couple of minutes — App
+
+A display showing a scoreboard, a listing or any card with a picture on it was rebooting
+roughly every two minutes, over and over, and had been since the 10th. It's fixed, and the
+fix is the one a household will notice first: the card you were looking at stays on screen.
+
+What was happening was that the memory a picture needs has to be one unbroken run, and
+drawing a card was leaving that memory in small pieces rather than one piece. The next card
+couldn't find a run big enough, gave up, and the display restarted itself rather than sit
+there blank. A bench display that had been rebooting every two minutes ran for just under
+four hours after this went on.
+
+Nothing to do. A display that has been cycling will settle on its own once it takes this
+update.
+
+### A display can be mounted tall instead of wide — App
+
+A display can now be turned ninety degrees and mounted taller than it is wide, and the
+cards lay themselves out for whichever shape it is. The two shapes are called **profile**
+(tall) and **landscape** (wide), and which one a display uses is a setting on the website,
+sent to the device at its next check-in and remembered through a power cycle.
+
+Paging works on whichever pair of edges is the long one, so a profile display pages by
+tapping its top and bottom rather than its sides, and the small arrows that mark the live
+edges move with it. The clock and the button row measure up from the bottom edge, wherever
+that is.
+
+Changing a display's shape after it's mounted is fine, but it needs one check-in to arrive
+and one more to redraw, so give it a couple of minutes before deciding it didn't work.
+
+**The cards themselves are still catching up.** The chrome, the paging and the pictures are
+right in profile; several cards still lay their text out for a wide panel, so expect some
+crowding on the sun, moon and forecast cards until those are redrawn. Landscape is
+unaffected.
+
+### The sun, moon and tide cards look like what they're about — App
+
+Sunrise and sunset now sit on a drawn sky with the sun or moon in it and hills along the
+bottom, and the tide card is drawn as water with a dial that fills and empties. Both have a
+day version and a night version and switch between them on their own.
+
+The clock on these three cards is top right rather than bottom right, because the bottom of
+each is now part of the picture.
+
+### One scoreboard for every sport — App
+
+The scoreboard card handles every league the same way and says which sport and which
+competition it's showing, instead of a separate card per sport that didn't. Up to four games
+fit on screen at once, and a game that hasn't started shows its start time where the score
+would be rather than a pair of zeroes.
+
+The website's reports now count each game on a scoreboard as its own showing, so a card with
+four games on it reports four rather than one, and the seconds on screen are counted once
+across the four rather than four times over.
+
+### A tap while the card is redrawing isn't lost any more — App
+
+Pressing a button or an edge during the second or so a card takes to draw, or during a
+check-in, used to do nothing at all: the press landed in a gap where nothing was watching
+the glass. Touch is now read on its own schedule and a press that arrives mid-draw is still
+there when the draw finishes.
+
+If a display has felt unreliable to the touch, this is why, and it needs nothing from you
+beyond the update.
+
+### The clock card shows the date again — App
+
+The clock card was drawing the date on top of itself and the time twice. It now drops the
+date to a smaller size when the long form doesn't fit, rather than overlapping.
+
+### A display that can't install an update stops trying — App
+
+A display handed an update it can't install used to retry it forever, which on a device with
+a weak signal meant it spent all day downloading and never drew a card. It now tries three
+times, then stops and says so on the next check-in, and carries on showing cards on the
+version it already has.
+
+The website shows the refusal, so a display stuck this way is visible rather than silently
+busy.
+
+### A display keeps its last few minutes of log even if nobody's listening — App
+
+Turning on the debug stream for a display used to show only what happened from that moment
+on, which was no use for anything that went wrong at startup — the interesting part was over
+before anyone could ask for it. A display now keeps its last 32 lines whether or not the
+stream is on, so switching it on shows what just happened as well as what happens next.
+
+### A display that loses its WiFi waits for somebody to walk over — CAL
+
+A display whose network has changed used to retry forever with nothing on screen worth
+reading. It now says what's wrong and what to do, and holds that up rather than cycling.
+
+### A button on the back puts the clock up — App
+
+Pressing the physical button jumps straight to the clock card, from whatever was on screen.
+
+---
+
+## v2026.10.08
+
+These four shipped in every release from v2026.10.08 onward.
+
 ### The overhead card names a military aircraft — App
 
 When a military aircraft is in range, the card shows that one rather than whichever
@@ -76,6 +178,7 @@ shows no stored passwords and nothing else is reachable — which needs them sta
 range of a device its owner is already standing over.
 
 ---
+
 
 ## How to write an entry
 
