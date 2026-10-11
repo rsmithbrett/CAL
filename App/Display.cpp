@@ -2780,7 +2780,7 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     // The state, in the live colour only when the server says the game is on.
     // Everything else - a start time, a period, FINAL - is muted, so the one
     // row somebody should look at is the one that catches the eye.
-    if (row.status.length() > 0) {
+    if (row.status[0] != '\0') {
       lcd.setFont(&fonts::FreeSansBold9pt7b);
       layoutLine(row.status, kScreenW - kCardMargin - 4, text, 56,
                  row.isLive ? sport.liveFill : sport.muted,

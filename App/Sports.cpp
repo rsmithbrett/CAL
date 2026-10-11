@@ -157,6 +157,29 @@ String scoreText(int16_t score) {
 /// confirmed seconds ago. Section 3 of the same design says a contradiction is
 /// not drawn, so this draws nothing and puts the oddity in the stream instead,
 /// where somebody can go and look at why the server flagged it.
+/// Copies into a fixed destination and terminates by hand, because strncpy
+/// writes no terminator when the source fills the buffer and these sources come
+/// across a wire whose bounds are not this firmware's to trust. A name longer
+/// than the row can hold is cut rather than allowed to overwrite its neighbour,
+/// which matches what setGames() already does with the same strings.
+void copyInto(char* destination, size_t capacity, const char* source) {
+  if (destination == nullptr || capacity == 0) { return; }
+  strncpy(destination, source != nullptr ? source : "", capacity - 1);
+  destination[capacity - 1] = '\0';
+}
+
+/// A score, or an empty cell before play has started. kNoScore is the whole
+/// reason this is a function: an unplayed game and a nil-nil draw are different
+/// claims, and only one of them is a zero.
+void writeScore(char* destination, size_t capacity, int16_t score) {
+  if (destination == nullptr || capacity == 0) { return; }
+  if (score == kNoScore) {
+    destination[0] = '\0';
+    return;
+  }
+  snprintf(destination, capacity, "%d", static_cast<int>(score));
+}
+
 String staleAgeText(const CardSlot& slot) {
   if (slot.staleSinceUtc == 0) {
     return String();
@@ -220,15 +243,26 @@ void drawCardAt(uint8_t index, uint16_t itemIndex) {
     for (uint8_t i = 0; i < slot.count && i < kMaxGames; ++i) {
       const Game& g = slot.games[i];
 
-      rows[i].awayName = g.away;
-      rows[i].awayScore = scoreText(g.awayScore);
-      rows[i].homeName = g.home;
-      rows[i].homeScore = scoreText(g.homeScore);
+      // Copied into the row's own fixed buffers rather than assigned into
+      // Strings. Five Strings a row across four rows is twenty to thirty heap
+      // allocations every time this card draws, which is the shape that took
+      // the fleet down on v2026.10.10.0004 - see SportsBoardRow in Display.h.
+      copyInto(rows[i].awayName, sizeof(rows[i].awayName), g.away);
+      copyInto(rows[i].homeName, sizeof(rows[i].homeName), g.home);
+      writeScore(rows[i].awayScore, sizeof(rows[i].awayScore), g.awayScore);
+      writeScore(rows[i].homeScore, sizeof(rows[i].homeScore), g.homeScore);
       rows[i].isLive = g.state == State::Live;
 
       // The period while a game is on, the state word otherwise. Both come
       // from the server; nothing here interprets either.
-      rows[i].status = rows[i].isLive && g.period[0] != '\0' ? String(g.period) : stateText(g);
+      //
+      // stateText() still returns a String and still allocates, once per row.
+      // Leaving it is deliberate: it has one branch that genuinely builds a
+      // string, startTimeText(), and rewriting that is a wider change than this
+      // one. Four allocations a draw instead of twenty is the fix; zero needs
+      // startTimeText() to take a buffer, and that can come later.
+      copyInto(rows[i].status, sizeof(rows[i].status),
+               rows[i].isLive && g.period[0] != '\0' ? g.period : stateText(g).c_str());
     }
 
     Log::verbose("[sports] board on screen: card=%s games=%u", kCardIds[index],

@@ -349,15 +349,37 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
 
 /// One row of the multi-game scoreboard: two sides, their scores where play has
 /// started, and whatever the server says about the state.
+///
+/// <para>FIXED BUFFERS, NOT Strings, and the four of these live on the caller's
+/// stack. Five Strings a row, four rows, each assigned from a char buffer or a
+/// returned temporary, is twenty to thirty heap allocations every time this
+/// card draws. That is the shape that put the fleet into a restart loop on
+/// v2026.10.10.0004: small repeated allocations carve the one large free region
+/// that a TLS handshake needs whole, and what is lost is the half on the wrong
+/// side of the split rather than the bytes asked for. Sports::Game already
+/// stores its teams this way for the same reason. See HeapRatchet.h and
+/// SPORTS_CARDS_V2_GENERIC_DESIGN.md section 13.</para>
 struct SportsBoardRow {
-  String awayName;
-  String awayScore;
-  String homeName;
-  String homeScore;
+  /// Twenty characters plus a terminator, matching Sports::kMaxTeamNameLength.
+  /// Stated as its own number rather than including Sports.h, which would make
+  /// the renderer depend on the one card that feeds it.
+  static constexpr size_t kMaxName = 21;
+
+  /// A score is three digits at the very outside, and empty before play starts.
+  static constexpr size_t kMaxScore = 8;
+
+  /// A period ("6TH INN"), a state word ("FINAL", "PPD"), or a start time
+  /// ("7:30 PM"). The longest of those sets the size.
+  static constexpr size_t kMaxStatus = 16;
+
+  char awayName[kMaxName] = "";
+  char awayScore[kMaxScore] = "";
+  char homeName[kMaxName] = "";
+  char homeScore[kMaxScore] = "";
 
   /// A progress label or the state word, whichever the server supplied. Drawn
   /// in the live colour only when isLive says so.
-  String status;
+  char status[kMaxStatus] = "";
   bool isLive = false;
 };
 
