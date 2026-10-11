@@ -936,6 +936,33 @@ bool drawImageFromBuffer(const uint8_t* data, size_t size);
 /// Valid only immediately after a draw call returned false, and cleared at the
 /// start of every draw - there is one flag, not one per path, because a draw
 /// is the only thing that sets it and callers ask before drawing anything else.
+/// Hands LovyanGFX PNG scratch back, for a display that is not going to
+/// draw a picture.
+///
+/// <para>The scratch is roughly 44KB of contiguous heap. draw_png() allocates
+/// it on first use and the library deliberately never frees it, so repeated
+/// PNG draws reuse one block instead of each needing to find 44KB - which is
+/// the right trade for a display that shows pictures, and the reason
+/// releaseDecodeMemory() above declines to touch it.</para>
+///
+/// <para>It is the wrong trade for a display that shows none. The boot splash
+/// takes the block while setup() still has 110,580 contiguous bytes, and then
+/// it is held for the life of the process for one decorative logo. A TLS
+/// session needs 16,717 contiguous for each of two record buffers; three
+/// displays with SD cards measured 49,152, 54,528 and 51,200 bytes of
+/// largest-block gone in the boot phase, settled under 9,000, and could not
+/// open a session at all. They showed "cannot reach" on every card that
+/// fetches and could not take the firmware update that would have fixed it.
+/// The two displays with no card never decode a splash, pay nothing, and have
+/// never failed a handshake.</para>
+///
+/// <para>Called once, immediately after the splash, and only when the policy
+/// this display last received had no picture card in it - see
+/// Identity::hasPictureCards() for why the answer has to come from the
+/// previous boot. A display that does show pictures keeps the block exactly
+/// as before.</para>
+void releaseSplashDecodeMemory();
+
 bool lastDrawFailedOnAllocation();
 
 }  // namespace Display

@@ -4,6 +4,7 @@
 #include "Config.h"
 #include "Display.h"
 #include "HeapRatchet.h"
+#include "Identity.h"
 #include "Impressions.h"
 #include "Log.h"
 #include "Motion.h"
@@ -1591,6 +1592,28 @@ void applyPolicy(const Cards::Policy& policy) {
               static_cast<unsigned long>(gManualNavHoldMs / 1000UL));
   gLastPolicyKnownCount = matched;
   gLastPolicyTotalCount = policy.entryCount;
+
+  // REMEMBERED FOR THE NEXT BOOT, not used on this one.
+  //
+  // The boot splash allocates LovyanGFX PNG scratch - about 44KB of
+  // contiguous heap, taken while setup() still has 110,580 and then kept by
+  // the library for the life of the process. On a display with no picture
+  // cards that block is held for a decorative logo and never used again, and
+  // it is most of what put three displays below the 16,717 bytes one mbedTLS
+  // record buffer needs. Those three answered every card that fetches with
+  // "cannot reach" and could not take a firmware update to fix it.
+  //
+  // Releasing it has to be decided at the splash, which happens before the
+  // first check-in and therefore before any policy exists. So the answer is
+  // carried over from the last policy this display was given, and this is
+  // where that is written down.
+  uint8_t pictureCards = 0;
+  for (uint8_t i = 0; i < gCardCount; ++i) {
+    if (gCards[i].active && gCards[i].assetId[0] != 0) {
+      pictureCards++;
+    }
+  }
+  Identity::noteHasPictureCards(pictureCards > 0);
 
   resetHistory(gCurrent);
   if (gCurrent.card < 0 || !showable(static_cast<uint8_t>(gCurrent.card))) {

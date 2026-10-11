@@ -46,6 +46,7 @@
 #include "CalQr.h"
 
 #include "Display.h"
+#include "Http.h"
 #include "Log.h"
 
 namespace Display {
@@ -5489,6 +5490,22 @@ bool drawImageFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, 
 ///
 /// This is what CYD-Dickey has always done - the project whose graphics, as
 /// its author points out, never had any of these problems.
+void releaseSplashDecodeMemory() {
+  const size_t before = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  lcd.releasePngMemory();
+  const size_t after = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+
+  // Logged as a pair because the figure is the whole point of the call, and
+  // because a release that recovers nothing means the splash was not a PNG -
+  // which is a different and useful finding rather than a failure.
+  Log::printf("[display] released the PNG scratch: largest contiguous 8-bit block %u -> %u "
+              "(+%d). This display had no picture card in its last policy, and a TLS record "
+              "buffer needs %u",
+              static_cast<unsigned>(before), static_cast<unsigned>(after),
+              static_cast<int>(after) - static_cast<int>(before),
+              static_cast<unsigned>(Http::kTlsRecordBufferBytes));
+}
+
 void releaseDecodeMemory() {
   // Deliberately NOT releasePngMemory(). The two blocks look alike and are
   // not, and getting this split wrong breaks one subsystem or the other:

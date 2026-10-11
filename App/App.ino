@@ -2497,6 +2497,26 @@ void setup() {
     const HeapRatchet::Scope step(HeapRatchet::Phase::Boot, "boot.splash");
     splashOnScreen = Assets::showBootSplash();
     noteBootHeap("boot.splash");
+
+    // AND HAND THE SCRATCH BACK IF NOTHING HERE DRAWS PICTURES.
+    //
+    // The splash is where LovyanGFX takes its ~44KB PNG workspace, and the
+    // library keeps it forever so later picture draws can reuse one block.
+    // On a display whose policy has no picture card that block is held for a
+    // logo and nothing else, and it is most of the ~50,000 bytes of largest
+    // block the boot phase costs on every display with an SD card. Those
+    // displays settle under 9,000 and a TLS record buffer needs 16,717, so
+    // they cannot open a session, cannot fetch a card, and cannot take the
+    // update that would fix it.
+    //
+    // The policy has not arrived yet - it cannot have, the network is not up
+    // - so the answer comes from the last one this display was given. A
+    // display that has never had a policy releases too: reaching the server
+    // is what gets it one.
+    if (!Identity::hasPictureCards()) {
+      Display::releaseSplashDecodeMemory();
+      noteBootHeap("boot.splash.released");
+    }
   }
   if (splashOnScreen) {
     // Read only by holdSplash() at the bottom of setup(), which is what stops

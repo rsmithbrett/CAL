@@ -123,6 +123,24 @@ uint8_t appUpdateAttempts();
 /// immediately BEFORE rebooting, for the reason noteCalUpdateAttempt() gives.
 void noteAppUpdateAttempt();
 
+/// Whether the card policy this display last received contained a picture card.
+///
+/// <para>Read at boot, one line after the splash is drawn, to decide whether to
+/// hand LovyanGFX PNG scratch back - see Display::releaseSplashDecodeMemory().
+/// It has to survive a reboot because the decision is made before the first
+/// check-in: the splash is drawn while the heap is still clean, which is the
+/// whole reason it is drawn there, and the policy does not arrive until the
+/// network is up and the 44KB is already spoken for.</para>
+///
+/// <para>False on a display that has never received a policy, which releases.
+/// A device that cannot check in cannot be given one, so a first boot spends
+/// its 44KB on reaching the server rather than on a picture nothing has asked
+/// for yet.</para>
+bool hasPictureCards();
+
+/// Records what the policy just applied contained. Writes only on a change.
+void noteHasPictureCards(bool hasPictures);
+
 void setInstalledAppVersion(const String& version);
 
 /// Set by the application to ask CAL to perform an update on next boot. The

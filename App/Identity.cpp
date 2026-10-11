@@ -3,6 +3,8 @@
 #include <Preferences.h>
 #include <esp_mac.h>
 
+#include "Log.h"
+
 namespace Identity {
 namespace {
 
@@ -141,6 +143,7 @@ constexpr const char* kKeyCalReqVer = "calreqver";
 constexpr const char* kKeyCalReqTries = "calreqtry";
 constexpr const char* kKeyAppReqVer = "appreqver";
 constexpr const char* kKeyAppReqTries = "appreqtry";
+constexpr const char* kKeyHasPictures = "haspics";
 }  // namespace
 
 uint8_t calUpdateAttempts() {
@@ -189,6 +192,20 @@ void noteAppUpdateAttempt() {
       prefs.getString(kKeyAppReqVer, "") == running ? prefs.getUChar(kKeyAppReqTries, 0) : 0;
   prefs.putString(kKeyAppReqVer, running);
   prefs.putUChar(kKeyAppReqTries, previous + 1);
+}
+
+bool hasPictureCards() { return prefs.getBool(kKeyHasPictures, false); }
+
+void noteHasPictureCards(bool hasPictures) {
+  if (prefs.getBool(kKeyHasPictures, false) == hasPictures) {
+    // Written only on a change. A policy arrives every check-in and this flash
+    // part is rated for about a hundred thousand writes - the same arithmetic
+    // Impressions reserves its id blocks for.
+    return;
+  }
+  prefs.putBool(kKeyHasPictures, hasPictures);
+  Log::printf("[identity] this display %s picture cards, remembered for the next boot",
+              hasPictures ? "has" : "has no");
 }
 
 void setInstalledAppVersion(const String& version) {
