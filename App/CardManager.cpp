@@ -8,6 +8,7 @@
 #include "Log.h"
 #include "Motion.h"
 #include "Touch.h"
+#include "../pi/src/ScheduleCore.h"
 
 // ---------------------------------------------------------------------------
 // The registry declared in Cards.h lives here rather than in a Cards.cpp of
@@ -416,38 +417,14 @@ bool earlier(uint8_t a, uint8_t b) {
   return a < b;
 }
 
-int8_t firstShowable(Cards::Kind kind) {
-  int8_t best = -1;
-  for (uint8_t i = 0; i < gCardCount; ++i) {
-    if (gCards[i].kind != kind || !showable(i)) {
-      continue;
-    }
-    if (best < 0 || earlier(i, static_cast<uint8_t>(best))) {
-      best = static_cast<int8_t>(i);
-    }
-  }
-  return best;
+int8_t nextShowable(Cards::Kind kind, int8_t after) {
+  return ScheduleCore::nextShowable(gCardCount, after,
+      [kind](uint8_t i) { return gCards[i].kind == kind && showable(i); },
+      [](uint8_t a, uint8_t b) { return earlier(a, b); });
 }
 
-/// The next showable card of `kind` strictly after `after` in the ordering
-/// above, wrapping around to the first. `after` < 0 starts from the top.
-int8_t nextShowable(Cards::Kind kind, int8_t after) {
-  if (after < 0) {
-    return firstShowable(kind);
-  }
-  int8_t best = -1;
-  for (uint8_t i = 0; i < gCardCount; ++i) {
-    if (gCards[i].kind != kind || !showable(i)) {
-      continue;
-    }
-    if (!earlier(static_cast<uint8_t>(after), i)) {
-      continue;
-    }
-    if (best < 0 || earlier(i, static_cast<uint8_t>(best))) {
-      best = static_cast<int8_t>(i);
-    }
-  }
-  return best >= 0 ? best : firstShowable(kind);
+int8_t firstShowable(Cards::Kind kind) {
+  return nextShowable(kind, -1);
 }
 
 /// Which interstitial, if any, has waited long enough. Every registered
@@ -459,23 +436,12 @@ int8_t nextShowable(Cards::Kind kind, int8_t after) {
 /// records having corrected that to two separate schedules - so nothing here
 /// couples one interstitial's cadence to another's.
 int8_t dueInterstitial() {
-  int8_t best = -1;
-  for (uint8_t i = 0; i < gCardCount; ++i) {
-    const Cards::CardSpec& card = gCards[i];
-    if (card.kind != Cards::Kind::Interstitial || card.interleaveEvery == 0) {
-      continue;
-    }
-    if (!showable(i)) {
-      continue;
-    }
-    if (card.cardsSince <= card.interleaveEvery) {
-      continue;
-    }
-    if (best < 0 || earlier(i, static_cast<uint8_t>(best))) {
-      best = static_cast<int8_t>(i);
-    }
-  }
-  return best;
+  return ScheduleCore::dueInterstitial(
+      gCards, gCardCount,
+      [](uint8_t i) {
+        return gCards[i].kind == Cards::Kind::Interstitial && showable(i);
+      },
+      [](uint8_t a, uint8_t b) { return earlier(a, b); });
 }
 
 /// Computes a genuinely new next card. Only ever called from advance() once
@@ -485,11 +451,7 @@ Position computeNext() {
   // Every active card's counter ticks on every computed card, including the
   // one that ends up being an interstitial; whichever type's interval is
   // reached first is what shows and the others just wait one more tick.
-  for (uint8_t i = 0; i < gCardCount; ++i) {
-    if (gCards[i].active && gCards[i].cardsSince < 0xFFFF) {
-      gCards[i].cardsSince++;
-    }
-  }
+  ScheduleCore::tickActive(gCards, gCardCount);
 
   const int8_t interstitial = dueInterstitial();
   if (interstitial >= 0) {
@@ -1587,3 +1549,4 @@ uint8_t lastPolicyTotalCount() { return gLastPolicyTotalCount; }
 String lastPolicyUnknownIds() { return gLastPolicyUnknownIds; }
 
 }  // namespace CardManager
+
