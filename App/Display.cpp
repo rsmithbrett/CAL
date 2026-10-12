@@ -282,7 +282,21 @@ int kScaledWidth(int designWidth) {
   return designWidth * kContentWidth() / (kDesignWidth - kCardMargin * 2);
 }
 
+/// The column the sun and moon cards reserve for the clock they draw themselves.
+///
+/// <para>120px against the 300px landscape band, measured for a 9pt bold time.
+/// Taken as a literal it leaves the heading beside it kWidthBeside(120) = 90px
+/// on a 220px band, and device 17 in profile reported "sunmoon.heading" and
+/// "moon.heading" ellipsizing eight times each in twenty minutes - "SUN · TODAY"
+/// needs about a hundred.
+///
+/// <para>The clock is the column that does not need its landscape width: it
+/// holds five characters at any panel size. Scaling it to 88px on a 220px band
+/// is still ample for "11:42" and hands the heading 122px, which fits.</para>
+int kClockColumnWidth() { return kScaledWidth(120); }
+
 /// An x from a 320-wide design, placed on the panel actually fitted.
+
 ///
 /// <para>For the sun/moon card's ridges, which are not a layout at all - they
 /// are five quadratic segments copied out of the design with their control
@@ -2255,7 +2269,8 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   // an edge.
   lcd.setTextSize(1);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  layoutLine("SUN · TODAY", kCardMargin, 12, kWidthBeside(120), sky.heading, "sunmoon.heading",
+  layoutLine("SUN · TODAY", kCardMargin, 12, kWidthBeside(kClockColumnWidth()),
+             sky.heading, "sunmoon.heading",
              Align::Left, kTransparentText);
 
   // The time goes top right, where the design puts it, and drawClock() is NOT
@@ -2264,7 +2279,8 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
   struct tm localTm;
   gmtime_r(&localNow, &localTm);
-  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kContentRight(), 12, 120,
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kContentRight(), 12,
+             kClockColumnWidth(),
              sky.heading, "sunmoon.clock", Align::Right, kTransparentText);
 
   // THE WHOLE STACK FINISHES BY y=220, which is what sets these three rows.
@@ -3231,7 +3247,8 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
 
   lcd.setTextSize(1);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  layoutLine("MOON · TODAY", kCardMargin, 12, kWidthBeside(120), sky.heading, "moon.heading",
+  layoutLine("MOON · TODAY", kCardMargin, 12, kWidthBeside(kClockColumnWidth()),
+             sky.heading, "moon.heading",
              Align::Left, kTransparentText);
 
   drawMoonDisc(53, 74, 30, k, waxingRight, sky.lit, sky.dark, sky.outline);
@@ -3345,7 +3362,8 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
   struct tm localTm;
   gmtime_r(&localNow, &localTm);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kContentRight(), 12, 120,
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kContentRight(), 12,
+             kClockColumnWidth(),
              sky.heading, "moon.clock", Align::Right, kTransparentText);
 
   restoreDefaultFont();
