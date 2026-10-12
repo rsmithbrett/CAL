@@ -1969,6 +1969,14 @@ void performCheckIn() {
   // own remarks.
   Log::setStreamingEnabled(result.debugStreamRequested);
 
+  // A check-in reached the server, so whatever took the last three boots down
+  // is not taking this one down - the storage stage is trusted again. Here
+  // rather than at the end of setup(), because setup() completing is exactly
+  // what skipping the stage already bought and would clear the count on the
+  // strength of the skip itself.
+  Identity::clearBootStageFailures();
+
+
   // The ladder again, now that somebody can hear it - see replayBootHeapLadder().
   if (result.debugStreamRequested) {
     replayBootHeapLadder();
@@ -2250,6 +2258,19 @@ uint32_t gBootRungBytes[kBootRungs];
 uint8_t gBootRungCount = 0;
 bool gBootLadderReplayed = false;
 
+/// The two steps of setup() that have been seen to stop a boot dead - see
+/// Identity::bootStageInProgress(). Numbered rather than named on the wire
+/// because the value lives in NVS and is read by the next boot, which may be a
+/// different build: a number that never changes meaning survives that, and a
+/// renamed enumerator does not.
+constexpr uint8_t kBootStageNone = 0;
+constexpr uint8_t kBootStageMountSd = 1;
+constexpr uint8_t kBootStageSplash = 2;
+
+/// How many boots may die inside a stage before it is skipped. Three, the same
+/// allowance calUpdateAttempts() and appUpdateAttempts() give.
+constexpr uint8_t kMaxBootStageFailures = 3;
+
 /// One rung of the boot heap ladder, logged by name.
 ///
 /// The ratchet already buckets the whole of setup() as Boot, and on the three
@@ -2480,6 +2501,24 @@ void setup() {
     noteBootHeap("boot.identity");
   }
 
+  // WHAT THE LAST BOOT DIED INSIDE, if it died inside anything. Read here
+  // because it needs Identity::begin() and must be known before the two steps
+  // it guards.
+  const uint8_t stageLastBoot = Identity::bootStageInProgress();
+  if (stageLastBoot != kBootStageNone) {
+    Identity::noteBootStageFailed();
+    Log::printf("[boot] the last boot stopped inside stage %u and never cleared it - that is "
+                "now %u in a row, and at %u the stage is skipped",
+                stageLastBoot, Identity::bootStageFailures(), kMaxBootStageFailures);
+  }
+
+  const bool skipStorage = Identity::bootStageFailures() >= kMaxBootStageFailures;
+  if (skipStorage) {
+    Log::line("[boot] SKIPPING the SD card and the boot splash: three boots in a row died "
+              "inside one of them. A display with no pictures is a working display and a "
+              "dark one is not. Clears itself as soon as a boot reaches its first check-in");
+  }
+
   // Storage and the boot splash come up HERE - before Http/WiFi/TLS - and the
   // ordering is the whole fix, not a cosmetic preference.
   //
@@ -2518,9 +2557,13 @@ void setup() {
   // during setup() - showBootSplash() only reads - and every real cache write
   // happens on check-in, long after the clock is set, so that property is
   // unaffected.
-  {
+  if (!skipStorage) {
     const HeapRatchet::Scope step(HeapRatchet::Phase::Boot, "boot.sd");
+    // Written before, cleared after. A boot that never reaches the clear is
+    // the only evidence a hang inside SD.begin() leaves behind.
+    Identity::enterBootStage(kBootStageMountSd);
     Sd::begin();
+    Identity::leaveBootStage();
     noteBootHeap("boot.sd");
   }
   {
@@ -2554,9 +2597,14 @@ void setup() {
   // ensureWifiConnected) are never suppressed on any path: a household that
   // needs to hold BOOT to fix its WiFi has to be told so.
   bool splashOnScreen = false;
-  {
+  if (!skipStorage) {
     const HeapRatchet::Scope step(HeapRatchet::Phase::Boot, "boot.splash");
+    // The same breadcrumb, around the decode. A corrupted PNG on the card is
+    // the likeliest thing to take a boot down after the mount succeeded, and
+    // the decoder cannot report its own crash.
+    Identity::enterBootStage(kBootStageSplash);
     splashOnScreen = Assets::showBootSplash();
+    Identity::leaveBootStage();
     noteBootHeap("boot.splash");
 
     // AND HAND THE SCRATCH BACK IF NOTHING HERE DRAWS PICTURES.

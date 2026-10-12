@@ -123,6 +123,45 @@ uint8_t appUpdateAttempts();
 /// immediately BEFORE rebooting, for the reason noteCalUpdateAttempt() gives.
 void noteAppUpdateAttempt();
 
+/// WHAT THIS DEVICE WAS IN THE MIDDLE OF WHEN IT LAST STOPPED.
+///
+/// <para>A display stops booting entirely if its SD card is bad. Observed on
+/// device 17 on 2026-10-11: eight consecutive boots that never reached a
+/// check-in with the card fitted, and a clean boot the moment it came out. A
+/// FAILED mount is already survivable - Sd::begin() retries three times,
+/// returns false, and setup() carries on - so what kills it is either a hang
+/// inside the SD stack, which has no timeout, or a crash after the mount, the
+/// likeliest being the PNG decode of a corrupted splash.</para>
+///
+/// <para>Neither can be caught where it happens. What can be done is remember
+/// what was being attempted: the stage is written to NVS before the risky step
+/// and cleared after it, so a boot that never gets to the clear leaves its own
+/// footprint for the next one to read. Three of those in a row and the step is
+/// skipped - the same count, and the same reasoning, as calUpdateAttempts()
+/// and appUpdateAttempts() next door.</para>
+///
+/// <para>A household with a bad card then gets a display with no pictures,
+/// which is a working display, instead of a dark one.</para>
+uint8_t bootStageInProgress();
+
+/// How many boots in a row died inside a stage without clearing it.
+uint8_t bootStageFailures();
+
+/// Records that the risky step is starting. Call immediately before it.
+void enterBootStage(uint8_t stage);
+
+/// Records that it finished. Call immediately after.
+void leaveBootStage();
+
+/// Counts the stage found still set at boot, and clears it so this boot gets
+/// its own clean slate.
+void noteBootStageFailed();
+
+/// Forgets the failures, once a boot has got far enough to prove the device
+/// works. Called after the first successful check-in, not at the end of
+/// setup(): setup() completing is what the skipping already achieved.
+void clearBootStageFailures();
+
 /// Whether the card policy this display last received contained a picture card.
 ///
 /// <para>Read at boot, one line after the splash is drawn, to decide whether to

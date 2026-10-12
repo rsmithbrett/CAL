@@ -144,6 +144,8 @@ constexpr const char* kKeyCalReqTries = "calreqtry";
 constexpr const char* kKeyAppReqVer = "appreqver";
 constexpr const char* kKeyAppReqTries = "appreqtry";
 constexpr const char* kKeyHasPictures = "haspics";
+constexpr const char* kKeyBootStage = "bootstage";
+constexpr const char* kKeyBootStageFails = "bootstagef";
 }  // namespace
 
 uint8_t calUpdateAttempts() {
@@ -192,6 +194,33 @@ void noteAppUpdateAttempt() {
       prefs.getString(kKeyAppReqVer, "") == running ? prefs.getUChar(kKeyAppReqTries, 0) : 0;
   prefs.putString(kKeyAppReqVer, running);
   prefs.putUChar(kKeyAppReqTries, previous + 1);
+}
+
+uint8_t bootStageInProgress() { return prefs.getUChar(kKeyBootStage, 0); }
+
+uint8_t bootStageFailures() { return prefs.getUChar(kKeyBootStageFails, 0); }
+
+void enterBootStage(uint8_t stage) { prefs.putUChar(kKeyBootStage, stage); }
+
+void leaveBootStage() {
+  if (prefs.getUChar(kKeyBootStage, 0) == 0) {
+    return;
+  }
+  prefs.putUChar(kKeyBootStage, 0);
+}
+
+void noteBootStageFailed() {
+  prefs.putUChar(kKeyBootStageFails,
+                 static_cast<uint8_t>(prefs.getUChar(kKeyBootStageFails, 0) + 1));
+  prefs.putUChar(kKeyBootStage, 0);
+}
+
+void clearBootStageFailures() {
+  if (prefs.getUChar(kKeyBootStageFails, 0) == 0) {
+    return;
+  }
+  prefs.putUChar(kKeyBootStageFails, 0);
+  Log::line("[identity] a boot completed, so the storage stage is trusted again");
 }
 
 bool hasPictureCards() { return prefs.getBool(kKeyHasPictures, false); }
