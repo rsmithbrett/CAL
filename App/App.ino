@@ -2248,6 +2248,7 @@ constexpr uint8_t kBootRungs = 12;
 const char* gBootRungName[kBootRungs];
 uint32_t gBootRungBytes[kBootRungs];
 uint8_t gBootRungCount = 0;
+bool gBootLadderReplayed = false;
 
 /// One rung of the boot heap ladder, logged by name.
 ///
@@ -2275,9 +2276,16 @@ void noteBootHeap(const char* step) {
 
 /// Says the ladder again, once the stream is open.
 void replayBootHeapLadder() {
-  if (gBootRungCount == 0) {
+  if (gBootRungCount == 0 || gBootLadderReplayed) {
+    // Once per boot, not once per check-in. performCheckIn() runs every
+    // sixty seconds and this sat straight after setStreamingEnabled() inside
+    // it, so the ladder was re-emitted every minute for the life of the run -
+    // on the one display being watched closely, filling the stream with a
+    // reading that cannot change until the next boot.
     return;
   }
+  gBootLadderReplayed = true;
+
   // A fixed buffer rather than a String, for the reason the sports draw path
   // was rewritten: this runs on the heap-starved boot it exists to measure,
   // and an instrument that allocates is an instrument that changes its own
