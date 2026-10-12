@@ -633,6 +633,39 @@ void showListingsCard(const String& address, const String& propertyType, int pri
 /// lastRefreshError text never reaches this function, and no longer reaches
 /// the device's own operator surfaces either - see Listings::Result::message
 /// for where it went and why.
+/// One already-labelled fact for the house-hunt card.
+///
+/// <para>Label and value both come from the server. This file prints them and
+/// interprets neither, which is what lets a boat broker's listings draw with no
+/// firmware change - the panel does not need to know what a beam is.</para>
+///
+/// <para>Pointers rather than Strings: the caller already holds this text, and
+/// copying it into Strings to hand it over would be six heap allocations on
+/// every repaint of a card on the device whose failure mode is contiguous
+/// heap. Borrowed for the duration of the call, never retained.</para>
+struct FactLine {
+  const char* label = "";
+  const char* value = "";
+};
+
+/// A property an agent sent this household, drawn one per card.
+///
+/// <para>Deliberately not showListingsCard() with more arguments. That one
+/// knows it is drawing real estate: it takes bedrooms and bathrooms and square
+/// footage as typed parameters, so a boat would arrive as three numbers that
+/// mean nothing. This takes a headline, a price and up to three labelled
+/// facts, and draws whatever it is given.</para>
+///
+/// <para>`title` is the keyword line the server derived - "New match", "Price
+/// drop" - and is empty when no rule matched, in which case the card draws
+/// without one rather than inventing a label.</para>
+///
+/// <para>`price` below zero means the source stated none, and nothing is drawn
+/// in its place. A $0 on a wall is worse than a blank.</para>
+void showHomeHuntCard(const String& title, const String& headline, const String& subhead,
+                      int32_t price, const FactLine* facts, uint8_t factCount,
+                      const String& updatedAt);
+
 void showListingsStatus(const String& headline, const String& detail, bool isProblem);
 
 /// Up to this many calendar days show in the forecast strip below - five

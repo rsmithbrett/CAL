@@ -473,7 +473,15 @@ struct CardSpec {
 // policy naming one of the other seven is ignored with a log line, exactly as
 // "weather" already is, and instances 3-5 are a later registration if anybody
 // asks for them. See Sports.h for the full accounting.
-static constexpr uint8_t kMaxCards = 33;
+//
+// 34 as of 2026-10-12, when HomeHunt.cpp registered "homehunt". This line is
+// why that edit was not optional: the registry was exactly full at 33, so
+// registerCard() would have answered false for the new card and the only trace
+// would have been one line in a debug stream - on a feature whose entire
+// symptom is a card that never appears. One CardSpec and one PolicyEntry,
+// roughly 230 bytes of .bss between them, against the same contiguous-block
+// budget the sports accounting above weighs.
+static constexpr uint8_t kMaxCards = 34;
 
 /// Called from each card module's own translation unit at static-init time
 /// (see the `kRegistered` idiom at the bottom of Weather.cpp/Aircraft.cpp),

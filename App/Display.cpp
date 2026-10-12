@@ -3897,6 +3897,105 @@ void showListingsCard(const String& address, const String& propertyType, int pri
   restoreDefaultFont();
 }
 
+void showHomeHuntCard(const String& title, const String& headline, const String& subhead,
+                      int32_t price, const FactLine* facts, uint8_t factCount,
+                      const String& updatedAt) {
+  lcd.fillScreen(bg());
+  drawCardBanner("YOUR SEARCH", kListingsBanner, 150);
+
+  int y = 40;
+
+  // Heights reserved below, so each block can ask whether it still fits before
+  // it draws. A turned panel and a taller clock band both move gContentBottom
+  // up, and this card stacks five blocks before the facts - without these
+  // checks a long two-line headline pushes the price through the button row,
+  // which layoutText() reports in the log and draws anyway.
+  constexpr int kTitleHeight = 18;
+  constexpr int kSubheadHeight = 18;
+  constexpr int kPriceHeight = 34;
+
+  // The keyword line, when a rule matched. Drawn above the address because it
+  // is the thing that changed - a household glancing at a card they have seen
+  // five times needs "Price drop" to be the first thing they read, not the
+  // address they already know.
+  if (title.length() > 0 && y + kTitleHeight <= gContentBottom) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setTextSize(1);
+    const TextBox titleBox{static_cast<int16_t>(kContentLeft()), static_cast<int16_t>(y),
+                           static_cast<int16_t>(kContentWidth()), 18, 1, Align::Left};
+    layoutText(title, titleBox, kListingsBanner, "homehunt.title");
+    y += 22;
+  }
+
+  // The headline wraps to two lines. An address is long and a boat name can be
+  // longer, and ellipsizing the one thing that identifies the listing would
+  // leave a card nobody can act on.
+  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setTextSize(1);
+
+  // One line instead of two when two would not fit. The headline is the only
+  // block drawn unconditionally - it is what identifies the listing, so a card
+  // without it is a card nobody can act on - and giving it a box the band can
+  // actually hold is how it stays inside one.
+  const int headlineLines = y + 52 <= gContentBottom ? 2 : 1;
+  const TextBox headlineBox{static_cast<int16_t>(kContentLeft()), static_cast<int16_t>(y),
+                            static_cast<int16_t>(kContentWidth()), 26,
+                            static_cast<uint8_t>(headlineLines), Align::Left};
+  const TextResult drewHeadline = layoutText(headline, headlineBox, ink(), "homehunt.headline");
+  y = drewHeadline.bottom + 6;
+
+  // The subhead yields to the price rather than the other way round: a
+  // neighbourhood line is context, an asking price is the number a household
+  // came to the card for. So it draws only where both still fit.
+  const bool priceWillDraw = price > 0;
+  const int roomNeededAfterSubhead = priceWillDraw ? kPriceHeight : 0;
+
+  if (subhead.length() > 0
+      && y + kSubheadHeight + roomNeededAfterSubhead + (priceWillDraw ? 4 : 0) <= gContentBottom) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    const TextBox subBox{static_cast<int16_t>(kContentLeft()), static_cast<int16_t>(y),
+                         static_cast<int16_t>(kContentWidth()), 18, 1, Align::Left};
+    layoutText(subhead, subBox, muted(), "homehunt.subhead");
+    y += 22;
+  }
+
+  // Below zero means the source stated none, and nothing is drawn in its
+  // place. A $0 on a wall is worse than a blank.
+  if (priceWillDraw && y + kPriceHeight <= gContentBottom) {
+    char priceBuf[24];
+    snprintf(priceBuf, sizeof(priceBuf), "$%ld", static_cast<long>(price));
+    lcd.setFont(&fonts::FreeSansBold18pt7b);
+    const TextBox priceBox{static_cast<int16_t>(kContentLeft()), static_cast<int16_t>(y),
+                           static_cast<int16_t>(kContentWidth()), 34, 1, Align::Left};
+    layoutText(priceBuf, priceBox, ink(), "homehunt.price");
+    y += 38;
+  }
+
+  // The facts, each a label and a value sharing the band. Columns rather than
+  // measured widths, so this reads the same on a turned panel - see the
+  // content band above.
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  for (uint8_t i = 0; i < factCount && y < gContentBottom - 18; ++i) {
+    layoutLine(facts[i].label, kContentLeft(), y, kHalfColumnWidth(), muted(),
+               "homehunt.fact.label", Align::Left);
+    layoutLine(facts[i].value, kContentRight(), y, kHalfColumnWidth(), ink(),
+               "homehunt.fact.value", Align::Right);
+    y += 20;
+  }
+
+  // Freshness last, and it earns its place on this card specifically: a
+  // property alert is true when it is sent and says nothing about availability
+  // a fortnight later, so a household reading an asking price deserves to know
+  // how old it is.
+  if (updatedAt.length() > 0) {
+    layoutLine(updatedAt, kContentLeft(), kClockTop() - 18, kWidthBeside(90), muted(),
+               "homehunt.updated", Align::Left);
+  }
+
+  drawClock();
+  restoreDefaultFont();
+}
+
 void showListingsStatus(const String& headline, const String& detail, bool isProblem) {
   lcd.fillScreen(bg());
   drawCardBanner("LISTINGS", kListingsBanner, 130);

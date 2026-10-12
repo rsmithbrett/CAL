@@ -14,7 +14,11 @@ Thumbs.db
 .DS_Store
 combined-checksums.txt
 
-# Detached compile output. The script is kept; its log is not.
+# Detached compile output. The script is kept; its log is not. Both halves have
+# their own pair, because CAL and App compile separately and a run of one must
+# not overwrite the evidence of the other.
 app-compile.log
+cal-compile.log
 
 compile-done.flag
+cal-done.flag

@@ -1,6 +1,8 @@
 #include "Listings.h"
 
 #include <ArduinoJson.h>
+
+#include <utility>  // std::move, for handing the fetched result to gLast without copying it
 #include <stdio.h>  // sscanf, used by parseIso8601Utc() below
 
 #include "Cards.h"
@@ -702,7 +704,7 @@ void cardFetch() {
   // The staleness is visible rather than implied. The freshness line is the
   // card's own, it keeps counting while the fetch fails, and a reader who wants
   // to know whether this is current can read it.
-  const Result fresh = fetchMine();
+  Result fresh = fetchMine();
   gEverFetched = true;
   if (fresh.status != Status::Ok && fresh.serviceUnreachable &&
       gLast.status == Status::Ok) {
@@ -712,7 +714,13 @@ void cardFetch() {
     return;
   }
 
-  gLast = fresh;
+  // MOVED, not copied. This used to be gLast = fetch(), assigning straight
+  // from the returned temporary, which the compiler moves. Binding to a local
+  // first - which the keep-the-cache check above needs - turns that into a deep
+  // copy of every String in the result, and a const local makes the move
+  // impossible. On a display whose whole failure mode is contiguous heap, that is
+  // allocation churn introduced by a fix for a different problem.
+  gLast = std::move(fresh);
   if (gLast.status == Status::Ok) {
     gLastOkMs = millis();
     Log::printf("[listings] card updated: %u listing(s), nearest '%s' at %.1fmi",
