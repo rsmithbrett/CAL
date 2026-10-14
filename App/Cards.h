@@ -474,7 +474,7 @@ struct CardSpec {
 // "weather" already is, and instances 3-5 are a later registration if anybody
 // asks for them. See Sports.h for the full accounting.
 //
-// 34 as of 2026-10-12, when HomeHunt.cpp registered "homehunt". This line is
+// 34 as of 2026-10-12, when FeaturedListings.cpp registered "featuredlistings". This line is
 // why that edit was not optional: the registry was exactly full at 33, so
 // registerCard() would have answered false for the new card and the only trace
 // would have been one line in a debug stream - on a feature whose entire

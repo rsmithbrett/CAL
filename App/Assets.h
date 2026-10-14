@@ -60,6 +60,14 @@ void begin();
 /// draw nothing rather than waiting.
 bool ensureCached(const String& id);
 
+/// Caches an image served from a path other than the asset route, under a caller-chosen
+/// cache id. True when it is on the card afterwards.
+///
+/// For images that cannot be assets because they are scoped more narrowly than an account -
+/// today that is the house-hunt card, whose pictures belong to one named household. See the
+/// implementation for why the cache id must change when the picture does.
+bool ensureCachedFrom(const String& fetchPath, const String& cacheId);
+
 /// The one caller that cannot just call ensureCached(): a device's configured
 /// boot-splash asset is chosen server-side per account (CheckInResponse.
 /// SplashAssetId), and its actual bytes need to land specifically in the

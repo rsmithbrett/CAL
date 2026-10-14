@@ -23,7 +23,7 @@
 /// whatever labels arrive. A boat broker's listings come down the same pipe
 /// and need no firmware change, which is the whole reason the server sends
 /// labels rather than field names.
-namespace HomeHunt {
+namespace FeaturedListings {
 
 enum class Status {
   Ok,
@@ -42,7 +42,7 @@ enum class Status {
 /// The most either half of a fact can be. A fact is drawn into a half-column
 /// at 9pt, which fits around fifteen characters before the layout ellipsizes
 /// it, so anything longer was never going to reach the glass. The server caps
-/// the same figure (HomeHuntService.MaxFactTextLength), which is what makes
+/// the same figure (FeaturedListingsService.MaxFactTextLength), which is what makes
 /// this a contract rather than a device-side truncation nobody sees.
 constexpr uint8_t kMaxFactText = 24;
 
@@ -65,6 +65,10 @@ struct Fact {
 };
 
 constexpr uint8_t kMaxFacts = 3;
+
+/// The longest image cache key, matching Assets::kMaxIdLength - the server builds a content
+/// key plus eight characters of a hash, which is 41.
+constexpr uint8_t kMaxImageKey = 48;
 
 /// The most a 240px panel fits beside a headline and a price, and the same cap
 /// the server applies. Asking for more and discarding the rest would spend the
@@ -95,6 +99,15 @@ struct Card {
 
   Fact facts[kMaxFacts];
   uint8_t factCount = 0;
+
+  /// What this card's picture is cached under, empty when it has none.
+  ///
+  /// **The server builds this so it CHANGES when the picture changes.** A key that stayed
+  /// the same would leave a replaced photograph sitting behind the file already on the
+  /// card, so a correction an operator can see on their own screen would never reach the
+  /// glass. Fixed buffer for the same reason the facts are: five of these live across the
+  /// next TLS handshake, and the binding constraint on this board is contiguous heap.
+  char imageKey[kMaxImageKey + 1] = {0};
 };
 
 struct Result {
@@ -111,8 +124,8 @@ struct Result {
   bool serviceUnreachable = false;
 };
 
-/// Fetches GET /api/homehunt/mine. Registered with the scheduler from the .cpp
+/// Fetches GET /api/featuredlistings/mine. Registered with the scheduler from the .cpp
 /// like every other card module.
 Result fetch();
 
-}  // namespace HomeHunt
+}  // namespace FeaturedListings

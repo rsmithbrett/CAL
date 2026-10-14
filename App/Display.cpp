@@ -43,6 +43,7 @@
 // vendored into App/ rather than referenced across sketch directories - the Arduino build
 // model compiles each sketch folder independently, so App needs its own copy exactly the
 // way it already has its own Display.cpp rather than sharing CAL's.
+#include "Assets.h"
 #include "CalQr.h"
 
 #include "Display.h"
@@ -3897,11 +3898,31 @@ void showListingsCard(const String& address, const String& propertyType, int pri
   restoreDefaultFont();
 }
 
-void showHomeHuntCard(const String& title, const String& headline, const String& subhead,
+void showFeaturedListingCard(const String& title, const String& headline, const String& subhead,
                       int32_t price, const FactLine* facts, uint8_t factCount,
-                      const String& updatedAt) {
+                      const String& updatedAt, const String& cachedImageId) {
   lcd.fillScreen(bg());
   drawCardBanner("YOUR SEARCH", kListingsBanner, 150);
+
+  // THE PICTURE TAKES A FIXED BAND DOWN THE RIGHT, and the text keeps the rest. Drawn first
+  // so the band is painted before anything measures against it, and sized as a third of the
+  // panel: enough that a house is recognisable across a room, little enough that an address
+  // still has two lines to wrap into. A card with a picture and an unreadable address would
+  // be a worse card than one with no picture at all.
+  //
+  // Empty means there is none, or that caching it failed - FeaturedListings.cpp has already decided
+  // and said so in the log. Either way the layout below simply gets the full width back.
+  const int pictureWidth = cachedImageId.length() > 0 ? kScaledWidth(104) : 0;
+  const int textRight = kContentRight() - (pictureWidth > 0 ? pictureWidth + kColumnGap : 0);
+
+  if (pictureWidth > 0
+      && !Assets::drawCachedInRect(cachedImageId, textRight + kColumnGap, 40, pictureWidth,
+                                   gContentBottom - 48)) {
+    // Decoded nothing, which leaves the band empty and the text already narrowed around it.
+    // Logged rather than recovered from: the card still reads, and the id is what somebody
+    // needs to find the file. Assets tracks decode failures by id for the same reason.
+    Log::printf("[display] featuredlistings picture '%s' did not decode", cachedImageId.c_str());
+  }
 
   int y = 40;
 
@@ -3910,6 +3931,10 @@ void showHomeHuntCard(const String& title, const String& headline, const String&
   // up, and this card stacks five blocks before the facts - without these
   // checks a long two-line headline pushes the price through the button row,
   // which layoutText() reports in the log and draws anyway.
+  // Every text block measures against this rather than the full band, so a picture narrows
+  // the column instead of being drawn over.
+  const int textWidth = textRight - kContentLeft();
+
   constexpr int kTitleHeight = 18;
   constexpr int kSubheadHeight = 18;
   constexpr int kPriceHeight = 34;
@@ -3922,8 +3947,8 @@ void showHomeHuntCard(const String& title, const String& headline, const String&
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
     const TextBox titleBox{static_cast<int16_t>(kContentLeft()), static_cast<int16_t>(y),
-                           static_cast<int16_t>(kContentWidth()), 18, 1, Align::Left};
-    layoutText(title, titleBox, kListingsBanner, "homehunt.title");
+                           static_cast<int16_t>(textWidth), 18, 1, Align::Left};
+    layoutText(title, titleBox, kListingsBanner, "featuredlistings.title");
     y += 22;
   }
 
@@ -3939,9 +3964,9 @@ void showHomeHuntCard(const String& title, const String& headline, const String&
   // actually hold is how it stays inside one.
   const int headlineLines = y + 52 <= gContentBottom ? 2 : 1;
   const TextBox headlineBox{static_cast<int16_t>(kContentLeft()), static_cast<int16_t>(y),
-                            static_cast<int16_t>(kContentWidth()), 26,
+                            static_cast<int16_t>(textWidth), 26,
                             static_cast<uint8_t>(headlineLines), Align::Left};
-  const TextResult drewHeadline = layoutText(headline, headlineBox, ink(), "homehunt.headline");
+  const TextResult drewHeadline = layoutText(headline, headlineBox, ink(), "featuredlistings.headline");
   y = drewHeadline.bottom + 6;
 
   // The subhead yields to the price rather than the other way round: a
@@ -3954,8 +3979,8 @@ void showHomeHuntCard(const String& title, const String& headline, const String&
       && y + kSubheadHeight + roomNeededAfterSubhead + (priceWillDraw ? 4 : 0) <= gContentBottom) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     const TextBox subBox{static_cast<int16_t>(kContentLeft()), static_cast<int16_t>(y),
-                         static_cast<int16_t>(kContentWidth()), 18, 1, Align::Left};
-    layoutText(subhead, subBox, muted(), "homehunt.subhead");
+                         static_cast<int16_t>(textWidth), 18, 1, Align::Left};
+    layoutText(subhead, subBox, muted(), "featuredlistings.subhead");
     y += 22;
   }
 
@@ -3966,8 +3991,8 @@ void showHomeHuntCard(const String& title, const String& headline, const String&
     snprintf(priceBuf, sizeof(priceBuf), "$%ld", static_cast<long>(price));
     lcd.setFont(&fonts::FreeSansBold18pt7b);
     const TextBox priceBox{static_cast<int16_t>(kContentLeft()), static_cast<int16_t>(y),
-                           static_cast<int16_t>(kContentWidth()), 34, 1, Align::Left};
-    layoutText(priceBuf, priceBox, ink(), "homehunt.price");
+                           static_cast<int16_t>(textWidth), 34, 1, Align::Left};
+    layoutText(priceBuf, priceBox, ink(), "featuredlistings.price");
     y += 38;
   }
 
@@ -3976,10 +4001,12 @@ void showHomeHuntCard(const String& title, const String& headline, const String&
   // content band above.
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   for (uint8_t i = 0; i < factCount && y < gContentBottom - 18; ++i) {
-    layoutLine(facts[i].label, kContentLeft(), y, kHalfColumnWidth(), muted(),
-               "homehunt.fact.label", Align::Left);
-    layoutLine(facts[i].value, kContentRight(), y, kHalfColumnWidth(), ink(),
-               "homehunt.fact.value", Align::Right);
+    // Half of the TEXT column, not half the panel, so a value right-aligns to the edge of
+    // the text rather than underneath the picture.
+    layoutLine(facts[i].label, kContentLeft(), y, textWidth / 2, muted(),
+               "featuredlistings.fact.label", Align::Left);
+    layoutLine(facts[i].value, textRight, y, textWidth / 2, ink(),
+               "featuredlistings.fact.value", Align::Right);
     y += 20;
   }
 
@@ -3988,8 +4015,9 @@ void showHomeHuntCard(const String& title, const String& headline, const String&
   // a fortnight later, so a household reading an asking price deserves to know
   // how old it is.
   if (updatedAt.length() > 0) {
-    layoutLine(updatedAt, kContentLeft(), kClockTop() - 18, kWidthBeside(90), muted(),
-               "homehunt.updated", Align::Left);
+    layoutLine(updatedAt, kContentLeft(), kClockTop() - 18,
+               min(kWidthBeside(90), textWidth), muted(),
+               "featuredlistings.updated", Align::Left);
   }
 
   drawClock();

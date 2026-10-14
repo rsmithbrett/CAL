@@ -187,11 +187,27 @@ void addPendingActions(JsonDocument& requestDoc) {
       entry["onScreenSummary"] = pending[i].onScreenSummary;
     }
 
-    // Omitted when absent, for the reason above. Every card but listings sends
-    // nothing here, and the server reads a missing field and an empty one the
-    // same way - see PendingDeviceAction.CompassPid.
+    // Omitted when absent, for the reason above. The server reads a missing field and an
+    // empty one the same way - see PendingDeviceAction.CompassPid.
+    //
+    // SENT UNDER BOTH NAMES FROM THE ONE FIELD, and the server keeps whichever it
+    // recognises. This field holds whatever the card on screen said identified its item,
+    // and that is a different kind of value per card: the listings card gives a numeric
+    // Compass id, the featured listings card gives the 32-character association key the
+    // server minted. Each name is normalised to its own shape on arrival - digits and at
+    // most thirty for compassPid, exactly 32 hex for contentKey - and no string can match
+    // both, so exactly one survives and the other reads as "the device did not say".
+    //
+    // The alternative was teaching this function which cards produce which kind of id,
+    // which is knowledge the server already holds and this file would then hold a second,
+    // driftable copy of. It costs about thirty bytes a press.
+    //
+    // Before contentKey existed the association key went out as compassPid alone and that
+    // normaliser discarded it, so a tour request reached the press log naming no property
+    // and the count against it stayed at zero.
     if (pending[i].compassPid.length() > 0) {
       entry["compassPid"] = pending[i].compassPid;
+      entry["contentKey"] = pending[i].compassPid;
     }
   }
   Log::printf("[checkin] carrying %u pending action(s)", count);

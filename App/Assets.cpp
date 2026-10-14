@@ -302,7 +302,17 @@ struct FetchTrace {
   }
 };
 
-bool fetchToCard(const String& fetchId, const String& cacheId) {
+/// Caches one remote image onto the card, verified.
+///
+/// `fetchPath` is the whole path after the host. Empty means the asset route, built from
+/// fetchId - which is every caller but the featured listings card, whose pictures are served per
+/// household rather than per account and so cannot live on /api/assets.
+///
+/// Parameterised rather than copied: everything below it - the 512-byte streamed write, the
+/// running sha256, the truncation check a size comparison cannot catch - was arrived at by
+/// hitting those failures on real devices, and a second copy would be a second chance to get
+/// them wrong.
+bool fetchToCard(const String& fetchId, const String& cacheId, const String& fetchPath) {
   FetchTrace trace(fetchId);
 
   if (!Http::ready()) {
@@ -311,7 +321,10 @@ bool fetchToCard(const String& fetchId, const String& cacheId) {
     return false;
   }
 
-  const String url = String("https://") + Config::kServiceHost + kFetchPathPrefix + fetchId + kFetchPathSuffix;
+  const String url = fetchPath.length() > 0
+                         ? String("https://") + Config::kServiceHost + fetchPath
+                         : String("https://") + Config::kServiceHost + kFetchPathPrefix + fetchId
+                               + kFetchPathSuffix;
   if (!Http::beginRequest(url)) {
     trace.cacheAction = "aborted-no-request";
     Log::printf("[assets] could not begin request for '%s'", fetchId.c_str());
@@ -834,6 +847,26 @@ void begin() {
   writeCardReadmeIfAbsent();
 }
 
+/// Caches an image served from a path other than the asset route, under a caller-chosen
+/// cache id.
+///
+/// The featured listings card's pictures are the only user. They cannot be assets: the asset
+/// content route scopes a device to its brand and account, and an account holds many
+/// households - so a photograph of one family's prospective home would be readable by every
+/// display in the account. Their own route resolves the owner from the device secret.
+///
+/// The cache id has to change when the picture does, or a replacement never reaches the
+/// glass. The server builds one that does - see FeaturedListingsService.ImageKeyFor.
+bool ensureCachedFrom(const String& fetchPath, const String& cacheId) {
+  if (!Sd::isReady() || !isSafeId(cacheId) || fetchPath.length() == 0) {
+    return false;
+  }
+  if (SD.exists(pathFor(cacheId))) {
+    return true;
+  }
+  return fetchToCard(cacheId, cacheId, fetchPath);
+}
+
 bool ensureCached(const String& id) {
   if (!Sd::isReady() || !isSafeId(id)) {
     return false;
@@ -841,7 +874,7 @@ bool ensureCached(const String& id) {
   if (SD.exists(pathFor(id))) {
     return true;
   }
-  return fetchToCard(id, id);
+  return fetchToCard(id, id, String());
 }
 
 /// False until this boot has re-validated the splash slot once - see
@@ -897,7 +930,7 @@ bool ensureSplashCached(const String& assetId) {
                 assetId.c_str());
   }
 
-  if (!fetchToCard(assetId, kSplashCacheId)) {
+  if (!fetchToCard(assetId, kSplashCacheId, String())) {
     // Deliberately NOT setting the revalidated flag: a failed fetch has
     // settled nothing, and the next check-in should try again rather than
     // treating one network error as a clean bill of health for the session.

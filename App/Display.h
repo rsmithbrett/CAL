@@ -633,7 +633,7 @@ void showListingsCard(const String& address, const String& propertyType, int pri
 /// lastRefreshError text never reaches this function, and no longer reaches
 /// the device's own operator surfaces either - see Listings::Result::message
 /// for where it went and why.
-/// One already-labelled fact for the house-hunt card.
+/// One already-labelled fact for the featured listings card.
 ///
 /// <para>Label and value both come from the server. This file prints them and
 /// interprets neither, which is what lets a boat broker's listings draw with no
@@ -662,9 +662,9 @@ struct FactLine {
 ///
 /// <para>`price` below zero means the source stated none, and nothing is drawn
 /// in its place. A $0 on a wall is worse than a blank.</para>
-void showHomeHuntCard(const String& title, const String& headline, const String& subhead,
+void showFeaturedListingCard(const String& title, const String& headline, const String& subhead,
                       int32_t price, const FactLine* facts, uint8_t factCount,
-                      const String& updatedAt);
+                      const String& updatedAt, const String& cachedImageId = String());
 
 void showListingsStatus(const String& headline, const String& detail, bool isProblem);
 

@@ -1,9 +1,10 @@
-#include "HomeHunt.h"
+#include "FeaturedListings.h"
 
 #include <ArduinoJson.h>
 
 #include <utility>  // std::move, for handing the fetched result to gLast without copying it
 
+#include "Assets.h"
 #include "Cards.h"
 #include "Config.h"
 #include "Display.h"
@@ -12,10 +13,16 @@
 #include "Log.h"
 #include "Maintenance.h"
 
-namespace HomeHunt {
+namespace FeaturedListings {
 namespace {
 
-constexpr const char* kPath = "/api/homehunt/mine";
+constexpr const char* kPath = "/api/featuredlistings/mine";
+
+// The picture route is keyed on the CONTENT KEY, which is the only identifier this device
+// holds and which the server minted for this association. The image key beside it is what the
+// picture is cached under, not what it is fetched by - the two differ because the cache id has
+// to change when the picture is replaced and the content key does not.
+constexpr const char* kImagePathPrefix = "/api/featuredlistings/image/";
 
 // The same ContentProviderGate 403 body every device-facing content route
 // produces - identical shape and reasoning to Listings.cpp's own parseRefusal.
@@ -40,7 +47,7 @@ Result parseRefusal(const String& body) {
     result.status = Status::ProviderDisabled;
   }
 
-  Log::printf("[homehunt] refused (%s): %s", reason, result.message.c_str());
+  Log::printf("[featuredlistings] refused (%s): %s", reason, result.message.c_str());
   return result;
 }
 
@@ -51,7 +58,7 @@ Result fetch() {
 
   if (!Http::ready()) {
     result.message = "Cannot verify the service's identity.";
-    Log::line("[homehunt] TLS setup failed");
+    Log::line("[featuredlistings] TLS setup failed");
     return result;
   }
 
@@ -59,7 +66,7 @@ Result fetch() {
   if (!Http::beginRequest(url)) {
     result.message = "Cannot reach the listings service.";
     result.serviceUnreachable = true;
-    Log::line("[homehunt] could not begin request");
+    Log::line("[featuredlistings] could not begin request");
     return result;
   }
 
@@ -67,15 +74,15 @@ Result fetch() {
   http.setTimeout(Config::kHttpTimeoutMs);
   http.addHeader("X-Device-Secret", Identity::deviceSecret());
 
-  Log::verbose("[homehunt] GET %s", url.c_str());
+  Log::verbose("[featuredlistings] GET %s", url.c_str());
   const int status = http.GET();
-  Log::verbose("[homehunt] response status=%d", status);
+  Log::verbose("[featuredlistings] response status=%d", status);
 
   if (status == 401) {
     http.end();
     result.status = Status::AuthError;
     result.message = "Cannot verify this device. Contact support.";
-    Log::line("[homehunt] auth rejected (401)");
+    Log::line("[featuredlistings] auth rejected (401)");
     return result;
   }
 
@@ -98,7 +105,7 @@ Result fetch() {
     http.end();
     result.message = "Cannot reach the listings service.";
     result.serviceUnreachable = true;
-    Log::printf("[homehunt] unexpected http status=%d", status);
+    Log::printf("[featuredlistings] unexpected http status=%d", status);
     return result;
   }
 
@@ -108,7 +115,7 @@ Result fetch() {
 
   if (error) {
     result.message = "Could not read the reply.";
-    Log::printf("[homehunt] json parse failed: %s", error.c_str());
+    Log::printf("[featuredlistings] json parse failed: %s", error.c_str());
     return result;
   }
 
@@ -125,7 +132,7 @@ Result fetch() {
       // which is worth saying out loud rather than silently truncating - a
       // card a household never sees because of a cap nobody remembered is
       // exactly the kind of thing that goes unnoticed for months.
-      Log::printf("[homehunt] server sent more than %u cards, drawing %u",
+      Log::printf("[featuredlistings] server sent more than %u cards, drawing %u",
                   static_cast<unsigned>(kMaxCards), static_cast<unsigned>(kMaxCards));
       break;
     }
@@ -141,13 +148,15 @@ Result fetch() {
     // zero for exactly this reason, and turning that into 0 here would undo it.
     out.price = card["price"].isNull() ? -1 : (card["price"] | -1);
 
+    strlcpy(out.imageKey, card["imageKey"] | "", sizeof(out.imageKey));
+
     out.factCount = 0;
     for (JsonObjectConst fact : card["facts"].as<JsonArrayConst>()) {
       if (out.factCount >= kMaxFacts) {
         break;
       }
 
-      // Copied into the fixed buffers rather than assigned - see HomeHunt.h for
+      // Copied into the fixed buffers rather than assigned - see FeaturedListings.h for
       // why these two are not Strings. Anything over the cap is truncated here
       // and said out loud: the server caps the same figure, so a long one means
       // the two ends disagree, and silently clipping a fact nobody can read
@@ -156,7 +165,7 @@ Result fetch() {
       const char* value = fact["value"] | "";
 
       if (strlen(label) > kMaxFactText || strlen(value) > kMaxFactText) {
-        Log::printf("[homehunt] a fact arrived longer than %u chars ('%s'/'%s') - truncated",
+        Log::printf("[featuredlistings] a fact arrived longer than %u chars ('%s'/'%s') - truncated",
                     static_cast<unsigned>(kMaxFactText), label, value);
       }
 
@@ -170,7 +179,7 @@ Result fetch() {
     // screen time would be credited to nothing, which is worse than one fewer
     // card. Dropped loudly, because it means the two ends disagree.
     if (out.contentKey.length() == 0) {
-      Log::printf("[homehunt] a card arrived with no contentKey ('%s') - dropped, because its "
+      Log::printf("[featuredlistings] a card arrived with no contentKey ('%s') - dropped, because its "
                   "screen time could not be attributed to anything",
                   out.headline.c_str());
       continue;
@@ -181,7 +190,7 @@ Result fetch() {
 
   result.status = result.count > 0 ? Status::Ok : Status::Empty;
 
-  Log::printf("[homehunt] %u propert%s for this household", static_cast<unsigned>(result.count),
+  Log::printf("[featuredlistings] %u propert%s for this household", static_cast<unsigned>(result.count),
               result.count == 1 ? "y" : "ies");
 
   return result;
@@ -215,7 +224,7 @@ void cardFetch() {
   // ANSWERING - a refusal, a disabled provider, a device not activated - and
   // those are real changes of state that must replace what is shown.
   if (fresh.status != Status::Ok && fresh.serviceUnreachable && gLast.status == Status::Ok) {
-    Log::printf("[homehunt] could not reach the service - keeping the last good result on "
+    Log::printf("[featuredlistings] could not reach the service - keeping the last good result on "
                 "screen rather than drawing an error over it (%s)",
                 describeFreshness(gLastOkMs).c_str());
     return;
@@ -231,7 +240,7 @@ void cardFetch() {
 
   if (gLast.status == Status::Ok) {
     gLastOkMs = millis();
-    Log::printf("[homehunt] card updated: %u propert%s, first '%s'",
+    Log::printf("[featuredlistings] card updated: %u propert%s, first '%s'",
                 static_cast<unsigned>(gLast.count), gLast.count == 1 ? "y" : "ies",
                 gLast.cards[0].headline.c_str());
   }
@@ -254,7 +263,7 @@ uint16_t cardItemCount() {
   // it to: a counter display in a shop would be telling passers-by about a house
   // hunt that is not theirs and never will be.
   if (gLast.status == Status::NotConfigured) {
-    Log::verbose("[homehunt] nothing matched to this display - taking no turn");
+    Log::verbose("[featuredlistings] nothing matched to this display - taking no turn");
     return 0;
   }
 
@@ -307,8 +316,23 @@ void cardDraw(uint16_t itemIndex) {
       lines[i].value = card.facts[i].value;
     }
 
-    Display::showHomeHuntCard(card.title, card.headline, card.subhead, card.price, lines,
-                              card.factCount, describeFreshness(gLastOkMs));
+    // Cached on the card, not held in RAM. The download streams through a 512-byte stack
+    // buffer and the decoder reads the file block by block, so a picture costs essentially
+    // nothing of the contiguous heap this board's TLS session needs - see
+    // Assets::ensureCachedFrom. A failure here is drawn as a card with no picture rather
+    // than as an error: the address and the price are what the household came for.
+    const bool hasPicture =
+        card.imageKey[0] != '\0'
+        && Assets::ensureCachedFrom(String(kImagePathPrefix) + card.contentKey, card.imageKey);
+
+    if (card.imageKey[0] != '\0' && !hasPicture) {
+      Log::printf("[featuredlistings] picture '%s' is not on the card, drawing without it",
+                  card.imageKey);
+    }
+
+    Display::showFeaturedListingCard(card.title, card.headline, card.subhead, card.price, lines,
+                              card.factCount, describeFreshness(gLastOkMs),
+                              hasPicture ? card.imageKey : "");
     return;
   }
 
@@ -331,7 +355,7 @@ void cardDraw(uint16_t itemIndex) {
 
 [[maybe_unused]] const bool kRegistered = [] {
   Cards::CardSpec spec;
-  spec.id = "homehunt";
+  spec.id = "featuredlistings";
   spec.kind = Cards::Kind::List;
   spec.fetch = cardFetch;
   spec.itemCount = cardItemCount;
@@ -340,9 +364,16 @@ void cardDraw(uint16_t itemIndex) {
   spec.draw = cardDraw;
   spec.order = 4;
 
-  // Longer than the listings card's ten seconds. A household's own property is
-  // the thing on this display most worth reading rather than glancing at, and
-  // the five it can hold turn over in under a minute at ten.
+  // A FALLBACK, not this card's dwell. CardManager::applyPolicy() overwrites
+  // this with the policy entry's own seconds, and with 0 - which resolves to
+  // the policy's default - when the entry says nothing. Since a card only
+  // draws when a policy names it, the number below applies in exactly one
+  // case: a policy that matched no card this firmware knows, where every card
+  // is switched back on and keeps what it registered.
+  //
+  // 14 because a household's own property is worth reading rather than
+  // glancing at, and five of them turn over in under a minute at ten. Set the
+  // real figure per card on the policy.
   spec.dwellSeconds = 14;
 
   return Cards::registerCard(spec);
@@ -350,4 +381,4 @@ void cardDraw(uint16_t itemIndex) {
 
 }  // namespace
 
-}  // namespace HomeHunt
+}  // namespace FeaturedListings
