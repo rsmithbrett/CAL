@@ -21,6 +21,33 @@ HTTPClient gHttp;
 
 bool gReady = false;
 
+/// The two blocks reserveTlsBallast() holds, one per mbedTLS record buffer.
+/// Separate allocations rather than one of 33,434, because that is the shape
+/// the handshake asks for: two independent holes of kTlsRecordBufferBytes. A
+/// single block twice the size would be harder to find at boot and would not
+/// match what has to be freed later.
+uint8_t* gBallast[2] = {nullptr, nullptr};
+
+void freeBallast() {
+  for (auto& block : gBallast) {
+    free(block);
+    block = nullptr;
+  }
+}
+
+bool takeBallast() {
+  for (auto& block : gBallast) {
+    if (block != nullptr) {
+      continue;
+    }
+    block = static_cast<uint8_t*>(heap_caps_malloc(kTlsRecordBufferBytes, MALLOC_CAP_8BIT));
+    if (block == nullptr) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 void begin() {
@@ -60,13 +87,57 @@ void begin() {
   gReady = Tls::configure(gClient);
 }
 
+bool reserveTlsBallast() {
+  const size_t before = largestContiguousBytes();
+  const bool held = takeBallast();
+  if (!held) {
+    freeBallast();
+    Log::printf("[http] could not reserve the TLS ballast: largest 8-bit block is %lu and this "
+                "needs %lu twice. Handshakes will depend on whatever the heap looks like when "
+                "they happen, which is the behaviour this reservation exists to remove",
+                static_cast<unsigned long>(largestContiguousBytes()),
+                static_cast<unsigned long>(kTlsRecordBufferBytes));
+    return false;
+  }
+  Log::printf("[http] TLS ballast reserved: 2 x %lu bytes held from boot. Largest 8-bit block %lu "
+              "-> %lu, and a handshake gets these back when it needs them",
+              static_cast<unsigned long>(kTlsRecordBufferBytes),
+              static_cast<unsigned long>(before),
+              static_cast<unsigned long>(largestContiguousBytes()));
+  return true;
+}
+
+bool ballastHeld() { return gBallast[0] != nullptr && gBallast[1] != nullptr; }
+
 bool ready() { return gReady; }
 
 size_t largestContiguousBytes() {
   return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
 }
 
-bool canOpenNewSession() { return largestContiguousBytes() >= kTlsRecordBufferBytes; }
+bool canOpenNewSession() {
+  // Holding the ballast IS the answer when it is held: those two blocks are
+  // the handshake's, nothing else can take them, and the free heap around them
+  // says nothing about whether a session can open. Reading the largest block
+  // here instead would report a starved device as unreachable and send the
+  // watchdog looking for a restart that fixes a problem the ballast already
+  // fixed.
+  if (ballastHeld()) {
+    return true;
+  }
+  return largestContiguousBytes() >= kTlsRecordBufferBytes;
+}
+
+void reclaimIdleBallast() {
+  if (gClient.connected() || ballastHeld()) {
+    return;
+  }
+  if (!takeBallast()) {
+    // Partial success is worse than none: one held block cannot open a session
+    // and still denies the space to everything else.
+    freeBallast();
+  }
+}
 
 ReconnectProbe probeReconnect() {
   ReconnectProbe probe{};
@@ -169,6 +240,14 @@ bool beginRequest(const String& url) {
         url.c_str(), static_cast<unsigned long>(largestContiguousBytes()),
         static_cast<unsigned long>(kTlsRecordBufferBytes));
     return false;
+  }
+
+  // The handover. A live session already owns its two buffers, so only a new
+  // one needs the ballast out of the way - and it is freed here, one statement
+  // before the connect, rather than anywhere earlier where another allocation
+  // could move into the hole first.
+  if (!gClient.connected() && ballastHeld()) {
+    freeBallast();
   }
   return gHttp.begin(gClient, url);
 }

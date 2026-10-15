@@ -2336,6 +2336,16 @@ void setup() {
   // what is left.
   releaseBluetoothMemory();
 
+  // Immediately after the Bluetooth DRAM comes back, and before anything
+  // spends it: claim the two blocks a TLS handshake needs. This is the only
+  // moment they are certainly there. The splash takes a ~44KB decoder scratch
+  // on a device with an SD card, graphics hold their pictures in RAM on a
+  // device without one, and Http::begin() runs once the network stack has
+  // already brought the largest block down to about 32,756. Every one of those
+  // comes after this line, and every one was observed taking space a check-in
+  // then could not find.
+  Http::reserveTlsBallast();
+
   // Right here, before anything else can obscure it: why the last restart
   // happened, in two parts - how the chip reset, and what this firmware was
   // trying to achieve when it asked for it. Until this existed, an unexpected
@@ -2897,6 +2907,14 @@ void loop() {
   // checkHeapHealth()'s own remarks for why this restarts the App directly
   // rather than routing through Loader.cpp.
   checkHeapHealth();
+
+  // Takes the handshake's two blocks back once the session that borrowed them
+  // has closed, so the space is owned again before the next check-in. Placed
+  // ahead of the watchdogs deliberately: the first thing checkUnreachableWatchdog()
+  // asks is whether a new session could be opened, and with the ballast back
+  // in hand the answer is yes, which is what stops it restarting a device that
+  // has nothing wrong with it.
+  Http::reclaimIdleBallast();
 
   // Checked here rather than inside performCheckIn() so the decision to
   // restart is never taken while a request is part-way through, and so it is

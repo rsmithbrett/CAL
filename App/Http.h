@@ -56,6 +56,46 @@ namespace Http {
 /// replaced, which it never is.
 void begin();
 
+/// Claims the two contiguous blocks a TLS handshake needs, at the one moment
+/// they are certainly available, and holds them until a handshake asks.
+///
+/// **Call this first in setup(), before the splash and before WiFi.** Not from
+/// begin(): by the time begin() runs the network stack has taken its share and
+/// the largest block is around 32,756, which is already less than the 33,434
+/// this reserves. The window is the top of setup() and nowhere else.
+///
+/// **Why a ballast rather than handing mbedTLS a buffer.** mbedtls_ssl_setup()
+/// allocates its own record buffers and takes no pointer from us, so the only
+/// way to guarantee it finds two 16,717-byte holes is to own them until it
+/// needs them and then get out of the way. releaseForHandshake() frees them
+/// immediately before a new session opens and reclaim() takes them back when
+/// the session closes, so between sessions nothing else can move into the
+/// space and fragment it.
+///
+/// This is what makes a check-in independent of what drawing has done to the
+/// heap. The three causes that starved handshakes - the splash's PNG decoder
+/// scratch on a device with an SD card, the per-graphic RAM buffers on a device
+/// without one, and ordinary fragmentation - stop mattering, because none of
+/// them can take a hole that is already held.
+///
+/// False means even this early allocation failed, so the device could never
+/// have held a session, and the caller should say so rather than discovering it
+/// one handshake at a time.
+bool reserveTlsBallast();
+
+/// Whether both ballast blocks are held right now.
+bool ballastHeld();
+
+/// Takes the ballast back once no session is live, so the space is owned again
+/// before the next handshake needs it. Call it from loop(); it does nothing
+/// while a session is open or while the blocks are already held.
+///
+/// Reclaiming here rather than beside each `http.end()` keeps the lifecycle in
+/// one place. Call sites close sessions in several modules and a missed one
+/// would leave the device running unprotected until its next reboot, which is
+/// exactly the silent half-state this reservation is meant to end.
+void reclaimIdleBallast();
+
 /// Whether begin() actually managed to configure TLS. False for the same
 /// reason Tls::configure() itself would have returned false before this
 /// change (no cert bundle available) - a hard, deterministic failure for
