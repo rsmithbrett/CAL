@@ -426,3 +426,96 @@ real partition ceilings from `partitions.csv`.
   rule too.
 - `CAL.ino`, `appOwnsThePanelThisBoot()` — the conditions in code, with the
   journal line that reports them.
+
+---
+
+## 11. The splash's second job, and the day it ate the connection
+
+Section 3's option 2 was rejected partly because **the App's splash draw is
+load-bearing for heap, not for looks**: it is where LovyanGFX takes its ~44KB
+PNG workspace, at a point in `setup()` where `maxAllocHeap` is still 110,580
+bytes rather than the 32,756 it becomes once the network stack has allocated.
+`Display.cpp` then deliberately never calls `releasePngMemory()`, so that one
+early block serves every graphic card for the whole uptime.
+
+That reasoning is still right. What it did not anticipate is a display for
+which the block is pure cost.
+
+### What device 17 did for three days
+
+Measured from its own serial log on 2026-10-15, with an SD card mounted and
+WiFi associated at -53 dBm:
+
+```
+[heapdiag] before drawPngFile | largest=94196
+[heapdiag] after  drawPngFile | largest=49140
+[ratchet] step -45056 to 49140 during boot (boot.splash), step 1 this boot
+[boot] checking in before the first card draw - largest 8-bit block is 42996
+[http] checkin: plain TCP to 32.192.231.29:443 SUCCEEDED - so DNS and routing
+       are fine and the failure is in the TLS handshake itself
+[http] checkin: mbedTLS error -1: ERROR - Generic error
+[boot] this device has restarted itself 84 times in a row (budget 3)
+```
+
+The splash cost **45,056 bytes** of largest block. At the boot check-in, free8
+was about 43,700; two mbedTLS record buffers take 33,434 of it, leaving roughly
+10,262 against the figure `TlsRoots.h` measured failing at 10,948 and
+succeeding at 20,764. So the handshake died in chain verification, which spends
+*total* free heap rather than the largest block, and the device spent
+eighty-four reboots proving it.
+
+### The deadlock, stated plainly
+
+`App.ino` already released that scratch when the display had no picture card,
+gated on `Identity::hasPictureCards()`. That flag is an NVS bool remembered from
+**the last policy the display received**. Device 17 held `true`, so it kept
+45KB for a picture card it could never fetch a picture for — because keeping
+that 45KB is what stopped it reaching the server. Nothing clears the flag
+except a check-in it could not make.
+
+A cached answer about pictures was outranking the device's ability to be
+reached, managed or updated at all.
+
+### The rule now
+
+Unreachability outranks the flag. The decision runs in order: no picture card
+in the last policy, release; otherwise unreachable, release; otherwise keep.
+
+"Unreachable" is `Identity::selfRestartBackoffSteps() >= 2`. That counter is
+stepped only by the connection and response-OOM watchdogs and cleared only by a
+completed check-in round trip, so it survives the restart it counts and a
+display that is reaching the server reads zero. `lastRestartCause()` was
+rejected because a household power-cycling the device erases the evidence;
+`consecutiveSelfRestarts()` because it clears on an hour of uptime whether or
+not a check-in ever succeeded; `bootAttempts()` because it clears the moment
+WiFi associates, which is the one thing device 17 did successfully.
+
+Two rather than one, because releasing is not free. A single unreachable
+restart is what a router dropout produces. A second full attempt with no round
+trip is not a hiccup, and the grace costs about twenty minutes at the base
+backoff floor.
+
+### The cost this accepts
+
+A display that **does** have picture cards and **has** gone unreachable spends
+that run without its pictures, and gets them back on the boot after its first
+successful check-in. That is a real regression on the recovery path, chosen
+over the alternative it replaces: no server, no pictures, and no way to take
+the firmware that would fix either.
+
+Section 3's option 2 is not reopened by this. That option released the scratch
+*unconditionally*; this releases it on two named conditions, and a reachable
+display with pictures is unaffected.
+
+### What is verified, and what is not
+
+Compiles clean at 1,560,891 bytes, 79% of the partition, globals unchanged.
+
+Nothing here has run on hardware. Whether 45,056 bytes of recovered free8
+actually completes that four-level ECDSA P-384 verification is a prediction read
+off one device's log and two measurements in `TlsRoots.h`. Device 17's own
+backoff counter was inferred rather than queried.
+
+**Device 17 cannot take this over the air**, for exactly the reason the change
+exists, and needs a wired flash. Displays not yet deadlocked can take it
+normally, since CAL performs the install and CAL never touches the PNG decoder.

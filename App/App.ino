@@ -277,6 +277,35 @@ constexpr uint8_t kMaxSilentSelfRestarts = 3;
 /// climbing, while a device that recovered clears on its first quiet hour.
 constexpr uint32_t kSelfRestartRecoveredUptimeMs = 60UL * 60UL * 1000UL;
 
+/// How many self-restarts in a row with no check-in between them before the
+/// boot hands LovyanGFX's PNG scratch back whatever the last card policy said.
+///
+/// **What this budget is weighing.** The splash decode takes about 45,000 bytes
+/// of largest block and LovyanGFX keeps them, so that one early allocation
+/// serves every picture card for the whole uptime. Releasing it costs this run
+/// its pictures: the next graphic card has to find 44KB in a post-WiFi heap and
+/// drops itself from the rotation when it cannot. Holding it costs free8, and
+/// free8 is what certificate-chain verification spends - four ECDSA P-384 links
+/// measured at failing on 10,948 bytes and succeeding on 20,764 (see
+/// TlsRoots.h). So the two outcomes are "a display with no pictures" and "a
+/// display that cannot reach the server at all", and the second one cannot even
+/// take the update that would end it.
+///
+/// Two, because one attempt holding the scratch is worth giving and a second is
+/// not. A router that dropped out or a single poisoned TLS session produces one
+/// unreachable restart and then the device checks in within a minute of coming
+/// back, and spending that display's pictures for the whole run to pre-empt a
+/// fault that has already passed is the regression this budget exists to avoid.
+/// A device that spends a whole further attempt without completing a single
+/// round trip is no longer describing a hiccup. At the twenty-minute base floor
+/// that second attempt costs about twenty minutes.
+///
+/// Raising it buys nothing. Identity::selfRestartBackoffSteps() clears only on a
+/// completed check-in, so a device that is genuinely stuck climbs through any
+/// threshold on its way to the 255 it saturates at - device 17 reached 84 - and
+/// a larger budget only adds hours to a state the device has no way out of.
+constexpr uint8_t kUnreachedRestartsBeforeScratchRelease = 2;
+
 /// The shortest time the boot splash is allowed to be the thing on screen.
 ///
 /// Reported by the household as "the splash is on screen for a split second".
@@ -413,6 +442,85 @@ void decideBootNarration(bool splashOnScreen) {
               static_cast<unsigned>(selfRestarts), static_cast<unsigned>(kMaxSilentSelfRestarts));
   Display::showStatus("Starting", "This device keeps restarting itself. If it continues, "
                                   "contact whoever set it up.");
+}
+
+/// Decides whether the scratch LovyanGFX took for the boot splash goes back
+/// before the first check-in, and says in the log which way it went and on what
+/// evidence. Returns whether the scratch was released.
+///
+/// Called once, immediately after the splash draw, for the same reason
+/// decideBootNarration() is: that is the first moment the inputs exist and the
+/// last moment before the network stack starts carving the heap.
+///
+/// **Two questions, asked in a fixed order.** The first is what the display is
+/// for, and Identity::hasPictureCards() answers it from the last policy this
+/// device received - the live one cannot have arrived yet, the network is not
+/// up. The second is whether this device can get a policy at all, and
+/// Identity::selfRestartBackoffSteps() answers that: self-restarts in a row with
+/// no completed check-in between them, stepped by the connection watchdog and
+/// the response-OOM watchdog and cleared by nothing except a full round trip.
+///
+/// The second question outranks the first, because the first one's answer is a
+/// remembered byte and a device that cannot reach the server can never correct
+/// it. Device 17 held `true` for 84 consecutive restarts and kept 45,056 bytes
+/// for a picture it could not fetch, while holding them was what stopped it
+/// reaching the server: free8 at the boot handshake was about 10,262 after two
+/// mbedTLS record buffers, under the 20,764 the four-level chain was measured
+/// needing. Nothing cleared the flag because clearing it needs the check-in the
+/// flag prevents.
+///
+/// **Why the backoff counter rather than the other three signals.**
+/// BootDiag::lastRestartCause() is one boot's fact: a household that power-cycles
+/// an unreachable device turns UNREACHABLE into None and the evidence is gone,
+/// while the backoff counter survives every reboot and only a check-in moves it.
+/// Identity::consecutiveSelfRestarts() counts the right restarts but clears on an
+/// hour of uptime whether or not the device ever reached the server, so it reads
+/// zero on a device that has been failing to check in all morning.
+/// Identity::bootAttempts() is CAL's counter and clears the moment WiFi
+/// associates, which is the one thing device 17 does successfully.
+bool decideSplashScratchRelease() {
+  const bool pictureCards = Identity::hasPictureCards();
+  // Read through to Identity rather than off gSelfRestartBackoffSteps, which
+  // holds the same value by this line. The mirror exists for selfRestartFloorMs()
+  // on the hot path, and a decision made once per boot does not need it; reading
+  // NVS here keeps this function working wherever in setup() it is called from.
+  const uint8_t unreachedRestarts = Identity::selfRestartBackoffSteps();
+  const bool unreachable = unreachedRestarts >= kUnreachedRestartsBeforeScratchRelease;
+
+  if (!pictureCards) {
+    Log::printf("[boot] handing the PNG scratch back: the last card policy this display received "
+                "had no picture card, so the block would be held for the logo and nothing else "
+                "(%u self-restart(s) in a row with no check-in between them, last restart %s)",
+                static_cast<unsigned>(unreachedRestarts), BootDiag::restartReasonToken());
+    Display::releaseSplashDecodeMemory();
+    return true;
+  }
+
+  if (unreachable) {
+    Log::printf("[boot] handing the PNG scratch back even though the last card policy HAD a "
+                "picture card: %u self-restart(s) in a row with no completed check-in between "
+                "them, at or past the budget of %u, last restart %s. The flag says what this "
+                "display last drew; the counter says nothing can correct the flag, and chain "
+                "verification needs the free heap more than a picture does",
+                static_cast<unsigned>(unreachedRestarts),
+                static_cast<unsigned>(kUnreachedRestartsBeforeScratchRelease),
+                BootDiag::restartReasonToken());
+    Display::releaseSplashDecodeMemory();
+    return true;
+  }
+
+  // The kept branch carries the same two figures. Whoever reads this stream
+  // wanting to know why a display is still holding 45,000 bytes gets the answer
+  // from the boot that decided it, rather than from the absence of a line.
+  Log::printf("[boot] keeping the PNG scratch: the last card policy had a picture card and this "
+              "display is reaching the server (%u self-restart(s) in a row with no check-in "
+              "between them, under the budget of %u, last restart %s). Every later picture draw "
+              "reuses this block instead of hunting 44KB in a heap the network stack has already "
+              "carved up",
+              static_cast<unsigned>(unreachedRestarts),
+              static_cast<unsigned>(kUnreachedRestartsBeforeScratchRelease),
+              BootDiag::restartReasonToken());
+  return false;
 }
 
 /// A boot-ladder status screen that a quiet boot swallows.
@@ -2617,7 +2725,8 @@ void setup() {
     Identity::leaveBootStage();
     noteBootHeap("boot.splash");
 
-    // AND HAND THE SCRATCH BACK IF NOTHING HERE DRAWS PICTURES.
+    // AND HAND THE SCRATCH BACK IF NOTHING HERE DRAWS PICTURES, OR IF THIS
+    // DISPLAY CANNOT REACH THE SERVER TO BE TOLD WHAT IT DRAWS.
     //
     // The splash is where LovyanGFX takes its ~44KB PNG workspace, and the
     // library keeps it forever so later picture draws can reuse one block.
@@ -2632,8 +2741,15 @@ void setup() {
     // - so the answer comes from the last one this display was given. A
     // display that has never had a policy releases too: reaching the server
     // is what gets it one.
-    if (!Identity::hasPictureCards()) {
-      Display::releaseSplashDecodeMemory();
+    //
+    // A remembered policy is a belief about what this display draws, and
+    // nothing in a boot can check it against a server it cannot reach. A
+    // display that keeps restarting itself without ever completing a check-in
+    // is holding the block for a picture whose bytes it will never receive, so
+    // the run of failed attempts outranks the remembered byte and the scratch
+    // goes back. decideSplashScratchRelease() is where both questions are asked
+    // and where either answer is written to the log.
+    if (decideSplashScratchRelease()) {
       noteBootHeap("boot.splash.released");
     }
   }
