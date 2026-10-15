@@ -441,7 +441,7 @@ early block serves every graphic card for the whole uptime.
 That reasoning is still right. What it did not anticipate is a display for
 which the block is pure cost.
 
-### What device 17 did for three days
+### What device 17 did, from its own log
 
 Measured from its own serial log on 2026-10-15, with an SD card mounted and
 WiFi associated at -53 dBm:
