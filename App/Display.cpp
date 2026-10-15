@@ -5758,9 +5758,14 @@ void releaseSplashDecodeMemory() {
   // Logged as a pair because the figure is the whole point of the call, and
   // because a release that recovers nothing means the splash was not a PNG -
   // which is a different and useful finding rather than a failure.
+  //
+  // Reports what was recovered and leaves the reason to the caller, which has
+  // two to choose between: no picture card in the last policy, or a display that
+  // cannot reach the server to be given one. App.ino's
+  // decideSplashScratchRelease() writes which one it picked immediately before
+  // calling in here.
   Log::printf("[display] released the PNG scratch: largest contiguous 8-bit block %u -> %u "
-              "(+%d). This display had no picture card in its last policy, and a TLS record "
-              "buffer needs %u",
+              "(+%d), and a TLS record buffer needs %u",
               static_cast<unsigned>(before), static_cast<unsigned>(after),
               static_cast<int>(after) - static_cast<int>(before),
               static_cast<unsigned>(Http::kTlsRecordBufferBytes));

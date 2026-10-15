@@ -175,6 +175,16 @@ void clearBootStageFailures();
 /// A device that cannot check in cannot be given one, so a first boot spends
 /// its 44KB on reaching the server rather than on a picture nothing has asked
 /// for yet.</para>
+///
+/// <para>True is a belief rather than an observation, which is why it is one of
+/// two inputs to that decision rather than the whole of it. It records a policy
+/// that arrived at some point in the past, and the only thing that can correct
+/// it is another policy - so a display that cannot reach the server keeps
+/// whatever it last heard, spending 45,056 bytes on a picture it can never
+/// fetch, and spending them is what keeps it off the server. Device 17 held true
+/// through 84 consecutive restarts that way. App.ino's
+/// decideSplashScratchRelease() reads selfRestartBackoffSteps() beside this one
+/// and lets a run of failed attempts outrank it.</para>
 bool hasPictureCards();
 
 /// Records what the policy just applied contained. Writes only on a change.

@@ -989,11 +989,14 @@ bool drawImageFromBuffer(const uint8_t* data, size_t size);
 /// The two displays with no card never decode a splash, pay nothing, and have
 /// never failed a handshake.</para>
 ///
-/// <para>Called once, immediately after the splash, and only when the policy
-/// this display last received had no picture card in it - see
-/// Identity::hasPictureCards() for why the answer has to come from the
-/// previous boot. A display that does show pictures keeps the block exactly
-/// as before.</para>
+/// <para>Called once, immediately after the splash, on either of two findings:
+/// the policy this display last received had no picture card in it, or this
+/// display has restarted itself repeatedly without once completing a check-in.
+/// See Identity::hasPictureCards() for why the first answer has to come from
+/// the previous boot, Identity::selfRestartBackoffSteps() for what the second
+/// one counts, and App.ino's decideSplashScratchRelease() for the order the two
+/// are asked in. A display that shows pictures and is reaching the server keeps
+/// the block exactly as before.</para>
 void releaseSplashDecodeMemory();
 
 bool lastDrawFailedOnAllocation();
