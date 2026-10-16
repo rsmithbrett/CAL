@@ -1535,20 +1535,21 @@ uint8_t gBrightnessPercent = 100;
 void begin(Orientation orientation) {
   lcd.init();
 
-  // ROTATION 1 IS LANDSCAPE AND 2 IS THE CLOCKWISE TURN FROM IT. The owner's
-  // own statement of which way a portrait display faces is that the right side
-  // of the landscape view becomes the bottom, and that is a 90 degree clockwise
-  // turn of the panel.
+  // ROTATION 1 IS LANDSCAPE AND 0 IS PORTRAIT, confirmed on a panel on
+  // 2026-10-16. This board's real configuration lives in LovyanGFX's table
+  // rather than in this repository, so the orientation is a measurement and not
+  // something to derive here: reasoning about this board from the firmware
+  // alone has been wrong three times, the other two being a PENIRQ interrupt on
+  // a pin the touch config disables and a boot chirp on GPIO25, which is the
+  // touch clock.
   //
-  // To be confirmed on a panel rather than trusted from here. This board's real
-  // configuration lives in LovyanGFX's table, not in this repository, and
-  // reasoning about it from the firmware alone has been wrong twice: a PENIRQ
-  // interrupt on a pin the touch config disables, and a boot chirp on GPIO25,
-  // which is the touch clock. If the picture comes up upside down the answer is
-  // 0, and that is this one line.
+  // Touch needs nothing from this. lcd.getTouch() applies the active rotation
+  // to the coordinates it returns, so the top of the image is the top of the
+  // touch space at either setting and Touch.cpp's previous-along-the-top stays
+  // correct for the person looking at the glass.
   const bool portrait = orientation == Orientation::Portrait;
   gPortrait = portrait;
-  lcd.setRotation(portrait ? 2 : 1);
+  lcd.setRotation(portrait ? 0 : 1);
 
   // Read back from the panel rather than assumed from the rotation, so a
   // rotation this code did not predict still leaves the viewport matching what

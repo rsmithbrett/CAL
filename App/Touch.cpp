@@ -35,10 +35,11 @@ constexpr int32_t kEdgeZoneWidth = 106;
 ///
 /// A portrait display therefore navigates on its long axis: previous along the
 /// top, next along the bottom, which leaves the full 240px width for content.
-/// That also keeps the gesture where a hand already learned it. The owner's
-/// description of the rotation is that the right side of the landscape view
-/// becomes the bottom, so the edge that meant "next" physically ends up at the
-/// bottom and means "next" still.
+///
+/// Top and bottom here are the image's, not the board's, and that is what makes
+/// this independent of which way the panel is turned. lcd.getTouch() returns
+/// coordinates in the active rotation, so y=0 is whatever edge the reader sees
+/// as the top; a change of rotation moves the card and the touch zone together.
 ///
 /// Read from Display rather than stored, so this follows a panel that came up
 /// the other way round without Touch needing to be told.
