@@ -5122,9 +5122,51 @@ constexpr size_t kRgb565MaxBandBytes = kRgb565BandLines * 320 * kRgb565BytesPerP
 
 /// Backs Display::lastDrawFailedOnAllocation() - see Display.h for why anyone
 /// needs to tell these two failures apart. Cleared by every public draw entry
-/// point and set only where an allocation is refused, so a stale true cannot
-/// outlive the draw that set it.
+/// point, so a stale true cannot outlive the draw that set it.
+///
+/// Set from two kinds of evidence. The rgb565 band path sets it from a malloc
+/// that actually came back null, which is the fact itself. The png paths set
+/// it from the heap figure at the moment of refusal, because their decoder
+/// answers a bare false either way - see notePngDrawFailure().
 bool gLastDrawFailedOnAllocation = false;
+
+/// The inflate window a PNG decoder keeps, fixed by the format at 32KB.
+///
+/// Every device in the fleet except one sits below this figure for a largest
+/// contiguous 8BIT block, which is why a logo draws on some and not others.
+constexpr size_t kPngInflateWindowBytes = 32768;
+
+/// Reads a refused PNG draw as an allocation failure when the heap could not
+/// have held the decoder, and records the figures either way.
+///
+/// <para>drawPngFile() and drawPng() both answer a bare false, for a malformed
+/// file and for a decoder that could not allocate alike. Without this the
+/// caller cannot tell them apart and takes the wrong branch, and the two
+/// branches do opposite things: one keeps the cached copy, the other DELETES
+/// it. Deleting is the damaging answer, because the cache was sha256-verified
+/// when it was written, so the re-fetch pulls the identical bytes and fails
+/// the same way, every rotation, for as long as the heap stays low.</para>
+///
+/// <para>The reading is a judgement from one number rather than an answer from
+/// the decoder, and the asymmetry is what makes that acceptable: reading a bad
+/// file as an allocation failure keeps a file that will never draw, which
+/// costs one SD entry, while reading an allocation failure as a bad file costs
+/// a TLS session and an SD write on every cycle forever.</para>
+void notePngDrawFailure(const char* where) {
+  const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  const bool tooSmallToHaveDecoded = largest < kPngInflateWindowBytes;
+
+  gLastDrawFailedOnAllocation = tooSmallToHaveDecoded;
+
+  Log::printf("[display] %s refused a png - 8BIT largest=%u free=%u, inflate window needs %u, "
+              "reading this as %s",
+              where,
+              static_cast<unsigned>(largest),
+              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+              static_cast<unsigned>(kPngInflateWindowBytes),
+              tooSmallToHaveDecoded ? "no room to decode, keeping the cache"
+                                    : "a file that will not decode");
+}
 
 /// Classifies the bytes at the front of an image, wherever they came from.
 ///
@@ -5669,6 +5711,9 @@ bool drawImageFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, 
     ok = lcd.drawJpgFile(SD, path.c_str(), x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
   } else if (format == ImageFormat::Png) {
     ok = lcd.drawPngFile(SD, path.c_str(), x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
+    if (!ok) {
+      notePngDrawFailure("drawImageFromSdInRect");
+    }
   } else if (format == ImageFormat::Rgb565) {
     // Handled here for completeness rather than because it is expected. The
     // server only generates an RGB565 rung for asset types stored as JPEG -
@@ -6022,6 +6067,9 @@ bool drawImageFromBuffer(const uint8_t* data, size_t size) {
     ok = lcd.drawJpg(data, size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
   } else if (format == ImageFormat::Png) {
     ok = lcd.drawPng(data, size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
+    if (!ok) {
+      notePngDrawFailure("drawImageFromBuffer");
+    }
   } else if (format == ImageFormat::Rgb565) {
     // Should be unreachable and handled anyway - see drawRgb565FromBuffer()
     // for the argument. Short version: a device taking this path is a device
