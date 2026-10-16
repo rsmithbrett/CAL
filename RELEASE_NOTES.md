@@ -45,6 +45,13 @@ that is.
 Changing a display's shape after it's mounted is fine, but it needs one check-in to arrive
 and one more to redraw, so give it a couple of minutes before deciding it didn't work.
 
+**Which way up a profile display draws is settled on hardware now.** If you have been
+running a pre-release build on a profile display, the picture was upside down on it — every
+card inverted, while landscape displays were unaffected. Nothing to do but take this update,
+and the first redraw after it installs comes up the right way round. Taps were never wrong
+and are not changed by the correction: the paging edges follow the picture rather than the
+panel, so the top of what you see has always been the top it responds to.
+
 **The cards themselves are still catching up.** The chrome, the paging and the pictures are
 right in profile; several cards still lay their text out for a wide panel, so expect some
 crowding on the sun, moon and forecast cards until those are redrawn. Landscape is
