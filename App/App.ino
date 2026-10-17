@@ -375,12 +375,22 @@ bool restartWasTherapeutic() {
     case BootDiag::RestartCause::CalHandover:
     case BootDiag::RestartCause::CalInstalledApp:
     case BootDiag::RestartCause::CalSelfInstall:
+    // Somebody turned this display from landscape to profile or back. Narrated
+    // for the reason the CAL causes above are: it is a change they made and
+    // are watching for, a wait is expected, and the boot screens are the
+    // evidence the new shape took.
+    case BootDiag::RestartCause::OrientationChanged:
       return false;
   }
-  // Unreachable with the enum as it stands. Present so a cause added to
-  // BootDiag.h later and not considered here defaults to being narrated - the
-  // safe direction, since a boot that says too much is a nuisance and one that
-  // hides a new failure mode is a bug nobody can see.
+  // Reached only by a cause added to BootDiag.h and not considered above, which
+  // then defaults to being narrated - the safe direction, since a boot that
+  // says too much is a nuisance and one that hides a new failure mode is a bug
+  // nobody can see.
+  //
+  // This said "unreachable with the enum as it stands" until 2026-10-16, by
+  // which point OrientationChanged had been added and was reaching it. The
+  // behaviour was right and the claim was stale, and -Wswitch had been saying
+  // so at a warning level neither CI nor the local script turns on.
   return false;
 }
 
