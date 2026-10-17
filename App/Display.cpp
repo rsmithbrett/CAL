@@ -2994,20 +2994,44 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
 
     const int text = top + 9;
 
-    // AWAY FIRST, HOME SECOND, which is how a scoreline is read aloud and what
-    // the single-game card does. The two score columns stay empty before a game
-    // starts: the state rules forbid a fabricated 0-0, and the status column
-    // carries the start time instead.
+    // The five columns, written as the edges they actually are. A name column
+    // takes its x as a left edge and a score or status column takes its x as a
+    // right edge, which is what Align does with it, so on the 320px panel they
+    // occupy 14..100, 100..126, 136..222, 222..248 and 250..306 inside the
+    // 14..306 the margins leave. Reading a right-aligned x as a left edge puts
+    // the home score at 248..274 and has it collide with the status; it does
+    // not, and the two sit 2px apart.
+    constexpr int kNameWidth = 86;
+    constexpr int kScoreWidth = 26;
+    constexpr int kStatusWidth = 56;
+    const int awayNameLeft = kCardMargin + 4;
+    const int awayScoreRight = kCardMargin + 116;
+    const int homeNameLeft = kCardMargin + 126;
+    const int homeScoreRight = kCardMargin + 238;
+    const int statusRight = kContentRight() - 4;
+
+    // A game that has not started draws no score, so both score columns are
+    // empty in the one state where the status holds a clock time instead of
+    // FINAL or a period. "10:00 PM" is about 72px of FreeSansBold9pt7b against
+    // the 56 the column has, and it has been drawing as "10:00...". A scoreless
+    // row gives the status the home score's column and the gap beside it, 84px;
+    // a row with a score keeps 56 and does not move.
+    const bool scoreless = row.awayScore[0] == '\0' && row.homeScore[0] == '\0';
+    const int statusWidth =
+        scoreless ? statusRight - (homeScoreRight - kScoreWidth) : kStatusWidth;
+
+    // Away first, home second, which is how a scoreline is read aloud and what
+    // the single-game card does.
     lcd.setFont(&fonts::FreeSansBold9pt7b);
-    layoutLine(row.awayName, kCardMargin + 4, text, 86, sport.name,
+    layoutLine(row.awayName, awayNameLeft, text, kNameWidth, sport.name,
                "board.away", Align::Left, kTransparentText);
-    layoutLine(row.homeName, kCardMargin + 126, text, 86, sport.name,
+    layoutLine(row.homeName, homeNameLeft, text, kNameWidth, sport.name,
                "board.home", Align::Left, kTransparentText);
 
     lcd.setFont(&fonts::FreeSansBold12pt7b);
-    layoutLine(row.awayScore, kCardMargin + 116, text - 2, 26, sport.score,
+    layoutLine(row.awayScore, awayScoreRight, text - 2, kScoreWidth, sport.score,
                "board.away.score", Align::Right, kTransparentText);
-    layoutLine(row.homeScore, kCardMargin + 238, text - 2, 26, sport.score,
+    layoutLine(row.homeScore, homeScoreRight, text - 2, kScoreWidth, sport.score,
                "board.home.score", Align::Right, kTransparentText);
 
     // The state, in the live colour only when the server says the game is on.
@@ -3015,7 +3039,7 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     // row somebody should look at is the one that catches the eye.
     if (row.status[0] != '\0') {
       lcd.setFont(&fonts::FreeSansBold9pt7b);
-      layoutLine(row.status, kContentRight() - 4, text, 56,
+      layoutLine(row.status, statusRight, text, statusWidth,
                  row.isLive ? sport.liveFill : sport.muted,
                  "board.status", Align::Right, kTransparentText);
     }
