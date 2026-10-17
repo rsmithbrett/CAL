@@ -950,3 +950,154 @@ CAL (field factory, pre-re-table)        1349664 / 1441792 (93%)  spare  92128  
   bound, which is the audit's own step 13 - a layout that needs redesign, not
   a shifted y. The budget check reports it, correctly, and nothing here
   silences it.
+
+---
+
+## 10. One fitting rule instead of fifteen judgements, 2026-10-16
+
+Fifteen labels truncate in the fleet's own logs. Counted over the window the
+owner pulled:
+
+| label | times | label | times |
+|---|---|---|---|
+| `board.status` | 135 | `sunmoon.sunset` | 35 |
+| `listings.distance` | 99 | `tides.low` | 34 |
+| `listings.updated` | 99 | `moon.heading` | 34 |
+| `board.home` | 73 | `moon.illuminated` | 34 |
+| `moon.upcoming.name` | 68 | `moon.phase` | 34 |
+| `forecast.condition` | 65 | `tides.high` | 34 |
+| `sunmoon.sunrise` | 35 | `featuredlistings.title` | 21 |
+| | | `board.age` | 21 |
+
+Fifteen separate column-width arguments is fifteen chances to measure one of
+them against a panel it isn't drawn on, which is how `listings.distance` got
+30px on device 17 after being measured correctly at 110. So this is one rule in
+`layoutLine()` that every call site inherits, the way the budget check in
+section 3 is one comparison for all fourteen cards.
+
+**The rule.** Try the caller's own face on one line. Then each smaller face in
+the same family on one line. Then two lines, if the caller declared room for a
+second and the string has somewhere to break. Ellipsize only when all of those
+have failed, and ellipsize at the caller's own face so the row still reads as a
+row.
+
+Nothing here stops drawing the ellipsis. Section 5's third case is unchanged
+and so is its reasoning: the mark goes inside the box on purpose, and taking it
+away without making the text fit would turn a loss a household can see into one
+it can't.
+
+### 10a. The ladder is the four faces already in the binary
+
+`FreeSansBold9pt7b`, `12pt`, `18pt` and `24pt`, whose `fontHeight()` values are
+22, 29, 42 and 56. A tier is never taller than the face above it, so a step down
+can't reach anything below the line, which is what makes this step safe to
+apply everywhere without asking.
+
+Nothing follows the 9pt face. Section 9b already settled that question for
+`homevalue.compliance`: `Font0` is the 6x8 bitmap `drawClock()` records as
+unreadable at arm's length, and text that has dropped to 9pt and still doesn't
+fit has run out of family.
+
+A single line that lands on a smaller face is centred in the slot the caller
+asked for, and `TextResult::bottom` still reports the slot rather than the
+shorter line, so anything stacking underneath is unaffected. A caller outside
+the family, `Font0` or a face scaled with `setTextSize`, gets no ladder and
+today's behaviour exactly.
+
+### 10b. A second line needs room, and room is the caller's to declare
+
+`layoutLine()` knows `x`, `y`, `width` and the font. It doesn't know what the
+card will draw at `y + 44`, and on this panel the answer is usually
+"something". Measured against the current code:
+
+| label | its line box | what comes next | room |
+|---|---|---|---|
+| `sunmoon.sunrise` | 170..212 | detail at 202 | none, overlaps by 10 |
+| `moon.phase` | 56..85 | illuminated at 78 | none, overlaps by 7 |
+| `moon.upcoming.name` | 184..206 | the day count at 202 | none, overlaps by 4 |
+| `moon.illuminated` | 78..100 | the phases label at 122 | **22** |
+| `board.home` | top+9..top+31 | the next row at top+35 | none landscape, 21 profile |
+| `listings.distance` | the footer row | the content floor | none |
+| `tides.high` | top+28..top+70 | the row's own bottom | none |
+
+A `layoutLine()` wrapping on its own judgement would draw three of those
+through the element below, which is worse than the ellipsis it replaced. So
+vertical room is a new last argument, `roomBelow`, in pixels, defaulting to
+zero. Zero means a one-line slot, which is what all 88 call sites mean today,
+so no site changes behaviour until its geometry has been measured and written
+down. Width already works exactly this way and nobody expects it to be guessed.
+
+`moon.illuminated` is the one site with measured room, and it's wired. The rest
+keep their slot. That is a smaller result than fifteen fixes and it is the size
+the panel actually has.
+
+### 10c. A word with nowhere to break is not wrapped, it's sawn in half
+
+`Avalanche` is 90px of 9pt bold in an 86px column. Given two lines,
+`layoutText()`'s section 5 rule hard-breaks it into `Avalanch` and `e`, because
+a single word that doesn't fit has no break opportunity and rule 3 says nothing
+may be dropped while there's somewhere to put it. That rule is right for a URL
+under a QR code and wrong for a team name.
+
+So `TextResult` gains `hardBroken`, set alongside `ellipsized`, and the
+two-line attempt is accepted only when the string wrapped at a space. `100%
+illuminated` takes the second line. `Avalanche` and `FINAL` keep the ellipsis.
+The flag costs nothing, because the hard-break count was already being tracked
+for the log line that reports it.
+
+### 10d. What the rule reaches, measured
+
+`LGFXBase::text_width()` at `size_x == 1`, reimplemented from the glyph tables
+the way section 9b describes, reproducing its figures exactly: `Est. value` at
+112, `Sunrise` at 89 and `$400K - $450K` at 161 at 12pt, and `Automated
+estimate, not an appraisal.` at 323 and `Scan me for more information` at 256
+at 9pt.
+
+Most of these fifteen truncate on the profile panel rather than the landscape
+one, which is what the ladder is good at, because profile is where a column
+shrinks under a face that didn't:
+
+| string | face, width | box | drops to |
+|---|---|---|---|
+| `12:51 PM` as `sunmoon.sunset` | 18pt, 149 | 110 profile | 12pt at 104, fits |
+| `11:38 AM` as `tides.high` | 18pt, 149 | 120 profile | 12pt at 105, fits |
+| `Patchy Fog then Sunny` | 12pt, 269 | 234 landscape | 9pt at 200, fits |
+| `Waning Crescent` as `moon.phase` | 12pt, 199 | 132 profile | 9pt at 147, still over |
+| `100% illuminated` | 9pt, 146 | 132 profile | two lines, fits |
+| `Avalanche` as `board.home` | 9pt, 90 | 86 | nothing below 9pt, ellipsis |
+| `Updated 365 days ago` | 9pt, 190 | 139 profile | no room, ellipsis |
+
+`board.status`'s 135 is the largest single figure and the ladder doesn't touch
+it, because it is 9pt already. `SPORTS_CARDS_DESIGN.md` section 11 is what
+addresses that one, by giving the column 84px instead of 56 on a row whose
+scores are blank: `10:00 PM` is 77 and `12:00 AM` is 78. A live row's `6TH INN`
+is 74 against 56 and is still cut.
+
+### 10e. What this leaves
+
+Seven of the fifteen still ellipsize, and they are the ones already at 9pt in a
+column with nothing under it: `listings.distance`, `listings.updated`,
+`board.home`, `board.age`, `moon.upcoming.name`, `moon.heading`, and
+`featuredlistings.title`, which goes through `layoutText()` with its own box
+rather than through `layoutLine()` and so inherits nothing here.
+
+There is one lever left and it isn't in this change. `FreeSans9pt7b` is the
+same family at the same size in regular weight, and the library already carries
+it. It runs 6 to 11 percent narrower:
+
+| string | bold | regular | its box |
+|---|---|---|---|
+| `Avalanche` | 90 | 84 | 86, fits |
+| `First Qtr` | 71 | 65 | 55 profile, no |
+| `100% illuminated` | 146 | 137 | 132 profile, no |
+| `Updated 365 days ago` | 190 | 181 | 139 profile, no |
+
+It buys `board.home` and little else, it puts a weight change in the middle of
+a row, and it adds a face to a binary already at 79% of its partition. Adding
+it is one line in the tier table whenever somebody wants to make that trade. It
+is not being made here.
+
+Nothing here has been on hardware. The arithmetic is a fifth agreeing model of
+LovyanGFX and still a model. What a device has to settle is whether a 12pt
+sunrise beside a 9pt label still reads as the hero of its row, and whether
+`100%` over `illuminated` reads as one fact or two.

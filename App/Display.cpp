@@ -641,6 +641,7 @@ struct TextBox {
 struct TextResult {
   uint8_t lines = 0;      // lines drawn, or that would be drawn under measureOnly
   bool ellipsized = false;  // true when the "..." went on the panel
+  bool hardBroken = false;  // true when a word was split across lines
   int16_t bottom = 0;     // y just past the last line, for stacking the next block
 };
 
@@ -846,6 +847,7 @@ TextResult layoutText(const char* text, const TextBox& box, uint32_t colour, con
   }
 
   result.bottom = static_cast<int16_t>(drawY);
+  result.hardBroken = hardBreaks > 0;
 
   // THE CONTENT BUDGET, CHECKED AT THE CHOKE POINT RATHER THAN PER CARD.
   //
@@ -912,31 +914,127 @@ TextResult layoutText(const String& text, const TextBox& box, uint32_t colour, c
   return layoutText(text.c_str(), box, colour, what, background, measureOnly);
 }
 
+// ---- The fitting ladder ---------------------------------------------------
+//
+// The bold sans faces this binary carries, largest first, whose fontHeight()
+// values are 56, 42, 29 and 22. layoutLine() below steps down this list before
+// it reaches for an ellipsis, and a step is safe to take anywhere because a
+// tier is never taller than the face above it.
+//
+// Nothing follows the 9pt face. Font0 is the 6x8 bitmap drawClock()'s remarks
+// record as unreadable at arm's length, and text that has reached 9pt and still
+// does not fit has run out of family. TEXT_LAYOUT_DESIGN.md section 10a has the
+// measurements and section 10e the one face that could be added.
+using LayoutFont = decltype(lcd.getFont());
+
+const LayoutFont kSansTiers[] = {
+    &fonts::FreeSansBold24pt7b,
+    &fonts::FreeSansBold18pt7b,
+    &fonts::FreeSansBold12pt7b,
+    &fonts::FreeSansBold9pt7b,
+};
+constexpr int kSansTierCount = sizeof(kSansTiers) / sizeof(kSansTiers[0]);
+
+/// Where a face sits in kSansTiers, or -1 for one outside it - Font0, or any
+/// face the caller scaled with setTextSize(), both of which get no ladder.
+int sansTierIndex(LayoutFont font) {
+  for (int i = 0; i < kSansTierCount; ++i) {
+    if (kSansTiers[i] == font) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 /// The single-line shape, which is most of this file: a stat value, a team
-/// name, an address, a button label. One line means the "lines ran out" rule
-/// applies immediately, so anything too wide ellipsizes rather than being
-/// quietly shortened - which is exactly the sports card defect.
+/// name, an address, a button label.
+///
+/// The slot is one line of the caller's own face. When the string does not fit
+/// it, this tries each smaller face in the family on one line, then two lines
+/// of each face starting with the caller's own, and ellipsizes at the caller's
+/// face only when all of those have failed. One rule here rather than fifteen
+/// per-card judgements; TEXT_LAYOUT_DESIGN.md section 10.
+///
+/// roomBelow is how many pixels under the slot the caller knows to be free, and
+/// it is what makes a second line possible. It defaults to zero, a one-line
+/// slot, because this routine knows x, y, width and the font and has no way to
+/// learn what the card draws at y + 44 - on this panel, usually something. Two
+/// lines of a smaller face can still land inside the slot itself at a zero
+/// roomBelow, and do.
+///
+/// A two-line layout is taken only when the string wrapped at a space. A word
+/// with no break opportunity is hard broken by layoutText()'s own rule, which
+/// is right for a URL under a QR code and wrong for a team name: "Avalanche" is
+/// better as "Avalanc..." than as "Avalanch" over "e".
 ///
 /// lineHeight comes from the font rather than from the caller because a
 /// one-line box has no second line to step to, and a zero there would make the
-/// returned `bottom` a quiet lie to anyone stacking a block underneath.
+/// returned `bottom` a quiet lie to anyone stacking a block underneath. The
+/// `bottom` reported is the slot, or the two-line block when that is taller, so
+/// a smaller face never moves what the caller stacks beneath it.
 /// Both overloads exist for the same reason the layoutText() pair does: a
 /// single const char* entry point taking a String would build a temporary on
 /// every call, and half the call sites below hand it a snprintf'd char buffer
 /// precisely to avoid that.
 TextResult layoutLine(const char* text, int x, int y, int width, uint32_t colour,
                       const char* what, Align align = Align::Left,
-                      uint32_t background = kUseCardBackground) {
-  const TextBox box{static_cast<int16_t>(x), static_cast<int16_t>(y),
-                    static_cast<int16_t>(width), static_cast<int16_t>(lcd.fontHeight()), 1,
-                    align};
-  return layoutText(text, box, colour, what, background);
+                      uint32_t background = kUseCardBackground, int roomBelow = 0) {
+  const LayoutFont callerFont = lcd.getFont();
+  const int slot = lcd.fontHeight();
+  const TextBox asked{static_cast<int16_t>(x), static_cast<int16_t>(y),
+                      static_cast<int16_t>(width), static_cast<int16_t>(slot), 1, align};
+
+  // A caller subtracting one y from another can arrive at a negative, and a
+  // negative here would turn off the one-line tier drop as well as the second
+  // line. A smaller face on one line always lands inside the slot, so it is
+  // the second line alone that room decides.
+  const int freeBelow = roomBelow > 0 ? roomBelow : 0;
+
+  const int tier = sansTierIndex(callerFont);
+  const bool overflows =
+      width > 0 && text != nullptr && text[0] != '\0' && lcd.textWidth(text) > width;
+
+  if (overflows && tier >= 0) {
+    for (uint8_t lines = 1; lines <= 2; ++lines) {
+      for (int t = tier; t < kSansTierCount; ++t) {
+        lcd.setFont(kSansTiers[t]);
+        const int height = lcd.fontHeight();
+        const int block = lines * height;
+        if (block > slot + freeBelow) {
+          continue;
+        }
+
+        // Centred in the slot while it fits inside one, so a smaller face sits
+        // on the row rather than riding the top of the space it left.
+        const int16_t top = static_cast<int16_t>(block <= slot ? y + (slot - block) / 2 : y);
+        const TextBox box{static_cast<int16_t>(x), top, static_cast<int16_t>(width),
+                          static_cast<int16_t>(height), lines, align};
+        const TextResult fit =
+            layoutText(text, box, colour, what, background, /*measureOnly=*/true);
+        if (fit.ellipsized || fit.hardBroken) {
+          continue;
+        }
+
+        TextResult drew = layoutText(text, box, colour, what, background);
+        lcd.setFont(callerFont);
+        drew.bottom = static_cast<int16_t>(y + (block > slot ? block : slot));
+        if (t != tier || lines != 1) {
+          Log::verbose("[display] %s: %u line(s) of %dpx, where one of %dpx would have ellipsized",
+                       (what == nullptr) ? "?" : what, static_cast<unsigned>(lines), height, slot);
+        }
+        return drew;
+      }
+    }
+    lcd.setFont(callerFont);
+  }
+
+  return layoutText(text, asked, colour, what, background);
 }
 
 TextResult layoutLine(const String& text, int x, int y, int width, uint32_t colour,
                       const char* what, Align align = Align::Left,
-                      uint32_t background = kUseCardBackground) {
-  return layoutLine(text.c_str(), x, y, width, colour, what, align, background);
+                      uint32_t background = kUseCardBackground, int roomBelow = 0) {
+  return layoutLine(text.c_str(), x, y, width, colour, what, align, background, roomBelow);
 }
 
 /// How many lines of lineHeight actually fit between topY and the content
@@ -3291,11 +3389,18 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
   // The buffer straight through rather than String(pctBuffer): the temporary
   // that wrapping cost was a heap allocation on the draw path for a string
   // that is already a flat array.
-  layoutLine(pctBuffer, 98, 78, kScreenW - 98 - kCardMargin, sky.detail, "moon.illuminated",
-             Align::Left, kTransparentText);
+  //
+  // 78..100 at 9pt with the phases label at 122, so 22px below this line are
+  // free and the line may take them as a second one. It does on a profile
+  // panel, where the column is 132px and "100% illuminated" is 146.
+  constexpr int kIlluminatedY = 78;
+  constexpr int kPhasesLabelY = 122;
+  layoutLine(pctBuffer, 98, kIlluminatedY, kScreenW - 98 - kCardMargin, sky.detail,
+             "moon.illuminated", Align::Left, kTransparentText,
+             kPhasesLabelY - (kIlluminatedY + lcd.fontHeight()));
 
-  layoutLine("NEXT MAJOR PHASES", kCardMargin, 122, 200, sky.heading, "moon.upcoming.label",
-             Align::Left, kTransparentText);
+  layoutLine("NEXT MAJOR PHASES", kCardMargin, kPhasesLabelY, 200, sky.heading,
+             "moon.upcoming.label", Align::Left, kTransparentText);
 
   // THE FOUR UPCOMING PHASES, IN THE ORDER THEY HAPPEN, computed here rather
   // than sent. Nothing on the check-in response carries phase dates, and the
