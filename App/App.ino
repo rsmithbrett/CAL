@@ -1097,6 +1097,19 @@ constexpr uint32_t kMaxMsDisassociated = 10UL * 60UL * 1000UL;
 /// rather than inheriting the first one's clock.
 uint32_t gWifiDownSinceMs = 0;
 
+/// When the WiFi hold-off line below was last written, so it is said once when
+/// an episode starts and then once a minute while it lasts.
+///
+/// checkUnreachableWatchdog() runs every loop iteration, so the unconditional
+/// line this replaces wrote about twenty entries a second for up to the ten
+/// minutes of kMaxMsDisassociated - the same flood gHoldOffLogged and
+/// StackWatch::logHighWaterMark were each fixed for, arriving by a third route.
+/// Throttled rather than latched because the line carries the elapsed figure
+/// and the deadline, and a countdown said once at the start of a ten-minute
+/// wait tells a reader nothing about where in it the device currently is.
+uint32_t gWifiHoldOffLastLogMs = 0;
+constexpr uint32_t kWifiHoldOffLogIntervalMs = 60000;
+
 /// RAM mirror of Identity::selfRestartBackoffSteps(), seeded once in setup().
 ///
 /// Mirrored rather than read through, because selfRestartFloorMs() is called
@@ -1422,18 +1435,29 @@ void checkUnreachableWatchdog() {
   // reconnect handling this used to defer to does not run outside setup().
   if (WiFi.status() != WL_CONNECTED) {
     const uint32_t observedAt = millis();
+    bool firstOfEpisode = false;
     if (gWifiDownSinceMs == 0) {
       gWifiDownSinceMs = observedAt;
+      firstOfEpisode = true;
     }
     const uint32_t downForMs = observedAt - gWifiDownSinceMs;
 
     if (downForMs < kMaxMsDisassociated) {
-      Log::printf("[health] %lu check-ins have failed and WiFi is not associated (status=%d) for "
-                  "%lu ms - a brief outage is not something a restart fixes, so holding off until "
-                  "%lu ms, after which it is, because nothing re-joins WiFi outside setup()",
-                  static_cast<unsigned long>(gConsecutiveCheckInFailures),
-                  static_cast<int>(WiFi.status()), static_cast<unsigned long>(downForMs),
-                  static_cast<unsigned long>(kMaxMsDisassociated));
+      // Once at the start of the episode, then once a minute - see
+      // gWifiHoldOffLastLogMs. Subtraction, not `observedAt > last + interval`,
+      // so the throttle survives millis()' 49-day rollover the same way the
+      // backoff floor below does.
+      if (firstOfEpisode ||
+          (observedAt - gWifiHoldOffLastLogMs) >= kWifiHoldOffLogIntervalMs) {
+        gWifiHoldOffLastLogMs = observedAt;
+        Log::printf("[health] %lu check-ins have failed and WiFi is not associated (status=%d) for "
+                    "%lu ms - a brief outage is not something a restart fixes, so holding off "
+                    "until %lu ms, after which it is, because nothing re-joins WiFi outside "
+                    "setup(). Repeated once a minute while this lasts",
+                    static_cast<unsigned long>(gConsecutiveCheckInFailures),
+                    static_cast<int>(WiFi.status()), static_cast<unsigned long>(downForMs),
+                    static_cast<unsigned long>(kMaxMsDisassociated));
+      }
       return;
     }
 
@@ -1874,11 +1898,22 @@ void performCheckIn() {
     // fleet's record is true rather than a story about the network.
     if (result.responseOutOfMemory) {
       ++gConsecutiveResponseOom;
-      Log::printf("[checkin] could not take the response in for want of heap, %lu of %lu before "
-                  "this device restarts to reclaim memory - the server was reached and answered, "
-                  "so this is NOT counted toward the unreachable threshold",
-                  static_cast<unsigned long>(gConsecutiveResponseOom),
-                  static_cast<unsigned long>(kMaxConsecutiveResponseOom));
+      // Past the limit this counter keeps climbing too, for the same reasons
+      // the connection counter does - see the branch on it further down.
+      if (gConsecutiveResponseOom < kMaxConsecutiveResponseOom) {
+        Log::printf("[checkin] could not take the response in for want of heap, %lu of %lu before "
+                    "this device restarts to reclaim memory - the server was reached and answered, "
+                    "so this is NOT counted toward the unreachable threshold",
+                    static_cast<unsigned long>(gConsecutiveResponseOom),
+                    static_cast<unsigned long>(kMaxConsecutiveResponseOom));
+      } else {
+        Log::printf("[checkin] could not take the response in for want of heap, %lu of them now, "
+                    "past the limit of %lu - the restart is being held off, and the [health] line "
+                    "says what is holding it. The server was reached and answered, so this is NOT "
+                    "counted toward the unreachable threshold",
+                    static_cast<unsigned long>(gConsecutiveResponseOom),
+                    static_cast<unsigned long>(kMaxConsecutiveResponseOom));
+      }
       // The one cheap remedy, and the only failure on this branch it is actually
       // aimed at - see the note on the call below. Spent on the first
       // occurrence so the later ones mean something.
@@ -1890,10 +1925,23 @@ void performCheckIn() {
     // happens when this keeps happening, and why a restart is the only
     // recovery this firmware has for it.
     ++gConsecutiveCheckInFailures;
-    Log::printf("[checkin] failure %lu of %lu before this device restarts to recover its "
-                "connection",
-                static_cast<unsigned long>(gConsecutiveCheckInFailures),
-                static_cast<unsigned long>(kMaxConsecutiveCheckInFailures));
+    // The counter keeps climbing past the limit on purpose - a maintenance
+    // window, a short WiFi outage and the self-restart backoff all hold the
+    // restart off while failures keep arriving, and the [health] lines report
+    // the running total. "failure 47 of 5 before this device restarts" is what
+    // the single wording produced once that happened, so the two cases say
+    // different things.
+    if (gConsecutiveCheckInFailures < kMaxConsecutiveCheckInFailures) {
+      Log::printf("[checkin] failure %lu of %lu before this device restarts to recover its "
+                  "connection",
+                  static_cast<unsigned long>(gConsecutiveCheckInFailures),
+                  static_cast<unsigned long>(kMaxConsecutiveCheckInFailures));
+    } else {
+      Log::printf("[checkin] failure %lu, past the limit of %lu - the restart is being held off, "
+                  "and the [health] line says what is holding it",
+                  static_cast<unsigned long>(gConsecutiveCheckInFailures),
+                  static_cast<unsigned long>(kMaxConsecutiveCheckInFailures));
+    }
 
     // Buy back contiguous heap before the next attempt, in case that is what
     // the handshake was short of. A new TLS session needs 16,717 bytes

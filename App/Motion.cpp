@@ -131,12 +131,26 @@ uint8_t fallbackPercent() {
   return 100;
 }
 
+/// The reason given for the state the display is in now. Compared by pointer
+/// and never dereferenced for the comparison, so every call site passes a string
+/// literal: two different reasons are two different literals and therefore two
+/// different addresses, and a caller that ever passed something else would at
+/// worst produce one extra log line rather than read a freed buffer.
+const char* gWhy = "";
+
 void enterState(BacklightState next, uint8_t percent, const char* why) {
-  if (gState == next && gTargetPercent == percent) {
+  // The reason is part of what this call carries, so a change of reason alone
+  // still gets logged. Dim is entered twice with the same percent and different
+  // reasons - "active timeout expired" first, then the hold-dim reason below
+  // once the dim timeout has also passed on a device that has never confirmed
+  // motion - and comparing only state and percent dropped the second, which is
+  // the one that explains why the panel is not going dark.
+  if (gState == next && gTargetPercent == percent && gWhy == why) {
     return;
   }
   gState = next;
   gTargetPercent = percent;
+  gWhy = why;
   Log::printf("[motion] backlight -> %s at %u%% (%s)",
               next == BacklightState::Active   ? "active"
               : next == BacklightState::Dim    ? "dim"
