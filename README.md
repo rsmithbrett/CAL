@@ -2636,13 +2636,15 @@ real heap, a real TLS stack, a real NVS partition and a real server on the other
 end. `TEST_PLAN.md` carries the bench procedure for every behaviour a compile
 cannot reach, and is explicit about which of them cost hours of wall-clock time.
 Two practical notes from it, worth repeating here: report sizes against the
-**real** ceilings from `partitions.csv` - `ota_0` is 2,359,296 bytes since
-`callog` was added, and CAL's own `factory` is 1,441,792 - never
-`arduino-cli`'s generic 1,966,080; and compiles on this project routinely look
-hung when they are not - check the OS process list rather than the console. On
-the machine this was last built on, a cold CAL compile took roughly 35 minutes
-and produced no console output at all until the final two lines, so an empty log
-is not a stalled build.
+**real** ceilings from `partitions.csv` - `ota_0` is 2,097,152 bytes and CAL's
+own `factory` is 1,703,936, the figures left by the 2026-09-15 rebalance that
+moved 262,144 bytes from the first to the second - never `arduino-cli`'s
+generic 1,966,080; and compiles on this project routinely look hung when they
+are not - check the OS process list rather than the console. On the machine
+this was last built on, a cold CAL compile took roughly 35 minutes and produced
+no console output at all until the final two lines, so an empty log is not a
+stalled build. A clean App compile on that machine took 99 minutes, most of it
+in library detection before the first object file appears.
 
 Toolchain, pinned in that script and matching what this has been measured
 against:
@@ -2675,6 +2677,124 @@ byte-for-byte (the `0xAA50`-magic partition-table binary format) rather than
 trusting `arduino-cli`'s own build summary, which reports "% of X bytes"
 against the *named* scheme's static memory map regardless of which table was
 actually used, and will happily report against the wrong one.
+
+### This workstation doesn't build against the stock core
+
+On 2026-10-08 the installed `esp32-libs/3.3.11` tree was overwritten by hand
+with a rebuild carrying `CONFIG_MBEDTLS_DYNAMIC_BUFFER`, from
+esp32-arduino-lib-builder run 37874699245 (CAL `aa8b343`), artifact
+`esp32-libs-dynamic`. Nothing in the build output mentions it and `core list`
+still reports a plain `esp32:esp32 3.3.11`. `ci/build-firmware.sh` won't undo
+it either, because its `core install esp32:esp32@3.3.11` is a no-op against a
+version already present. Running the documented build procedure on this machine
+produces a dynamic-buffer binary, not a stock one.
+
+Three ways to tell which tree a build used, cheapest first:
+
+```bash
+# 1. the installed tree
+head -1 ~/AppData/Local/Arduino15/packages/esp32/tools/esp32-libs/3.3.11/versions.txt
+#   lib-builder: eb36458          -> overlaid
+#   lib-builder: master ee57070   -> stock
+
+# 2. what that tree configures
+grep -E 'MBEDTLS_(DYNAMIC_BUFFER|SSL_(MAX|IN|OUT)_CONTENT_LEN)' .../3.3.11/sdkconfig
+
+# 3. what a build ALREADY MADE used. arduino-cli copies the sdkconfig it
+#    compiled against into the build path, so this settles an argument about
+#    an artifact rather than about the machine's state right now.
+grep MBEDTLS_DYNAMIC_BUFFER <build-path>/sdkconfig
+```
+
+Don't try to tell them apart by looking for `esp_mbedtls_dynamic.h`. Both trees
+ship it, identical at 665 bytes. What differs is the implementation and the
+link line: the overlay's `lib/libmbedtls_2.a` carries 24 members against
+stock's 20, the four extra being `esp_mbedtls_dynamic_impl.c.obj`,
+`esp_ssl_cli.c.obj`, `esp_ssl_srv.c.obj` and `esp_ssl_tls.c.obj`, and
+`flags/ld_flags` gains twelve `-Wl,--wrap=` entries over mbedTLS entry points.
+One of them is `mbedtls_ssl_setup`, which matters below.
+
+This is not a narrow patch. Comparing the two trees file by file, 373 files
+differ in content, 42 exist only in the overlay and 9 only in stock. The
+bootloader ELFs differ, so does `libspi_flash.a`, and so do the WiFi,
+`esp_timer` and `esp_partition` headers. The overlay was cut from a different
+IDF: `-DIDF_VER="v5.5.5-832-g2553c5ad432"` against stock's `-DIDF_VER="v5.5.5"`.
+Any size difference between the two therefore mixes the dynamic-buffer change
+with 832 IDF commits and can't be laid at mbedTLS's door alone.
+
+**What it does to the numbers in `App/Http.h`.** That header derives
+`kTlsRecordBufferBytes = 16717` from `CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN =
+16384` and says the cost is 16,717 twice. That's a stock-core statement, and
+the generated `sdkconfig.h` the overlay compiles against disagrees:
+
+| | stock | overlaid |
+|---|---|---|
+| `CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN` | 16384 | not defined |
+| `CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN` | 16384, derived | 16384 |
+| `CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN` | 16384, derived | 4096 |
+| `CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN` | not set | 1 |
+| `CONFIG_MBEDTLS_DYNAMIC_BUFFER` | not set | 1 |
+| `CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH` | not set | not set |
+
+`esp_config.h` is where that derivation happens. Without
+`CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN` it defines one
+`MBEDTLS_SSL_MAX_CONTENT_LEN` that sizes both I/O buffers; with it, the in and
+out lengths are set separately. Running those through the same arithmetic
+`Http.h` already documents (13 header + 16 IV + 48 MAC + 256 padding = 333,
+plus the content length):
+
+- stock: 16,717 in and 16,717 out, 33,434 held for the session
+- overlaid: 16,717 in and 4,429 out, 21,146
+
+The largest single contiguous demand stays 16,717 either way, so the figure
+deciding whether a handshake can happen at all doesn't move. The total moves by
+12,288 bytes. And since `mbedtls_ssl_setup` is wrapped, the allocation that
+derivation describes isn't the one an overlaid build performs.
+
+**What the linker says, and what it can't.** App built both ways from the same
+commit, same libraries, clean build paths, sketch and core caches wiped between
+runs, with the libs tree as the only variable:
+
+| | overlaid | stock | difference |
+|---|---|---|---|
+| `Sketch uses` (flash) | 1,563,103 | 1,564,275 | -1,172 |
+| `Global variables` (static RAM) | 114,068 | 113,940 | +128 |
+| `.flash.text` | 1,128,108 | 1,130,244 | -2,136 |
+| `.flash.rodata` | 254,080 | 253,268 | +812 |
+| `.iram0.text` | 95,383 | 95,263 | +120 |
+| `.dram0.data` | 45,524 | 45,492 | +32 |
+| `.dram0.bss` | 68,544 | 68,448 | +96 |
+
+So the overlay costs about a kilobyte less flash and 128 bytes more static RAM.
+Those are the only two quantities a build reports, and both are near enough to
+noise that neither would make anyone look twice.
+
+**The largest contiguous free block is not in that table, and cannot be.** It's
+a property of a running heap on a device, not of an ELF, and no linker output
+reports it. The 128-byte static-RAM difference moves where the heap starts and
+nothing else. Everything the overlay actually changes about TLS memory happens
+at runtime, in allocations the linker never sees: up to 12,288 fewer bytes held
+for a session, allocated and released around each call rather than held for its
+life. That last part is read off the config and the wrap list, not measured on
+hardware, and measuring it needs a device reporting
+`heap_caps_get_largest_free_block()` through a session on each build. A size
+summary that looks unchanged is not evidence that heap behavior is unchanged,
+and that's the trap when a figure read off a local build gets compared against
+one read off a device.
+
+CI builds stock. The release workflow's `custom_libs_run_id` input is opt-in,
+empty on every push, and settable only through `workflow_dispatch`, so every
+published release is a stock build and the fleet is running stock.
+
+**Getting stock back.** The displaced tree is kept at
+`~/AppData/Local/Arduino15-backups/esp32-libs-3.3.11-stock`, and Arduino's own
+download cache still holds the original archive at
+`~/AppData/Local/Arduino15/staging/packages/esp32-libs-3.3.11.zip`. The
+backup's `versions.txt` and `sdkconfig` match that archive byte for byte, at
+1,372 and 114,491 bytes, so either restores a genuine stock core. Rename the
+overlay aside rather than deleting it, copy with `robocopy` because parts of
+the Matter include tree run past the 260-character path limit and `Copy-Item`
+dies partway, and read `versions.txt` again afterwards.
 
 ## Shipping
 
