@@ -4034,15 +4034,23 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   lcd.fillScreen(bg());
   drawCardBanner("YOUR SEARCH", kListingsBanner, 150);
 
-  // THE PICTURE TAKES A FIXED BAND DOWN THE RIGHT, and the text keeps the rest. Drawn first
-  // so the band is painted before anything measures against it, and sized as a third of the
-  // panel: enough that a house is recognisable across a room, little enough that an address
-  // still has two lines to wrap into. A card with a picture and an unreadable address would
-  // be a worse card than one with no picture at all.
+  // THE PICTURE TAKES A FIXED BAND DOWN THE RIGHT OF A LANDSCAPE PANEL, and the text keeps
+  // the rest. Drawn first so the band is painted before anything measures against it, and
+  // sized as a third of the panel: enough that a house is recognisable across a room, little
+  // enough that an address still has three lines to wrap into. A card with a picture and an
+  // unreadable address would be a worse card than one with no picture at all.
+  //
+  // That last sentence is why a turned panel draws no band. 220px of band, less a picture and
+  // its gutter, leaves 134 for the text, and no band width holds the addresses households are
+  // sent in that column. Landscape keeps its 104, where three 9pt lines do.
+  // FEATURED_LISTING_CARD_LAYOUT_DESIGN.md section 4 carries the sweep.
+  //
+  // The wire is unchanged: the key still arrives, Assets still caches the file, and a panel
+  // turned back to landscape draws the picture on its next repaint.
   //
   // Empty means there is none, or that caching it failed - FeaturedListings.cpp has already decided
   // and said so in the log. Either way the layout below simply gets the full width back.
-  const int pictureWidth = cachedImageId.length() > 0 ? kScaledWidth(104) : 0;
+  const int pictureWidth = (!gPortrait && cachedImageId.length() > 0) ? kScaledWidth(104) : 0;
   const int textRight = kContentRight() - (pictureWidth > 0 ? pictureWidth + kColumnGap : 0);
 
   if (pictureWidth > 0
@@ -4082,22 +4090,34 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
     y += 22;
   }
 
-  // The headline wraps to two lines. An address is long and a boat name can be
-  // longer, and ellipsizing the one thing that identifies the listing would
-  // leave a card nobody can act on.
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  // The headline wraps to three lines of 9pt. An address is long and a boat
+  // name can be longer, and ellipsizing the one thing that identifies the
+  // listing would leave a card nobody can act on.
+  //
+  // Three 9pt lines at an 18px step is the home value card's answer to the same
+  // string - two lines at that step - carried one line further for a column
+  // 186px wide instead of 300. 12pt over two lines does not hold these titles
+  // at either column width; section 4 of the design document carries the
+  // widths.
+  lcd.setFont(&fonts::FreeSansBold9pt7b);
   lcd.setTextSize(1);
 
-  // One line instead of two when two would not fit. The headline is the only
-  // block drawn unconditionally - it is what identifies the listing, so a card
-  // without it is a card nobody can act on - and giving it a box the band can
-  // actually hold is how it stays inside one.
-  const int headlineLines = y + 52 <= gContentBottom ? 2 : 1;
+  // Fewer lines when three would not fit. The headline is the only block drawn
+  // unconditionally - it is what identifies the listing, so a card without it
+  // is a card nobody can act on - and giving it a box the band can actually
+  // hold is how it stays inside one.
+  const int headlineLines = y + 54 <= gContentBottom ? 3 : (y + 36 <= gContentBottom ? 2 : 1);
   const TextBox headlineBox{static_cast<int16_t>(kContentLeft()), static_cast<int16_t>(y),
-                            static_cast<int16_t>(textWidth), 26,
+                            static_cast<int16_t>(textWidth), 18,
                             static_cast<uint8_t>(headlineLines), Align::Left};
   const TextResult drewHeadline = layoutText(headline, headlineBox, ink(), "featuredlistings.headline");
-  y = drewHeadline.bottom + 6;
+
+  // 4 rather than 6, so three 18px lines and this gap come to the same 58px two
+  // 26px lines and a 6px gap came to. Nothing below the headline moves, which
+  // keeps the y=154 floor an action bound to this card imposes working as it
+  // did. An address that needs only two lines reports a `bottom` 18px higher
+  // and hands the blocks below it the row it did not use.
+  y = drewHeadline.bottom + 4;
 
   // The subhead yields to the price rather than the other way round: a
   // neighbourhood line is context, an asking price is the number a household
@@ -4126,11 +4146,33 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
     y += 38;
   }
 
+  // The freshness line is reserved before the facts are drawn, not placed after
+  // them. The fact loop runs to this line's top rather than to gContentBottom,
+  // so a row cannot be admitted into the 18px the line occupies.
+  //
+  // LISTINGS_CARD_LAYOUT_DESIGN.md section 2 makes the same argument for the
+  // sibling card: the footer is reserved first, because what says whether the
+  // answer is current is worth more than one more stat row.
+  //
+  // 22 above the clock rather than 18 clears drawClock()'s corner vertically,
+  // which is what a reserved right-hand column was doing horizontally, so the
+  // line takes the whole text column instead. kWidthBeside(90) was 120px on a
+  // turned panel and the shortest string this line can carry is 150.
+  const int freshnessY = kClockTop() - 22;
+  const int factFloor = updatedAt.length() > 0 ? min(freshnessY, gContentBottom) : gContentBottom;
+
   // The facts, each a label and a value sharing the band. Columns rather than
   // measured widths, so this reads the same on a turned panel - see the
   // content band above.
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  for (uint8_t i = 0; i < factCount && y < gContentBottom - 18; ++i) {
+  for (uint8_t i = 0; i < factCount; ++i) {
+    if (y + 18 > factFloor) {
+      Log::printf("[display] featuredlistings: no room for the '%s' row - %dpx between y=%d and "
+                  "the freshness line reserved at y=%d",
+                  facts[i].label, factFloor - y, y, factFloor);
+      break;
+    }
+
     // Half of the TEXT column, not half the panel, so a value right-aligns to the edge of
     // the text rather than underneath the picture.
     layoutLine(facts[i].label, kContentLeft(), y, textWidth / 2, muted(),
@@ -4145,8 +4187,7 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   // a fortnight later, so a household reading an asking price deserves to know
   // how old it is.
   if (updatedAt.length() > 0) {
-    layoutLine(updatedAt, kContentLeft(), kClockTop() - 18,
-               min(kWidthBeside(90), textWidth), muted(),
+    layoutLine(updatedAt, kContentLeft(), freshnessY, textWidth, muted(),
                "featuredlistings.updated", Align::Left);
   }
 
