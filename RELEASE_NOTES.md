@@ -15,6 +15,22 @@ above the checksums, so an entry written here before the merge is the entry that
 
 ## Unreleased
 
+### Connecting a new display to Wi-Fi is easier to finish — CAL
+
+When a new display shows its Wi-Fi setup QR, an iPhone no longer has to wait
+for the display to scan all nearby networks *after* the phone has connected.
+The display prepares the network list first, before it advertises its temporary
+setup network, so the configuration page can load straight away.
+
+If the iPhone joins the setup network but doesn't open the setup form
+automatically, the display now shows a direct browser address underneath the
+QR code. Open that address on the phone while connected to the setup network.
+A hidden or missing home Wi-Fi name can also be entered manually.
+
+This changes the permanent CAL loader, not the downloadable App. It needs a
+bench hardware test before the loader is reflashed onto any deployed device.
+
+
 ### Displays stopped restarting themselves every couple of minutes — App
 
 A display showing a scoreboard, a listing or any card with a picture on it was rebooting
