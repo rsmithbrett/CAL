@@ -1618,6 +1618,75 @@ reads false, and the card draws what it drew before - the 6-month compatibility 
   exactly one aircraft.
 
 
+## 11. iPhone Wi-Fi provisioning: fast captive portal
+
+The CAL-side setup used to scan neighboring 2.4 GHz networks **inside**
+`GET /` while the ESP32 was also serving its setup access point. On a
+single-radio ESP32 this can interrupt the iPhone's AP connection precisely
+when captive detection asks for the web page. The revised flow scans first,
+then starts the AP, and serves an HTML snapshot with no additional radio scan.
+
+**No iPhone hardware test has been run yet.** Both the QR join and the captive
+portal must be tested on a real, USB-recoverable bench device before merging
+or flashing any customer's factory CAL.
+
+### 11a. The HTTP page never triggers a radio scan
+
+1. Open a serial monitor **before** rebooting so connecting it doesn't reset
+   the device unexpectedly: `arduino-cli monitor -p COMx -c baudrate=115200`.
+2. Enter CAL Wi-Fi provisioning with an empty remembered network list, or
+   hold BOOT to force it.
+3. Expect **`[portal] pre-AP scan done in N ms; HTML=M bytes`** to appear
+   **before** **`[portal] access point 'Discover-Setup-...' raised`**.
+4. With the QR screen displayed, request `http://192.168.4.1/` repeatedly.
+   Each request must log **`[portal] root served in N ms`**. The serial log
+   must **not** show a second pre-AP scan until provisioning restarts.
+5. Record the first-root response time on old CAL and this branch, with the
+   same iPhone/router setup. Confirm the portal remains reachable during
+   repeated requests and the network picker uses its cached options.
+
+### 11b. iOS opens the portal or the direct URL works
+
+1. On an iPhone, scan the QR once. Expect the network-join prompt for the
+   matching `Discover-Setup-XXXX` SSID, unchanged `WIFI:S:...;T:nopass;;`.
+2. If iOS opens its captive-network sheet automatically, the form must appear
+   without a long spinner. Look for `[portal] probe /hotspot-detect.html`
+   (or another `[portal] probe ...`) followed by the root request.
+3. If the captive sheet **does not** appear, join the temporary Wi-Fi in
+   Settings if necessary and open the **address displayed below the QR**:
+   `http://192.168.4.1` (or the actual `WiFi.softAPIP()`).
+4. The probe response must be HTTP 302 with an **absolute local**
+   `Location: http://192.168.4.1/`, plus no-store/no-cache headers.
+   The root response must carry no-store/no-cache headers too.
+5. Repeat on at least two supported iOS versions; test one Android phone
+   using its `/generate_204` probe as a regression check.
+
+### 11c. Scan errors, hidden SSIDs and correct credential selection
+
+1. With at least two visible home 2.4GHz networks, verify the dropdown
+   matches those seen by the ESP32, with signal strength shown.
+2. On a hidden network or when scanning returns no networks, enter an SSID
+   manually; it must take precedence over the dropdown.
+3. Put `<`, `&`, and `"` in a test SSID. It must render as text, and
+   selecting it must still save the original unescaped SSID.
+4. Submit an empty SSID or one over 32 bytes: rejected with 400.
+5. Submit correct credentials: CAL closes its temporary AP and rejoins
+   the selected home network. Test failed credentials separately; existing
+   re-provisioning recovery must remain available.
+6. Test two nearby devices simultaneously: the SSID suffix and QR must
+   distinguish them.
+
+### 11d. Scope and factory-flash protection
+
+This patch deliberately **does not change** the setup AP from open to WPA2,
+does not add HTTPS, and does not change the `/save` post-submit window. Those
+are security and flow changes requiring a separate decision and device test.
+
+On this repository, merging into `main` triggers the build-and-publish
+workflow for **both CAL and App**. CAL lives in the factory partition and
+requires a deliberate USB flashing/recovery process. A successful source
+review is not evidence that iOS captive detection works on hardware.
+
 ## What a clean compile does and does not prove
 
 Recorded once, because several commits in this repository lean on it:
