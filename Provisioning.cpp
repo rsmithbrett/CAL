@@ -16,6 +16,15 @@ namespace {
 DNSServer dns;
 WebServer server(80);
 bool credentialsAccepted = false;
+String cachedNetworkOptionsHtml;
+uint32_t portalStartedMs = 0;
+uint16_t probeRequests = 0;
+
+void sendNoCacheHeaders() {
+  server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+  server.sendHeader("Pragma", "no-cache");
+  server.sendHeader("Expires", "0");
+}
 
 String apName() {
   // The MAC suffix matters: two devices in one household otherwise advertise
@@ -40,10 +49,21 @@ String scanNetworksHtml() {
     return "<p class=\"note\">No 2.4GHz networks found. This device cannot see "
            "5GHz networks.</p>";
   }
-  html.reserve(found * 80);
+  // Bound the HTML stored while the AP is active; the phone can enter an
+  // SSID manually when a network is missing or hidden.
+  const int limit = found < 24 ? found : 24;
+  html.reserve(limit * 100);
   html += "<select name=\"ssid\" id=\"ssid\">";
-  for (int i = 0; i < found; ++i) {
-    html += "<option value=\"" + WiFi.SSID(i) + "\">" + WiFi.SSID(i) + " (" +
+  for (int i = 0; i < limit; ++i) {
+    // SSIDs are supplied by nearby radios. Escape them in both the visible
+    // option text and its HTML value attribute.
+    String label = WiFi.SSID(i);
+    label.replace("&", "&amp;");
+    label.replace("<", "&lt;");
+    label.replace(">", "&gt;");
+    label.replace("\"", "&quot;");
+    label.replace("'", "&#39;");
+    html += "<option value=\"" + label + "\">" + label + " (" +
             String(WiFi.RSSI(i)) + "dBm)</option>";
   }
   html += "</select>";
@@ -52,6 +72,9 @@ String scanNetworksHtml() {
 }
 
 void handleRoot() {
+  const uint32_t started = millis();
+  Journal::printf("[portal] root request at +%lu ms",
+                  static_cast<unsigned long>(started - portalStartedMs));
   String page =
       "<!doctype html><meta name=viewport content=\"width=device-width,initial-scale=1\">"
       "<style>body{font-family:system-ui;margin:0;padding:24px;background:#111;color:#eee}"
@@ -62,20 +85,28 @@ void handleRoot() {
       "background:#2a78d6;color:#fff}.note{color:#9a9a9a;font-size:13px}</style>"
       "<h1>Connect this device to WiFi</h1>"
       "<form method=POST action=/save><label for=ssid>Network</label>";
-  page += scanNetworksHtml();
+  // This was prepared before WiFi.softAP(): no radio scanning during HTTP.
+  page += cachedNetworkOptionsHtml;
   page +=
+      "<label for=manualSsid>Or enter a missing / hidden network</label>"
+      "<input id=manualSsid name=manualSsid maxlength=32 autocomplete=off>"
       "<label for=pass>Password</label><input id=pass name=pass type=password>"
       "<button type=submit>Connect</button></form>"
-      "<p class=\"note\">Only 2.4GHz networks are listed. If your network is "
-      "missing, it may be 5GHz only.</p>";
-  server.send(200, "text/html", page);
+      "<p class=\"note\">Only 2.4GHz networks are supported. Typing a network name "
+      "overrides the selection above.</p>";
+  sendNoCacheHeaders();
+  server.send(200, "text/html; charset=utf-8", page);
+  Journal::printf("[portal] root served in %lu ms",
+                  static_cast<unsigned long>(millis() - started));
 }
 
 void handleSave() {
-  const String ssid = server.arg("ssid");
+  const String manualSsid = server.arg("manualSsid");
+  const String ssid = manualSsid.length() ? manualSsid : server.arg("ssid");
   const String pass = server.arg("pass");
-  if (ssid.length() == 0) {
-    server.send(400, "text/plain", "A network is required.");
+  sendNoCacheHeaders();
+  if (ssid.length() == 0 || ssid.length() > 32 || pass.length() > 64) {
+    server.send(400, "text/plain", "A valid network name and password are required.");
     return;
   }
   Identity::rememberNetwork(ssid, pass);
@@ -91,12 +122,19 @@ void handleSave() {
 }
 
 void handleProbe() {
-  // Mobile platforms probe a known URL to decide whether a network has
-  // internet. Answered wrongly, the handset declares the network dead and
-  // silently drops back to cellular partway through setup, taking the form
-  // with it. Wildcard DNS alone does not prevent that.
-  server.sendHeader("Location", "/", true);
-  server.send(302, "text/plain", "");
+  // Mobile captive detection probes name external hosts, which wildcard DNS
+  // resolves to us. An ABSOLUTE redirect avoids leaving captive.apple.com
+  // (or another probe host) in the browser address bar.
+  ++probeRequests;
+  if (probeRequests <= 8) {
+    Journal::printf("[portal] probe %.60s at +%lu ms", server.uri().c_str(),
+                    static_cast<unsigned long>(millis() - portalStartedMs));
+  }
+  sendNoCacheHeaders();
+  server.sendHeader("Location", "http://" + WiFi.softAPIP().toString() + "/", true);
+  server.send(302, "text/html; charset=utf-8",
+              "<!doctype html><title>WiFi setup</title>"
+              "<p><a href=\"/\">Open device WiFi setup</a></p>");
 }
 
 }  // namespace
@@ -292,7 +330,18 @@ bool joinStoredNetwork() {
 
 bool run() {
   credentialsAccepted = false;
+  probeRequests = 0;
 
+  // AP+STA is one radio: a synchronous scan during handleRoot() delayed the
+  // iPhone portal and can interrupt its captive detection connection.
+  // Scan first in STA mode, then start the AP and never scan it again.
+  WiFi.mode(WIFI_STA);
+  Display::showStatus("Finding WiFi networks", "Preparing setup");
+  const uint32_t scanStarted = millis();
+  cachedNetworkOptionsHtml = scanNetworksHtml();
+  Journal::printf("[portal] pre-AP scan done in %lu ms; HTML=%u bytes",
+                  static_cast<unsigned long>(millis() - scanStarted),
+                  static_cast<unsigned>(cachedNetworkOptionsHtml.length()));
   WiFi.mode(WIFI_AP_STA);
   const String name = apName();
 
@@ -312,7 +361,11 @@ bool run() {
   // needs them inside WiFi range, during the few minutes the portal is up, of a
   // device its owner is standing over. A household that cannot join their own
   // display is the certain cost; that is the unlikely one.
-  WiFi.softAP(name.c_str());
+  if (!WiFi.softAP(name.c_str())) {
+    Journal::line("[portal] failed to start setup AP");
+    Display::showFailure("Cannot open WiFi setup", "Restart the device.");
+    return false;
+  }
 
   const IPAddress ip = WiFi.softAPIP();
   dns.start(53, "*", ip);
@@ -324,6 +377,7 @@ bool run() {
   server.on("/connecttest.txt", handleProbe);       // Windows
   server.onNotFound(handleProbe);
   server.begin();
+  portalStartedMs = millis();
 
   // The code carries the device's own access point in the format phone cameras
   // already understand, so scanning it joins the phone to the device. This
@@ -339,7 +393,11 @@ bool run() {
                   "credentials",
                   name.c_str(), ip.toString().c_str(),
                   static_cast<unsigned long>(Config::kProvisioningAbandonTimeoutMs));
-  Display::showQr(joinPayload, "Scan to set up WiFi", name);
+  // WiFi QR joins the temporary SSID only. iOS normally opens the captive
+  // page; show the actual HTTP URL for phones that do not.
+  const String setupUrl = "http://" + ip.toString();
+  Journal::printf("[portal] manual browser URL: %s", setupUrl.c_str());
+  Display::showQr(joinPayload, "Scan to join WiFi", name, "Open " + setupUrl);
 
   const uint32_t deadline = millis() + Config::kProvisioningAbandonTimeoutMs;
   bool abandoned = false;
@@ -362,7 +420,9 @@ bool run() {
   server.stop();
   dns.stop();
   WiFi.softAPdisconnect(true);
-  Journal::printf("[portal] closed, returning %s", abandoned ? "false" : "true");
+  cachedNetworkOptionsHtml = "";
+  Journal::printf("[portal] closed; probes=%u, returning %s",
+                  static_cast<unsigned>(probeRequests), abandoned ? "false" : "true");
   return !abandoned;
 }
 
