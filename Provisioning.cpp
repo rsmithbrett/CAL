@@ -46,8 +46,9 @@ String scanNetworksHtml() {
   const int found = WiFi.scanNetworks();
   String html;
   if (found <= 0) {
-    return "<p class=\"note\">No 2.4GHz networks found. This device cannot see "
-           "5GHz networks.</p>";
+    WiFi.scanDelete();
+    return "<p class=\"note\">No 2.4GHz networks found during setup scan. "
+           "Enter the network name below.</p>";
   }
   // Bound the HTML stored while the AP is active; the phone can enter an
   // SSID manually when a network is missing or hidden.
@@ -131,7 +132,7 @@ void handleProbe() {
                     static_cast<unsigned long>(millis() - portalStartedMs));
   }
   sendNoCacheHeaders();
-  server.sendHeader("Location", "http://" + WiFi.softAPIP().toString() + "/", true);
+  server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString() + "/", true);
   server.send(302, "text/html; charset=utf-8",
               "<!doctype html><title>WiFi setup</title>"
               "<p><a href=\"/\">Open device WiFi setup</a></p>");
@@ -395,9 +396,9 @@ bool run() {
                   static_cast<unsigned long>(Config::kProvisioningAbandonTimeoutMs));
   // WiFi QR joins the temporary SSID only. iOS normally opens the captive
   // page; show the actual HTTP URL for phones that do not.
-  const String setupUrl = "http://" + ip.toString();
+  const String setupUrl = String("http://") + ip.toString();
   Journal::printf("[portal] manual browser URL: %s", setupUrl.c_str());
-  Display::showQr(joinPayload, "Scan to join WiFi", name, "Open " + setupUrl);
+  Display::showQr(joinPayload, "Scan to join WiFi", name, String("Open ") + setupUrl);
 
   const uint32_t deadline = millis() + Config::kProvisioningAbandonTimeoutMs;
   bool abandoned = false;
