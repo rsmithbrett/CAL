@@ -37,10 +37,11 @@ void showStatus(const String& headline, const String& detail = "");
 /// screen must say what to do about it.
 void showFailure(const String& headline, const String& whatToDo);
 
-/// Renders a QR alongside a caption and the URL in text. The URL is always
-/// shown as characters too: the camera fails often enough, and a code nobody
-/// can type is a support call.
-void showQr(const String& url, const String& caption, const String& subCaption = "");
+/// Renders a QR alongside a caption and a human-readable fallback. For a
+/// regular QR, the payload is printed too. A WiFi-join QR is NOT a web URL,
+/// so its caller may supply the local setup address as readable fallback text.
+void showQr(const String& payload, const String& caption, const String& subCaption = "",
+            const String& fallbackText = "");
 
 /// Progress during a firmware download. Percent is 0-100.
 void showUpdateProgress(uint8_t percent, const String& version);
