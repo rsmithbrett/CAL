@@ -362,7 +362,8 @@ void showFailure(const String& headline, const String& whatToDo) {
   wrappedCenteredText(whatToDo, 75 + headlineLines * 22 + 12, kMuted, 1, 14, 3);
 }
 
-void showQr(const String& url, const String& caption, const String& subCaption) {
+void showQr(const String& url, const String& caption, const String& subCaption,
+            const String& fallbackText) {
   startPanel();
   clear();
 
@@ -405,8 +406,10 @@ void showQr(const String& url, const String& caption, const String& subCaption) 
   if (subCaption.length() > 0) {
     y += wrappedCenteredText(subCaption, y, kAccent, 2, 22, 2) * 22;
   }
-  // The address in characters as well as in the code, because cameras fail.
-  wrappedCenteredText(url, y, kMuted, 1, 14, 2);
+  // The Wi-Fi QR payload only joins a network; the setup URL is separate.
+  // For every other caller keep showing the actual QR payload as before.
+  wrappedCenteredText(fallbackText.length() > 0 ? fallbackText : url,
+                      y, kMuted, 1, 14, 2);
 }
 
 void showUpdateProgress(uint8_t percent, const String& version) {
