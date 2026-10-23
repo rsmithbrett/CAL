@@ -404,12 +404,20 @@ void showQr(const String& url, const String& caption, const String& subCaption,
   int y = y0 + side + 8;
   y += wrappedCenteredText(caption, y, kInk, 2, 22, 2) * 22;
   if (subCaption.length() > 0) {
-    y += wrappedCenteredText(subCaption, y, kAccent, 2, 22, 2) * 22;
+    // The network name, which somebody matches against a list on a phone.
+    // kAccent is blue and this panel is blue: a photograph of a real unit on
+    // 2026-10-23 showed the name, and the address below it, as the two least
+    // readable things on a screen whose whole job is to be read off.
+    y += wrappedCenteredText(subCaption, y, kInk, 2, 22, 2) * 22;
   }
   // The Wi-Fi QR payload only joins a network; the setup URL is separate.
   // For every other caller keep showing the actual QR payload as before.
+  //
+  // kInk, not kMuted. This is the fallback for a phone that does not open the
+  // portal by itself, so it is the one thing here somebody types by hand, and
+  // grey on blue at size 1 is not typeable.
   wrappedCenteredText(fallbackText.length() > 0 ? fallbackText : url,
-                      y, kMuted, 1, 14, 2);
+                      y, kInk, 1, 14, 2);
 }
 
 void showUpdateProgress(uint8_t percent, const String& version) {

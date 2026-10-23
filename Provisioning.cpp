@@ -123,19 +123,30 @@ void handleSave() {
 }
 
 void handleProbe() {
-  // Mobile captive detection probes name external hosts, which wildcard DNS
-  // resolves to us. An ABSOLUTE redirect avoids leaving captive.apple.com
-  // (or another probe host) in the browser address bar.
+  // Mobile platforms probe a known URL to decide whether a network has
+  // internet. Answered wrongly, the handset declares the network dead and
+  // silently drops back to cellular partway through setup, taking the form
+  // with it. Wildcard DNS alone does not prevent that.
+  //
+  // THE REDIRECT IS RELATIVE, AND HAS TO BE. v2026.10.23.0001 made it
+  // absolute - "http://192.168.4.1/" - to keep captive.apple.com out of the
+  // address bar, and the portal stopped appearing: an iPhone joined the setup
+  // network and then sat there with no form, which is how it was found.
+  //
+  // Wildcard DNS has already pointed the probe host at this device, so "/"
+  // keeps the handset on the host it asked for and the captive sheet follows
+  // it. An absolute redirect sends it to a different host mid-probe, which
+  // iOS reads as leaving the captive context and answers by closing the sheet
+  // rather than following it. A tidier address bar is not worth a setup
+  // nobody can finish.
   ++probeRequests;
   if (probeRequests <= 8) {
     Journal::printf("[portal] probe %.60s at +%lu ms", server.uri().c_str(),
                     static_cast<unsigned long>(millis() - portalStartedMs));
   }
   sendNoCacheHeaders();
-  server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString() + "/", true);
-  server.send(302, "text/html; charset=utf-8",
-              "<!doctype html><title>WiFi setup</title>"
-              "<p><a href=\"/\">Open device WiFi setup</a></p>");
+  server.sendHeader("Location", "/", true);
+  server.send(302, "text/plain", "");
 }
 
 }  // namespace
