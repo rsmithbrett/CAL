@@ -192,6 +192,23 @@ jobs:
             awk '/^## Unreleased$/{on=1; next} on && /^## /{exit} on' RELEASE_NOTES.md \
               | sed '/^---$/d'
             echo
+            # EVERY release carries this, which is why it is generated rather than typed
+            # into RELEASE_NOTES.md. No release body had ever contained a link of any
+            # kind, so a reader told a new CAL exists had nowhere to go - and for CAL
+            # that matters more than for the App, because the loader cannot be replaced
+            # by the App's over-the-air path and a cable is sometimes the only route.
+            echo '### Installing this'
+            echo
+            echo 'The App updates itself over the air. **CAL does not** - it is the factory'
+            echo 'loader, so putting a new one on a device means a USB cable.'
+            echo
+            echo 'Wired install, no sign-in needed: <https://discoveraroundme.com/cal>'
+            echo
+            echo 'That page leads with the CH340 driver, which a fresh unit usually needs'
+            echo 'before any serial port shows up in the browser at all, then hands off to'
+            echo "Espressif's esptool-js to do the flash. Use \`CAL.ino.merged.bin\` below"
+            echo 'for a unit being set up from scratch.'
+            echo
             echo '### Checksums'
             echo '```'
             cat combined-checksums.txt

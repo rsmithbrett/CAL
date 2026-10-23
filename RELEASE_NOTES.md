@@ -11,6 +11,14 @@ an entry says which one it is wherever that changes what a reader does.
 Keep **Unreleased** at the top. The build writes whatever is under it into the release body
 above the checksums, so an entry written here before the merge is the entry that ships.
 
+**And empty it once it has shipped.** Nothing clears this section automatically, so entries
+left here go out again on the next release, and the one after that. `v2026.10.18.0001` and
+`v2026.10.22.0001` published byte-identical prose for exactly that reason: the only
+difference between the two release bodies was the four checksum lines, so the later one
+described work that had gone out four days earlier and said nothing about what was in it.
+Publishing is two steps, not one. Write the entry before the merge, then move it under a
+dated heading after.
+
 ---
 
 ## Unreleased
@@ -30,6 +38,14 @@ A hidden or missing home Wi-Fi name can also be entered manually.
 This changes the permanent CAL loader, not the downloadable App. It needs a
 bench hardware test before the loader is reflashed onto any deployed device.
 
+
+---
+
+## v2026.10.18.0001 and v2026.10.22.0001
+
+**Both tags carry these same entries**, because the section above was never emptied after
+the first of them. Recorded once here against both rather than duplicated. What genuinely
+differed between the two builds is the binaries, and each release's own checksums say so.
 
 ### Displays stopped restarting themselves every couple of minutes — App
 
@@ -216,3 +232,7 @@ range of a device its owner is already standing over.
   draws the cards.
 - **Leave out anything only a maintainer can act on.** Refactors, test coverage and internal
   renames belong in the commit, which is linked from the release anyway.
+- **Move the entry under a dated heading once it has shipped.** This is the step that gets
+  skipped, and skipping it is invisible: the release publishes, it reads correctly, and the
+  next one repeats it. Checking takes a moment - compare the published body against the
+  previous release, and identical prose means the roll was missed.
