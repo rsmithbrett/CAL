@@ -1,0 +1,51 @@
+name: Build CAL bench image (no release)
+
+# PR builds produce a downloadable artifact only. They do NOT publish a
+# GitHub Release, register firmware in DiscoverAroundMe, or mark it current.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "Provisioning.cpp"
+      - "Identity.cpp"
+      - "Identity.h"
+      - "Display.cpp"
+      - "partitions.csv"
+      - "ci/**"
+      - ".github/workflows/bench-cal.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-bench-cal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Compile against production toolchain and check real partitions
+        run: bash ci/build-firmware.sh
+
+      - name: Check merged ESP32 recovery image
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("build/esp32.esp32.esp32/CAL.ino.merged.bin")
+          data = p.read_bytes()
+          assert 0x10100 <= len(data) <= 0x400000, "not a 4MB-class merged image"
+          assert data[0x1000] == 0xE9, "bootloader image missing at 0x1000"
+          assert data[0x8000:0x8002] == bytes([0xAA, 0x50]), "partition table absent at 0x8000"
+          assert data[0x10000] == 0xE9, "factory image missing at 0x10000"
+          print(f"Bench merged image: {len(data)} bytes, structural checks passed")
+          PY
+          sha256sum build/esp32.esp32.esp32/CAL.ino.merged.bin
+
+      - name: Upload merged bench image for /cal?bench=1
+        uses: actions/upload-artifact@v4
+        with:
+          name: cal-bench-merged-image-${{ github.run_number }}
+          path: build/esp32.esp32.esp32/CAL.ino.merged.bin
+          if-no-files-found: error
+          retention-days: 14
