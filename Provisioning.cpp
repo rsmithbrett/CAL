@@ -382,7 +382,23 @@ bool run() {
   Journal::printf("[portal] pre-AP scan done in %lu ms; HTML=%u bytes",
                   static_cast<unsigned long>(millis() - scanStarted),
                   static_cast<unsigned>(cachedNetworkOptionsHtml.length()));
-  WiFi.mode(WIFI_AP_STA);
+  // AP ONLY, NOT AP+STA. One radio serves both, and the station side has nothing to
+  // do here: the scan above already ran and is cached, and a household network is not
+  // joined until after this portal closes.
+  //
+  // Left as AP_STA it does active harm. Once a network is remembered - which it is
+  // from the moment somebody submits the form once - the station side retries that
+  // association for as long as the portal is up. If the remembered network is out of
+  // range or 5GHz, which is the case this was found on, it never succeeds and never
+  // stops, and the access point degrades as the session runs: measured 2026-10-24 at
+  // 189 seconds of stable association on a clean device, then 105, then under four.
+  //
+  // WiFi.disconnect() first so a connection attempt already in flight from the join
+  // ladder is dropped rather than left running underneath the mode change. false,
+  // false keeps the radio on and keeps the stored credentials, which the ladder needs
+  // again the moment this returns.
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_AP);
   const String name = apName();
 
   // WPA2 bench experiment. iPhone Camera reads the passphrase from the Wi-Fi

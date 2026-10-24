@@ -23,6 +23,17 @@ dated heading after.
 
 ## Unreleased
 
+### The setup network stops getting worse the longer it is open — CAL
+
+A display that had been given a network name it cannot reach kept trying to
+reach it while the setup screen was up. Both share one radio, so the setup
+network got less reliable the longer somebody spent on it: a phone that held
+the connection for three minutes early on was dropping it after four seconds
+later in the same session.
+
+The display now leaves that alone until setup is finished. It changes the
+permanent CAL loader, not the downloadable App.
+
 ### Why a phone could not join, in the log — CAL
 
 The display recorded that a phone arrived or left and nothing about why. It now
