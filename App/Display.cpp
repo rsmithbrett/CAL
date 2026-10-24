@@ -2027,7 +2027,10 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   // CYD-Dickey's drawFeaturedAircraft() gives the airline logo or bold
   // airline name - callsign was the fallback for this position for as long
   // as this server sent nothing richer (see Aircraft.h's updated remarks),
-  // and stays the fallback now for a server too old to send a name at all.
+  // and stays the fallback for the two cases that leave the name empty: a
+  // server too old to send one, and a server that matched the "OTH"
+  // catch-all and withheld it on purpose from 2026-10-23. The second is now
+  // the common one, so this path is ordinary rather than a legacy edge.
   // Bounded at 200px rather than the full card width: aircraftLogoZone()
   // starts at x220, and a name long enough to reach it would run under the
   // logo rather than stopping short of it. An over-long name now ellipsizes

@@ -84,14 +84,25 @@ struct Sighting {
   /// firmware logic could branch on it later without needing to add a wire
   /// field for that. Empty only against firmware old enough to predate this
   /// field entirely - a server that has it always sends one of the three.
+  /// Since 2026-10-23 that is the reason this field earns its place: the
+  /// server withholds airlineName for an "OTH" match, so this code is the
+  /// only thing separating "a real carrier the directory lacks" from "a
+  /// server that sends no airline at all".
   String airlineCode;
   /// The directory row's display name, already chosen to be card-width by
   /// whoever maintains the directory server-side - drawn verbatim, never
-  /// wrapped or re-derived here. Empty means exactly one thing: this
-  /// firmware is talking to a server old enough to not send it. It does NOT
-  /// mean "general aviation" - PVT and OTH are ordinary directory rows with
-  /// their own editable names, so a real server always sends something here
-  /// once it has the field at all.
+  /// wrapped or re-derived here.
+  ///
+  /// Empty means one of two things, and this comment said "exactly one"
+  /// until 2026-10-23. Either the server predates the field, or it matched
+  /// the "OTH" catch-all and deliberately withheld the name, because "Other"
+  /// describes a gap in the directory rather than anything about the flight.
+  /// Both draw the callsign as the headline, which is why that server change
+  /// needed no firmware release. It still does NOT mean "general aviation":
+  /// PVT keeps its name and sends it.
+  ///
+  /// airlineCode separates the two - "OTH" for the withheld case, empty for
+  /// the old-server case.
   String airlineName;
   /// An Assets catalog id, fetched the same way Graphic.cpp fetches its own
   /// configured picture - see Aircraft.cpp's cardFetch(). Empty means no
