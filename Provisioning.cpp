@@ -151,7 +151,10 @@ void handleProbe() {
   // and an iPad that received seven of these, each answered in 3 ms, still never
   // put the form on screen. A body costs nothing and removes one difference
   // between this portal and the reference one.
-  server.send(302, "text/plain", "redirect to the WiFi setup page");
+  server.send(302, "text/html; charset=utf-8",
+              "<!doctype html><html><body>"
+              "Opening DiscoverAroundMe WiFi setup..."
+              "</body></html>");
 }
 
 }  // namespace
