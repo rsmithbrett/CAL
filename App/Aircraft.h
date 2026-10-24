@@ -175,6 +175,15 @@ struct Result {
   /// reasoning as CYD-Dickey scaling its own overhead threshold off
   /// aircraftRadiusMiles rather than hardcoding a mile count.
   double radiusMiles = 10.0;
+  /// How close the server considers worth the longer dwell, in statute miles.
+  /// Zero when the server does not send it, which is the signal to fall back
+  /// to the old rule - a fifth of radiusMiles - in cardIsNotable().
+  ///
+  /// It exists because that derivation made one number answer two questions.
+  /// The server widened its search radius on 2026-10-23 and this threshold
+  /// moved with it, so the card took the long dwell far more often and the
+  /// whole rotation lengthened, which nobody chose.
+  double notableDistanceMiles = 0.0;
   /// Set on every non-Ok status, including Empty - what to put on screen.
   ///
   /// Always the plain, honest text, even during a declared maintenance window -

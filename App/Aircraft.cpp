@@ -156,6 +156,7 @@ Result fetchMine() {
   static const JsonDocument filter = [] {
     JsonDocument f;
     f["radiusMiles"] = true;
+    f["notableDistanceMiles"] = true;
     // A top-level sibling of the array, not part of it, so it gets its own
     // entry. See the empty-list branch below for what it decides.
     f["status"] = true;
@@ -192,6 +193,10 @@ Result fetchMine() {
   }
 
   result.radiusMiles = doc["radiusMiles"] | 10.0;
+
+  // Zero when the server does not send it, which cardIsNotable() reads as
+  // "fall back to the old fifth-of-the-radius rule".
+  result.notableDistanceMiles = doc["notableDistanceMiles"] | 0.0;
 
   // THE SIGNAL, AND THE ONE FIELD THIS CARD READS TO GET IT. `ProviderStatus`
   // on the server - a closed vocabulary derived on the record, meant to be read
@@ -551,17 +556,27 @@ void cardFetch() {
 /// scheduler's empty-card skipping is for cards with nothing at all to say.
 uint16_t cardItemCount() { return gEverFetched ? 1 : 0; }
 
-/// A plane nearly directly overhead earns the longer dwell. Threshold scales
-/// with the configured radius rather than being a fixed mile count, so it
-/// still means "practically overhead" whether the owner tracks 3 miles or
-/// 30 - the same 20%-of-radius rule CYD-Dickey uses, with the same 1-mile
-/// floor so a very small radius does not make every sighting notable.
+/// A plane nearly directly overhead earns the longer dwell.
+///
+/// The server says how close that is, in notableDistanceMiles. It used to be
+/// derived here as a fifth of the search radius - CYD-Dickey's rule - and that
+/// made one number answer two questions. On 2026-10-23 the server's radius
+/// went from 10 miles to 25 for an unrelated reason, this threshold moved from
+/// 2 miles to 5 with it, and the card started taking the twenty-second dwell
+/// far more often on every display, which lengthened the whole rotation. How
+/// far to look and how close is remarkable are separate questions.
+///
+/// The old rule is the fallback, so a device talking to a server that does not
+/// send the field behaves exactly as it did. The 1-mile floor stays on both
+/// paths: a very small value must not make every sighting notable.
 bool cardIsNotable(uint16_t) {
   if (gLast.status != Status::Ok) {
     return false;
   }
-  const double threshold = max(1.0, gLast.radiusMiles * 0.2);
-  return gLast.nearest.distanceMiles <= threshold;
+  const double notable = gLast.notableDistanceMiles > 0
+                             ? gLast.notableDistanceMiles
+                             : gLast.radiusMiles * 0.2;
+  return gLast.nearest.distanceMiles <= max(1.0, notable);
 }
 
 void cardDraw(uint16_t) {
