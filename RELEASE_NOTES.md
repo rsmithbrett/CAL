@@ -23,6 +23,12 @@ dated heading after.
 
 ## Unreleased
 
+### The setup code names the display again, and the network joins — CAL
+
+The last build advertised every display as "Discover-Setup-0000" instead of
+naming it, and a display could not join a household network afterwards even
+with the right password. Both came from the same change and both are fixed.
+
 ### The setup network stops getting worse the longer it is open — CAL
 
 A display that had been given a network name it cannot reach kept trying to

@@ -3,6 +3,7 @@
 #include <DNSServer.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <esp_mac.h>
 
 #include "BootButton.h"
 #include "Config.h"
@@ -29,8 +30,16 @@ void sendNoCacheHeaders() {
 String apName() {
   // The MAC suffix matters: two devices in one household otherwise advertise
   // identical names and the phone silently joins whichever it saw first.
+  //
+  // esp_read_mac, NOT WiFi.macAddress(). The latter reads the STATION interface,
+  // and this portal runs AP-only as of 2026-10-24, so the station is down and it
+  // answers all zeros: every unit advertised "Discover-Setup-0000" on the first
+  // build after that change, which is exactly the collision the line above warns
+  // about. esp_read_mac reads the burned-in address and does not care which
+  // interfaces are up - it is what Identity::macAddress has always used, which is
+  // why the journal kept printing the right address while the SSID did not.
   uint8_t mac[6];
-  WiFi.macAddress(mac);
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
   char suffix[5];
   snprintf(suffix, sizeof(suffix), "%02X%02X", mac[4], mac[5]);
   return String(Config::kSetupApPrefix) + "-" + suffix;
@@ -382,9 +391,23 @@ bool run() {
   Journal::printf("[portal] pre-AP scan done in %lu ms; HTML=%u bytes",
                   static_cast<unsigned long>(millis() - scanStarted),
                   static_cast<unsigned>(cachedNetworkOptionsHtml.length()));
-  // AP ONLY, NOT AP+STA. One radio serves both, and the station side has nothing to
-  // do here: the scan above already ran and is cached, and a household network is not
-  // joined until after this portal closes.
+  // THE STATION STAYS REGISTERED AND STOPS TRYING. Both halves of that matter.
+  //
+  // It used to retry a remembered network for as long as the portal was up, on the
+  // one radio the access point needs. When that network is out of range or 5GHz the
+  // retry never succeeds and never stops, and the access point degrades as the
+  // session runs: measured 2026-10-24 at 189 seconds of stable association on a
+  // clean device, then 105, then under four.
+  //
+  // The first attempt at this dropped to WIFI_AP outright, and that was worse. It
+  // tears the station interface down, and the switch back to WIFI_STA afterwards
+  // failed to re-register the network stack - "netstack cb reg failed with 12308" -
+  // so the join that follows could not succeed at all. A household network at -5 dBm
+  // with the right password timed out with status 4. Keeping AP_STA keeps the
+  // interface; disconnect plus setAutoReconnect(false) is what stops the retrying,
+  // and it is the whole of what was wrong.
+  //
+  // joinStoredNetwork calls WiFi.begin(), which re-arms auto-reconnect itself.
   //
   // Left as AP_STA it does active harm. Once a network is remembered - which it is
   // from the moment somebody submits the form once - the station side retries that
@@ -398,7 +421,8 @@ bool run() {
   // false keeps the radio on and keeps the stored credentials, which the ladder needs
   // again the moment this returns.
   WiFi.disconnect(false, false);
-  WiFi.mode(WIFI_AP);
+  WiFi.setAutoReconnect(false);
+  WiFi.mode(WIFI_AP_STA);
   const String name = apName();
 
   // WPA2 bench experiment. iPhone Camera reads the passphrase from the Wi-Fi
