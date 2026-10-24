@@ -229,22 +229,22 @@ These recommendations update the implementation choices in §4: a *standards-
 compliant* RFC 8910/8908 captive-portal API requires HTTPS and is not presently
 available on the local-only CAL AP. However, Espressif's Arduino-ESP32 **3.3.11**
 code exposes an **experimental, noncompliant HTTP Option 114 advertisement**
-through \`WiFi.AP.enableDhcpCaptivePortal()\`. We can evaluate it in a bench
+through `WiFi.AP.enableDhcpCaptivePortal()`. We can evaluate it in a bench
 build without committing to it for production or treating it as guaranteed
 Apple behavior.
 
 ### 8.1 What we must preserve (no regressions)
 
-- **Keep** the STA scan before \`WiFi.softAP()\`; keep cached SSIDs in
-  \`cachedNetworkOptionsHtml\`. Never call \`WiFi.scanNetworks()\` in an HTTP
+- **Keep** the STA scan before `WiFi.softAP()`; keep cached SSIDs in
+  `cachedNetworkOptionsHtml`. Never call `WiFi.scanNetworks()` in an HTTP
   handler while a customer is connected to the AP.
-- **Keep** wildcard local DNS, \`dns.start(53, "*", WiFi.softAPIP())\`,
-  and the current relative \`Location: /\` redirect. The earlier *absolute*
-  redirect to \`http://192.168.4.1/\` visibly regressed iPhone behavior; the
-  rollback in \`8510fce\` must not be undone during these experiments.
-- Keep the existing routes \`/\`, \`POST /save\`, \`/hotspot-detect.html\`,
-  \`/generate_204\`, \`/connecttest.txt\` and the not-found fallback.
-- Keep the Wi-Fi join QR payload \`WIFI:S:<name>;T:nopass;;\` and the readable
+- **Keep** wildcard local DNS, `dns.start(53, "*", WiFi.softAPIP())`,
+  and the current relative `Location: /` redirect. The earlier *absolute*
+  redirect to `http://192.168.4.1/` visibly regressed iPhone behavior; the
+  rollback in `8510fce` must not be undone during these experiments.
+- Keep the existing routes `/`, `POST /save`, `/hotspot-detect.html`,
+  `/generate_204`, `/connecttest.txt` and the not-found fallback.
+- Keep the Wi-Fi join QR payload `WIFI:S:<name>;T:nopass;;` and the readable
   local fallback URL beneath it. Do **not** redirect or intercept HTTPS
   connections to Apple, Google or arbitrary websites.
 - Do not change AP password/encryption, certificate handling, credential
@@ -257,26 +257,26 @@ Apple behavior.
 
 ### 8.2 First firmware experiment (P1): nonempty body on the HTTP redirect
 
-**Rationale:** In the current \`Provisioning.cpp\`, \`handleProbe()\` sends
-\`302\` with \`Location: /\` and an empty \`text/plain\` body. Espressif's
+**Rationale:** In the current `Provisioning.cpp`, `handleProbe()` sends
+`302` with `Location: /` and an empty `text/plain` body. Espressif's
 ESP-IDF captive-portal example sends a relative redirect **with content** and
 explicitly notes an iOS compatibility reason. This is a small change that
 can be tested independently; it is **not** a proven fix for the observed iPad.
 
-**Only change the final response in \`handleProbe()\`:**
+**Only change the final response in `handleProbe()`:**
 
-\`\`\`cpp
+```cpp
 // Preserve sendNoCacheHeaders(), probe logging and the relative redirect.
 server.sendHeader("Location", "/", true);
 server.send(302, "text/html; charset=utf-8",
             "<!doctype html><html><body>"
             "Opening DiscoverAroundMe WiFi setup."
             "</body></html>");
-\`\`\`
+```
 
-Keep \`handleRoot()\` returning the actual self-contained configuration form
+Keep `handleRoot()` returning the actual self-contained configuration form
 as HTTP 200. Do not change the redirect destination, do not redirect to HTTPS,
-and do not replace \`302\` with \`200\` in the same experiment.
+and do not replace `302` with `200` in the same experiment.
 
 **Proof required:** Compare against the unchanged baseline on the *same*
 device and iPhone/iPad. Log whether the captive window **automatically
@@ -286,22 +286,22 @@ iOS/iPadOS version. If worse, restore the empty body without further changes.
 
 ### 8.3 Second firmware experiment (P2): advertise DHCP Option 114
 
-**Rationale:** The pinned \`arduino-esp32 3.3.11\` source contains
-\`APClass::enableDhcpCaptivePortal()\` (behind an ESP-IDF >= 5.4.2
+**Rationale:** The pinned `arduino-esp32 3.3.11` source contains
+`APClass::enableDhcpCaptivePortal()` (behind an ESP-IDF >= 5.4.2
 compile-time condition). It stops the AP DHCP service briefly, sets the
-\`ESP_NETIF_CAPTIVEPORTAL_URI\` DHCP option, and restarts DHCP. Its advertised
-address is an **HTTP** URL such as \`http://192.168.4.1\`.
+`ESP_NETIF_CAPTIVEPORTAL_URI` DHCP option, and restarts DHCP. Its advertised
+address is an **HTTP** URL such as `http://192.168.4.1`.
 
-In a **separate, opt-in test build** of \`Provisioning.cpp\`, after
-\`WiFi.softAP(name.c_str())\` succeeds and **before** the QR is shown or
+In a **separate, opt-in test build** of `Provisioning.cpp`, after
+`WiFi.softAP(name.c_str())` succeeds and **before** the QR is shown or
 the user associates, try:
 
-\`\`\`cpp
+```cpp
 // EXPERIMENT ONLY: requires the matching Arduino-ESP32 / ESP-IDF API.
 const bool advertised = WiFi.AP.enableDhcpCaptivePortal();
 Journal::printf("[portal] experimental DHCP option 114: %s",
                 advertised ? "enabled" : "failed");
-\`\`\`
+```
 
 Keep existing wildcard DNS and HTTP handlers in place. A failed optional
 advertisement should **not** prevent ordinary portal setup. Verify the
@@ -310,7 +310,7 @@ expected URI; a successful function return alone is insufficient.
 
 **Standards warning:** RFC 8910 says Option 114 identifies an RFC 8908
 Captive Portal **API endpoint**, not simply an HTML setup form. RFC 8908
-requires an **HTTPS** endpoint and \`application/captive+json\` API data,
+requires an **HTTPS** endpoint and `application/captive+json` API data,
 with a TLS-protected user portal. The Espressif helper's local HTTP URI does
 **not** satisfy that design. Modern iOS may ignore or mishandle it.
 Do not characterize this helper as a standards-compliant deployment or
@@ -326,15 +326,15 @@ explicitly, not casually added to the factory CAL.
 
 ### 8.4 DNS recommendation (P0 diagnostic, not a blind configuration change)
 
-**Do not modify GoDaddy or public \`discoveraroundme.com\` DNS.** These records
+**Do not modify GoDaddy or public `discoveraroundme.com` DNS.** These records
 are unrelated to captive discovery inside the ESP32's isolated temporary
 setup network.
 
-Keep the ESP32 wildcard \`DNSServer\` as the local responder for legacy
-HTTP captive probes. Before proposing changes to \`softAPConfig()\` or DNS:
+Keep the ESP32 wildcard `DNSServer` as the local responder for legacy
+HTTP captive probes. Before proposing changes to `softAPConfig()` or DNS:
 
 1. Capture a **DHCP OFFER/ACK** and verify the leased phone IP, gateway
-   (\`192.168.4.1\` or the actual softAP IP), DNS server(s) (**DHCP
+   (`192.168.4.1` or the actual softAP IP), DNS server(s) (**DHCP
    Option 6**) and, in the Option-114 variant, captive URI.
 2. Verify from iOS Wi-Fi network details that DNS is **Automatic** and note
    which DNS server(s) it actually received. Check for unexpected manually
@@ -347,15 +347,15 @@ HTTP captive probes. Before proposing changes to \`softAPConfig()\` or DNS:
    DHCP Option-6 / softAP DNS fix and test it separately. If correct,
    changing DNS addresses is not supported by current evidence.
 
-A wildcard DNS response of \`192.168.4.1\` does not guarantee that the
+A wildcard DNS response of `192.168.4.1` does not guarantee that the
 client used that resolver on every request; capture the packet sequence.
 
 ### 8.5 Required instrumentation before declaring a solution
 
-In \`Provisioning.cpp\` / the existing journal, record timestamps relative
+In `Provisioning.cpp` / the existing journal, record timestamps relative
 to AP readiness for: AP created; associated station count transitions;
 first observed DNS query (if bounded/cheap to log); captive probe
-(path and status); \`GET /\` start/finish; \`POST /save\`; AP shutdown.
+(path and status); `GET /` start/finish; `POST /save`; AP shutdown.
 Avoid logging submitted passwords or secrets. Keep journal volume bounded
 (especially bursts of captive probes).
 
@@ -367,7 +367,7 @@ Capture *phone-side* observations for every attempt:
   disappeared, or never appeared.
 - Seconds from successful Wi-Fi association to a visible **usable** form.
 - Whether selecting SSID and posting credentials succeeded.
-- Whether manually opening \`http://192.168.4.1\` in Safari worked
+- Whether manually opening `http://192.168.4.1` in Safari worked
   immediately while the automatic sheet failed.
 
 If available, capture DHCP/DNS/HTTP traffic on a test network to distinguish
@@ -411,11 +411,11 @@ regressions.
 Build the previously proposed **two-stage QR** on the LCD only after
 measuring the P1/P2 results:
 
-1. Show existing \`WIFI:S:<name>;T:nopass;;\` to join \`Discover-Setup-XXXX\`.
+1. Show existing `WIFI:S:<name>;T:nopass;;` to join `Discover-Setup-XXXX`.
 2. Keep the first QR visible while the phone associates; watch
-   \`WiFi.softAPgetStationNum()\` for a transition above zero.
+   `WiFi.softAPgetStationNum()` for a transition above zero.
 3. Once connected, show a new QR whose **payload is the actual**
-   \`http://<WiFi.softAPIP()>/\` address. Print the URL in legible text.
+   `http://<WiFi.softAPIP()>/` address. Print the URL in legible text.
    Leave enough time to avoid a flashing screen; account for multiple
    connected phones and disconnect/reconnect.
 4. Scanning this second QR should open Safari (or the system browser)
@@ -463,8 +463,8 @@ unconfigured factory device with no phone app installed.
   nonempty response content):
   https://github.com/espressif/esp-idf/blob/master/examples/protocols/http_server/captive_portal/main/main.c
 - Espressif Arduino-ESP32 **3.3.11** implementation
-  (\`APClass::enableDhcpCaptivePortal\`, HTTP URL):
+  (`APClass::enableDhcpCaptivePortal`, HTTP URL):
   https://github.com/espressif/arduino-esp32/blob/3.3.11/libraries/WiFi/src/AP.cpp
 - CAL's own measured baseline: §§1–3 of this document, with firmware
-  \`v2026.10.24.0001\` journal timings.
+  `v2026.10.24.0001` journal timings.
 
