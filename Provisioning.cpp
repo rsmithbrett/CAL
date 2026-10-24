@@ -365,23 +365,18 @@ bool run() {
   WiFi.mode(WIFI_AP_STA);
   const String name = apName();
 
-  // OPEN, NOT WPA. The access point carried a MAC-derived passphrase until
-  // 2026-10-04, and it cost the one thing this screen exists for: an iPhone has
-  // to complete a WPA association before iOS raises the captive-portal sheet, so
-  // the household watched a spinner before being shown anything to fill in.
-  // Owner, from the bench: "it slowed the process of joining the iPhone."
-  //
-  // It bought very little. The passphrase was "dam" plus the last three bytes of
-  // the MAC, and the SSID suffix already broadcasts two of them - guessable from
-  // across the room by anyone who had seen one of these before.
-  //
-  // What an open portal exposes, stated rather than assumed: it serves a network
-  // scan list and a form, it renders no stored credential, and the worst a
-  // stranger could do is point this device at a network of their choosing. That
-  // needs them inside WiFi range, during the few minutes the portal is up, of a
-  // device its owner is standing over. A household that cannot join their own
-  // display is the certain cost; that is the unlikely one.
-  if (!WiFi.softAP(name.c_str())) {
+  // WPA2 bench experiment. iPhone Camera reads the passphrase from the Wi-Fi
+  // QR automatically, so the person still types no *setup AP* password.
+  // Preserve the same SSID/password across power cycles to avoid stale phone
+  // credentials. If NVS cannot retain the key, do not start an open portal.
+  const String setupPassword = Identity::setupApPassword();
+  if (setupPassword.length() != 24) {
+    Journal::line("[portal] protected setup AP key unavailable - refusing open AP");
+    Display::showFailure("Cannot open WiFi setup", "Restart or recover over USB.");
+    return false;
+  }
+
+  if (!WiFi.softAP(name.c_str(), setupPassword.c_str())) {
     Journal::line("[portal] failed to start setup AP");
     Display::showFailure("Cannot open WiFi setup", "Restart the device.");
     return false;
@@ -430,12 +425,11 @@ bool run() {
   // removes the step that fails most often: hunting for an unfamiliar network
   // name in a list.
   //
-  // T:nopass AND NO P: FIELD, matching the open access point above. A payload
-  // that still named WPA would have the phone attempt an encrypted association
-  // against an open radio and fail to join at all - a worse outcome than the
-  // delay this change set out to remove.
-  const String joinPayload = "WIFI:S:" + name + ";T:nopass;;";
-  Journal::printf("[portal] access point '%s' raised at %s - waiting up to %lu ms for "
+  // WPA2 passphrase travels in the QR. Never include it in the boot journal.
+  // Uppercase hex needs no escaping in Wi-Fi QR grammar.
+  const String joinPayload = "WIFI:T:WPA;S:" + name +
+                             ";P:" + setupPassword + ";;";
+  Journal::printf("[portal] WPA2 access point '%s' raised at %s - waiting up to %lu ms for "
                   "credentials",
                   name.c_str(), ip.toString().c_str(),
                   static_cast<unsigned long>(Config::kProvisioningAbandonTimeoutMs));
@@ -447,7 +441,17 @@ bool run() {
 
   const uint32_t deadline = millis() + Config::kProvisioningAbandonTimeoutMs;
   bool abandoned = false;
+  int lastStationCount = 0;
   while (!credentialsAccepted) {
+    // iOS may associate, fetch the captive page and never bring CNA onscreen.
+    // Association timing gives a firm baseline for comparing Camera/Settings.
+    const int stationCount = WiFi.softAPgetStationNum();
+    if (stationCount != lastStationCount) {
+      Journal::printf("[portal] station count=%d at +%lu ms",
+                      stationCount,
+                      static_cast<unsigned long>(millis() - portalStartedMs));
+      lastStationCount = stationCount;
+    }
     if (millis() >= deadline) {
       abandoned = true;
       break;
