@@ -43,6 +43,11 @@ void showFailure(const String& headline, const String& whatToDo);
 void showQr(const String& payload, const String& caption, const String& subCaption = "",
             const String& fallbackText = "");
 
+/// Shown while a phone is joined to the setup access point: dark-on-light, so the
+/// join reads as having worked from across a room. Provisioning swaps back to the
+/// join code when the last station leaves.
+void showConnected(const String& headline, const String& detail = "");
+
 /// Progress during a firmware download. Percent is 0-100.
 void showUpdateProgress(uint8_t percent, const String& version);
 

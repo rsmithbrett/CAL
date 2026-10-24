@@ -97,10 +97,14 @@ void handleRoot() {
       "<form method=POST action=/save><label for=ssid>Network</label>";
   // This was prepared before WiFi.softAP(): no radio scanning during HTTP.
   page += cachedNetworkOptionsHtml;
+  // ORDER: network, then its password, then the box for a network that was not in
+  // the list. A password sitting under the manual-entry box reads as that box's
+  // password rather than the chosen network's, and the manual box is the exception
+  // most people never touch, so it goes last.
   page +=
+      "<label for=pass>Password</label><input id=pass name=pass type=password>"
       "<label for=manualSsid>Or enter a missing / hidden network</label>"
       "<input id=manualSsid name=manualSsid maxlength=32 autocomplete=off>"
-      "<label for=pass>Password</label><input id=pass name=pass type=password>"
       "<button type=submit>Connect</button></form>"
       "<p class=\"note\">Only 2.4GHz networks are supported. Typing a network name "
       "overrides the selection above.</p>";
@@ -531,6 +535,17 @@ bool run() {
   const uint32_t deadline = millis() + Config::kProvisioningAbandonTimeoutMs;
   bool abandoned = false;
   int lastStationCount = 0;
+
+  // THE SCREEN SAYS WHICH THING TO DO NEXT. While nobody is joined it shows the
+  // code to scan. The moment a phone associates it says so, light-on-dark inverted
+  // to white, because at that point the person is looking at their handset and the
+  // only question left is whether the join worked.
+  //
+  // Redrawn on a transition, never every pass: showQr and showConnected both clear
+  // and repaint the whole panel, and doing that every 2 ms is a flicker rather than
+  // a screen. Going back to the code when the last station leaves is what lets a
+  // second phone, or the same one after it drops, start again without a restart.
+  bool showingConnected = false;
   while (!credentialsAccepted) {
     // iOS may associate, fetch the captive page and never bring CNA onscreen.
     // Association timing gives a firm baseline for comparing Camera/Settings.
@@ -540,6 +555,17 @@ bool run() {
                       stationCount,
                       static_cast<unsigned long>(millis() - portalStartedMs));
       lastStationCount = stationCount;
+    }
+
+    const bool someoneIsOn = stationCount > 0;
+    if (someoneIsOn != showingConnected) {
+      showingConnected = someoneIsOn;
+      if (someoneIsOn) {
+        Display::showConnected("Connected", "Look on your phone to choose WiFi");
+      } else {
+        Display::showQr(joinPayload, "Scan to join WiFi", name,
+                        String("Key ") + setupPassword);
+      }
     }
     if (millis() >= deadline) {
       abandoned = true;

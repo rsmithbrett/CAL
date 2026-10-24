@@ -45,6 +45,10 @@ constexpr uint32_t kMuted = 0x9A9A9Au;
 constexpr uint32_t kAccent = 0x2A78D6u;
 constexpr uint32_t kWarn = 0xEDA100u;
 
+// White, for the one screen that inverts. Named rather than written inline so the
+// page-style guard and anybody reading the palette can see there are two grounds.
+constexpr uint32_t kPaper = 0xFFFFFFu;
+
 void clear() {
   lcd.fillScreen(kBg);
 }
@@ -346,6 +350,28 @@ void showStatus(const String& headline, const String& detail) {
   const int headlineLines = wrappedCenteredText(headline, 155, kInk, 2, 22, 2);
   if (detail.length() > 0) {
     wrappedCenteredText(detail, 155 + headlineLines * 22 + 12, kMuted, 1, 14, 2);
+  }
+}
+
+// THE ONE SCREEN DRAWN DARK-ON-LIGHT, and it is deliberate. Every other screen
+// here is light text on the product's near-black panel. This one inverts so that
+// a household glancing up from their phone can tell at a distance that the join
+// worked, without reading a word of it.
+//
+// Shown while a phone is associated to the setup access point. Provisioning swaps
+// back to the join code the moment the last station leaves, so the screen always
+// says which of the two things the person should be doing.
+void showConnected(const String& headline, const String& detail) {
+  startPanel();
+  lcd.fillScreen(kPaper);
+
+  // kInk is white and would vanish here. Both lines are the accent blue, the
+  // detail a size smaller rather than a lighter colour, because there is no
+  // muted tone that stays legible on white at size 1 on this panel.
+  lcd.setTextColor(kAccent, kPaper);
+  const int headlineLines = wrappedCenteredText(headline, 80, kAccent, 3, 30, 2);
+  if (detail.length() > 0) {
+    wrappedCenteredText(detail, 80 + headlineLines * 30 + 16, kAccent, 2, 22, 3);
   }
 }
 

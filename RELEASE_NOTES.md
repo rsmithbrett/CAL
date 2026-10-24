@@ -23,6 +23,21 @@ dated heading after.
 
 ## Unreleased
 
+### The display says when your phone has joined — CAL
+
+While a display is waiting to be set up it shows the code to scan. The moment
+a phone joins, the screen turns white and says so, in large blue letters, so
+somebody looking up from their handset can tell the join worked from across
+the room. If the phone drops off, the code comes back.
+
+The setup form also reads in the order people fill it: the network, then its
+password, then the box for a network that was not in the list. The password
+sat under that last box before, where it looked like it belonged to it.
+
+And the setup network's own key is printed under the code. The code already
+carries it and a camera fills it in, but a scan that did not work left nothing
+to type.
+
 ### The setup code names the display again, and the network joins — CAL
 
 The last build advertised every display as "Discover-Setup-0000" instead of
