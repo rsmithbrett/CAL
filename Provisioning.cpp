@@ -447,40 +447,10 @@ bool run() {
 
   const uint32_t deadline = millis() + Config::kProvisioningAbandonTimeoutMs;
   bool abandoned = false;
-  bool showingSetupCode = false;
   while (!credentialsAccepted) {
     if (millis() >= deadline) {
       abandoned = true;
       break;
-    }
-
-    // ONCE A PHONE IS ON, SHOW IT WHERE TO GO. The join QR has done its job the
-    // moment a station associates, and from there the household is waiting on
-    // iOS to raise a captive sheet. On 2026-10-24 an iPad was served the form
-    // three times in its first 32 seconds and showed none of them, then nothing
-    // for nine and a half minutes until somebody opened the address by hand.
-    //
-    // A QR of the address does not participate in captive detection at all. A
-    // camera reads it and opens the browser, which is the same on every phone
-    // and has nothing in it for Apple to change. The sheet is still welcome if
-    // it appears; this is what the screen says while it does not.
-    //
-    // Redrawn only on a transition, because showQr() clears and repaints the
-    // panel and doing that every 2 ms is a flicker, not a screen. Going back to
-    // the join code when the last station leaves is what lets a second phone,
-    // or the same one after a failed join, start over without a restart.
-    const bool someoneIsOn = WiFi.softAPgetStationNum() > 0;
-    if (someoneIsOn != showingSetupCode) {
-      showingSetupCode = someoneIsOn;
-      if (someoneIsOn) {
-        Journal::printf("[portal] a station joined at +%lu ms - showing the setup address",
-                        static_cast<unsigned long>(millis() - portalStartedMs));
-        Display::showQr(setupUrl, "Scan again to open setup");
-      } else {
-        Journal::printf("[portal] no stations left at +%lu ms - showing the join code again",
-                        static_cast<unsigned long>(millis() - portalStartedMs));
-        Display::showQr(joinPayload, "Scan to join WiFi", name, String("Open ") + setupUrl);
-      }
     }
 
     dns.processNextRequest();
