@@ -23,6 +23,15 @@ dated heading after.
 
 ## Unreleased
 
+### Why a phone could not join, in the log — CAL
+
+The display recorded that a phone arrived or left and nothing about why. It now
+records the reason the radio gives, so a refused password can be told apart
+from a phone that simply moved away.
+
+This changes the permanent CAL loader, not the downloadable App, and adds no
+behaviour: the setup network and the setup page work exactly as before.
+
 ### The setup network is protected again, as a bench test — CAL
 
 The temporary network a new display puts up while you set it up has had no

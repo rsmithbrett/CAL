@@ -122,6 +122,26 @@ void handleSave() {
               "<p>You can close this page and look at the device.</p>");
 }
 
+// The reason codes a setup AP actually sees, named. The full wifi_err_reason_t has
+// about fifty entries and compiling all of them in would cost flash to say nothing:
+// these are the ones that separate "wrong passphrase" from "the phone went away".
+//
+// 15 is the one to look for. A four-way handshake timeout is what a handset offering
+// a stale passphrase produces, and the wired install erases NVS, so the key changes
+// on every reflash while the SSID does not.
+const char* disconnectReason(uint8_t reason) {
+  switch (reason) {
+    case 2:   return "previous authentication no longer valid";
+    case 3:   return "the station left";
+    case 4:   return "inactive too long";
+    case 8:   return "the station left the network";
+    case 15:  return "four-way handshake timed out - usually a wrong passphrase";
+    case 23:  return "802.1X authentication failed";
+    case 204: return "handshake timeout";
+    default:  return "see wifi_err_reason_t";
+  }
+}
+
 void handleProbe() {
   // Mobile platforms probe a known URL to decide whether a network has
   // internet. Answered wrongly, the handset declares the network dead and
@@ -369,6 +389,35 @@ bool run() {
   // QR automatically, so the person still types no *setup AP* password.
   // Preserve the same SSID/password across power cycles to avoid stale phone
   // credentials. If NVS cannot retain the key, do not start an open portal.
+  // WHY A HANDSHAKE FAILED, NOT JUST THAT ONE DID. The station count says a phone
+  // arrived or left and nothing about why. The AP events carry a reason code, which
+  // separates a wrong passphrase from a phone that wandered off - and a wrong
+  // passphrase is the expected failure here, because the wired install runs
+  // erase_flash before write_flash. That wipes NVS, so every reflash mints a NEW key
+  // for the SAME SSID while the handset keeps offering the old one.
+  //
+  // Registered before softAP() so nothing is missed between the radio coming up and
+  // the first association. Logs the MAC's last three bytes only: enough to follow one
+  // handset across a session, and not the whole address of somebody's phone.
+  WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
+    const uint8_t* m = info.wifi_ap_staconnected.mac;
+    Journal::printf("[portal] station %02X:%02X:%02X associated", m[3], m[4], m[5]);
+  }, ARDUINO_EVENT_WIFI_AP_STACONNECTED);
+
+  WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
+    const uint8_t* m = info.wifi_ap_stadisconnected.mac;
+    const uint8_t why = info.wifi_ap_stadisconnected.reason;
+    Journal::printf("[portal] station %02X:%02X:%02X left, reason=%u (%s)",
+                    m[3], m[4], m[5], static_cast<unsigned>(why), disconnectReason(why));
+  }, ARDUINO_EVENT_WIFI_AP_STADISCONNECTED);
+
+  WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
+    const esp_ip4_addr_t ip = info.wifi_ap_staipassigned.ip;
+    Journal::printf("[portal] lease issued: %u.%u.%u.%u",
+                    ip.addr & 0xFF, (ip.addr >> 8) & 0xFF,
+                    (ip.addr >> 16) & 0xFF, (ip.addr >> 24) & 0xFF);
+  }, ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED);
+
   const String setupPassword = Identity::setupApPassword();
   if (setupPassword.length() != 24) {
     Journal::line("[portal] protected setup AP key unavailable - refusing open AP");
