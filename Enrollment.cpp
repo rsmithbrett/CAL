@@ -60,6 +60,7 @@ Result requestKey(const Service::Discovery& discovery) {
   // The wording shown on screen comes from the server rather than from a table
   // compiled in here. CAL cannot be updated to change a sentence.
   out.message = doc["message"] | "";
+  out.setupUrl = doc["setupUrl"] | "";
 
   const String state = doc["state"] | "";
   if (state == "issued") {

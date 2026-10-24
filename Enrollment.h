@@ -24,6 +24,14 @@ enum class State {
 struct Result {
   State state = State::Unknown;
   String message;  ///< server-supplied, shown verbatim - the server decides the wording
+
+  /// Where a person should go to claim this device, built WHOLE by the server and
+  /// never assembled here. Empty when the server did not send one, which is how an
+  /// installation that has not configured a template behaves, and what every build
+  /// before this one did. CAL is the binary that cannot be recovered remotely, so a
+  /// URL compiled into it would be permanent; a URL it is handed is a configuration
+  /// change. SELF_SERVICE_DEVICE_CLAIM_DESIGN.md section 7.
+  String setupUrl;
 };
 
 /// Reports this unit's hardware address and asks to be assigned a key.

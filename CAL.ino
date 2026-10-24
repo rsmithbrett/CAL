@@ -302,9 +302,20 @@ void awaitKeyAssignment(const Service::Discovery& discovery) {
     // as the subcaption drew it twice - the large line and the small one under
     // it were the same address in the 2026-10-24 photograph. Dropping it also
     // gives the server's message the third line it needs.
-    Display::showQr(Identity::macAddress(),
+    // THE QR CARRIES THE SERVER'S URL WHEN THERE IS ONE, and the bare MAC when there
+    // is not. Scanning a MAC opens nothing; scanning the URL opens the claim page for
+    // this device. The server builds the whole string - see Enrollment::Result::setupUrl
+    // for why CAL never assembles one.
+    //
+    // The MAC stays printed underneath either way. It is what an administrator matches
+    // the unit against, and it is the half of this screen a person reads rather than
+    // photographs.
+    Display::showQr(result.setupUrl.length() > 0 ? result.setupUrl
+                                                 : Identity::macAddress(),
                     result.message.length() > 0 ? result.message
-                                                : String("Waiting to be set up"));
+                                                : String("Waiting to be set up"),
+                    "",
+                    Identity::macAddress());
 
     // Broken into short slices rather than one long delay(), purely so the
     // serial 'd' command still answers during a wait that can last hours. The
