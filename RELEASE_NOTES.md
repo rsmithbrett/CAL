@@ -23,6 +23,33 @@ dated heading after.
 
 ## Unreleased
 
+### The setup network is protected again, as a bench test — CAL
+
+The temporary network a new display puts up while you set it up has had no
+password since 4 October. It has one again: a random key, different on every
+display, kept so the phone never holds a stale one. The QR code carries it, so
+there is still nothing to type — scan, tap Join, and the setup page follows.
+
+This is being measured rather than assumed. The password was taken off in
+October because it was thought to be slowing the phone down, and that was never
+actually timed. The display now records when a phone joins, so the two can be
+compared on the same bench with the same handset.
+
+### The code on the waiting screen opens the right page — CAL
+
+A display waiting to be set up showed a code that, when scanned, gave a camera
+nothing but a hardware address. It now opens the page where that display is
+claimed, when the server supplies the address; where it does not, the screen is
+unchanged.
+
+Both change the permanent CAL loader, not the downloadable App, and neither has
+run on hardware. To reflash over a cable, follow the wired install at
+https://discoveraroundme.com/cal
+
+---
+
+## v2026.10.24.0002
+
 ### Two changes aimed at the Wi-Fi setup form appearing by itself — CAL
 
 When a new display shows its Wi-Fi setup code, a phone that joins is supposed
