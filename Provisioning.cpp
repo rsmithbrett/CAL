@@ -526,7 +526,15 @@ bool run() {
   // page; show the actual HTTP URL for phones that do not.
   const String setupUrl = String("http://") + ip.toString();
   Journal::printf("[portal] manual browser URL: %s", setupUrl.c_str());
-  Display::showQr(joinPayload, "Scan to join WiFi", name, String("Open ") + setupUrl);
+  // THE KEY IS PRINTED, NOT ONLY ENCODED. The QR carries it and a camera fills it in,
+  // which is the whole point of the WPA2 change - but a scan that does not work left
+  // the household with a protected network and nothing to type, which is worse than
+  // the open AP it replaced. Found on the bench 2026-10-24: "there was no pass-phrase".
+  //
+  // It costs nothing to show. Anyone close enough to read it is close enough to scan
+  // the code beside it, which already contains it.
+  Display::showQr(joinPayload, "Scan to join WiFi", name,
+                  String("Key ") + setupPassword + "\n" + setupUrl);
 
   const uint32_t deadline = millis() + Config::kProvisioningAbandonTimeoutMs;
   bool abandoned = false;
