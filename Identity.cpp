@@ -2,6 +2,7 @@
 
 #include <Preferences.h>
 #include <esp_mac.h>
+#include <esp_random.h>
 
 #include "Journal.h"
 
@@ -15,6 +16,7 @@ Preferences prefs;
 constexpr const char* kNamespace = "cal";
 
 constexpr const char* kKeySecret = "secret";
+constexpr const char* kKeySetupApPw = "setupapkey";
 constexpr const char* kKeyNetCount = "netcount";
 constexpr const char* kKeyAppVer = "appver";
 constexpr const char* kKeyUpdReq = "updreq";
@@ -67,6 +69,43 @@ bool hasSecret() { return deviceSecret().length() > 0; }
 void saveSecret(const String& secret) { prefs.putString(kKeySecret, secret); }
 
 void clearSecret() { prefs.remove(kKeySecret); }
+
+// The setup SSID is MAC-derived and persists across boots. Its WPA2 password
+// must persist too: changing it on every boot would leave iPhones holding an
+// incorrect remembered password for the same SSID.
+String setupApPassword() {
+  const String saved = prefs.getString(kKeySetupApPw, "");
+  if (saved.length() == 24) {
+    bool validHex = true;
+    for (size_t i = 0; i < saved.length(); ++i) {
+      const char c = saved[i];
+      if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'))) {
+        validHex = false;
+        break;
+      }
+    }
+    if (validHex) return saved;
+  }
+
+  // Called only after WiFi.mode(WIFI_AP_STA), while the radio is initialized:
+  // hardware randomness is available. 12 bytes -> 24 uppercase hex chars.
+  uint8_t entropy[12];
+  esp_fill_random(entropy, sizeof(entropy));
+  char password[25];
+  for (size_t i = 0; i < sizeof(entropy); ++i) {
+    snprintf(password + i * 2, 3, "%02X", static_cast<unsigned>(entropy[i]));
+  }
+  password[24] = '\0';
+
+  // A read-back protects the rescue loader from starting an AP with a password
+  // that will unexpectedly differ next boot. Never fall back to open Wi-Fi.
+  if (prefs.putString(kKeySetupApPw, password) == 0 ||
+      prefs.getString(kKeySetupApPw, "") != password) {
+    Journal::line("[identity] could not persist protected setup AP key");
+    return "";
+  }
+  return String(password);
+}
 
 String macAddress() {
   uint8_t mac[6];
