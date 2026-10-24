@@ -23,7 +23,31 @@ dated heading after.
 
 ## Unreleased
 
-Nothing yet.
+### Two changes aimed at the Wi-Fi setup form appearing by itself — CAL
+
+When a new display shows its Wi-Fi setup code, a phone that joins is supposed
+to pop the setup form up on its own. On a recent iPad it did not: the display
+answered every request the iPad made, in a few milliseconds each, and the form
+still never appeared. The address printed under the code worked when typed by
+hand.
+
+Two things change in how the display answers, both aimed at that.
+
+The display's redirect now carries a short page rather than an empty one, and
+the network it hands out now names the setup address outright instead of
+leaving the phone to work out that there is one.
+
+Neither has been run on hardware. This changes the permanent CAL loader, not
+the downloadable App, so bench-test it before reflashing a deployed display.
+To reflash over a cable, follow the wired install at
+https://discoveraroundme.com/cal
+
+### A clearer enrollment screen — CAL
+
+The screen a display shows while it waits to be set up printed its own address
+twice, and cut the message off mid-word. It prints the address once and gives
+the message the room it needs.
+
 
 ---
 
