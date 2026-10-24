@@ -37,6 +37,32 @@ A hidden or missing home Wi-Fi name can also be entered manually.
 
 This changes the permanent CAL loader, not the downloadable App. It needs a
 bench hardware test before the loader is reflashed onto any deployed device.
+It was compiled before release and has not been run on hardware.
+
+To reflash a display over a cable, follow the wired install at
+https://discoveraroundme.com/cal
+
+### An aircraft card no longer says "Other" where an airline should be — App
+
+A flight whose airline isn't in our directory used to draw the word "Other"
+where the carrier's name goes. "Other" describes a gap in the list rather than
+anything about the flight, so the card now puts the callsign in the headline
+and leaves the airline line out. A small private aircraft still says
+"Private", because that tells you something real.
+
+Fifteen carriers were added at the same time, so a number of flights that used
+to fall into that gap now show their airline by name.
+
+### Aircraft cards hold the screen for the right length of time — App
+
+The display used to work out "is this plane close enough to linger on" from
+the search radius. Widening the search therefore made the aircraft card take
+the long twenty-second dwell far more often, which pushed every other card
+down the rotation. The server now says what counts as close, separately from
+how far it looks, and the display uses that.
+
+A display on older firmware keeps working the old way, so nothing has to be
+updated for this to be safe.
 
 
 ---
