@@ -30,6 +30,10 @@ void saveSecret(const String& secret);
 /// for why a rejected secret needs this and a rejected WiFi network does not.
 void clearSecret();
 
+// Stable device-specific WPA2 passphrase for the temporary setup network.
+// Stored in NVS; generated only once and never logged. Empty on storage failure.
+String setupApPassword();
+
 /// The hardware address, formatted as the server expects it. This is what
 /// identifies an unprovisioned unit, since it has nothing else to offer.
 String macAddress();

@@ -1715,3 +1715,36 @@ Recorded once, because several commits in this repository lean on it:
   and worth doing when a change is "the card must now be able to say X".
 - It proves nothing about heap, TLS, NVS, timing, the panel, or any decision
   taken at runtime. Every item on this page is on this page for that reason.
+
+
+## Bench-only WPA2 captive portal A/B (2026-10-24)
+
+This is an **experiment**, not an instruction to publish to the fleet. See
+[`WPA2_PORTAL_BENCH.md`](WPA2_PORTAL_BENCH.md) for design and recoverability rules.
+
+- Build the draft branch through the PR's `Build CAL bench image (no release)`
+  workflow and download **`CAL.ino.merged.bin`**, not the bare `CAL.ino.bin`.
+- On a USB-recoverable original ESP32 unit, flash through the site's opt-in
+  `/cal?bench=1` loader after its companion server PR has been reviewed and
+  deployed. The ordinary `/cal` page must still serve the current catalog CAL.
+- Verify first run generates a 24-hex WPA2 AP password in NVS. The same SSID
+  gets the same password after a power cycle. A storage failure must **fail
+  closed** and never create an open fallback AP.
+- iPhone Camera scans the *single* `WIFI:T:WPA;S:...;P:...;;` QR. Join should
+  not request manual typing of the setup AP password. Verify Wi-Fi association,
+  its timestamp, Apple `/hotspot-detect.html` requests, GET / responses, **visible
+  captive UI**, form save and successful home Wi-Fi join.
+- Cross-check Settings → Wi-Fi connection on the same handset. Collect at least
+  10 Camera-started trials per open and WPA2 variant; compare median/p90 visible
+  UI delay and completion, not merely HTTP-handler latency.
+- Inspect a wireless capture to verify the household password is not exposed
+  in plaintext over the air by the open temporary AP. Local provisioning remains
+  HTTP **over a WPA2-protected Wi-Fi link**, not HTTPS.
+- Test stale remembered-network handling, setup timeout, BOOT-hold recovery,
+  Android provisioning and old App handover. Record firmware artifact SHA,
+  original ESP32 model and iOS version for each result.
+
+**Do not conclude that WPA2 fixes iOS's Camera-to-CNA transition from successful
+compilation or from the presence of an HTTP request.** Require real physical
+phone testing and keep the two-stage QR/URL fallback available as a separate
+experiment.
