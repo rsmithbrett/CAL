@@ -23,24 +23,26 @@ dated heading after.
 
 ## Unreleased
 
-### Connecting a new display to Wi-Fi is easier to finish — CAL
+Nothing yet.
 
-When a new display shows its Wi-Fi setup QR, an iPhone no longer has to wait
-for the display to scan all nearby networks *after* the phone has connected.
-The display prepares the network list first, before it advertises its temporary
-setup network, so the configuration page can load straight away.
+---
 
-If the iPhone joins the setup network but doesn't open the setup form
-automatically, the display now shows a direct browser address underneath the
-QR code. Open that address on the phone while connected to the setup network.
-A hidden or missing home Wi-Fi name can also be entered manually.
+## v2026.10.24.0001
 
-This changes the permanent CAL loader, not the downloadable App. It needs a
-bench hardware test before the loader is reflashed onto any deployed device.
-It was compiled before release and has not been run on hardware.
+### A new display shows its setup form again — CAL
 
-To reflash a display over a cable, follow the wired install at
-https://discoveraroundme.com/cal
+v2026.10.23.0001 left an iPhone that scanned the Wi-Fi setup QR joined to the
+display's setup network with no form to fill in. The form comes back in this
+release.
+
+The setup address printed under the QR code, and the network name beside it,
+were drawn grey and blue on a blue panel, which made the two things somebody
+has to read off the screen the two hardest to read. Both are dark now.
+
+This changes the permanent CAL loader, not the downloadable App. Neither fix
+has been run on hardware, and a loader that misbehaves can't fix itself, so
+bench-test it before reflashing a deployed display. To reflash over a cable,
+follow the wired install at https://discoveraroundme.com/cal
 
 ### An aircraft card no longer says "Other" where an airline should be — App
 
@@ -64,6 +66,29 @@ how far it looks, and the display uses that.
 A display on older firmware keeps working the old way, so nothing has to be
 updated for this to be safe.
 
+---
+
+## v2026.10.23.0001
+
+### Connecting a new display to Wi-Fi is easier to finish — CAL
+
+When a new display shows its Wi-Fi setup QR, an iPhone no longer has to wait
+for the display to scan all nearby networks *after* the phone has connected.
+The display prepares the network list first, before it advertises its temporary
+setup network, so the configuration page can load straight away.
+
+If the iPhone joins the setup network but doesn't open the setup form
+automatically, the display now shows a direct browser address underneath the
+QR code. Open that address on the phone while connected to the setup network.
+A hidden or missing home Wi-Fi name can also be entered manually.
+
+This changes the permanent CAL loader, not the downloadable App. To reflash a
+display over a cable, follow the wired install at
+https://discoveraroundme.com/cal
+
+**This release also left the setup form unreachable on an iPhone**, which
+v2026.10.24.0001 fixes. A display still on this loader needs that one to
+finish Wi-Fi setup from a phone.
 
 ---
 
