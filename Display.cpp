@@ -49,6 +49,10 @@ constexpr uint32_t kWarn = 0xEDA100u;
 // page-style guard and anybody reading the palette can see there are two grounds.
 constexpr uint32_t kPaper = 0xFFFFFFu;
 
+// Near-black, for text on kPaper. Not pure black: a hair of blue sits better against
+// a ground this panel renders slightly blue anyway.
+constexpr uint32_t kSlate = 0x101828u;
+
 void clear() {
   lcd.fillScreen(kBg);
 }
@@ -361,6 +365,22 @@ void showStatus(const String& headline, const String& detail) {
 // Shown while a phone is associated to the setup access point. Provisioning swaps
 // back to the join code the moment the last station leaves, so the screen always
 // says which of the two things the person should be doing.
+// A tap, anywhere, rising edge only. LovyanGFX already drives this panel's touch
+// controller - the App reads it the same way - so nothing new is initialised here and
+// the loader gains a read rather than a driver.
+//
+// Rising edge, because the portal loop runs every 2 ms and a finger rests for a
+// couple of hundred: a level read would fire a hundred times per tap.
+bool wasTapped() {
+  static bool wasDown = false;
+  int32_t x = 0;
+  int32_t y = 0;
+  const bool isDown = lcd.getTouch(&x, &y);
+  const bool rising = isDown && !wasDown;
+  wasDown = isDown;
+  return rising;
+}
+
 void showConnected(const String& headline, const String& detail) {
   startPanel();
   lcd.fillScreen(kPaper);
@@ -368,10 +388,13 @@ void showConnected(const String& headline, const String& detail) {
   // kInk is white and would vanish here. Both lines are the accent blue, the
   // detail a size smaller rather than a lighter colour, because there is no
   // muted tone that stays legible on white at size 1 on this panel.
-  lcd.setTextColor(kAccent, kPaper);
-  const int headlineLines = wrappedCenteredText(headline, 80, kAccent, 3, 30, 2);
+  // kSlate, not kAccent. The panel carries a blue cast - kBg is pure black and
+  // photographs as deep blue - so white comes out pale blue and accent-blue text on
+  // it is blue on blue. Near-black against that ground is a far wider gap, and this
+  // is the screen somebody reads at arm's length across a room.
+  const int headlineLines = wrappedCenteredText(headline, 80, kSlate, 3, 30, 2);
   if (detail.length() > 0) {
-    wrappedCenteredText(detail, 80 + headlineLines * 30 + 16, kAccent, 2, 22, 3);
+    wrappedCenteredText(detail, 80 + headlineLines * 30 + 16, kSlate, 2, 22, 3);
   }
 }
 

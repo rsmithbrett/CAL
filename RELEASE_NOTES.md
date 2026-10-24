@@ -23,6 +23,23 @@ dated heading after.
 
 ## Unreleased
 
+### The setup screen follows along, and a tap brings the code back — CAL
+
+While somebody sets a display up, the screen now says where they have got to:
+the code to scan, then that their phone has joined, then that the setup page
+is opening, then that it is open and ready to fill in.
+
+It also stopped saying "Connected" after a phone had gone. It was reading a
+list the display keeps of who is joined, and a phone that goes to sleep or
+walks away stays on that list for a while. It now listens for the phone
+leaving, which happens straight away.
+
+And touching the screen puts the code back, whatever it was showing. If the
+screen is ever wrong, that is the way out.
+
+The writing on the white screen is near-black rather than blue, which is
+easier to read across a room on this panel.
+
 ### The display says when your phone has joined — CAL
 
 While a display is waiting to be set up it shows the code to scan. The moment

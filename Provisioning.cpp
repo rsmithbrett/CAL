@@ -81,8 +81,23 @@ String scanNetworksHtml() {
   return html;
 }
 
+// WHAT THE SCREEN SHOULD BE SAYING. Written by the WiFi task from the AP events and
+// by the HTTP handlers, read by the portal loop, which is the only thing that draws.
+//
+// A handler must never draw. The events run on the WiFi task and handleRoot on the
+// server's, while the loop may be repainting the panel from its own - two tasks into
+// one framebuffer is a corrupted screen, and an intermittent one.
+//
+// volatile and a plain enum: one aligned word, written from one place at a time and
+// read in the loop. Nothing here needs a mutex, and taking one on the WiFi task to
+// set a screen would be worse than the problem.
+enum class Stage : uint8_t { Waiting, Joined, Addressed, PageOpen };
+volatile Stage gStage = Stage::Waiting;
+
 void handleRoot() {
   const uint32_t started = millis();
+  // The form is being fetched: the person is looking at it now, not about to.
+  gStage = Stage::PageOpen;
   Journal::printf("[portal] root request at +%lu ms",
                   static_cast<unsigned long>(started - portalStartedMs));
   String page =
@@ -155,6 +170,7 @@ const char* disconnectReason(uint8_t reason) {
   }
 }
 
+
 void handleProbe() {
   // Mobile platforms probe a known URL to decide whether a network has
   // internet. Answered wrongly, the handset declares the network dead and
@@ -172,6 +188,9 @@ void handleProbe() {
   // iOS reads as leaving the captive context and answers by closing the sheet
   // rather than following it. A tidier address bar is not worth a setup
   // nobody can finish.
+  // A probe means the handset is reaching us. Only ever forward: a later probe
+  // must not walk the screen back from "the form is open" to "getting ready".
+  if (gStage == Stage::Joined) { gStage = Stage::Addressed; }
   ++probeRequests;
   if (probeRequests <= 8) {
     Journal::printf("[portal] probe %.60s at +%lu ms", server.uri().c_str(),
@@ -446,6 +465,7 @@ bool run() {
   WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
     const uint8_t* m = info.wifi_ap_staconnected.mac;
     Journal::printf("[portal] station %02X:%02X:%02X associated", m[3], m[4], m[5]);
+    gStage = Stage::Joined;
   }, ARDUINO_EVENT_WIFI_AP_STACONNECTED);
 
   WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
@@ -453,6 +473,11 @@ bool run() {
     const uint8_t why = info.wifi_ap_stadisconnected.reason;
     Journal::printf("[portal] station %02X:%02X:%02X left, reason=%u (%s)",
                     m[3], m[4], m[5], static_cast<unsigned>(why), disconnectReason(why));
+    // THE EVENT, NOT THE POLLED COUNT. softAPgetStationNum reads the association
+    // table, which keeps a phone that walked away until the AP ages it out - 53
+    // seconds in one measured case on 2026-10-24, during which the screen said
+    // Connected to nobody. The deauth is immediate.
+    gStage = Stage::Waiting;
   }, ARDUINO_EVENT_WIFI_AP_STADISCONNECTED);
 
   WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
@@ -460,6 +485,7 @@ bool run() {
     Journal::printf("[portal] lease issued: %u.%u.%u.%u",
                     ip.addr & 0xFF, (ip.addr >> 8) & 0xFF,
                     (ip.addr >> 16) & 0xFF, (ip.addr >> 24) & 0xFF);
+    if (gStage == Stage::Joined) { gStage = Stage::Addressed; }
   }, ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED);
 
   const String setupPassword = Identity::setupApPassword();
@@ -532,6 +558,10 @@ bool run() {
   Journal::printf("[portal] manual browser URL: %s", setupUrl.c_str());
   Display::showQr(joinPayload, "Scan to join WiFi", name, String("Open ") + setupUrl);
 
+  // A second portal run in one boot starts from the code again, whatever the last
+  // one left behind.
+  gStage = Stage::Waiting;
+
   const uint32_t deadline = millis() + Config::kProvisioningAbandonTimeoutMs;
   bool abandoned = false;
   int lastStationCount = 0;
@@ -545,7 +575,7 @@ bool run() {
   // and repaint the whole panel, and doing that every 2 ms is a flicker rather than
   // a screen. Going back to the code when the last station leaves is what lets a
   // second phone, or the same one after it drops, start again without a restart.
-  bool showingConnected = false;
+  Stage drawnStage = Stage::Waiting;
   while (!credentialsAccepted) {
     // iOS may associate, fetch the captive page and never bring CNA onscreen.
     // Association timing gives a firm baseline for comparing Camera/Settings.
@@ -557,14 +587,35 @@ bool run() {
       lastStationCount = stationCount;
     }
 
-    const bool someoneIsOn = stationCount > 0;
-    if (someoneIsOn != showingConnected) {
-      showingConnected = someoneIsOn;
-      if (someoneIsOn) {
-        Display::showConnected("Connected", "Look on your phone to choose WiFi");
-      } else {
-        Display::showQr(joinPayload, "Scan to join WiFi", name,
-                        String("Key ") + setupPassword);
+    // A TAP ANYWHERE PUTS THE CODE BACK. The screen can be wrong - a phone that
+    // slept leaves us saying Connected until the deauth arrives - and this is the
+    // way out that needs no explanation and cannot make anything worse.
+    if (Display::wasTapped()) {
+      Journal::printf("[portal] tapped at +%lu ms - showing the code again",
+                      static_cast<unsigned long>(millis() - portalStartedMs));
+      gStage = Stage::Waiting;
+    }
+
+    // ONE PLACE DRAWS. The events and the HTTP handlers only set the stage; this
+    // repaints when it changes. Both calls clear the whole panel, so redrawing on
+    // every pass would be a flicker rather than a screen.
+    const Stage stage = gStage;
+    if (stage != drawnStage) {
+      drawnStage = stage;
+      switch (stage) {
+        case Stage::Joined:
+          Display::showConnected("Connected", "Getting the setup page ready");
+          break;
+        case Stage::Addressed:
+          Display::showConnected("Connected", "Opening the setup page");
+          break;
+        case Stage::PageOpen:
+          Display::showConnected("Choose your WiFi", "The setup page is open on your phone");
+          break;
+        case Stage::Waiting:
+          Display::showQr(joinPayload, "Scan to join WiFi", name,
+                          String("Key ") + setupPassword);
+          break;
       }
     }
     if (millis() >= deadline) {

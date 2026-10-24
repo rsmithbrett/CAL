@@ -46,6 +46,10 @@ void showQr(const String& payload, const String& caption, const String& subCapti
 /// Shown while a phone is joined to the setup access point: dark-on-light, so the
 /// join reads as having worked from across a room. Provisioning swaps back to the
 /// join code when the last station leaves.
+/// True once per tap, anywhere on the panel. Rising edge: the portal loop runs every
+/// 2 ms and a finger rests for a couple of hundred.
+bool wasTapped();
+
 void showConnected(const String& headline, const String& detail = "");
 
 /// Progress during a firmware download. Percent is 0-100.
