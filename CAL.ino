@@ -298,10 +298,13 @@ void awaitKeyAssignment(const Service::Discovery& discovery) {
                       "An administrator must re-issue its key.");
     }
 
+    // No third argument. showQr prints the payload itself, so passing the MAC
+    // as the subcaption drew it twice - the large line and the small one under
+    // it were the same address in the 2026-10-24 photograph. Dropping it also
+    // gives the server's message the third line it needs.
     Display::showQr(Identity::macAddress(),
                     result.message.length() > 0 ? result.message
-                                                : String("Waiting to be set up"),
-                    Identity::macAddress());
+                                                : String("Waiting to be set up"));
 
     // Broken into short slices rather than one long delay(), purely so the
     // serial 'd' command still answers during a wait that can last hours. The

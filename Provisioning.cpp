@@ -146,7 +146,12 @@ void handleProbe() {
   }
   sendNoCacheHeaders();
   server.sendHeader("Location", "/", true);
-  server.send(302, "text/plain", "");
+  // A BODY, NOT AN EMPTY ONE. This redirect carried a zero-length body until
+  // 2026-10-24. Espressif's own CaptivePortal example sends text with its 302,
+  // and an iPad that received seven of these, each answered in 3 ms, still never
+  // put the form on screen. A body costs nothing and removes one difference
+  // between this portal and the reference one.
+  server.send(302, "text/plain", "redirect to the WiFi setup page");
 }
 
 }  // namespace
@@ -380,6 +385,32 @@ bool run() {
   }
 
   const IPAddress ip = WiFi.softAPIP();
+
+  // DHCP OPTION 114, RFC 8910 - the thing a hotel does that this did not.
+  // Handed to the phone in its DHCP lease, it names the portal outright instead
+  // of leaving iOS to infer one from probe answers. The core builds the URI as
+  // "http://" plus the softAP address, so it is this device and nothing else.
+  //
+  // NOT standards-complete, and that is stated rather than hidden: RFC 8910's
+  // option points at an RFC 8908 API endpoint, which must be HTTPS serving
+  // application/captive+json. A device on 192.168.4.1 cannot hold a certificate
+  // for a name anybody trusts, so this advertises a plain HTTP page and a client
+  // is free to ignore it. It is additive: the wildcard DNS and the probe handlers
+  // below are unchanged and still carry the phones that do.
+  //
+  // THE VERSION GUARD IS LOGGED, NOT SILENT. enableDhcpCaptivePortal() exists
+  // only from ESP-IDF 5.4.2, and CAL is built against two different trees - CI
+  // builds stock, this workstation carries an overlay. Compiled out with no line
+  // in the journal, a binary that never had the call would read exactly like one
+  // where the option did not help.
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 2)
+  const bool advertised = WiFi.AP.enableDhcpCaptivePortal();
+  Journal::printf("[portal] DHCP option 114 advertising http://%s: %s",
+                  ip.toString().c_str(), advertised ? "accepted" : "refused by the core");
+#else
+  Journal::line("[portal] DHCP option 114 not compiled in - this core predates ESP-IDF 5.4.2");
+#endif
+
   dns.start(53, "*", ip);
 
   server.on("/", handleRoot);
@@ -413,11 +444,42 @@ bool run() {
 
   const uint32_t deadline = millis() + Config::kProvisioningAbandonTimeoutMs;
   bool abandoned = false;
+  bool showingSetupCode = false;
   while (!credentialsAccepted) {
     if (millis() >= deadline) {
       abandoned = true;
       break;
     }
+
+    // ONCE A PHONE IS ON, SHOW IT WHERE TO GO. The join QR has done its job the
+    // moment a station associates, and from there the household is waiting on
+    // iOS to raise a captive sheet. On 2026-10-24 an iPad was served the form
+    // three times in its first 32 seconds and showed none of them, then nothing
+    // for nine and a half minutes until somebody opened the address by hand.
+    //
+    // A QR of the address does not participate in captive detection at all. A
+    // camera reads it and opens the browser, which is the same on every phone
+    // and has nothing in it for Apple to change. The sheet is still welcome if
+    // it appears; this is what the screen says while it does not.
+    //
+    // Redrawn only on a transition, because showQr() clears and repaints the
+    // panel and doing that every 2 ms is a flicker, not a screen. Going back to
+    // the join code when the last station leaves is what lets a second phone,
+    // or the same one after a failed join, start over without a restart.
+    const bool someoneIsOn = WiFi.softAPgetStationNum() > 0;
+    if (someoneIsOn != showingSetupCode) {
+      showingSetupCode = someoneIsOn;
+      if (someoneIsOn) {
+        Journal::printf("[portal] a station joined at +%lu ms - showing the setup address",
+                        static_cast<unsigned long>(millis() - portalStartedMs));
+        Display::showQr(setupUrl, "Scan again to open setup");
+      } else {
+        Journal::printf("[portal] no stations left at +%lu ms - showing the join code again",
+                        static_cast<unsigned long>(millis() - portalStartedMs));
+        Display::showQr(joinPayload, "Scan to join WiFi", name, String("Open ") + setupUrl);
+      }
+    }
+
     dns.processNextRequest();
     server.handleClient();
     delay(2);

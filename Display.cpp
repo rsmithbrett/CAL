@@ -402,7 +402,13 @@ void showQr(const String& url, const String& caption, const String& subCaption,
   }
 
   int y = y0 + side + 8;
-  y += wrappedCenteredText(caption, y, kInk, 2, 22, 2) * 22;
+  // THREE LINES WHEN NOTHING FOLLOWS, TWO WHEN SOMETHING DOES. The enrollment
+  // screen drew "Waiting for an administrator to set t..." on 2026-10-24: the
+  // server writes that message and a two-line cap cut it mid-word. The screen
+  // has room for a third line only when there is no subcaption under it, so the
+  // cap is computed rather than raised, and nothing can run off the panel.
+  const int captionLines = subCaption.length() > 0 ? 2 : 3;
+  y += wrappedCenteredText(caption, y, kInk, 2, 22, captionLines) * 22;
   if (subCaption.length() > 0) {
     // The network name, which somebody matches against a list on a phone.
     // kAccent is blue and this panel is blue: a photograph of a real unit on
