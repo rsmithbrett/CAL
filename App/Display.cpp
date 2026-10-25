@@ -2717,24 +2717,33 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // number, which is the guarantee that matters when the alternative is a
   // silently wrong dollar figure.
   //
-  // The 10px each row leaves between its label and its value is the gap, not
-  // slack. 116 + 174 and 80 + 210 both come to 290 of the 300 available.
-  constexpr int kEstimateLabelWidth = 116;
-  constexpr int kEstimateValueWidth = 174;
-  constexpr int kRangeLabelWidth = 80;
-  constexpr int kRangeValueWidth = 210;
-
+  // The widths were 116 + 174 and 80 + 210, both 290 of the 300 a landscape
+  // panel has. A turned panel has 220, so the two boxes overlapped and the
+  // label was drawn under the value: a device photographed "Rang$325K - $904K".
+  //
+  // The label is measured rather than the value, because the two labels are
+  // fixed strings and the value is the part that varies: giving each label
+  // exactly what it needs leaves the dollar figures everything else.
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
 
-  layoutLine("Est. value", kCardMargin, firstRowY, kEstimateLabelWidth, muted(),
+  const int rowWidth = rightX - kCardMargin;
+  constexpr int kRowGap = 10;
+
+  const int estimateLabelWidth = static_cast<int>(lcd.textWidth("Est. value")) + 2;
+  const int estimateValueWidth = rowWidth - estimateLabelWidth - kRowGap;
+
+  const int rangeLabelWidth = static_cast<int>(lcd.textWidth("Range")) + 2;
+  const int rangeValueWidth = rowWidth - rangeLabelWidth - kRowGap;
+
+  layoutLine("Est. value", kCardMargin, firstRowY, estimateLabelWidth, muted(),
              "homevalue.estimate.label");
-  layoutLine(estimateText, rightX, firstRowY, kEstimateValueWidth, ink(), "homevalue.estimate",
+  layoutLine(estimateText, rightX, firstRowY, estimateValueWidth, ink(), "homevalue.estimate",
              Align::Right);
 
-  layoutLine("Range", kCardMargin, secondRowY, kRangeLabelWidth, muted(),
+  layoutLine("Range", kCardMargin, secondRowY, rangeLabelWidth, muted(),
              "homevalue.range.label");
-  layoutLine(rangeText, rightX, secondRowY, kRangeValueWidth, ink(), "homevalue.range",
+  layoutLine(rangeText, rightX, secondRowY, rangeValueWidth, ink(), "homevalue.range",
              Align::Right);
 
   // detail (price-per-square-foot and the RentCast refresh date) is optional

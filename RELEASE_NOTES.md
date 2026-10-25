@@ -23,7 +23,13 @@ dated heading after.
 
 ## Unreleased
 
-_Nothing yet._
+### The home value card fits a turned panel — App
+
+On a display standing on its end, the estimate's range read "Rang$325K -
+$904K": the word and the figure were drawn on top of each other. They now
+share the row by measuring what each needs, so the label reads "Range" and
+the figure is whole.
+
 
 ---
 
