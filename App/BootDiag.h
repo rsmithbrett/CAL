@@ -10,9 +10,9 @@
 /// diagnoses that used to be indistinguishable from the server, where the only
 /// evidence was `totalBoots` going up. But it flattens every deliberate restart
 /// into a single `SOFTWARE_RESET`, and this firmware has several for entirely
-/// unrelated reasons: the heap watchdog, an OTA install, and a return to CAL
-/// for reprovisioning. Knowing a restart was deliberate without knowing which
-/// one it was is barely better than not knowing.
+/// unrelated reasons: the cannot-draw watchdog, an OTA install, and a return to
+/// CAL for reprovisioning. Knowing a restart was deliberate without knowing
+/// which one it was is barely better than not knowing.
 ///
 /// The obvious answer - "read the log line the firmware printed just before it
 /// restarted" - is exactly wrong, and was the first version of this file. That
@@ -23,12 +23,12 @@
 ///
 /// So the reason reads as a pair:
 ///
-///   POWERON_RESET  + NONE       power was applied; nothing to explain
-///   SOFTWARE_RESET + LOW_HEAP   the heap watchdog restarted us
-///   SOFTWARE_RESET + OTA        restarting to install an update
-///   PANIC_RESET    + NONE       we crashed; no intent was recorded, by
-///                               definition, because nobody meant to
-///   BROWNOUT_RESET + NONE       the supply sagged; not a software fault
+///   POWERON_RESET  + NONE         power was applied; nothing to explain
+///   SOFTWARE_RESET + CANNOT_DRAW  the cannot-draw watchdog restarted us
+///   SOFTWARE_RESET + OTA          restarting to install an update
+///   PANIC_RESET    + NONE         we crashed; no intent was recorded, by
+///                                 definition, because nobody meant to
+///   BROWNOUT_RESET + NONE         the supply sagged; not a software fault
 ///
 /// A `NONE` beside a `SOFTWARE_RESET` is itself a finding worth acting on: it
 /// means something restarted this device deliberately without recording why,

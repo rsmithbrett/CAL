@@ -1757,7 +1757,7 @@ void checkResponseOomWatchdog() {
       static_cast<unsigned long>(selfRestartFloorMs()));
   Log::flushNow();
   AppService::stashTimeForFastReboot();
-  // LOW_HEAP_RESPONSE, not UNREACHABLE, and not the bare LOW_HEAP the draw
+  // LOW_HEAP_RESPONSE, not UNREACHABLE, and not the CANNOT_DRAW the draw
   // watchdog uses either. This is the field the whole change is for: an operator
   // reading /diag or the reboot heatmap sees a memory incident on a device whose
   // connection was fine, instead of a connectivity incident on a device whose
