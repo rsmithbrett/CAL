@@ -734,7 +734,39 @@ full height, the same dimensions CYD-Dickey settled on for the same panel
 the 320px panel (106px) per side after real-device feedback that the
 original width was too easy to miss and made edge navigation feel
 unresponsive, matching the approved backlog suggestion to enlarge this
-touch area. The inner ~108px strip is what a card has left to itself. On a card
+touch area. The inner ~108px strip is what a card has left to itself.
+
+**Navigation is left and right on every panel, and the strip narrows instead
+of the axis turning.** Left is previous and right is next, which is the
+direction reading runs in English, Spanish and French — the three languages
+this product ships. A turned panel used to page on its top and bottom edges,
+and the reason was arithmetic rather than a principle: two 106px strips on a
+240px-wide panel leave a 28px middle, so the pair would have taken almost the
+whole glass. The strip is sized per panel now.
+
+| Panel | Strip per side | Middle left to the card |
+|---|---|---|
+| 320 wide (lying flat) | 106px — a third of the width | 108px |
+| 240 wide (standing on its end) | 60px — a quarter of the width | 120px |
+
+60px is the figure, and two things set it. The first is the touch floor: 44px
+is the smallest target this product accepts, and a 26px one found by eye on
+`/content` is on record as a defect, so 60 clears the floor by 16px with the
+strip running the full 320px height — width is the only dimension under any
+pressure. The second is what the middle has to hold. Half the panel is the
+line, and 120px holds the moon card's hero disc (120px across, centred) whole
+with the strips either side of it. A centred line of text is wider than that
+on either panel — the sun card's own detail line already spans the full 300px
+band in landscape — so this is not a promise that no text sits under a strip.
+It is a promise that half the glass still reads as the card rather than as
+navigation.
+
+The zones are the **image's** left and right, not the board's.
+`lcd.getTouch()` returns coordinates in the active rotation, so x=0 is
+whichever edge the reader sees on the left, and a panel that came up the other
+way round moves the card and the strip together. `Touch.cpp` reads the width
+from `Display` rather than storing it, so nothing has to tell it which way the
+panel is mounted. On a card
 showing a banner it has one further meaning: a tap there clears an announcement
 that has no button to press, which *A notice with no button is cleared by touching
 it* at the end of this file covers.
@@ -990,7 +1022,8 @@ swapped out from under them.
 Geometry is entirely the device's: a row of up to three buttons along the
 bottom, from x=8 to x=312 and ending at y=220, clearing the corner clock's
 bottom-right patch above it. It does *not* need to clear the reverse/forward
-edge strips on either side (now ~106px, up from an original 16px) the way it
+edge strips on either side (now 106px lying flat and 60px on end, up from an
+original 16px) the way it
 looks like it should — `Touch.cpp`'s `poll()` checks action-button zones
 before the edge strips, so a tap landing inside a button rect is always a
 button press regardless of how close it sits to the physical edge; real

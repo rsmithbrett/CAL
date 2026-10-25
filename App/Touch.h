@@ -27,6 +27,11 @@
 /// bottom corners are checked before its `x < 16` / `x > 304` edge zones for
 /// exactly that reason.
 ///
+/// The strips are on the left and the right of whatever the panel is, and the
+/// width is read from the panel rather than written down here: 106px on a 320px
+/// panel and 60px on a 240px one. See `edgeZoneWidth()` in the .cpp for what
+/// sets the second figure.
+///
 /// Still deliberately ignorant of *cards*: this file knows about rectangles
 /// and screen edges, not about what advancing means. CardManager owns that.
 ///

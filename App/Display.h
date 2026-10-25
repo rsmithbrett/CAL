@@ -49,9 +49,9 @@ void begin(Orientation orientation = Orientation::Landscape);
 /// The panel this display is drawing on, after any rotation begin() applied.
 ///
 /// <para>Read rather than assumed: a caller that needs to know the shape of the
-/// glass - Touch, deciding which edges navigation lives on - must not carry its
-/// own copy of 320. That duplicate is what would make a rotated display draw
-/// correctly and navigate wrongly.</para>
+/// glass - Touch, sizing its navigation strips - must not carry its own copy of
+/// 320. That duplicate is what would make a rotated display draw correctly and
+/// navigate wrongly.</para>
 int screenWidth();
 int screenHeight();
 

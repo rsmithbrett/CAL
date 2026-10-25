@@ -23,6 +23,31 @@ dated heading after.
 
 ## Unreleased
 
+### A display standing on its end pages left and right — App
+
+Tap the left side of the screen to go back and the right side to go forward,
+the same as a display lying flat. It used to page on the top and bottom edges
+instead, which nobody expects and which nothing on the screen told you about.
+The side strips are narrower on a display standing on its end, so the card
+still has the middle half of the glass to itself, and the small arrows at the
+edges now point at the strips that do something.
+
+### The moon card fits a display standing on its end — App
+
+Turned on its end, the card used to cut off almost everything it said: the
+heading, the name of the phase, and all four of the phases coming up. It shows
+a big moon now with the phase under it, how much of it is lit, and today's
+date. The four upcoming phases stay on a display lying flat, where there's
+room for them.
+
+### A long town name no longer prints through the temperature — App
+
+On the forecast card the town sat on the same few rows of pixels as the big
+number under it, so anything longer than about "Annapolis, MD" ran across the
+72. The town gets its own row now and the number starts below it. This
+happened whichever way the display was turned, not only on one standing on its
+end.
+
 ### A house that isn't shown no longer costs the details — App
 
 On a display standing on its end with a button on the card, the house was

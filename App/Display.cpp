@@ -483,16 +483,17 @@ constexpr int kChevronWidth = 7;
 /// constant would capture 240 before begin() ever ran.
 int kChevronCentreY() { return kScreenH / 2; }
 
-// Mirrors Touch.cpp's own kEdgeZoneWidth exactly (see that file's remarks on
-// why 106, not the original 16). Duplicated rather than shared for the same
+// Mirrors Touch.cpp's own edgeZoneWidth() exactly, both figures (see that
+// file's remarks on why 106 rather than the original 16, and why 60 rather
+// than 106 on a narrow panel). Duplicated rather than shared for the same
 // reason kScreenW here and kScreenWidth there are already duplicated instead
 // of one file including the other's constant: Touch stays ignorant of
 // Display and Display stays ignorant of Touch's hit-testing internals.
 // flashNavEdge() below needs this to fill exactly the rect Touch::poll()
-// reads taps from, so if one of these two numbers ever changes without the
+// reads taps from, so if one of these numbers ever changes without the
 // other, a flash would light up a strip narrower or wider than the zone that
 // actually responds to a finger.
-constexpr int kEdgeZoneWidth = 106;
+int kEdgeZoneWidth() { return kScreenH > kScreenW ? 60 : 106; }
 
 void clear() {
   lcd.fillScreen(bg());
@@ -3381,11 +3382,85 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
   if (k > 1.0) { k = 1.0; }
   const bool waxingRight = phase < 0.5;
 
+  // One reading of the clock for both the time in the corner and the date the
+  // narrow card carries, so the two cannot name different days. The format is
+  // showClockDate()'s - see ClockDate.cpp, which spells %A and %B for the same
+  // reason this does.
+  const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
+  struct tm localTm;
+  gmtime_r(&localNow, &localTm);
+  char dateBuffer[32];
+  strftime(dateBuffer, sizeof(dateBuffer), "%A, %B %d", &localTm);
+
+  // A NARROW PANEL SAYS "MOON" AND LETS THE DATE LINE CARRY THE DAY. "TODAY"
+  // and a spelled-out date beside each other say the same thing twice, and the
+  // heading is the one of the two that can be shortened without losing a fact.
+  const bool narrow = kScreenH > kScreenW;
+
   lcd.setTextSize(1);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  layoutLine("MOON · TODAY", kCardMargin, 12, kWidthBeside(kClockColumnWidth()),
-             sky.heading, "moon.heading",
+  layoutLine(narrow ? "MOON" : "MOON · TODAY", kCardMargin, 12,
+             kWidthBeside(kClockColumnWidth()), sky.heading, "moon.heading",
              Align::Left, kTransparentText);
+
+  // Top right, like the design and like the sun card, rather than drawClock()
+  // bottom right in ink() - a colour picked for a white card, over the row the
+  // landscape card spends on the upcoming phases.
+  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kContentRight(), 12,
+             kClockColumnWidth(), sky.heading, "moon.clock", Align::Right, kTransparentText);
+
+  char pctBuffer[24];
+  snprintf(pctBuffer, sizeof(pctBuffer), "%d%% illuminated", static_cast<int>(k * 100.0 + 0.5));
+
+  if (narrow) {
+    // THE DISC OVER THE NAME, AND NO UPCOMING ROW. The landscape card sets its
+    // disc beside the phase name and spends its lower half on the four phases
+    // still to come; both are landscape compositions. Beside the disc there are
+    // 132px for the name, and "Waning Crescent" is 199 at 12pt, so the name
+    // ellipsized; the upcoming row's four columns are 55px each against a
+    // "First qtr" of 68, so each of those ellipsized too. Stacking fixes the
+    // name. The upcoming row comes off instead of being stacked under it - four
+    // more rows of arithmetic the card can work out but nobody asked this panel
+    // for, against a date it had never shown at all.
+    //
+    // MEASURED UP FROM THE FLOOR, not down from the top, so an action bound to
+    // the card takes the pixels out of the disc rather than pushing the date
+    // off the glass.
+    const int dateY = contentBottom() - 18;
+    const int illuminatedY = dateY - 22;
+    const int nameY = illuminatedY - 28;
+
+    // The disc takes the space between the heading and the name, capped so it
+    // keeps a clear margin either side of the glass: 144px across a 240px panel
+    // leaves 48, well outside the 10px card margin, so it never reads as
+    // touching an edge. An action bound to the card lowers the floor and the
+    // cap stops applying - the space itself becomes the smaller of the two.
+    const int discTop = 36;
+    const int discBottom = nameY - 8;
+    int radius = (discBottom - discTop) / 2;
+    if (radius > 72) {
+      radius = 72;
+    }
+    const int discCy = (discTop + discBottom) / 2;
+
+    drawMoonDisc(kContentCentreX(), discCy, radius, k, waxingRight, sky.lit, sky.dark,
+                 sky.outline);
+
+    if (phaseName.length() > 0) {
+      lcd.setFont(&fonts::FreeSansBold12pt7b);
+      layoutLine(phaseName, kContentCentreX(), nameY, kContentWidth(), sky.name, "moon.phase",
+                 Align::Centre, kTransparentText);
+    }
+
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    layoutLine(pctBuffer, kContentCentreX(), illuminatedY, kContentWidth(), sky.detail,
+               "moon.illuminated", Align::Centre, kTransparentText);
+    layoutLine(dateBuffer, kContentCentreX(), dateY, kContentWidth(), sky.detail, "moon.date",
+               Align::Centre, kTransparentText);
+
+    restoreDefaultFont();
+    return;
+  }
 
   drawMoonDisc(53, 74, 30, k, waxingRight, sky.lit, sky.dark, sky.outline);
 
@@ -3395,8 +3470,6 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
                Align::Left, kTransparentText);
   }
 
-  char pctBuffer[24];
-  snprintf(pctBuffer, sizeof(pctBuffer), "%d%% illuminated", static_cast<int>(k * 100.0 + 0.5));
   lcd.setFont(&fonts::FreeSansBold9pt7b);
   // The buffer straight through rather than String(pctBuffer): the temporary
   // that wrapping cost was a heap allocation on the draw path for a string
@@ -3497,17 +3570,6 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
     layoutLine(whenBuffer, upcomingX, 202, kUpcomingColumn, sky.detail, "moon.upcoming.when",
                Align::Centre, kTransparentText);
   }
-
-  // Top right, like the design and like the sun card, rather than drawClock()
-  // bottom right in ink() - a colour picked for a white card, over the row this
-  // one spends on the upcoming phases.
-  const time_t localNow = time(nullptr) + static_cast<time_t>(gUtcOffsetMinutes) * 60;
-  struct tm localTm;
-  gmtime_r(&localNow, &localTm);
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
-  layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kContentRight(), 12,
-             kClockColumnWidth(),
-             sky.heading, "moon.clock", Align::Right, kTransparentText);
 
   restoreDefaultFont();
 }
@@ -4398,6 +4460,12 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   drawCardBanner("FORECAST", kForecastBanner, 130);
   const int bodyWidth = kContentWidth();
 
+  // The row the location and, on a tight card, the freshness stamp share. Three
+  // pixels under the banner rather than six: the hero below is measured from
+  // this row's bottom, so every pixel the header gives back is a pixel of air
+  // between the number and the phrase under it.
+  constexpr int kLocationY = 25;
+
   // Day/Night, in the banner row's own right-hand corner where this card's
   // old "N of M" paging caption used to sit - there is nothing left to page
   // through now that every period draws on one slide, but the flag itself
@@ -4483,8 +4551,8 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // they would all see needs a reason none of them have. But it is worth
   // writing down what that reservation is actually worth, because the tight
   // row cannot afford to pay it twice: the Day/Night tag is on the row ABOVE.
-  // It is drawn at y=4 and 9pt reports a 22px fontHeight(), so its ink ends at
-  // 26 against a location whose box starts at 28. They cannot collide. The
+  // It is drawn at y=4 and a 9pt line inks 18 rows, so its ink ends at 21
+  // against a location whose box starts at kLocationY. They cannot collide. The
   // reservation guards against a future font change, not against any string
   // this card can be handed today.
   //
@@ -4542,7 +4610,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
     const int locationWidth =
         tight ? bodyWidth - updatedReservation : bodyWidth - kDayNightWidth;
     if (locationWidth > 0) {
-      layoutLine(location, kCardMargin, 28, locationWidth, muted(), "forecast.location");
+      layoutLine(location, kCardMargin, kLocationY, locationWidth, muted(), "forecast.location");
     } else {
       // printf rather than verbose: the card was asked to say where it is and
       // has drawn nothing at all, which is a defect rather than a routine
@@ -4567,7 +4635,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // left to right in source order; they cannot overlap either way, because the
   // location box was narrowed by exactly this much.
   if (tight && updatedInkWidth > 0) {
-    layoutLine(updatedAt, kContentRight(), 28, updatedInkWidth, muted(),
+    layoutLine(updatedAt, kContentRight(), kLocationY, updatedInkWidth, muted(),
                "forecast.updated", Align::Right);
   }
 
@@ -4577,15 +4645,33 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // room. The period name itself ("Today"/"Tonight") is not drawn anywhere
   // on this card: it would either duplicate the Day/Night tag above or the
   // "Now" label the strip's own first column already carries.
+  //
+  // THE HERO STARTS WHERE THE LOCATION ROW'S INK ENDS, and it did not. The
+  // location row is a 9pt line, which is 18px tall, so at kLocationY = 25 its
+  // last inked row is 42 and kHeroInkTop is 43. The icon was drawn at cy=60
+  // with a 24px radius, putting the sun's longest ray at 38, and the
+  // temperature's box at y=40 puts the digits' tops at 42 - both inside the row
+  // above them. Any location wide enough to reach x=16 printed through the icon
+  // and any reaching x=76 printed through the number. "Severna Park, MD" is
+  // 152px at 9pt and reaches 162, so the comma and the MD landed on the 72.
+  //
+  // It was never a narrow-panel fault, though that is where it was seen. The
+  // two rows are at the same y on both panels and collide identically on both.
+  //
+  // 24pt digits ink from two rows below the box they are given (a 35px baseline
+  // against a 34px cap height), which is why the temperature's y sits two above
+  // the band and the icon's centre a radius below it. The condition phrase does
+  // not move: the digits bottom at kHeroInkTop + 33 and it starts at 80, which
+  // is the same four pixels of air they have always had.
   constexpr int kHeroIconCx = 40;
-  constexpr int kHeroIconCy = 60;
   constexpr int kHeroIconRadius = 24;
-  drawWeatherIcon(classifyCondition(currentShortForecast), kHeroIconCx, kHeroIconCy,
-                  kHeroIconRadius, currentIsDaytime);
+  const int kHeroInkTop = kLocationY + 18;
+  drawWeatherIcon(classifyCondition(currentShortForecast), kHeroIconCx,
+                  kHeroInkTop + kHeroIconRadius, kHeroIconRadius, currentIsDaytime);
 
   lcd.setFont(&fonts::FreeSansBold24pt7b);
   lcd.setTextSize(1);
-  drawTemperature(currentTemperature, currentUnit, 76, 40,
+  drawTemperature(currentTemperature, currentUnit, 76, kHeroInkTop - 2,
                   gIsDaytime ? kForecastBanner : ink(), /*ringRadius=*/8);
 
   // The condition phrase - one truncated line, not the old two-tier wrap.
@@ -5051,32 +5137,11 @@ void drawNavAffordances(bool canReverse) {
   // arrow reads as a solid blob, and the point of these is to be noticed
   // without being loud.
   //
-  // THEY MARK THE EDGES THAT ACTUALLY NAVIGATE, which is not always left and
-  // right. Touch::poll() takes the panel's long axis, so a portrait display
-  // pages on its top and bottom edges - and a chevron left on the side would
-  // point at a strip that does nothing while the live one went unmarked. An
-  // affordance pointing at the wrong place is worse than no affordance.
+  // THEY MARK THE EDGES THAT NAVIGATE, which is the left and the right of
+  // whatever the panel is. Touch::poll() narrows its strips on a panel standing
+  // on its end rather than moving them to the top and bottom, so one pair of
+  // chevrons marks both shapes.
   const uint32_t reverseColour = canReverse ? muted() : bg();
-  const bool vertical = kScreenH > kScreenW;
-
-  if (vertical) {
-    // Up for previous along the top, down for next along the bottom, both
-    // centred across the width the way the side pair centre down the height.
-    const int centreX = kContentCentreX();
-
-    const int topTipY = 5;
-    lcd.drawLine(centreX - kChevronHalfHeight, topTipY + kChevronWidth, centreX, topTipY,
-                 reverseColour);
-    lcd.drawLine(centreX, topTipY, centreX + kChevronHalfHeight, topTipY + kChevronWidth,
-                 reverseColour);
-
-    const int bottomTipY = kScreenH - 6;
-    lcd.drawLine(centreX - kChevronHalfHeight, bottomTipY - kChevronWidth, centreX, bottomTipY,
-                 muted());
-    lcd.drawLine(centreX, bottomTipY, centreX + kChevronHalfHeight, bottomTipY - kChevronWidth,
-                 muted());
-    return;
-  }
 
   const int leftTipX = 5;
   lcd.drawLine(leftTipX + kChevronWidth, kChevronCentreY() - kChevronHalfHeight, leftTipX,
@@ -5106,37 +5171,13 @@ void flashNavEdge(bool isForward, bool canReverse) {
   // taken out of a real button until some unrelated later redraw happened
   // to fix it.
   //
-  // AND IT FLASHES THE EDGE THAT NAVIGATES, which on a portrait panel is the
-  // top or the bottom. This painted a side strip unconditionally, so a portrait
-  // display answered a tap on its bottom edge by flashing a tall bar down its
-  // right-hand side - a response at the opposite end of the glass from the
-  // finger that caused it, which reads as a fault rather than as feedback.
-  // drawNavAffordances() above already draws its chevrons on the live edges;
-  // this is the same decision, made from the same two numbers.
-  const bool vertical = kScreenH > kScreenW;
-
-  int x = 0;
-  int y = 0;
-  int w = 0;
-  int h = 0;
-
-  if (vertical) {
-    w = kScreenW;
-    h = kEdgeZoneWidth;
-    y = isForward ? kScreenH - kEdgeZoneWidth : 0;
-
-    // Clipped off the button row for the reason stated above, which in portrait
-    // bites rather than being merely prudent: the bottom edge zone starts at
-    // y=214 and the button row at y=240, so an unclipped forward flash would
-    // cover the top third of every button on the card.
-    if (y + h > kButtonRowY()) {
-      h = kButtonRowY() - y;
-    }
-  } else {
-    w = kEdgeZoneWidth;
-    h = kButtonRowY();
-    x = isForward ? kScreenW - kEdgeZoneWidth : 0;
-  }
+  // The strip is the one Touch::poll() reads from, narrower on a panel standing
+  // on its end and on the same two edges either way, so the glass lights up
+  // under the finger that caused it.
+  const int w = kEdgeZoneWidth();
+  const int h = kButtonRowY();
+  const int x = isForward ? kScreenW - w : 0;
+  const int y = 0;
 
   if (w <= 0 || h <= 0) {
     drawNavAffordances(canReverse);

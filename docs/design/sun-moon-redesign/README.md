@@ -8,7 +8,9 @@ Four reference images in this folder, two per card:
 | Moon | `moon-forecast-day.svg` | `moon-forecast.svg` |
 
 All four are 320×240, which is the panel exactly, so a coordinate in the SVG is
-a coordinate on the device.
+a coordinate on the device — **on a panel lying flat**. A panel standing on its
+end is 240×320 and the moon card draws something else there; see "The moon card
+on a turned panel" below.
 
 ## Why there are two of each
 
@@ -64,6 +66,58 @@ Five copies of terminator arithmetic would be five places for the lit side to
 end up on the wrong edge, and the quarters are the case that catches it: first
 quarter waxes right, last quarter left, so passing the current phase's direction
 to every disc draws both the same way round.
+
+## The moon card on a turned panel
+
+**The disc goes over the name, and the four upcoming phases come off.** Both the
+disc-beside-the-name and the four-across row are landscape compositions, and
+neither survives a 240px panel. Measured against the vendored glyph table:
+
+| Line | Column it was given | What it needs | Before |
+|---|---|---|---|
+| `MOON · TODAY` | 122px | 137px at 9pt | ellipsized |
+| Phase name | 132px | 199px at 12pt for "Waning Crescent" | ellipsized |
+| `X% illuminated` | 132px | 146px at 9pt for "100% illuminated" | wrapped to two lines |
+| Each upcoming column | 55px | 68px at 9pt for "First qtr" | all four ellipsized |
+
+So the narrow card is the disc, the phase name, how much of it is lit, and the
+date — centred, each on its own full-width row. The widest of them,
+"Waning Crescent" at 199px, fits the 220px band with room over.
+
+**The upcoming phases are dropped rather than stacked into a column.** Four
+rows of "in 12d" is a lot of card for arithmetic the device works out rather
+than something a household asked this panel for, and the space buys a disc
+nearly three times the area of the landscape hero. Landscape keeps them: the
+row fits there, and nothing about it reads badly in the shot.
+
+**The date is new, and it replaces the word TODAY.** The heading said
+`MOON · TODAY` and the card never showed a date. A heading saying TODAY beside a
+line saying Saturday, October 25 says the same thing twice, so the narrow
+heading is just `MOON`. The date is `strftime("%A, %B %d")` off the same local
+time the card's own corner clock reads, which is the format and the source
+`showClockDate()` already uses, so the two cards cannot name different days.
+Landscape keeps `MOON · TODAY` and shows no date.
+
+**Measured up from the content floor, not down from the top.** The date sits
+18px above whatever `contentBottom()` says, the lit line 22 above that and the
+name 28 above that; the disc takes what is left between the heading and the
+name, capped at a 72px radius so it keeps a clear margin either side of the
+glass. An action bound to the card lowers the floor by 80px and the disc gives
+up the pixels, rather than the date being pushed off the bottom.
+
+Photographed at both sizes, four phases each, with and without an action bound:
+`docs/ia/screens/panel-moonphase-*.png` in the server repository, written by
+`DAM_PANEL_SHOTS=1 dotnet test tests/DiscoverAroundMe.DeviceSimulator.Tests`.
+
+**The sun card beside it does not have this problem.** Every string on it is
+given a column helper rather than a landscape constant — `kWidthBeside`,
+`kHalfColumnWidth`, `kContentWidth` — so each one narrows with the panel.
+"SUN · TODAY" measures 119px against the 122px the heading gets on a 240px
+panel, the labels and the daylight line have room, and the one line that
+outgrows its column is the 18pt time: "6:47 AM" is 130px against a 110px half
+column, so the fitting ladder draws it at 12pt instead. That is a hero losing a
+size on a narrow panel, not a card that stops reading, and it is logged when it
+happens. Left alone.
 
 ## Not verified on hardware
 

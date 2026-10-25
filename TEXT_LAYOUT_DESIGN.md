@@ -1101,3 +1101,27 @@ Nothing here has been on hardware. The arithmetic is a fifth agreeing model of
 LovyanGFX and still a model. What a device has to settle is whether a 12pt
 sunrise beside a 9pt label still reads as the hero of its row, and whether
 `100%` over `illuminated` reads as one fact or two.
+
+## 11. Three of these were a layout, not a fitting problem, 2026-10-25
+
+`moon.heading`, `moon.phase`, `moon.illuminated` and `moon.upcoming.name` were
+all in the list above because the moon card put them in columns measured
+against a 320px panel: a heading beside a clock, a 132px text column beside a
+disc, and four 55px columns across the lower half. No fitting rule rescues a
+68px string in a 55px column. The card lays out differently on a narrow panel
+now — see `docs/design/sun-moon-redesign` — and on that panel these four each
+get the full 220px band and none of them ellipsizes. The entries above still
+describe the landscape card, where they still fit as recorded.
+
+**And one of these was never a fitting problem at all.** The forecast card's
+location row and its hero temperature collided: a 9pt line inks 18 rows, so a
+location at y=28 inked down to y=45, and the hero icon started at 36 and the
+24pt digits at 42. `forecast.location` never ellipsized on a landscape panel
+and never reported anything; it simply printed through the number. "Severna
+Park, MD" is 152px and reaches x=162, and the digits start at x=76.
+
+A fitting ladder cannot see that, because nothing overflowed. What sees it is a
+picture of the card, which is what `DAM_PANEL_SHOTS=1 dotnet test
+tests/DiscoverAroundMe.DeviceSimulator.Tests` now writes for this card and the
+moon card at both panel sizes. The hero is measured off the header's own ink
+now: `kHeroInkTop = kLocationY + 18`.
