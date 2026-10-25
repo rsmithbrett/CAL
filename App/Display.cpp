@@ -4140,12 +4140,15 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   // Below zero means the source stated none, and nothing is drawn in its
   // place. A $0 on a wall is worse than a blank.
   if (priceWillDraw && y + kPriceHeight <= gContentBottom) {
-    char priceBuf[24];
-    snprintf(priceBuf, sizeof(priceBuf), "$%ld", static_cast<long>(price));
+    // formatPrice, not a bare snprintf. This drew "$514000" on a real card while
+    // formatPrice sat in this same file grouping "$450,000" correctly for the other
+    // listing card. Six figures without separators is the number a household is
+    // being asked to read at a glance.
+    const String priceText = formatPrice(price);
     lcd.setFont(&fonts::FreeSansBold18pt7b);
     const TextBox priceBox{static_cast<int16_t>(kContentLeft()), static_cast<int16_t>(y),
                            static_cast<int16_t>(textWidth), 34, 1, Align::Left};
-    layoutText(priceBuf, priceBox, ink(), "featuredlistings.price");
+    layoutText(priceText.c_str(), priceBox, ink(), "featuredlistings.price");
     y += 38;
   }
 

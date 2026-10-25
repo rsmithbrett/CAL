@@ -23,6 +23,11 @@ dated heading after.
 
 ## Unreleased
 
+### A featured listing price reads as money again — App
+
+A price on a featured listing card showed as '$514000'. It now reads
+'$514,000', the same as every other price the display draws.
+
 ### The setup screen follows along, and a tap brings the code back — CAL
 
 While somebody sets a display up, the screen now says where they have got to:
