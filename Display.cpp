@@ -142,9 +142,13 @@ void centeredText(const String& text, int y, uint32_t colour, uint8_t size) {
 //      board whose largest contiguous block decides whether TLS can open.
 constexpr size_t kWrapLineBytes = 128;
 
+// background defaults to kBg, because every caller but one draws on the dark panel.
+// It is a parameter at all because showConnected draws on kPaper, and this function
+// used to fill each glyph cell with kBg regardless - which on a white screen painted
+// the text as solid black bars. Seen on a real unit 2026-10-24.
 int wrappedCenteredText(const String& text, int y, uint32_t colour, uint8_t size,
-                        int lineHeight, int maxLines) {
-  lcd.setTextColor(colour, kBg);
+                        int lineHeight, int maxLines, uint32_t background = kBg) {
+  lcd.setTextColor(colour, background);
   lcd.setTextSize(size);
   lcd.setTextDatum(top_center);
 
@@ -392,9 +396,9 @@ void showConnected(const String& headline, const String& detail) {
   // photographs as deep blue - so white comes out pale blue and accent-blue text on
   // it is blue on blue. Near-black against that ground is a far wider gap, and this
   // is the screen somebody reads at arm's length across a room.
-  const int headlineLines = wrappedCenteredText(headline, 80, kSlate, 3, 30, 2);
+  const int headlineLines = wrappedCenteredText(headline, 80, kSlate, 3, 30, 2, kPaper);
   if (detail.length() > 0) {
-    wrappedCenteredText(detail, 80 + headlineLines * 30 + 16, kSlate, 2, 22, 3);
+    wrappedCenteredText(detail, 80 + headlineLines * 30 + 16, kSlate, 2, 22, 3, kPaper);
   }
 }
 
