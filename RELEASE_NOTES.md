@@ -23,13 +23,36 @@ dated heading after.
 
 ## Unreleased
 
+### A house that isn't shown no longer costs the details — App
+
+On a display standing on its end with a button on the card, the house was
+left off and two lines of detail went with it, so the card said less than it
+did before it could show houses at all. It measures the space first now. If
+the house fits, the card draws the house and one line of detail; if it
+doesn't, the card draws all three lines.
+
+Same answer when a picture won't open. On a display standing on its end the
+details come back into the space the house was going to take, and on one
+lying flat the words spread back across the whole card instead of sitting in
+a narrow column beside a gap.
+
+### A picture stays put when a display is short of memory — App
+
+A display with no room to open a picture threw its copy away and fetched it
+again, and the new copy failed the same way next time that card came round.
+It keeps the copy now and tries again later, so a display in that state stops
+downloading the same house over and over.
+
+---
+
+## v2026.10.25.0005
+
 ### The home value card fits a turned panel — App
 
 On a display standing on its end, the estimate's range read "Rang$325K -
 $904K": the word and the figure were drawn on top of each other. They now
 share the row by measuring what each needs, so the label reads "Range" and
 the figure is whole.
-
 
 ---
 

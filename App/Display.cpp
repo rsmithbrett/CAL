@@ -4062,17 +4062,28 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   //
   // Empty means there is none, or that caching it failed - FeaturedListings.cpp has already decided
   // and said so in the log. Either way the layout below simply gets the full width back.
-  const int pictureWidth = (!gPortrait && cachedImageId.length() > 0) ? kScaledWidth(104) : 0;
-  const int textRight = kContentRight() - (pictureWidth > 0 ? pictureWidth + kColumnGap : 0);
+  const int bandWidth = (!gPortrait && cachedImageId.length() > 0) ? kScaledWidth(104) : 0;
+  const int bandLeft = kContentRight() - bandWidth;
+  const int bandHeight = gContentBottom - 48;
 
-  if (pictureWidth > 0
-      && !Assets::drawCachedInRect(cachedImageId, textRight + kColumnGap, 40, pictureWidth,
-                                   gContentBottom - 48)) {
-    // Decoded nothing, which leaves the band empty and the text already narrowed around it.
-    // Logged rather than recovered from: the card still reads, and the id is what somebody
-    // needs to find the file. Assets tracks decode failures by id for the same reason.
-    Log::printf("[display] featuredlistings picture '%s' did not decode", cachedImageId.c_str());
+  // A band that decodes keeps its width; one that does not hands it back. The draw runs
+  // before anything measures, so the column, the fact budget and every block below are laid
+  // out against what is on the glass rather than against what was cached. A failed decode
+  // clears the band first, because a decode can paint scanlines before it stops.
+  bool bandDrawn = false;
+  if (bandWidth > 0) {
+    bandDrawn = Assets::drawCachedInRect(cachedImageId, bandLeft, 40, bandWidth, bandHeight);
+    if (!bandDrawn) {
+      // The id is what somebody needs to find the file. Assets tracks decode failures by id
+      // for the same reason.
+      Log::printf("[display] featuredlistings picture '%s' did not decode - the text takes the "
+                  "band back", cachedImageId.c_str());
+      lcd.fillRect(bandLeft, 40, bandWidth, bandHeight, bg());
+    }
   }
+
+  const int pictureWidth = bandDrawn ? bandWidth : 0;
+  const int textRight = kContentRight() - (pictureWidth > 0 ? pictureWidth + kColumnGap : 0);
 
   int y = 40;
 
@@ -4183,36 +4194,65 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   // household reads off a wall, and bathrooms and living area are the rows that
   // cost a turned panel its house and crowd a landscape one. A card with no
   // picture keeps all of them, because the space is there and nothing else wants it.
+  //
+  // What a picture costs is measured before it is charged. A turned panel works out
+  // the height one fact row would leave under it, and keeps every row when that
+  // height is under the floor - the rows and the picture are the same pixels, and
+  // giving them up buys nothing when what they buy is skipped. Landscape takes its
+  // band out of the width rather than the height, so its question is whether the
+  // band decoded, which is already answered above.
+  constexpr int kMinPictureHeight = 56;
+  constexpr int kFactRowStep = 20;
+
   const bool hasPicture = cachedImageId.length() > 0;
-  const bool portraitPicture = gPortrait && hasPicture;
-  const uint8_t factBudget = hasPicture && factCount > 1 ? 1 : factCount;
+  const uint8_t factsBesidePicture = factCount > 1 ? 1 : factCount;
+  const int factBottomBesidePicture =
+      (factsBesidePicture > 0 && y + 18 <= factFloor) ? y + kFactRowStep * factsBesidePicture : y;
+  const int pictureHeightBesideOneFact = factFloor - (factBottomBesidePicture + 6);
+
+  const bool portraitPicture =
+      gPortrait && hasPicture && pictureHeightBesideOneFact >= kMinPictureHeight;
+  const bool landscapePicture = !gPortrait && pictureWidth > 0;
+  const uint8_t factBudget = (portraitPicture || landscapePicture) ? factsBesidePicture : factCount;
+
   if (factBudget < factCount) {
-    Log::printf("[display] featuredlistings: %d of %d fact rows held back for the "
-                "portrait picture", factCount - factBudget, factCount);
+    Log::printf("[display] featuredlistings: %d of %d fact rows held back for the picture",
+                factCount - factBudget, factCount);
+  } else if (gPortrait && hasPicture && !portraitPicture) {
+    Log::printf("[display] featuredlistings portrait picture skipped - %dpx under the last fact "
+                "row, %d needed, so every fact row is drawn",
+                pictureHeightBesideOneFact, kMinPictureHeight);
   }
 
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
-  for (uint8_t i = 0; i < factBudget; ++i) {
-    if (y + 18 > factFloor) {
-      Log::printf("[display] featuredlistings: no room for the '%s' row - %dpx between y=%d and "
-                  "the freshness line reserved at y=%d",
-                  facts[i].label, factFloor - y, y, factFloor);
-      break;
+  // Draws facts[first, limit) down the text column, advancing y past each row it
+  // draws and stopping at the floor. Called a second time with the held-back rows
+  // when the picture they paid for does not reach the glass.
+  auto drawFactRows = [&](uint8_t first, uint8_t limit) {
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    for (uint8_t i = first; i < limit; ++i) {
+      if (y + 18 > factFloor) {
+        Log::printf("[display] featuredlistings: no room for the '%s' row - %dpx between y=%d and "
+                    "the freshness line reserved at y=%d",
+                    facts[i].label, factFloor - y, y, factFloor);
+        break;
+      }
+
+      // The value takes the width it needs and the label takes the rest, capped so a long
+      // value cannot squeeze the label out. Half each drew "Bathroo..." beside a value two
+      // characters wide. Both are measured against the TEXT column, not the panel, so a
+      // value right-aligns to the edge of the text rather than underneath the picture.
+      const int valueWidth =
+          min(static_cast<int>(lcd.textWidth(facts[i].value)) + 2, (textWidth * 2) / 3);
+      const int labelWidth = textWidth - valueWidth - 8;
+      layoutLine(facts[i].label, kContentLeft(), y, labelWidth, muted(),
+                 "featuredlistings.fact.label", Align::Left);
+      layoutLine(facts[i].value, textRight, y, valueWidth, ink(),
+                 "featuredlistings.fact.value", Align::Right);
+      y += kFactRowStep;
     }
+  };
 
-    // The value takes the width it needs and the label takes the rest, capped so a long
-    // value cannot squeeze the label out. Half each drew "Bathroo..." beside a value two
-    // characters wide. Both are measured against the TEXT column, not the panel, so a
-    // value right-aligns to the edge of the text rather than underneath the picture.
-    const int valueWidth =
-        min(static_cast<int>(lcd.textWidth(facts[i].value)) + 2, (textWidth * 2) / 3);
-    const int labelWidth = textWidth - valueWidth - 8;
-    layoutLine(facts[i].label, kContentLeft(), y, labelWidth, muted(),
-               "featuredlistings.fact.label", Align::Left);
-    layoutLine(facts[i].value, textRight, y, valueWidth, ink(),
-               "featuredlistings.fact.value", Align::Right);
-    y += 20;
-  }
+  drawFactRows(0, factBudget);
 
   // Freshness last, and it earns its place on this card specifically: a
   // property alert is true when it is sent and says nothing about availability
@@ -4231,20 +4271,29 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   // Drawn last, so the text keeps its full width and every block above has already
   // taken the height it needs. The floor is factFloor rather than gContentBottom, so
   // the freshness line keeps the pixels it reserved. Below kMinPictureHeight it is
-  // left out rather than drawn as a sliver.
+  // left out rather than drawn as a sliver, and the budget above has already asked
+  // that question against this same arithmetic.
+  //
+  // A decode can only answer here, after the rows are spent, because the height it
+  // is handed is what the words left over. So a refusal hands the space back: the
+  // rectangle is cleared, since a decode can paint scanlines before it stops, and
+  // the held-back rows are drawn into it down to the floor.
   if (portraitPicture) {
-    constexpr int kMinPictureHeight = 56;
     const int pictureTop = y + 6;
     const int pictureHeight = factFloor - pictureTop;
-    if (pictureHeight >= kMinPictureHeight) {
-      if (!Assets::drawCachedInRect(cachedImageId, kContentLeft(), pictureTop,
-                                    kContentRight() - kContentLeft(), pictureHeight)) {
-        Log::printf("[display] featuredlistings portrait picture '%s' did not decode",
-                    cachedImageId.c_str());
+    const int pictureWidthAcross = kContentRight() - kContentLeft();
+    const bool drew =
+        pictureHeight >= kMinPictureHeight
+        && Assets::drawCachedInRect(cachedImageId, kContentLeft(), pictureTop, pictureWidthAcross,
+                                    pictureHeight);
+    if (!drew) {
+      Log::printf("[display] featuredlistings portrait picture '%s' not drawn in %dpx at y=%d - "
+                  "the held fact rows take the space back",
+                  cachedImageId.c_str(), pictureHeight, pictureTop);
+      if (pictureHeight > 0) {
+        lcd.fillRect(kContentLeft(), pictureTop, pictureWidthAcross, pictureHeight, bg());
       }
-    } else {
-      Log::printf("[display] featuredlistings portrait picture skipped - %d px left, %d needed",
-                  pictureHeight, kMinPictureHeight);
+      drawFactRows(factBudget, factCount);
     }
   }
 
@@ -5357,11 +5406,21 @@ constexpr size_t kRgb565MaxBandBytes = kRgb565BandLines * 320 * kRgb565BytesPerP
 /// answers a bare false either way - see notePngDrawFailure().
 bool gLastDrawFailedOnAllocation = false;
 
-/// The inflate window a PNG decoder keeps, fixed by the format at 32KB.
+/// The one contiguous block a PNG decode needs, measured at 45,056 bytes.
+///
+/// `lgfx_pngle_new()` takes the whole `_pngle_t` in a single malloc, so the
+/// figure is the struct: `lz_buf[32768]` for the format's inflate window, a
+/// 10,992-byte `lgfx_tinfl_decompressor`, `read_buf[512]`, `out_buf[64]` and the
+/// fields around them. The 32KB window alone is about three quarters of it, and
+/// a heap that can hand over 34,804 bytes and no more cannot start a decode.
+///
+/// Display.h, CardManager.cpp, App.ino and HeapRatchet.h quote the same
+/// allocation as 44KB or 45,056, and docs/rgb565-feasibility.md carries the
+/// hardware measurement.
 ///
 /// Every device in the fleet except one sits below this figure for a largest
 /// contiguous 8BIT block, which is why a logo draws on some and not others.
-constexpr size_t kPngInflateWindowBytes = 32768;
+constexpr size_t kPngDecoderScratchBytes = 45056;
 
 /// Reads a refused PNG draw as an allocation failure when the heap could not
 /// have held the decoder, and records the figures either way.
@@ -5381,16 +5440,16 @@ constexpr size_t kPngInflateWindowBytes = 32768;
 /// a TLS session and an SD write on every cycle forever.</para>
 void notePngDrawFailure(const char* where) {
   const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  const bool tooSmallToHaveDecoded = largest < kPngInflateWindowBytes;
+  const bool tooSmallToHaveDecoded = largest < kPngDecoderScratchBytes;
 
   gLastDrawFailedOnAllocation = tooSmallToHaveDecoded;
 
-  Log::printf("[display] %s refused a png - 8BIT largest=%u free=%u, inflate window needs %u, "
-              "reading this as %s",
+  Log::printf("[display] %s refused a png - 8BIT largest=%u free=%u, the decoder needs %u in one "
+              "block, reading this as %s",
               where,
               static_cast<unsigned>(largest),
               static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
-              static_cast<unsigned>(kPngInflateWindowBytes),
+              static_cast<unsigned>(kPngDecoderScratchBytes),
               tooSmallToHaveDecoded ? "no room to decode, keeping the cache"
                                     : "a file that will not decode");
 }
