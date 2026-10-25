@@ -1015,7 +1015,7 @@ card will draw at `y + 44`, and on this panel the answer is usually
 | `sunmoon.sunrise` | 170..212 | detail at 202 | none, overlaps by 10 |
 | `moon.phase` | 56..85 | illuminated at 78 | none, overlaps by 7 |
 | `moon.upcoming.name` | 184..206 | the day count at 202 | none, overlaps by 4 |
-| `moon.illuminated` | 78..100 | the phases label at 122 | **22** |
+| `moon.illuminated` | 78..96 | the next-event line at 100 | none |
 | `board.home` | top+9..top+31 | the next row at top+35 | none landscape, 21 profile |
 | `listings.distance` | the footer row | the content floor | none |
 | `tides.high` | top+28..top+70 | the row's own bottom | none |
@@ -1027,9 +1027,11 @@ zero. Zero means a one-line slot, which is what all 88 call sites mean today,
 so no site changes behaviour until its geometry has been measured and written
 down. Width already works exactly this way and nobody expects it to be guessed.
 
-`moon.illuminated` is the one site with measured room, and it's wired. The rest
-keep their slot. That is a smaller result than fifteen fixes and it is the size
-the panel actually has.
+`moon.illuminated` was the one site with measured room, and it was wired. It no
+longer is: the 22px under it went to the next moonrise or moonset at y=100 (see
+section 12), and the room there was only ever spent on a profile panel the card
+now lays out differently for. Every site keeps a one-line slot. That is a
+smaller result than fifteen fixes and it is the size the panel actually has.
 
 ### 10c. A word with nowhere to break is not wrapped, it's sawn in half
 
@@ -1125,3 +1127,21 @@ picture of the card, which is what `DAM_PANEL_SHOTS=1 dotnet test
 tests/DiscoverAroundMe.DeviceSimulator.Tests` now writes for this card and the
 moon card at both panel sizes. The hero is measured off the header's own ink
 now: `kHeroInkTop = kLocationY + 18`.
+
+## 12. The row under `moon.illuminated` went to a line, 2026-10-25
+
+The landscape moon card now draws the next moonrise or moonset at y=100, in the
+22px that section 10b measured as `moon.illuminated`'s room below. Nothing was
+lost: the room was reserved for a second line of "100% illuminated" that a
+320px panel never needs, because the column there is 212px and the string's
+longest form is 146. It was measured when this code drew both panel sizes from
+these constants, and the card has taken a separate branch for a 240px panel
+since (`docs/design/sun-moon-redesign`), where that line gets the full content
+width and does not wrap either.
+
+So `moon.illuminated` goes back to a one-line slot, `moon.nextevent` takes
+100..118, and `NEXT MAJOR PHASES` stays at 122 with the four upcoming phases
+below it untouched. The widest string the new label draws is
+`No moonrise or set`, at roughly 170px against the 212 it is given.
+`No moonrise or moonset` was the first wording and it ellipsized in that
+column, which the card's own shot caught.
