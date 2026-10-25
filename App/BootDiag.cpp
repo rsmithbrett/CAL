@@ -24,6 +24,11 @@ constexpr const char* kKeyCause = "cause";
 /// The largest contiguous 8-bit block at the moment a restart was decided on.
 /// NVS keys are capped at 15 characters, hence the short name.
 constexpr const char* kKeyCauseBlock = "causeblk";
+/// Consecutive cannot-draw restarts. Not cleared by logResetReason() the way the
+/// cause is - this one has to accumulate across boots, which is the only way a
+/// watchdog that restarts the device can know how many times it has already
+/// tried. NVS keys are capped at 15 characters.
+constexpr const char* kKeyCannotDraw = "cdrawrst";
 
 /// What logResetReason() concluded, kept so lastRestartCause() can answer
 /// after the fact. Not read from NVS on demand: the key is cleared during
@@ -58,6 +63,13 @@ uint32_t gBootLargestFreeBlock = 0;
 /// travels over a session that works, and answers the question the lost line was
 /// asked: how much contiguous memory was left when this device gave up.
 uint32_t gLastRestartLargestFreeBlock = 0;
+
+/// RAM mirror of the cannot-draw restart count, so the once-a-minute health
+/// check that reads it does not open NVS once a minute for the life of the boot.
+/// The same mirroring App.ino does for the self-restart backoff steps, and for
+/// the same reason: a hot path reads it, a cold path writes it.
+uint8_t gCannotDrawRestarts = 0;
+bool gCannotDrawRestartsRead = false;
 
 /// The reason, in words, plus what it actually implies. The second half is the
 /// point: `ESP_RST_TASK_WDT` means nothing to someone who has not just been
@@ -149,6 +161,15 @@ const char* describeCause(RestartCause cause) {
       return "CAL_SELF_INSTALL";
     case RestartCause::OrientationChanged:
       return "ORIENTATION";
+    // Deliberately does NOT contain "LOW_HEAP", which is what LowHeapResponse
+    // above does to inherit the server's existing classification for free. The
+    // word is why this value exists: a run of failed card draws was reaching the
+    // server under a memory name. Until the server adds this token to
+    // RebootHeatmap.Classify()'s recovery branch it sorts as Deliberate rather
+    // than Recovery, which is a less wrong answer than the right colour under
+    // the wrong diagnosis.
+    case RestartCause::CannotDraw:
+      return "CANNOT_DRAW";
   }
   return "UNRECOGNISED";
 }
@@ -193,6 +214,7 @@ RestartCause takeRecordedCause() {
     case RestartCause::CalInstalledApp:
     case RestartCause::CalSelfInstall:
     case RestartCause::OrientationChanged:
+    case RestartCause::CannotDraw:
       return static_cast<RestartCause>(stored);
   }
   // A value this build does not recognise - most likely an older or newer
@@ -232,6 +254,58 @@ void recordBootHeap() {
 uint32_t bootLargestFreeBlock() { return gBootLargestFreeBlock; }
 
 uint32_t lastRestartLargestFreeBlock() { return gLastRestartLargestFreeBlock; }
+
+uint8_t cannotDrawRestarts() {
+  if (gCannotDrawRestartsRead) {
+    return gCannotDrawRestarts;
+  }
+  Preferences prefs;
+  if (!prefs.begin(kNvsNamespace, /*readOnly=*/true)) {
+    // Answered as zero and not latched, so the next call tries again. Zero is
+    // the direction that keeps the watchdog working: an unreadable counter must
+    // not read as a spent budget and turn the restart off on a device a restart
+    // might still fix.
+    Log::line("[boot] could not open NVS to read the cannot-draw restart count - reading it as 0");
+    return 0;
+  }
+  gCannotDrawRestarts = prefs.getUChar(kKeyCannotDraw, 0);
+  prefs.end();
+  gCannotDrawRestartsRead = true;
+  return gCannotDrawRestarts;
+}
+
+void recordCannotDrawRestart() {
+  const uint8_t next = cannotDrawRestarts() < UINT8_MAX
+                           ? static_cast<uint8_t>(cannotDrawRestarts() + 1)
+                           : UINT8_MAX;
+  Preferences prefs;
+  if (!prefs.begin(kNvsNamespace, /*readOnly=*/false)) {
+    Log::line("[boot] could not open NVS to count this cannot-draw restart - the next boot's cap "
+              "will not see it");
+    return;
+  }
+  prefs.putUChar(kKeyCannotDraw, next);
+  // Explicit, like recordRestartIntent()'s: the commit has to have happened by
+  // the time the reset lands.
+  prefs.end();
+  gCannotDrawRestarts = next;
+  gCannotDrawRestartsRead = true;
+}
+
+void clearCannotDrawRestarts() {
+  if (cannotDrawRestarts() == 0) {
+    return;
+  }
+  Preferences prefs;
+  if (!prefs.begin(kNvsNamespace, /*readOnly=*/false)) {
+    Log::line("[boot] could not open NVS to clear the cannot-draw restart count");
+    return;
+  }
+  prefs.putUChar(kKeyCannotDraw, 0);
+  prefs.end();
+  gCannotDrawRestarts = 0;
+  gCannotDrawRestartsRead = true;
+}
 
 void logResetReason() {
   const esp_reset_reason_t reason = esp_reset_reason();

@@ -2713,20 +2713,21 @@ disposable tag can no longer cost the permanent one.
   submitting credentials (`Config::kProvisioningAbandonTimeoutMs`), matching
   its documented contract - but "nothing has run on hardware" below applies
   to this exactly as much as everything else.
-- **The cannot-draw watchdog's restart has fired on a device, and probably
-  should not have.** This entry previously read "has never fired", and that is
-  no longer true: device 7 — which has **no SD card** — was observed rebooting
-  every ~11 minutes at 620-660 s uptime with `consecutive file-buffer alloc
-  failures=6/6`. The suspected mechanism is a false positive rather than
-  memory exhaustion, and a reboot cannot fix a missing card. **Not confirmed**,
-  and the two things needed to confirm it are in "Still open after tonight" at
-  the end of this file. The counter is also no longer what this entry once
-  described: it is `Display::consecutiveDrawFailures()`, incremented on any
-  failed draw, and the `[health]` line's "file-buffer alloc failures" wording
-  is stale — read it as "failed draws". That the three thresholds this replaces
-  each looked correct when read and were wrong when run is still the reason to
-  treat this trigger with suspicion; see "What the watchdog restarts on now"
-  near the end of this file.
+- **The cannot-draw watchdog's restart has fired on devices that no restart
+  could help, and that is now confirmed rather than suspected.** This entry read
+  "has never fired", then "probably should not have". Device 39 settled it: 31
+  restarts at roughly 21-minute intervals, `RestartLargestFreeBlockBytes` of
+  34,804 at essentially every one of them, and a single image-bearing card whose
+  airline-logo PNG needs 45,056 contiguous bytes against an all-time maximum
+  largest block of 36,852. The decode cannot succeed, there is no second picture
+  card to produce the successful draw that would clear the counter, and the
+  restart is therefore a loop by construction. Two things changed: the cause is
+  recorded as `CANNOT_DRAW` rather than `LOW_HEAP`, and the restarts are capped
+  at three in a row. The counter itself is sound - it is
+  `Display::consecutiveDrawFailures()`, and the `[health]` line's wording was
+  corrected earlier. See "What the watchdog restarts on now" near the end of
+  this file for the cap and for the argument each way on counting an allocation
+  refusal at all.
 - **The unreachability watchdog has never fired, and it self-restarts.** New
   tonight, and the most dangerous shape of thing in this firmware: it reboots
   the device on its own judgement. Its three guards are verified by reading
@@ -3699,14 +3700,41 @@ household's display on a number nobody can explain is worse than not
 restarting it - and it said what should replace it: something keyed to observed
 harm rather than to a proxy. That is now implemented.
 
-`Display::consecutiveBufferAllocFailures()` counts how many file-buffer
-allocations have failed **in a row**, incremented in
-`ensureFileBufferCapacity()` only at the point where plain `malloc()`, all three
-explicit capability sets, *and* the TLS release have each been tried and the
-bytes still are not available - i.e. only when the draw is genuinely lost. Any
-success clears it, including the early return where the buffer was already large
-enough. `checkHeapHealth()` restarts when that run exceeds
-`kMaxConsecutiveBufferAllocFailures`, which is **6**.
+`Display::consecutiveDrawFailures()` counts how many card draws have failed
+**in a row**, incremented by `Display.cpp`'s `noteDrawOutcome()` for every draw
+where an image was in front of the decoder and no picture came out. Any
+successful draw clears it. A draw that never reached a decoder because there was
+no image to give one is neither counted nor cleared - `noteNoImageAvailable()`
+handles that case, and the distinction is load-bearing rather than pedantic.
+`checkHeapHealth()` restarts when that run exceeds
+`kMaxConsecutiveDrawFailures`, which is **6**.
+
+Two earlier descriptions of this counter are gone from this document because
+both were false. It never counted file-buffer allocations - streaming draws
+removed that buffer - and the constant was `kMaxConsecutiveBufferAllocFailures`
+for long enough that a reading of `6/6` was taken for memory exhaustion for an
+entire evening, on a device whose largest 8-bit block was 21,492 at the time.
+
+**The restart records `CANNOT_DRAW`, and it used to record `LOW_HEAP`.** Nothing
+about the heap decides this trigger. The figure on the `[health]` line is context
+printed beside the count, and the count is failed draws. Reported under a memory
+name it sent a day of investigation into the wrong subsystem on device 39, whose
+`RestartLargestFreeBlockBytes` read 34,804 at essentially every one of its 31
+restarts - above the 33,434 two-buffer TLS requirement and double the 16,717
+single-buffer floor. That device was never out of heap. `RestartCause::LowHeap`
+(1, `LOW_HEAP`) is kept: stored rows and NVS values written by older firmware
+still decode to it, and a genuine heap restart can still claim it.
+`RestartCause::CannotDraw` (11, `CANNOT_DRAW`) is a new value in an existing
+field, which is what the six-month compatibility mandate allows.
+
+The server needs one line for the new token to sort correctly:
+`RebootHeatmap.Classify()` matches `UNREACHABLE` and `LOW_HEAP` as
+`RebootKind.Recovery`, and `SOFTWARE_RESET+CANNOT_DRAW` falls through to
+`Deliberate` until `CANNOT_DRAW` joins that branch. Stored rows are unaffected -
+they still read `SOFTWARE_RESET+LOW_HEAP` and still classify as they always did.
+`LOW_HEAP_RESPONSE` took the other route and embedded `LOW_HEAP` in its own token
+to inherit the classification for free; that trick is not reused here, because
+the whole point of this change is that the word does not belong on a draw fault.
 
 6 is chosen against `Assets.cpp`'s own retry behaviour, not picked for feel.
 `kMaxDrawAttempts` there is 3: a failed decode is retried three times before the
@@ -3762,14 +3790,60 @@ heap turning into a tight reboot loop, and because it guarantees every boot a
 full three minutes in which to produce a success and clear whatever its first
 draws failed at.
 
-The risk being accepted, said out loud: if a restart does not fix it, this
-becomes a restart every four minutes, which is exactly what 60000 did. The
-difference is what it takes to get there. That loop fired on devices drawing
-their cards perfectly; this one can only fire on a device that has failed more
-than two cards outright, and such a device is already showing a household
-nothing. A rebooting device at least retries against a fresh heap and keeps
-reporting telemetry - and because the counter clears on the first success after
-the reboot, one that recovers stops restarting immediately.
+The risk this section used to accept, said out loud at the time: if a restart
+does not fix it, this becomes a restart every few minutes, which is exactly what
+60000 did. That risk arrived. Device 39 restarted 31 times at roughly 21-minute
+intervals - the interval is how long its rotation took to fail seven draws, not
+a memory curve - and no restart could ever have helped it. Its only
+image-bearing card is `aircraft`, whose picture is an airline-logo PNG; a PNG
+needs 45,056 bytes in one contiguous block and that device's all-time maximum
+largest block is 36,852. The decode cannot succeed on any heap it will ever
+have. With no second picture card there is never a successful draw to clear the
+counter, so it climbs past 6 and the device restarts, forever.
+
+### Should a draw refused for want of memory count toward this watchdog?
+
+There is a real argument each way, and the answer implemented is a compromise
+rather than a victory for either side.
+
+**For counting it:** a restart defragments the heap, and a draw refused because
+no single block was large enough is exactly the failure a fresh heap can cure.
+Device 17's measurement is the evidence - releasing the TLS session moved the
+largest block from 6,132 to 36,852 and an identical 10,568-byte allocation that
+had just failed then succeeded. Refusing to count allocation refusals would
+blind the watchdog to the one case where its remedy works.
+
+**Against counting it:** a device whose ceiling is below what the picture needs
+cannot be given the bytes by any restart, so counting the refusal guarantees an
+endless loop. Device 39 is that device, and 31 restarts bought it nothing.
+
+**What is implemented: a cap.** An allocation refusal still counts, so the first
+restart is still made and the defragmentation case is still served. What changed
+is that the restarts stop. `BootDiag` keeps a cannot-draw restart streak in NVS;
+after `kMaxCannotDrawRestarts` (**3**) consecutive restarts the watchdog logs the
+run and declines to restart again, and the device stays up reporting telemetry
+instead of rebooting every twenty minutes. Three successive fresh heaps that each
+failed to produce one successful draw is enough to call the ceiling structural.
+The streak clears at the first check past `kCannotDrawBudgetResetMs` (**30
+minutes** of uptime) where the failure count is zero - a device drawing again
+gets its budget back, and a device still failing cannot reach that condition,
+because its count is above the limit at every check. A power cycle does not
+refill the budget either: the ceiling did not change because somebody pulled the
+plug.
+
+**The alternative not taken, and the owner may want it instead:** a separate
+counter, so an allocation refusal feeds something other than the draw-failure
+run and the watchdog restarts only for decodes that failed with memory to spare.
+That is the cleaner separation and it is a change to `Display.cpp`'s
+`noteDrawOutcome()`, which decides what a draw failure is. The cap was chosen
+over it because the cap bounds the harm wherever the refusal is counted, and
+because it keeps the defragmentation case working. Not counting refusals at all
+was rejected outright: it discards the one case a restart fixes.
+
+A capped device is still showing a household every card it *can* draw - a card
+whose picture will not decode is dropped from the rotation after its first
+failure - so staying up is strictly better for the household than a reboot
+every twenty minutes that cannot change the outcome.
 
 ## Locating an HTTPS failure by layer instead of arguing about it
 
@@ -5003,7 +5077,8 @@ So the reason reads as a pair:
 
 ```
 POWERON_RESET   + NONE               power was applied; nothing to explain
-SOFTWARE_RESET  + LOW_HEAP           the cannot-draw watchdog restarted us
+SOFTWARE_RESET  + CANNOT_DRAW        the cannot-draw watchdog restarted us
+SOFTWARE_RESET  + LOW_HEAP           kept for a genuine heap restart; what the cannot-draw watchdog used to record
 SOFTWARE_RESET  + LOW_HEAP_RESPONSE  check-in responses arrived intact and would not parse for lack of heap
 SOFTWARE_RESET  + OTA                restarting to install an update
 SOFTWARE_RESET  + REPROVISION        returning to CAL for new WiFi or a new owner
@@ -5026,9 +5101,17 @@ because there is no ambiguity here to wait out), its own watchdog
 (`checkResponseOomWatchdog()`, sharing the connection watchdog's twenty-minute
 anti-loop floor), and its own cause. The token contains `LOW_HEAP` deliberately,
 so the server's existing `RebootHeatmap.Classify()` already sorts it as a
-recovery restart with no server change needed. It is distinct from plain
-`LOW_HEAP` too: that one is the cannot-draw watchdog, and a device can hit this
-one while drawing every card perfectly.
+recovery restart with no server change needed. It is distinct from
+`CANNOT_DRAW` too: that one is the cannot-draw watchdog, and a device can hit
+this one while drawing every card perfectly.
+
+`CANNOT_DRAW` exists for the mirror-image reason, one subsystem over. The
+cannot-draw watchdog recorded `LOW_HEAP`, so a run of failed card draws reached
+the server under a memory name and a day of investigation went into the heap of
+a device that had 34,804 contiguous bytes at every restart. See "What the
+watchdog restarts on now" for the trigger, the cap on how many times it may
+restart, and the one line the server needs for the new token to sort as a
+recovery restart rather than a deliberate one.
 
 The obvious cheaper design - "read the log line the firmware printed just before
 it restarted" - was the first version of this and is exactly wrong: the remote
@@ -5442,19 +5525,19 @@ next capture:
   rebooting for this reason will say `SOFTWARE_RESET + LOW_HEAP` and one rebooting
   for any other reason will say something else. That single distinction is what
   turns this from a suspicion into a finding, and it is the first thing to look
-  for.
-- **The log line is misdescribing its own subject.** `App.ino` prints
-  "consecutive file-buffer alloc failures" and its constant is still
-  `kMaxConsecutiveBufferAllocFailures`, but what it reads is
-  `Display::consecutiveDrawFailures()`, which `noteDrawOutcome()` increments on
-  **any** failed draw - a missing file, an unrecognised header, a decode that
-  returned false - and not, as the surrounding comment still claims, "only when a
-  file-buffer allocation has exhausted plain malloc, all three explicit capability
-  sets, and the TLS release". That file buffer does not exist any more; streaming
-  removed it. So the counter is right, the watchdog is behaving as designed, and
-  the *label* is what points every reader who sees `6/6` at memory exhaustion.
-  Renaming it is a code change and is not made here; until then, read a `[health]`
-  line's failure count as "failed draws".
+  for. **The token changed on 2026-10-25**: this restart now records
+  `CANNOT_DRAW`, and `LOW_HEAP` in a stored row is a device that restarted for
+  this reason on firmware older than that build.
+- **The log line was misdescribing its own subject, and so was the cause.** The
+  `[health]` line printed "consecutive file-buffer alloc failures" and the
+  constant was `kMaxConsecutiveBufferAllocFailures`, over a reading of
+  `Display::consecutiveDrawFailures()` - which `noteDrawOutcome()` increments on
+  any failed draw, not on a file-buffer allocation that streaming had already
+  removed. The line and the constant were corrected first; the cause the restart
+  recorded stayed `LOW_HEAP` for another week and cost a day of investigation
+  aimed at the heap of a device that had 34,804 contiguous bytes. Both halves now
+  name the draw: the line reads "consecutive failed draws" and the cause reads
+  `CANNOT_DRAW`.
 
   Worth noting alongside it: `a10c686` deliberately closed the gap where
   `drawImageFromBuffer` - the RAM path a device with no usable card uses - never

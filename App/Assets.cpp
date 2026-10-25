@@ -21,6 +21,15 @@ constexpr uint8_t kMaxReportedDecodeFailures = 4;
 String gDecodeFailureIds;
 uint8_t gDecodeFailureCount = 0;
 
+/// Draws given up on because no block large enough was available, counted apart
+/// from the decode failures above because they are a different fault with a
+/// different first question: a decode failure asks what is wrong with the bytes,
+/// this asks what the picture needs in one contiguous block and what this device
+/// has. Logged rather than sent - see giveUpOnDecodeFailure() for what reporting
+/// it would take. Cleared with the decode-failure report so the figure in the
+/// log line stays per reporting cycle rather than per boot.
+uint8_t gAllocationRefusals = 0;
+
 /// How many times drawFullScreen()/drawCachedInRect()/drawCached() retry a
 /// failed decode before giving up - centralised here (not duplicated per
 /// card module) so every current and future caller gets the same retry,
@@ -55,22 +64,40 @@ void recordDecodeFailure(const String& assetId) {
 /// failures silent past the generic Display::drawImageFromSd*() line, the
 /// same "loud, not silent" gap this whole mechanism exists to close.
 ///
-/// A heap shortage is not charged to the file. invalidate() deletes the cached
-/// copy and schedules a re-fetch, which is right for bytes that will never
-/// decode and wrong for bytes that were never read: an RGB565 asset is ~153,600
-/// bytes over WiFi, and the re-fetch lands on the same heap that just refused a
-/// band buffer. Device 17 on 2026-10-11 did this three times in one minute for
-/// a file that was intact the whole time.
+/// A heap shortage is not charged to the file, and it is not charged to the
+/// decoder either.
+///
+/// invalidate() deletes the cached copy and schedules a re-fetch, which is right
+/// for bytes that will never decode and wrong for bytes that were never read: an
+/// RGB565 asset is ~153,600 bytes over WiFi, and the re-fetch lands on the same
+/// heap that just refused a band buffer. Device 17 on 2026-10-11 did this three
+/// times in one minute for a file that was intact the whole time.
+///
+/// **The report is on the same footing, and used to be made before the question
+/// was asked.** recordDecodeFailure() ran first, so an allocation refusal
+/// reached the server in assetDecodeFailureIds and the gateway filed an
+/// AssetDecodeFailure audit row against an asset whose bytes were fine. What
+/// Assets.h promises that report means - "present on the card, downloaded and
+/// SHA-256 verified fine, but LovyanGFX still refused it" - is what it now
+/// carries: a refusal for want of a block is counted here and logged, and goes
+/// no further. Which means it currently reaches the server only as the
+/// cannot-draw restart cause, once the run of them trips App.ino's watchdog; an
+/// optional assetDrawOutOfMemory pair on the check-in request would report it
+/// directly, and that needs Assets.h, CheckIn.cpp and the gateway together.
 void giveUpOnDecodeFailure(const String& id) {
-  recordDecodeFailure(id);
-
   if (Display::lastDrawFailedOnAllocation()) {
-    Log::printf("[assets] '%s' could not be drawn after %u attempt(s) - keeping the cached copy, "
-                "this heap had no block to draw it with",
-                id.c_str(), static_cast<unsigned>(kMaxDrawAttempts));
+    if (gAllocationRefusals < UINT8_MAX) {
+      ++gAllocationRefusals;
+    }
+    Log::printf("[assets] '%s' could not be drawn after %u attempt(s) - keeping the cached copy "
+                "and not reporting it as a decode failure, this heap had no block to draw it with "
+                "(%u refusal(s) this reporting cycle)",
+                id.c_str(), static_cast<unsigned>(kMaxDrawAttempts),
+                static_cast<unsigned>(gAllocationRefusals));
     return;
   }
 
+  recordDecodeFailure(id);
   invalidate(id);
   Log::printf("[assets] '%s' would not decode after %u attempt(s) - invalidating the cache",
               id.c_str(), static_cast<unsigned>(kMaxDrawAttempts));
@@ -1129,6 +1156,7 @@ String decodeFailureIds() { return gDecodeFailureIds; }
 void clearDecodeFailures() {
   gDecodeFailureIds = "";
   gDecodeFailureCount = 0;
+  gAllocationRefusals = 0;
 }
 
 bool showBootSplash() {

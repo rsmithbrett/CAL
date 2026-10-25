@@ -656,7 +656,8 @@ diagnose.
    Confirm from largest8 jumping once and from the pictures re-fetching.
 4. At the third consecutive OOM the device restarts. On the serial console the
    next boot must read `SOFTWARE_RESET + LOW_HEAP_RESPONSE` - not
-   `UNREACHABLE`, and not the bare `LOW_HEAP` the draw watchdog uses.
+   `UNREACHABLE`, and not the `CANNOT_DRAW` the draw watchdog uses (that one
+   recorded `LOW_HEAP` until 2026-10-25; see section 12).
 5. On `/diag`, telemetry must carry `LOW_HEAP_RESPONSE` and the reboot heatmap
    must sort it as a **recovery** restart, not as an unknown reason. This works
    without a server change because the token contains `LOW_HEAP` and
@@ -1686,6 +1687,61 @@ On this repository, merging into `main` triggers the build-and-publish
 workflow for **both CAL and App**. CAL lives in the factory partition and
 requires a deliberate USB flashing/recovery process. A successful source
 review is not evidence that iOS captive detection works on hardware.
+
+---
+
+## 12. The cannot-draw watchdog names itself, and stops after three tries
+
+Two changes, both bench-observable, and the second one is the one worth being
+careful about because its correct behaviour is a device **not** doing something.
+
+### 12a. The cause reads `CANNOT_DRAW`
+
+Reproduce the trigger the cheap way: give a device one picture card whose asset
+cannot decode on it, and no second picture card. Device 39's own shape is the
+worked example - its only image-bearing card is `aircraft` and the airline logo
+is a PNG needing 45,056 contiguous bytes against a largest block that has never
+exceeded 36,852. A deliberately corrupted cached file does the same job on any
+device.
+
+1. Let it run past `kHeapCheckGraceMs` (3 minutes). The `[health]` line must
+   report `consecutive failed draws=N/6` and must print the largest 8BIT block
+   beside it as context.
+2. Past 6 the device restarts. The next boot must read
+   `SOFTWARE_RESET + CANNOT_DRAW`. **Not `LOW_HEAP`** - that is the whole
+   change, and a `LOW_HEAP` here means the build under test predates it.
+3. On `/diag`, telemetry must carry `CANNOT_DRAW`. Until the server adds the
+   token to `RebootHeatmap.Classify()`'s recovery branch the heatmap will sort
+   it as **Deliberate** rather than Recovery, which is the known gap - confirm
+   which of the two it shows and record it, because that is the evidence for
+   whether the server change has landed.
+4. A device restarting for a genuine heap shortage must still be able to read
+   `LOW_HEAP`, and a stored row from older firmware must still read `LOW_HEAP`
+   unchanged. The value was kept, not repurposed.
+
+### 12b. The restarts stop at three
+
+Same setup, left running for at least two hours.
+
+1. Count the restarts. There must be **three** and then no more. The streak is
+   held in NVS under the `bootdiag` namespace, so it survives the reboot it is
+   counting.
+2. At the fourth time the count passes 6, the `[health]` line must say the
+   device has already restarted three times for this and is staying up. That
+   line appears **once per boot**, not once a minute.
+3. The device must keep checking in and keep reporting telemetry while capped.
+   A capped device that goes quiet is a different fault.
+4. Pull the power and let it come back. The budget must still be spent - a power
+   cycle does not refill it, because the ceiling did not change.
+5. Now fix the decode (uncorrupt the file, or give the device a second picture
+   card that draws). Once a draw succeeds and the device has been up past
+   `kCannotDrawBudgetResetMs` (30 minutes) with a zero failure count, the streak
+   must clear. Prove it by breaking the decode again: the watchdog must restart
+   the device once more rather than staying capped forever.
+
+Step 5 is the one that can be wrong in the quiet direction. A streak that never
+clears turns this watchdog off permanently on any device that has ever hit it,
+and nothing on screen would say so.
 
 ## What a clean compile does and does not prove
 

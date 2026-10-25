@@ -356,6 +356,9 @@ bool gBootPromptDrawn = false;
 bool restartWasTherapeutic() {
   switch (BootDiag::lastRestartCause()) {
     case BootDiag::RestartCause::LowHeap:
+    // The cannot-draw watchdog's own cause, therapeutic for the same reason
+    // LowHeap was when that watchdog recorded it.
+    case BootDiag::RestartCause::CannotDraw:
     case BootDiag::RestartCause::Unreachable:
     // Therapeutic for the same reason the two above are: nobody asked for it,
     // this firmware decided it needed it, and the household is owed the same
@@ -717,6 +720,13 @@ uint32_t lastUpdateCheckMs = 0;
 uint32_t lastCheckInMs = 0;
 uint32_t lastHeapCheckMs = 0;
 
+/// Whether this boot has already said that the cannot-draw watchdog's restart
+/// budget is spent. The condition persists at every check once it is reached, so
+/// without this the line would repeat once a minute for as long as the device
+/// stays up - and a line that repeats forever is how a real finding gets scrolled
+/// past.
+bool gCannotDrawCapReported = false;
+
 // ---------------------------------------------------------------------------
 // Cannot-draw watchdog. (It was the "heap fragmentation watchdog" for most of
 // its life; the name changed because what it watches did.)
@@ -773,12 +783,16 @@ constexpr uint32_t kHeapCheckIntervalMs = 60000;  // once a minute
 //
 // It stays because it does something else that is still needed. Together with
 // kHeapCheckIntervalMs it bounds how often this can restart a device to roughly
-// once every four minutes, which is the whole protection against a device that
-// cannot draw even on a fresh heap turning into a tight reboot loop - and it
-// guarantees that whatever failures a boot's first draws produce, the boot gets
-// a full 3 minutes to also produce a success and clear them. 3 minutes is
-// comfortably past every boot-time allocation this firmware makes (WiFi join,
-// SNTP, the first check-in, the first card fetches).
+// once every four minutes, and it guarantees that whatever failures a boot's
+// first draws produce, the boot gets a full 3 minutes to also produce a success
+// and clear them. 3 minutes is comfortably past every boot-time allocation this
+// firmware makes (WiFi join, SNTP, the first check-in, the first card fetches).
+//
+// This used to be described as the whole protection against a tight reboot loop,
+// and it never was one: bounding the rate of a loop that cannot end is not a
+// protection, as 31 restarts on device 39 at roughly 21 minutes apart
+// demonstrated. kMaxCannotDrawRestarts is the protection; this is a floor under
+// the interval between tries.
 constexpr uint32_t kHeapCheckGraceMs = 3UL * 60UL * 1000UL;
 
 // Why this watchdog counts FAILURES and not free bytes, and the whole history
@@ -910,6 +924,50 @@ constexpr uint32_t kHeapCheckGraceMs = 3UL * 60UL * 1000UL;
 // Renamed from kMaxConsecutiveBufferAllocFailures. It never counted buffer
 // allocations - see the block above for what the old name cost.
 constexpr uint32_t kMaxConsecutiveDrawFailures = 6;
+
+// How many times in a row this watchdog may restart the device before it stops
+// restarting and leaves it up.
+//
+// A restart's only mechanism here is handing the device a fresh heap. That is
+// worth doing - releasing a TLS session on device 17 moved the largest
+// contiguous 8-bit block from 6,132 to 36,852, and a 10,568-byte allocation that
+// had just failed then succeeded - so the first restart stays, and so does the
+// second. What it cannot do is raise the ceiling. Device 39's only
+// image-bearing card is `aircraft`, its picture is an airline-logo PNG needing
+// 45,056 bytes in one block, and that device's all-time maximum largest block is
+// 36,852. With no second picture card there is never a successful draw to clear
+// the counter, so it climbs past the limit above and the device restarts, every
+// ~21 minutes, 31 times, with 34,804 contiguous bytes free at essentially every
+// one of them.
+//
+// 3, because three successive fresh heaps that each failed to produce one
+// successful draw is enough to call the shortage structural. Past that the
+// device keeps checking in and reporting telemetry, which is how the fault
+// reaches somebody, and stops rebooting in front of a household for an outcome
+// it cannot change. A card whose picture will not decode is dropped from the
+// rotation after its first failure, so a capped device still shows every card it
+// can draw.
+//
+// The streak lives in NVS (BootDiag::cannotDrawRestarts()) because it has to
+// survive the restart it counts, and a power cycle does not refill it - the
+// ceiling did not change because somebody pulled the plug.
+constexpr uint8_t kMaxCannotDrawRestarts = 3;
+
+// Uptime past which a zero failure count gives the budget above back.
+//
+// 30 minutes, chosen against the loop it has to not interrupt. A device in the
+// loop restarts at roughly 21 minutes, and a capped one sits with its failure
+// count above the limit at every check, so neither can reach "zero failures at
+// 30 minutes up" - the condition is only reachable by a device that is actually
+// drawing. It is also past two Config::kContentRefreshIntervalMs cycles, so the
+// cards have been re-fetched and re-armed at least twice before a device is
+// called healthy.
+//
+// The alternative - clearing on the first check that reports zero - is wrong at
+// boot, where the count is zero because nothing has been drawn yet rather than
+// because something drew successfully. That would refill the budget on every
+// boot and the cap would never bite.
+constexpr uint32_t kCannotDrawBudgetResetMs = 30UL * 60UL * 1000UL;
 
 /// How many check-ins in a row may fail before this device restarts itself to
 /// get its connection back.
@@ -1233,6 +1291,37 @@ void checkHeapHealth() {
       static_cast<unsigned long>(now));
 
   if (failures <= kMaxConsecutiveDrawFailures) {
+    // A device drawing again gets its restart budget back. Gated on uptime
+    // because a zero count at boot means nothing has been drawn yet - see
+    // kCannotDrawBudgetResetMs for why the ungated version turns the cap off.
+    if (failures == 0 && now >= kCannotDrawBudgetResetMs &&
+        BootDiag::cannotDrawRestarts() > 0) {
+      Log::printf("[health] this device is drawing again after %lu ms uptime - clearing the "
+                  "cannot-draw restart count",
+                  static_cast<unsigned long>(now));
+      BootDiag::clearCannotDrawRestarts();
+      gCannotDrawCapReported = false;
+    }
+    return;
+  }
+
+  // Past the limit, so the device has stopped being able to draw. Whether that
+  // is worth another restart depends on how many this one has already had.
+  const uint8_t priorRestarts = BootDiag::cannotDrawRestarts();
+  if (priorRestarts >= kMaxCannotDrawRestarts) {
+    if (!gCannotDrawCapReported) {
+      gCannotDrawCapReported = true;
+      Log::printf(
+          "[health] %lu consecutive failed card draws (limit %lu) and this device has already "
+          "restarted %u times for it (cap %u) - staying up instead, because a restart offers it a "
+          "fresh heap and nothing else, and three fresh heaps have not produced one successful "
+          "draw. Largest 8BIT block=%u. Check what the card's picture needs in one block",
+          static_cast<unsigned long>(failures),
+          static_cast<unsigned long>(kMaxConsecutiveDrawFailures),
+          static_cast<unsigned>(priorRestarts), static_cast<unsigned>(kMaxCannotDrawRestarts),
+          static_cast<unsigned>(largestBlock));
+      Log::flushNow();
+    }
     return;
   }
 
@@ -1240,21 +1329,20 @@ void checkHeapHealth() {
   // the restart is back - the same restart, with the same care, on a trigger
   // that means something this time.
   //
-  // The risk being accepted, said out loud: if a restart does not fix it, this
-  // becomes a restart every kHeapCheckGraceMs + one interval (about four
-  // minutes), which is exactly what the 60,000 threshold did. The difference is
-  // what it takes to get there. That loop fired on devices that were drawing
-  // their cards perfectly; this one can only fire on a device that has failed
-  // more than two cards outright, and such a device is already showing a
-  // household nothing. A rebooting device at least retries against a fresh heap
-  // and keeps reporting telemetry; and because the counter clears on the first
-  // success after the reboot, one that recovers stops restarting immediately.
+  // This used to carry the risk of becoming a restart every four minutes
+  // forever, on the reasoning that a rebooting device at least retries against a
+  // fresh heap. The risk arrived - device 39, 31 restarts, 34,804 contiguous
+  // bytes free at essentially every one of them - and the branch above is the
+  // answer: the retry is still made, up to kMaxCannotDrawRestarts times, and
+  // then the device stays up. A device that recovers stops restarting
+  // immediately, because the counter clears on the first successful draw.
   Log::printf(
       "[health] %lu consecutive failed card draws (limit %lu) after %lu ms uptime - this "
-      "device can no longer draw its cards, restarting to reclaim memory "
-      "(largest 8BIT block=%u)",
+      "device can no longer draw its cards, restarting for a fresh heap "
+      "(restart %u of %u for this; largest 8BIT block=%u)",
       static_cast<unsigned long>(failures), static_cast<unsigned long>(kMaxConsecutiveDrawFailures),
-      static_cast<unsigned long>(now), static_cast<unsigned>(largestBlock));
+      static_cast<unsigned long>(now), static_cast<unsigned>(priorRestarts + 1),
+      static_cast<unsigned>(kMaxCannotDrawRestarts), static_cast<unsigned>(largestBlock));
   // So the line above actually reaches the server instead of being lost with
   // everything else in RAM at restart - same reasoning as every other
   // pre-esp_restart() call site in this codebase (see Loader.cpp).
@@ -1266,17 +1354,28 @@ void checkHeapHealth() {
   // next setup(), which is what most of this restart's own visible outage
   // window was actually spent on.
   AppService::stashTimeForFastReboot();
-  // So the next boot reports SOFTWARE_RESET + LOW_HEAP rather than an
+  // So the next boot reports SOFTWARE_RESET + CANNOT_DRAW rather than an
   // unexplained software reset. This is the restart that spent a night looking
-  // like a crash loop, which is exactly why it should name itself.
-  BootDiag::recordRestartIntent(BootDiag::RestartCause::LowHeap, Http::largestContiguousBytes());
+  // like a crash loop, which is exactly why it should name itself - and the
+  // cause names the draw rather than the heap, because the trigger is the
+  // failure count a few lines up and no heap figure decides anything here. The
+  // largest-block figure still travels beside it: it is the context a reader
+  // wants next, not the reason.
+  BootDiag::recordRestartIntent(BootDiag::RestartCause::CannotDraw,
+                                Http::largestContiguousBytes());
+  // Counted so the next boot's watchdog knows how many fresh heaps this device
+  // has already been given. See kMaxCannotDrawRestarts.
+  BootDiag::recordCannotDrawRestart();
   // Beside the cause, not instead of it: BootDiag says what the LAST restart
   // was for, this says how many in a row this device has now needed. The next
   // boot reads both - the first to decide whether to be quiet, the second to
   // decide whether it has been quiet for too long. See
   // Identity::consecutiveSelfRestarts() and kMaxSilentSelfRestarts.
   Identity::recordSelfRestart();
-  Display::showStatus("Refreshing", "Reclaiming memory - back in a moment");
+  // Names what the household can see rather than what the firmware is doing
+  // about it. "Reclaiming memory" put a shortage this watchdog does not measure
+  // in front of somebody who cannot act on it either way.
+  Display::showStatus("Refreshing", "Sorting out a picture that won't load - back in a moment");
   // Long enough for both the status message and the flushed log line to be
   // visibly sent before the restart cuts everything off.
   delay(1500);

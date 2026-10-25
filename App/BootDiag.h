@@ -70,8 +70,15 @@ namespace BootDiag {
 /// Adding a value means adding it in both places, with the same number.
 enum class RestartCause : uint32_t {
   None = 0,
-  /// The heap-health watchdog in App.ino decided the device could no longer
-  /// draw its cards.
+  /// A genuine heap restart. **Nothing in this firmware records it today** -
+  /// CannotDraw below took over the one call site that did.
+  ///
+  /// Kept rather than removed, for two reasons that are both wire contracts.
+  /// NVS written by older firmware still reads back as 1, and the server stores
+  /// the token `LOW_HEAP` in rows going back to September. Renumbering or
+  /// renaming either would misreport history, which is what the six-month
+  /// compatibility mandate forbids. Available to a future restart that really is
+  /// decided by a heap figure.
   LowHeap = 1,
   /// Rebooting into CAL to install a firmware update.
   Ota = 2,
@@ -171,6 +178,23 @@ enum class RestartCause : uint32_t {
   /// viewport at begin() - so applying a new orientation means coming up again.
   /// A few seconds, and the editor says so before anybody presses save.
   OrientationChanged = 10,
+  /// The cannot-draw watchdog in App.ino restarted this device: card draws
+  /// failed consecutively past kMaxConsecutiveDrawFailures, so the device had
+  /// stopped being able to put pictures on the glass.
+  ///
+  /// **This recorded LowHeap until 2026-10-25, and the rename is the whole
+  /// point of the value.** The trigger is
+  /// `Display::consecutiveDrawFailures() > kMaxConsecutiveDrawFailures`. No heap
+  /// figure is compared against anything; the largest-block number on the
+  /// `[health]` line beside the count is context. Filed under a memory name, a
+  /// run of failed draws sent a day of investigation into the heap of device 39,
+  /// which reported 34,804 contiguous bytes at essentially all 31 of its
+  /// restarts - above the 33,434 two TLS record buffers need and double the
+  /// 16,717 one needs.
+  ///
+  /// A cause that names the draw sends the next reader to the picture: which
+  /// asset, what format, and how many bytes in one block its decoder wants.
+  CannotDraw = 11,
 };
 
 /// Records what this restart is FOR, immediately before calling
@@ -304,5 +328,31 @@ uint32_t bootLargestFreeBlock();
 /// precisely those. The line is written and lost; this rides the next boot's
 /// telemetry, over a session that works.
 uint32_t lastRestartLargestFreeBlock();
+
+/// How many times in a row the cannot-draw watchdog has restarted this device
+/// without a successful draw since.
+///
+/// Stored in NVS beside the restart cause, for the reason the cause is: the
+/// counter has to survive the restart it is counting, and every restart here
+/// goes App -> CAL -> App with a different binary running in between.
+/// Deliberately separate from the cause itself, which `logResetReason()` clears
+/// on every boot and which therefore only ever answers "what was the last one".
+///
+/// Read by App.ino's watchdog to decide whether another restart is worth making.
+/// A restart's only mechanism is handing the device a fresh heap, so a run of
+/// them with no successful draw in between says the shortage is structural -
+/// device 39's airline-logo PNG wants 45,056 bytes in one block and that device
+/// has never had more than 36,852 - and further restarts cost a household a
+/// reboot every twenty minutes for nothing.
+uint8_t cannotDrawRestarts();
+
+/// Adds one to the count above and commits it. Call immediately before the
+/// restart, beside recordRestartIntent().
+void recordCannotDrawRestart();
+
+/// Resets the count to zero, for a device that is drawing again. Writes nothing
+/// when the count is already zero, so an ordinary healthy device never touches
+/// flash for this.
+void clearCannotDrawRestarts();
 
 }  // namespace BootDiag

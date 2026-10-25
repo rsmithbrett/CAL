@@ -43,6 +43,21 @@ again, and the new copy failed the same way next time that card came round.
 It keeps the copy now and tries again later, so a display in that state stops
 downloading the same house over and over.
 
+### A display that can't draw a picture stops restarting itself — App
+
+A display that couldn't open one of its pictures restarted itself to try
+again, and then kept doing it: one display restarted 31 times, roughly every
+twenty minutes, for a picture that was never going to open on it. It tries
+three times now and then stays on. It keeps showing every card it can draw
+and keeps checking in, so whoever set it up can see what's wrong instead of
+watching it reboot all day. If the picture starts working again, the display
+gets its three tries back.
+
+The reason it gives for those restarts changed too. It used to say it was
+short of memory, which sent people looking in the wrong place — the display
+had plenty. It now says it couldn't draw a picture, which is what happened.
+Restarts recorded before this release still read the old way.
+
 ---
 
 ## v2026.10.25.0005
