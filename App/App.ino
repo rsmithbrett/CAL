@@ -2154,6 +2154,7 @@ void performCheckIn() {
   // Same reasoning, same push, one card over: the Moon-phase card has no fetch of
   // its own either, and its content rides this exact response.
   MoonPhase::setPhase(result.moonPhase, result.moonIlluminatedFraction, result.moonPhaseName);
+  MoonPhase::setNextEvent(result.nextMoonEventMinutesUtc, result.nextMoonEventKind);
   // Same reasoning, same push, one card over again: the tides card has no fetch
   // of its own either, and its content rides this exact response too.
   Tides::setTimes(result.nextHighTideMinutesUtc, result.nextLowTideMinutesUtc,

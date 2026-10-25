@@ -98,12 +98,13 @@ time the card's own corner clock reads, which is the format and the source
 `showClockDate()` already uses, so the two cards cannot name different days.
 Landscape keeps `MOON · TODAY` and shows no date.
 
-**Measured up from the content floor, not down from the top.** The date sits
-18px above whatever `contentBottom()` says, the lit line 22 above that and the
-name 28 above that; the disc takes what is left between the heading and the
-name, capped at a 72px radius so it keeps a clear margin either side of the
-glass. An action bound to the card lowers the floor by 80px and the disc gives
-up the pixels, rather than the date being pushed off the bottom.
+**Measured up from the content floor, not down from the top.** The next-event
+line sits 18px above whatever `contentBottom()` says, the date 22 above that, the
+lit line 22 above that and the name 28 above that; the disc takes what is left
+between the heading and the name, capped at a 72px radius so it keeps a clear
+margin either side of the glass. An action bound to the card lowers the floor by
+80px and the disc gives up the pixels, rather than the bottom line being pushed
+off the glass.
 
 Photographed at both sizes, four phases each, with and without an action bound:
 `docs/ia/screens/panel-moonphase-*.png` in the server repository, written by
@@ -118,6 +119,50 @@ outgrows its column is the 18pt time: "6:47 AM" is 130px against a 110px half
 column, so the fitting ladder draws it at 12pt instead. That is a hero losing a
 size on a narrow panel, not a card that stops reading, and it is logged when it
 happens. Left alone.
+
+## The next moonrise or moonset
+
+**One line, and it is whichever of the two comes next.** Not both times. The card
+already carries the phase, how much of it is lit and the date; a pair of labelled
+times is four more pieces of type on a card whose subject is a picture, and the
+question somebody standing in front of it asks is "when does it come up",
+singular.
+
+The server works out which event is next and sends it as
+`nextMoonEventMinutesUtc` plus `nextMoonEventKind` — see the server repository's
+README under "The next moonrise or moonset" for why the choice is made there
+rather than here. This card does no selection and no clock comparison of its own.
+It turns the minute into local wall-clock with `gUtcOffsetMinutes`, the way every
+other time on the card already does, and prints `Moonrise 8:14 PM` or
+`Moonset 6:02 AM`.
+
+**Three states, three different drawings.** A kind of `rise` or `set` with a
+minute draws the time. A kind of `none` draws `No moonrise or set`, which is
+the server saying it looked and there is no event to name. Absent fields draw
+nothing at all: no line, and no gap where a line would be, so the card is pixel
+for pixel what it was before this change on a device whose position the server
+cannot resolve. A dash would have collapsed those last two into one appearance,
+which is the mistake this project has made before with cards holding nothing.
+
+**Portrait takes it at the bottom of the stack, under the date.** The stack is
+still measured up from `contentBottom()`, so the new line is the one 18px above
+the floor and the date, the lit line and the name each move up 22. On a 240×320
+panel with no action bound the space left for the disc is still larger than the
+72px cap, so the disc does not change at all. With an action bound the floor
+comes up 80px and the disc gives up the pixels: 49px of radius against the 60 it
+had.
+
+**Landscape takes it at y=100, in the column beside the disc.** That row was
+free. The lit line sits at 78 and the `NEXT MAJOR PHASES` label at 122, and the
+22px between them were reserved for a second line of "100% illuminated" that a
+landscape panel never wraps — the column there is 212px and the longest form of
+that string is 146. The reservation dates from before the narrow branch above
+existed, when this code drew both panels from these constants. `Moonrise 8:14 PM`
+is about 130px at 9pt, so it fits the column with room, and the lit line now gets
+a single-line budget instead of the two it could not use.
+
+So the four upcoming phases stay on landscape. They were the thing at risk if
+this had needed a row of its own.
 
 ## Not verified on hardware
 

@@ -931,6 +931,14 @@ Result perform() {
   result.moonPhase = responseDoc["moonPhase"] | -1.0;
   result.moonIlluminatedFraction = responseDoc["moonIlluminatedFraction"] | -1.0;
   result.moonPhaseName = String(responseDoc["moonPhaseName"] | "");
+  // The next moonrise or moonset, already chosen by the server. `| -1` and `| ""`
+  // cover a JSON null and a field an older server never sends at all, the same
+  // reasoning as sunriseMinutesUtc above - but here the kind carries one more
+  // state than the minute does. An empty kind is "the server said nothing";
+  // "none" with a minute of -1 is "the server looked and there is no event to
+  // name". The card draws those two differently, so they are not collapsed here.
+  result.nextMoonEventMinutesUtc = responseDoc["nextMoonEventMinutesUtc"] | -1;
+  result.nextMoonEventKind = String(responseDoc["nextMoonEventKind"] | "");
   // `| -1` covers a JSON null and a field an older server never sends at all, the
   // same reasoning as sunriseMinutesUtc/sunsetMinutesUtc above - both mean "no
   // tide to show" here.

@@ -8,9 +8,10 @@
 ///
 /// **This card fetches nothing.** Everything it draws already arrives on the
 /// check-in response the device makes anyway - `moonPhase`,
-/// `moonIlluminatedFraction` and `moonPhaseName` - alongside the sunrise/
-/// sunset fields SunMoon.cpp already reads off the same response. No
-/// request, no timer, and no failure mode of its own here.
+/// `moonIlluminatedFraction`, `moonPhaseName`, `nextMoonEventMinutesUtc` and
+/// `nextMoonEventKind` - alongside the sunrise/sunset fields SunMoon.cpp
+/// already reads off the same response. No request, no timer, and no failure
+/// mode of its own here.
 ///
 /// **Pushed in, not pulled**, for the same reason SunMoon::setTimes() is:
 /// the check-in path is the only thing that knows these values, and it
@@ -45,5 +46,18 @@ extern const char* const kCardId;
 /// see the header note above. Cheap and idempotent; safe to call on every
 /// check-in whether or not anything changed.
 void setPhase(double phase, double illuminatedFraction, const String& phaseName);
+
+/// The next moonrise or moonset, off the same response and pushed the same
+/// way. `minutesUtc` is minutes after UTC midnight, -1 for none. `kind` is
+/// "rise", "set", "none" for a day the server found no event on, or empty for
+/// a server that said nothing at all - see CheckIn::Result's own remarks for
+/// why the last two are separate states, and Display::showMoonPhaseCard() for
+/// what the card draws for each.
+///
+/// Carried separately from setPhase() rather than folded into it, because the
+/// phase decides whether this card appears at all (cardItemCount() above) and
+/// the next event does not. A disc, a name and no event line is a complete
+/// card.
+void setNextEvent(int minutesUtc, const String& kind);
 
 }  // namespace MoonPhase

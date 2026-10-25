@@ -201,6 +201,27 @@ struct Result {
   double moonIlluminatedFraction = -1.0;
   String moonPhaseName;
 
+  /// The next moonrise or moonset, as minutes after UTC midnight (0-1439) and
+  /// which of the two it is: "rise" or "set". Same unit and the same "-1
+  /// rather than 0" reasoning as sunriseMinutesUtc above, and the minute
+  /// carries no date, so an event on tomorrow's UTC day arrives as its clock
+  /// time the way nextHighTideMinutesUtc below already can.
+  ///
+  /// The server picks which event it is and this device compares nothing
+  /// against its own clock. Once both of today's events have passed the next
+  /// one is tomorrow's, which today's figures do not hold, so a pair of
+  /// today's times would leave the card with nothing to draw every evening.
+  ///
+  /// "none" with a minute of -1 means the server looked at today and tomorrow
+  /// and found no rise and no set in either - the Moon stays up, or stays
+  /// down, for days at a stretch above the Arctic Circle. An empty kind means
+  /// the server said nothing at all: a position it could not resolve, or a
+  /// server predating these fields. The card draws the time for "rise" or
+  /// "set", words for "none", and no line at all for an empty or unrecognised
+  /// kind. See CheckInModels.cs in the DiscoverAroundMe repo.
+  int nextMoonEventMinutesUtc = -1;
+  String nextMoonEventKind;
+
   /// The next high and low tide as minutes after UTC midnight (0-1439), or -1
   /// where the server reported none - same unit and the same "-1 rather than
   /// 0" reasoning as sunriseMinutesUtc/sunsetMinutesUtc above. Backed by real

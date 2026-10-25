@@ -3343,9 +3343,37 @@ double daysUntilPhase(double currentPhase, double target) {
   return ahead * kSynodicDays;
 }
 
+/// The one line the card draws for the next moonrise or moonset, or an empty
+/// string when there is no line to draw.
+///
+/// Three answers, three appearances. A kind of "rise" or "set" with a minute
+/// draws the local time. "none" draws words, because the server looked at today
+/// and tomorrow and there is no event to name. An empty or unrecognised kind
+/// draws nothing at all - no line and no gap - which is what a device whose
+/// position the server cannot resolve gets, and what a device talking to a
+/// server predating these two fields gets. A dash would have made those last
+/// two look alike.
+String nextMoonEventLine(int minutesUtc, const String& kind) {
+  if (kind == "none") {
+    return String("No moonrise or set");
+  }
+
+  const bool isRise = kind == "rise";
+  if ((!isRise && kind != "set") || minutesUtc < 0) {
+    return String();
+  }
+
+  // (value + offset + 1440) % 1440, the arithmetic the wire contract specifies,
+  // with the + 1440 before the modulo so a western offset cannot produce a
+  // negative remainder out of C's %.
+  const int local = ((minutesUtc + gUtcOffsetMinutes) % 1440 + 1440) % 1440;
+  return String(isRise ? "Moonrise " : "Moonset ") + formatTimeOfDay(local / 60, local % 60);
+}
+
 }  // namespace
 
-void showMoonPhaseCard(const String& phaseName, double phase, double illuminatedFraction) {
+void showMoonPhaseCard(const String& phaseName, double phase, double illuminatedFraction,
+                       int nextEventMinutesUtc, const String& nextEventKind) {
   // docs/design/sun-moon-redesign: the disc moves off centre to sit beside its
   // own name, and the lower half becomes the four phases still to come.
   //
@@ -3412,6 +3440,8 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
   char pctBuffer[24];
   snprintf(pctBuffer, sizeof(pctBuffer), "%d%% illuminated", static_cast<int>(k * 100.0 + 0.5));
 
+  const String eventLine = nextMoonEventLine(nextEventMinutesUtc, nextEventKind);
+
   if (narrow) {
     // THE DISC OVER THE NAME, AND NO UPCOMING ROW. The landscape card sets its
     // disc beside the phase name and spends its lower half on the four phases
@@ -3426,7 +3456,11 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
     // MEASURED UP FROM THE FLOOR, not down from the top, so an action bound to
     // the card takes the pixels out of the disc rather than pushing the date
     // off the glass.
-    const int dateY = contentBottom() - 18;
+    // The next event takes the bottom row and the rest of the stack moves up a
+    // row to make it. An empty line - the server said nothing - leaves the
+    // stack exactly where it was, so the card has no gap where a line would be.
+    const int eventY = contentBottom() - 18;
+    const int dateY = eventLine.length() > 0 ? eventY - 22 : eventY;
     const int illuminatedY = dateY - 22;
     const int nameY = illuminatedY - 28;
 
@@ -3458,6 +3492,11 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
     layoutLine(dateBuffer, kContentCentreX(), dateY, kContentWidth(), sky.detail, "moon.date",
                Align::Centre, kTransparentText);
 
+    if (eventLine.length() > 0) {
+      layoutLine(eventLine, kContentCentreX(), eventY, kContentWidth(), sky.detail, "moon.nextevent",
+                 Align::Centre, kTransparentText);
+    }
+
     restoreDefaultFont();
     return;
   }
@@ -3475,14 +3514,24 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
   // that wrapping cost was a heap allocation on the draw path for a string
   // that is already a flat array.
   //
-  // 78..100 at 9pt with the phases label at 122, so 22px below this line are
-  // free and the line may take them as a second one. It does on a profile
-  // panel, where the column is 132px and "100% illuminated" is 146.
+  // 78..96 at 9pt, with the next-event line at 100 and the phases label at 122.
+  // One line only: the 22px between this and the label used to be offered to it
+  // as a second line, which a 240px panel needed and this one never does - the
+  // column here is 212px and "100% illuminated" is 146 - and the narrow branch
+  // above now draws that panel instead.
   constexpr int kIlluminatedY = 78;
+  constexpr int kEventY = 100;
   constexpr int kPhasesLabelY = 122;
   layoutLine(pctBuffer, 98, kIlluminatedY, kScreenW - 98 - kCardMargin, sky.detail,
-             "moon.illuminated", Align::Left, kTransparentText,
-             kPhasesLabelY - (kIlluminatedY + lcd.fontHeight()));
+             "moon.illuminated", Align::Left, kTransparentText);
+
+  // Beside the disc, which ends at x=83, in the row the four upcoming phases
+  // left free. "Moonrise 8:14 PM" is about 130px at 9pt against this column's
+  // 212, so the four phases below keep their row.
+  if (eventLine.length() > 0) {
+    layoutLine(eventLine, 98, kEventY, kScreenW - 98 - kCardMargin, sky.detail,
+               "moon.nextevent", Align::Left, kTransparentText);
+  }
 
   layoutLine("NEXT MAJOR PHASES", kCardMargin, kPhasesLabelY, 200, sky.heading,
              "moon.upcoming.label", Align::Left, kTransparentText);

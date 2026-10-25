@@ -498,7 +498,14 @@ void showIssNextPassCard(const String& riseTimeText, const String& riseDirection
 /// gets from Announcement.cpp's own cardItemCount(). See this function's
 /// body in Display.cpp for the rendering technique and the Northern-
 /// Hemisphere waxing/waning convention it uses.
-void showMoonPhaseCard(const String& phaseName, double phase, double illuminatedFraction);
+///
+/// nextEventMinutesUtc and nextEventKind are the next moonrise or moonset off
+/// the check-in response, drawn as one line: the local time for a kind of
+/// "rise" or "set", the words "No moonrise or set" for "none", and no line
+/// at all for an empty or unrecognised kind, so a device the server cannot
+/// answer for gets the card exactly as it was before these two existed.
+void showMoonPhaseCard(const String& phaseName, double phase, double illuminatedFraction,
+                       int nextEventMinutesUtc, const String& nextEventKind);
 
 /// The clock/date card: a large, room-readable HH:MM and today's date filling
 /// most of the panel - "a moment where the display is just a big clock",

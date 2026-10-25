@@ -24,6 +24,16 @@ String gPhaseName;
 String gLastLoggedPhaseName;
 bool gLastLoggedHadData = false;
 
+/// The next moonrise or moonset the server named. -1 and an empty kind are the
+/// "server said nothing" state; "none" with -1 is "the server looked and there
+/// is no event to name". Both reach the card, which draws them differently.
+int gNextEventMinutesUtc = -1;
+String gNextEventKind;
+
+/// Logged on a change of either, same reasoning as gLastLoggedPhaseName above.
+int gLastLoggedEventMinutes = -1;
+String gLastLoggedEventKind;
+
 bool hasData() { return gPhase >= 0.0 && gIlluminatedFraction >= 0.0; }
 
 /// Nothing to fetch - see MoonPhase.h. Present because CardSpec requires one
@@ -39,9 +49,12 @@ void cardFetch() {}
 uint16_t cardItemCount() { return hasData() ? 1 : 0; }
 
 void cardDraw(uint16_t) {
-  Log::verbose("[moonphase] drawing: phase=%.3f illuminated=%.0f%% (%s)", gPhase,
-              gIlluminatedFraction * 100.0, gPhaseName.c_str());
-  Display::showMoonPhaseCard(gPhaseName, gPhase, gIlluminatedFraction);
+  Log::verbose("[moonphase] drawing: phase=%.3f illuminated=%.0f%% (%s), next %s at %d UTC",
+              gPhase, gIlluminatedFraction * 100.0, gPhaseName.c_str(),
+              gNextEventKind.length() > 0 ? gNextEventKind.c_str() : "(none sent)",
+              gNextEventMinutesUtc);
+  Display::showMoonPhaseCard(gPhaseName, gPhase, gIlluminatedFraction, gNextEventMinutesUtc,
+                             gNextEventKind);
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +103,25 @@ void setPhase(double phase, double illuminatedFraction, const String& phaseName)
     gLastLoggedHadData = false;
     gLastLoggedPhaseName = "";
     Log::line("[moonphase] server reported no Moon phase for this device (position unresolved)");
+  }
+}
+
+void setNextEvent(int minutesUtc, const String& kind) {
+  gNextEventMinutesUtc = minutesUtc;
+  gNextEventKind = kind;
+
+  if (minutesUtc == gLastLoggedEventMinutes && kind == gLastLoggedEventKind) {
+    return;
+  }
+  gLastLoggedEventMinutes = minutesUtc;
+  gLastLoggedEventKind = kind;
+
+  if (kind == "rise" || kind == "set") {
+    Log::printf("[moonphase] next moon%s at %d minutes UTC", kind.c_str(), minutesUtc);
+  } else if (kind == "none") {
+    Log::line("[moonphase] server found no moonrise or moonset today or tomorrow");
+  } else {
+    Log::line("[moonphase] server sent no next moonrise or moonset for this device");
   }
 }
 

@@ -23,6 +23,17 @@ dated heading after.
 
 ## Unreleased
 
+### The moon card says when the moon comes up next — App
+
+One line at the bottom of the card, and it's whichever comes next: `Moonrise
+8:14 PM` or `Moonset 6:02 AM`. Both orientations show it. On the rare day with
+no moonrise and no moonset at all the card says so in words instead of showing
+a blank time, and a display whose location the server can't work out yet draws
+the card exactly as it did before, with no empty line on it.
+
+Nothing to set up. The time arrives with everything else the display already
+asks the server for.
+
 ### A display standing on its end pages left and right — App
 
 Tap the left side of the screen to go back and the right side to go forward,
