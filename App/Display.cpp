@@ -4170,8 +4170,20 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   // The facts, each a label and a value sharing the band. Columns rather than
   // measured widths, so this reads the same on a turned panel - see the
   // content band above.
+  // A card with a picture draws one fact row. Beds and the price are what a
+  // household reads off a wall, and bathrooms and living area are the rows that
+  // cost a turned panel its house and crowd a landscape one. A card with no
+  // picture keeps all of them, because the space is there and nothing else wants it.
+  const bool hasPicture = cachedImageId.length() > 0;
+  const bool portraitPicture = gPortrait && hasPicture;
+  const uint8_t factBudget = hasPicture && factCount > 1 ? 1 : factCount;
+  if (factBudget < factCount) {
+    Log::printf("[display] featuredlistings: %d of %d fact rows held back for the "
+                "portrait picture", factCount - factBudget, factCount);
+  }
+
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  for (uint8_t i = 0; i < factCount; ++i) {
+  for (uint8_t i = 0; i < factBudget; ++i) {
     if (y + 18 > factFloor) {
       Log::printf("[display] featuredlistings: no room for the '%s' row - %dpx between y=%d and "
                   "the freshness line reserved at y=%d",
@@ -4179,11 +4191,16 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
       break;
     }
 
-    // Half of the TEXT column, not half the panel, so a value right-aligns to the edge of
-    // the text rather than underneath the picture.
-    layoutLine(facts[i].label, kContentLeft(), y, textWidth / 2, muted(),
+    // The value takes the width it needs and the label takes the rest, capped so a long
+    // value cannot squeeze the label out. Half each drew "Bathroo..." beside a value two
+    // characters wide. Both are measured against the TEXT column, not the panel, so a
+    // value right-aligns to the edge of the text rather than underneath the picture.
+    const int valueWidth =
+        min(static_cast<int>(lcd.textWidth(facts[i].value)) + 2, (textWidth * 2) / 3);
+    const int labelWidth = textWidth - valueWidth - 8;
+    layoutLine(facts[i].label, kContentLeft(), y, labelWidth, muted(),
                "featuredlistings.fact.label", Align::Left);
-    layoutLine(facts[i].value, textRight, y, textWidth / 2, ink(),
+    layoutLine(facts[i].value, textRight, y, valueWidth, ink(),
                "featuredlistings.fact.value", Align::Right);
     y += 20;
   }
@@ -4195,6 +4212,31 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   if (updatedAt.length() > 0) {
     layoutLine(updatedAt, kContentLeft(), freshnessY, textWidth, muted(),
                "featuredlistings.updated", Align::Left);
+  }
+
+  // A turned panel draws the picture across the bottom, out of whatever the words did
+  // not use. The only placement this card had was a column down the right, and a 220px
+  // band less a picture and its gutter leaves 134 for an address - an argument about
+  // the column. A turned panel's spare room is vertical.
+  //
+  // Drawn last, so the text keeps its full width and every block above has already
+  // taken the height it needs. The floor is factFloor rather than gContentBottom, so
+  // the freshness line keeps the pixels it reserved. Below kMinPictureHeight it is
+  // left out rather than drawn as a sliver.
+  if (portraitPicture) {
+    constexpr int kMinPictureHeight = 56;
+    const int pictureTop = y + 6;
+    const int pictureHeight = factFloor - pictureTop;
+    if (pictureHeight >= kMinPictureHeight) {
+      if (!Assets::drawCachedInRect(cachedImageId, kContentLeft(), pictureTop,
+                                    kContentRight() - kContentLeft(), pictureHeight)) {
+        Log::printf("[display] featuredlistings portrait picture '%s' did not decode",
+                    cachedImageId.c_str());
+      }
+    } else {
+      Log::printf("[display] featuredlistings portrait picture skipped - %d px left, %d needed",
+                  pictureHeight, kMinPictureHeight);
+    }
   }
 
   drawClock();
