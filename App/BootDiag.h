@@ -182,18 +182,18 @@ enum class RestartCause : uint32_t {
   /// failed consecutively past kMaxConsecutiveDrawFailures, so the device had
   /// stopped being able to put pictures on the glass.
   ///
-  /// **This recorded LowHeap until 2026-10-25, and the rename is the whole
-  /// point of the value.** The trigger is
+  /// The trigger is
   /// `Display::consecutiveDrawFailures() > kMaxConsecutiveDrawFailures`. No heap
-  /// figure is compared against anything; the largest-block number on the
-  /// `[health]` line beside the count is context. Filed under a memory name, a
-  /// run of failed draws sent a day of investigation into the heap of device 39,
-  /// which reported 34,804 contiguous bytes at essentially all 31 of its
-  /// restarts - above the 33,434 two TLS record buffers need and double the
-  /// 16,717 one needs.
+  /// figure is compared against anything; the largest-block number printed on
+  /// the `[health]` line beside the count is context.
   ///
-  /// A cause that names the draw sends the next reader to the picture: which
-  /// asset, what format, and how many bytes in one block its decoder wants.
+  /// Distinct from LowHeap above, which this restart recorded until 2026-10-25,
+  /// and the distinction is the reason for the value. A memory name sends a
+  /// reader to the heap, and the devices this fires on have reported 34,804
+  /// contiguous bytes at the moment they restarted - above the 33,434 two TLS
+  /// record buffers need and double the 16,717 one needs. A cause that names the
+  /// draw sends the reader to the picture instead: which asset, what format, and
+  /// how many bytes in one block its decoder wants.
   CannotDraw = 11,
 };
 
@@ -340,10 +340,10 @@ uint32_t lastRestartLargestFreeBlock();
 ///
 /// Read by App.ino's watchdog to decide whether another restart is worth making.
 /// A restart's only mechanism is handing the device a fresh heap, so a run of
-/// them with no successful draw in between says the shortage is structural -
-/// device 39's airline-logo PNG wants 45,056 bytes in one block and that device
-/// has never had more than 36,852 - and further restarts cost a household a
-/// reboot every twenty minutes for nothing.
+/// them with no successful draw in between says the shortage is structural - a
+/// PNG wants 45,056 bytes in one block and some devices have never had more than
+/// 36,852 - and further restarts cost a household a reboot every twenty minutes
+/// for nothing. See kMaxCannotDrawRestarts.
 uint8_t cannotDrawRestarts();
 
 /// Adds one to the count above and commits it. Call immediately before the

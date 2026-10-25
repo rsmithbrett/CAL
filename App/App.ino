@@ -788,11 +788,9 @@ constexpr uint32_t kHeapCheckIntervalMs = 60000;  // once a minute
 // and clear them. 3 minutes is comfortably past every boot-time allocation this
 // firmware makes (WiFi join, SNTP, the first check-in, the first card fetches).
 //
-// This used to be described as the whole protection against a tight reboot loop,
-// and it never was one: bounding the rate of a loop that cannot end is not a
-// protection, as 31 restarts on device 39 at roughly 21 minutes apart
-// demonstrated. kMaxCannotDrawRestarts is the protection; this is a floor under
-// the interval between tries.
+// This is a floor under the interval between tries, not a protection against a
+// loop. Bounding the rate of a loop that cannot end does not end it;
+// kMaxCannotDrawRestarts is what bounds the number of tries.
 constexpr uint32_t kHeapCheckGraceMs = 3UL * 60UL * 1000UL;
 
 // Why this watchdog counts FAILURES and not free bytes, and the whole history
@@ -928,29 +926,26 @@ constexpr uint32_t kMaxConsecutiveDrawFailures = 6;
 // How many times in a row this watchdog may restart the device before it stops
 // restarting and leaves it up.
 //
-// A restart's only mechanism here is handing the device a fresh heap. That is
-// worth doing - releasing a TLS session on device 17 moved the largest
-// contiguous 8-bit block from 6,132 to 36,852, and a 10,568-byte allocation that
-// had just failed then succeeded - so the first restart stays, and so does the
-// second. What it cannot do is raise the ceiling. Device 39's only
-// image-bearing card is `aircraft`, its picture is an airline-logo PNG needing
-// 45,056 bytes in one block, and that device's all-time maximum largest block is
-// 36,852. With no second picture card there is never a successful draw to clear
-// the counter, so it climbs past the limit above and the device restarts, every
-// ~21 minutes, 31 times, with 34,804 contiguous bytes free at essentially every
-// one of them.
+// A restart's only mechanism here is handing the device a fresh heap, which is
+// worth trying: releasing a TLS session moved a measured largest block from
+// 6,132 to 36,852 and a 10,568-byte allocation that had just failed then
+// succeeded. What it cannot do is raise the ceiling. A PNG needs 45,056 bytes in
+// one block; a device whose largest block has never exceeded 36,852 will not get
+// them from any heap, and if that picture is on its only image-bearing card
+// there is never a successful draw to clear the counter either. The run then
+// passes the limit above on every rotation and the restart repeats for as long
+// as the device is powered.
 //
 // 3, because three successive fresh heaps that each failed to produce one
-// successful draw is enough to call the shortage structural. Past that the
-// device keeps checking in and reporting telemetry, which is how the fault
-// reaches somebody, and stops rebooting in front of a household for an outcome
-// it cannot change. A card whose picture will not decode is dropped from the
-// rotation after its first failure, so a capped device still shows every card it
-// can draw.
+// successful draw is enough to call the shortage structural. Past that the device
+// keeps checking in and reporting telemetry, which is how the fault reaches
+// somebody, and stops rebooting in front of a household for an outcome it cannot
+// change. A card whose picture will not decode is dropped from the rotation after
+// its first failure, so a capped device still shows every card it can draw.
 //
 // The streak lives in NVS (BootDiag::cannotDrawRestarts()) because it has to
 // survive the restart it counts, and a power cycle does not refill it - the
-// ceiling did not change because somebody pulled the plug.
+// ceiling is not changed by a power cut.
 constexpr uint8_t kMaxCannotDrawRestarts = 3;
 
 // Uptime past which a zero failure count gives the budget above back.
@@ -1313,9 +1308,9 @@ void checkHeapHealth() {
       gCannotDrawCapReported = true;
       Log::printf(
           "[health] %lu consecutive failed card draws (limit %lu) and this device has already "
-          "restarted %u times for it (cap %u) - staying up instead, because a restart offers it a "
-          "fresh heap and nothing else, and three fresh heaps have not produced one successful "
-          "draw. Largest 8BIT block=%u. Check what the card's picture needs in one block",
+          "restarted %u times for it (cap %u) - staying up instead. A restart offers a fresh heap "
+          "and nothing else, and that many fresh heaps have not produced one successful draw. "
+          "Largest 8BIT block=%u. Check what this card's picture needs in one block",
           static_cast<unsigned long>(failures),
           static_cast<unsigned long>(kMaxConsecutiveDrawFailures),
           static_cast<unsigned>(priorRestarts), static_cast<unsigned>(kMaxCannotDrawRestarts),
@@ -1329,13 +1324,11 @@ void checkHeapHealth() {
   // the restart is back - the same restart, with the same care, on a trigger
   // that means something this time.
   //
-  // This used to carry the risk of becoming a restart every four minutes
-  // forever, on the reasoning that a rebooting device at least retries against a
-  // fresh heap. The risk arrived - device 39, 31 restarts, 34,804 contiguous
-  // bytes free at essentially every one of them - and the branch above is the
-  // answer: the retry is still made, up to kMaxCannotDrawRestarts times, and
-  // then the device stays up. A device that recovers stops restarting
-  // immediately, because the counter clears on the first successful draw.
+  // Bounded by the branch above: the retry is made up to kMaxCannotDrawRestarts
+  // times and then the device stays up, so a shortage no heap can satisfy costs
+  // a household three reboots rather than one every twenty minutes. A device
+  // that recovers stops restarting immediately, because the draw counter clears
+  // on the first successful draw.
   Log::printf(
       "[health] %lu consecutive failed card draws (limit %lu) after %lu ms uptime - this "
       "device can no longer draw its cards, restarting for a fresh heap "

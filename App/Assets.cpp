@@ -73,17 +73,17 @@ void recordDecodeFailure(const String& assetId) {
 /// heap that just refused a band buffer. Device 17 on 2026-10-11 did this three
 /// times in one minute for a file that was intact the whole time.
 ///
-/// **The report is on the same footing, and used to be made before the question
-/// was asked.** recordDecodeFailure() ran first, so an allocation refusal
-/// reached the server in assetDecodeFailureIds and the gateway filed an
+/// **The report is on the same footing, and the allocation check comes before
+/// it.** recordDecodeFailure() used to run first, so a refusal for want of a
+/// block travelled in assetDecodeFailureIds and the gateway filed an
 /// AssetDecodeFailure audit row against an asset whose bytes were fine. What
-/// Assets.h promises that report means - "present on the card, downloaded and
-/// SHA-256 verified fine, but LovyanGFX still refused it" - is what it now
-/// carries: a refusal for want of a block is counted here and logged, and goes
-/// no further. Which means it currently reaches the server only as the
-/// cannot-draw restart cause, once the run of them trips App.ino's watchdog; an
-/// optional assetDrawOutOfMemory pair on the check-in request would report it
-/// directly, and that needs Assets.h, CheckIn.cpp and the gateway together.
+/// Assets.h says that report means - "present on the card, downloaded and
+/// SHA-256 verified fine, but LovyanGFX still refused it" - is now what it
+/// carries. A refusal is counted here and logged, and goes no further, so it
+/// reaches the server only as the cannot-draw restart cause once a run of them
+/// trips App.ino's watchdog. Reporting it directly would take an optional
+/// assetDrawOutOfMemory pair on the check-in request, which means Assets.h,
+/// CheckIn.cpp and the gateway together.
 void giveUpOnDecodeFailure(const String& id) {
   if (Display::lastDrawFailedOnAllocation()) {
     if (gAllocationRefusals < UINT8_MAX) {
