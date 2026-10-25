@@ -50,7 +50,9 @@ namespace BootDiag {
 /// for the same reason: leaving a gap invites the next person to fill it.
 enum class RestartCause : uint32_t {
   None = 0,
-  /// App: the heap-health watchdog.
+  /// App: a genuine heap restart. Nothing records it today - CannotDraw below
+  /// took over the App's one call site - and the value stays because the App
+  /// still reads it out of NVS written by older firmware.
   LowHeap = 1,
   /// App: rebooting into CAL to install a firmware update.
   Ota = 2,
@@ -101,6 +103,17 @@ enum class RestartCause : uint32_t {
   /// 2026-10-11 and CAL did not, and every build for the rest of that day
   /// stopped here before compiling anything.
   OrientationChanged = 10,
+  /// App: card draws failed consecutively past the App's own limit, so the
+  /// device had stopped being able to put pictures on the glass. The App's
+  /// cannot-draw watchdog recorded LowHeap for this until 2026-10-25, which put
+  /// a run of failed draws on the server under a memory name.
+  ///
+  /// CAL never writes it, for the reason OrientationChanged above says: the
+  /// number is the wire format between the two binaries, and
+  /// ci/build-firmware.sh refuses a build where the two enums disagree. describe()
+  /// does not list it either, the same way it does not list OrientationChanged -
+  /// CAL only ever prints causes it writes.
+  CannotDraw = 11,
 };
 
 /// Records what this restart is FOR, unless something has already recorded a
