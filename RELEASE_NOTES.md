@@ -23,6 +23,34 @@ dated heading after.
 
 ## Unreleased
 
+_Nothing yet._
+
+---
+
+## v2026.10.25.0003
+
+### A turned panel shows the house — App
+
+A display standing on its end drew the words of a property alert and no
+picture at all. It draws the house now, across the bottom, under the address
+and the price.
+
+Most of these cards have been seen on a turned panel: 8,019 of the 10,762
+times this card has been on screen. So "no picture" was the usual way it
+looked, not a corner case.
+
+A card carrying a picture now shows one line of detail rather than three. The
+bedrooms and the price stay; bathrooms and living area come off, because they
+were what left no room for the house. A card with no picture still shows all
+three.
+
+A line of detail also measures its own number and gives the label whatever is
+left, so "Bathrooms" no longer reads "Bathroo...".
+
+---
+
+## v2026.10.25.0002
+
 ### A featured listing price reads as money again — App
 
 A price on a featured listing card showed as '$514000'. It now reads
@@ -108,7 +136,6 @@ unchanged.
 Both change the permanent CAL loader, not the downloadable App, and neither has
 run on hardware. To reflash over a cable, follow the wired install at
 https://discoveraroundme.com/cal
-
 ---
 
 ## v2026.10.24.0002
