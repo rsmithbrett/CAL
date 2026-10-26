@@ -23,6 +23,44 @@ dated heading after.
 
 ## Unreleased
 
+### An airline logo reaches displays that have no memory card — App
+
+Two displays in service have no memory card, and the aircraft card's airline
+logo was only ever read from one. Those two showed the flight, the distance
+and the route with a blank space where the logo goes, every single time. They
+now pull the logo over the network and draw it the way they already pull their
+picture cards, so it appears with no card in the slot. It is fetched again on
+each refresh rather than kept, which is what having nowhere to keep it means.
+
+### The airline logo fits a display standing on its end — App
+
+On an upright display the logo was drawn off the right-hand edge: a square
+airline mark missed the glass entirely, and a wide one showed a sliver of its
+left edge jammed against the border. It is now placed from the display's own
+width and sits inside the right margin either way, at full size.
+
+Upright, it also moves to a line of its own above the airline name instead of
+sitting beside it. Side by side there was only room for about half a name -
+"Southwest Airlines" came out as "Southwe..." - and an upright display has
+empty space below the card to spend instead. The name now reads in full with
+the logo above it. Displays lying flat keep the layout they have.
+
+A sighting whose airline has no logo on file no longer holds that space empty.
+The name gets the whole width on any display.
+
+### A logo the server has replaced reaches a display that stored the old one — App
+
+Every airline logo was re-encoded into a form these displays can draw after
+startup. A display that had already stored the old version kept using it,
+because a stored image was checked for being there and never for being
+current, so it went on failing to draw the same picture every few minutes. A
+small stored image that will not draw is now dropped once per startup, and the
+next fetch brings whatever the server holds now.
+
+---
+
+## v2026.10.26.0003
+
 ### A price drop says what the price dropped from — App
 
 A card headed "Price drop" showed one number, so there was no way to tell what

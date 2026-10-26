@@ -342,6 +342,94 @@ constexpr int kBannerStripHeight = 100;
 // exactly rather than merely resembling it.
 constexpr int kRouteLineHeight = 18;
 
+// The aircraft card's logo column, and the headline column beside it.
+//
+// 90px, and NOT kScaledWidth(90), which is the one column on this card that
+// must not scale with the band. An airline logo is stored as RGB565, and that
+// format cannot be resampled on the way to the panel - drawRgb565FromBuffer()
+// centres the frame and clips it. The server sizes every logo to fit 90x34 for
+// exactly that reason, so a zone narrower than 90 does not shrink the logo, it
+// cuts the ends off it: 66px would take 12 columns off each side of a 90px
+// wordmark and lose a letter at both ends.
+//
+// So the width is the server's target and the x is what moves. The literal
+// x220 was the actual defect - against a 240px panel the zone ran from x220 to
+// x310, and because the draw centres what it fits, a 34px square mark was
+// placed at x248 and reached the glass not at all. Measured back from
+// kContentRight() it lands at x140 on that panel, whole.
+//
+// Capped at half the band so the logo can never take a column wider than the
+// text beside it. 90 of a 220px band is the narrowest case this hardware has
+// and the cap does not bite there; it is a floor against a panel nobody has
+// measured this card against, not a rule in force today.
+//
+// The headline takes what is left. The two widths have to agree or a long
+// airline name runs under the logo, and they previously agreed only in a
+// comment - the headline carried the literal 200, which is
+// 300 - 90 - kColumnGap worked out by hand for one panel width.
+// kWidthBeside() is that subtraction, so both columns move together now.
+constexpr int kAircraftLogoDesignWidth = 90;
+int kAircraftLogoWidth() { return min(kAircraftLogoDesignWidth, kColumnWidth(2)); }
+
+// The logo's own rows: under the banner, above the distance line, with 4px
+// clearance at each edge. Both of those bounds are fixed y values on every
+// panel, so this is the same 34px height landscape always had - written as
+// the arithmetic rather than the answer, so moving either line moves the logo
+// with it.
+constexpr int kAircraftDistanceRowY = 64;
+constexpr int kAircraftLogoClearance = 4;
+
+// Below which the headline stops sharing a row with the logo and drops under
+// it instead.
+//
+// 160px, and the number is the airline names rather than a round figure.
+// "Southwest Airlines" is about 140px of the 9pt the fitting ladder falls back
+// to, so a column under that cannot hold an ordinary carrier name at any size
+// the ladder offers and the name ellipsizes whatever it does. A 240px panel
+// leaves 120px beside the logo, which drew "Southwe..." - broken mid-word,
+// photographed 2026-10-26 - while the bottom half of the same card was empty.
+//
+// A turned panel is 80px narrower and 80px taller, so the room the logo needs
+// beside the text is exactly the room there is underneath it. Landscape keeps
+// 200px and never takes this branch.
+constexpr int kAircraftMinHeadlineWidth = 160;
+
+// What the card's text gives up to let the logo have a row of its own: the
+// logo's bottom edge plus a 6px gap, less the y the headline sits at when they
+// share a row. Every line below the headline moves by the same amount, so the
+// card keeps its spacing and only its top moves.
+constexpr int kAircraftHeadlineY = 32;
+constexpr int kAircraftTextGapUnderLogo = 6;
+
+/// Whether the logo takes a row of its own rather than a column beside the
+/// headline. True only on a panel too narrow to give the headline a usable
+/// column, and only when there is a logo at all - a card with none lays out
+/// the way it always has at every width.
+bool kAircraftLogoStacked(bool hasLogo) {
+  return hasLogo && kWidthBeside(kAircraftLogoWidth()) < kAircraftMinHeadlineWidth;
+}
+
+/// How far the card's text drops to clear a stacked logo. Zero when they share
+/// a row, which is every landscape card and every card with no logo.
+int kAircraftTextShift(bool hasLogo) {
+  if (!kAircraftLogoStacked(hasLogo)) {
+    return 0;
+  }
+  const int logoBottom = kBannerHeight + kAircraftLogoClearance +
+                         (kAircraftDistanceRowY - kBannerHeight - (kAircraftLogoClearance * 2));
+  return logoBottom + kAircraftTextGapUnderLogo - kAircraftHeadlineY;
+}
+
+/// The column the headline is laid out in: the band beside the logo when they
+/// share a row, and the whole band when the logo has its own row or there is
+/// no logo to make room for.
+int kAircraftHeadlineWidth(bool hasLogo) {
+  if (!hasLogo || kAircraftLogoStacked(hasLogo)) {
+    return kContentWidth();
+  }
+  return kWidthBeside(kAircraftLogoWidth());
+}
+
 // Card chrome geometry - see Display.h's own remarks on why all of it is
 // decided here rather than described by the server.
 //
@@ -1868,14 +1956,21 @@ void showFailure(const String& headline, const String& whatToDo) {
 }
 
 void aircraftLogoZone(int16_t& x, int16_t& y, int16_t& w, int16_t& h) {
-  // Top-right of the content area: clear of the banner (ends y22), clear of
-  // the headline's left-aligned start (truncated to stop at x210, see
-  // below), and above the distance/route line at y64 so a wide logo cannot
-  // run into it either.
-  x = 220;
-  y = 26;
-  w = 90;
-  h = 34;
+  // The right-hand end of the content band, between the banner and the
+  // distance line. The right edge is kContentRight(), the width is the
+  // server's own 90px logo target (see kAircraftLogoWidth() for why this one
+  // does not scale), and the rows are the gap the banner and the distance line
+  // leave.
+  //
+  // On a 320x240 panel this is x220 y26 90x34, which is what the four literals
+  // here used to say. On 240x320 it is x140 y26 90x34 - the same zone, moved
+  // in by the 80px the narrower panel owes it, with the headline beside it
+  // narrowing to match.
+  w = static_cast<int16_t>(kAircraftLogoWidth());
+  h = static_cast<int16_t>(kAircraftDistanceRowY - kBannerHeight -
+                           (kAircraftLogoClearance * 2));
+  x = static_cast<int16_t>(kContentRight() - w);
+  y = static_cast<int16_t>(kBannerHeight + kAircraftLogoClearance);
 }
 
 /// SHORTENS ONE ALREADY-FORMATTED AIRPORT NAME, ON THE DEVICE, BECAUSE THE
@@ -2020,7 +2115,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
                       double speedKnots, double headingDegrees, double distanceMiles,
                       const String& originCode, const String& destinationCode,
                       const String& originName, const String& destinationName,
-                      const String& updatedAt, const String& noRouteLine) {
+                      const String& updatedAt, const String& noRouteLine, bool hasLogo) {
   lcd.fillScreen(bg());
   drawCardBanner("OVERHEAD", kAircraftBanner, 130);
 
@@ -2032,15 +2127,27 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   // server too old to send one, and a server that matched the "OTH"
   // catch-all and withheld it on purpose from 2026-10-23. The second is now
   // the common one, so this path is ordinary rather than a legacy edge.
-  // Bounded at 200px rather than the full card width: aircraftLogoZone()
-  // starts at x220, and a name long enough to reach it would run under the
-  // logo rather than stopping short of it. An over-long name now ellipsizes
-  // inside those 200px instead of being shortened with nothing to show for it.
+  // Bounded to the band beside the logo rather than the full card width: a
+  // name long enough to reach aircraftLogoZone() would run under the logo
+  // instead of stopping short of it, so an over-long name ellipsizes inside
+  // this column. kAircraftHeadlineWidth() is the same subtraction the zone's
+  // width comes out of, which is what keeps the two in step on a panel the
+  // landscape numbers were never measured against.
+  //
+  // The column is reserved only when there is a logo to put in it, and only
+  // when the panel is wide enough for the two to sit side by side. A sighting
+  // whose airline has no logo draws nothing in the zone, and holding the space
+  // empty would cost the name 90px of a 220px band for a picture that is not
+  // coming. On a turned panel the logo takes a row of its own instead and
+  // every line below drops by kAircraftTextShift() - see
+  // kAircraftMinHeadlineWidth for the measurement that decides which.
+  const int shift = kAircraftTextShift(hasLogo);
   const bool hasAirlineName = airlineName.length() > 0;
   const String headline = hasAirlineName ? airlineName : callsign;
   lcd.setFont(&fonts::FreeSansBold12pt7b);
   lcd.setTextSize(1);
-  layoutLine(headline, kCardMargin, 32, 200, ink(), "aircraft.headline");
+  layoutLine(headline, kCardMargin, kAircraftHeadlineY + shift, kAircraftHeadlineWidth(hasLogo),
+             ink(), "aircraft.headline");
 
   // Callsign drops to this secondary line, alongside distance, only when the
   // airline name took the headline slot above it - otherwise callsign is
@@ -2060,7 +2167,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   } else {
     snprintf(distanceBuf, sizeof(distanceBuf), "%.1f mi away", distanceMiles);
   }
-  layoutLine(distanceBuf, kCardMargin, 64, kContentWidth(), muted(),
+  layoutLine(distanceBuf, kCardMargin, kAircraftDistanceRowY + shift, kContentWidth(), muted(),
              "aircraft.distance");
 
   // Route, in the gap between the distance line and the stat rows.
@@ -2132,7 +2239,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
     // deliberately different strings: the log says what the server sent, this
     // says what fits, and a diagnostic that quietly adopted the display's
     // abbreviations would stop being able to show a bad name upstream.
-    const TextBox routeBox{kCardMargin, 82, kContentWidth(), kRouteLineHeight, 2,
+    const TextBox routeBox{kCardMargin, 82 + shift, kContentWidth(), kRouteLineHeight, 2,
                            Align::Left};
     routeLines = layoutText(routeLine, routeBox, muted(), "aircraft.route").lines;
   }
@@ -2148,7 +2255,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
     // either way.
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
-    const TextBox box{kCardMargin, 82, kContentWidth(), kRouteLineHeight, 1,
+    const TextBox box{kCardMargin, 82 + shift, kContentWidth(), kRouteLineHeight, 1,
                       Align::Left};
     routeLines = layoutText(noRouteLine, box, muted(), "aircraft.noroute").lines;
   }
@@ -2175,7 +2282,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   // push a value off the edge - the same ordering the sports card already
   // argues for its score column.
   const int rowLabelWidth = rightX - rowValueWidth - kCardMargin;
-  int rowY = routeLines > 0 ? 82 + routeLines * kRouteLineHeight : 100;
+  int rowY = routeLines > 0 ? 82 + shift + routeLines * kRouteLineHeight : 100 + shift;
 
   // THE ROW PITCH CLOSES UP WHEN THE ROUTE TOOK TWO LINES, because at 30 it
   // did not fit and never had. Arithmetic, both at 9pt whose fontHeight() is
@@ -6252,6 +6359,56 @@ bool drawImageFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, 
         path.c_str(), formatName(format), (int)w, (int)h, (int)x, (int)y,
         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
+  }
+  return ok;
+}
+
+bool drawImageFromBufferInRect(const uint8_t* data, size_t size, int32_t x, int32_t y, int32_t w,
+                               int32_t h) {
+  gLastDrawFailedOnAllocation = false;
+
+  if (data == nullptr || size == 0) {
+    // No bytes, so no decode, so nothing this device failed at - the same
+    // reasoning drawImageFromBuffer() and the two SD draws apply to their own
+    // empty cases, and not counted for the same reason. Nothing is cleared
+    // either, so the card this logo was going to be layered onto is left as
+    // the caller composed it.
+    noteNoImageAvailable("drawImageFromBufferInRect called with no data", String("RAM buffer"));
+    releaseDecodeMemory();
+    return false;
+  }
+
+  // Sniffed from the bytes in front of us, exactly as the SD in-rect draw
+  // sniffs the file. classifyHeader() is the same function both paths use, so
+  // they cannot disagree about what a format looks like.
+  const ImageFormat format = classifyHeader(data, size);
+
+  bool ok = false;
+  if (format == ImageFormat::Jpeg) {
+    ok = lcd.drawJpg(data, size, x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
+  } else if (format == ImageFormat::Png) {
+    ok = lcd.drawPng(data, size, x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
+    if (!ok) {
+      notePngDrawFailure("drawImageFromBufferInRect");
+    }
+  } else if (format == ImageFormat::Rgb565) {
+    // The expected format on this path, which is the one way it differs from
+    // every other draw in this file. A device with no SD card reaches this
+    // function for an airline logo, and the logos the server holds are RGB565
+    // of a few thousand bytes - small enough to fetch into one contiguous
+    // block, where the ~153,600-byte full-panel RGB565 assets are not. The
+    // push needs no decoder and no band buffer at all.
+    ok = drawRgb565FromBuffer(data, size, x, y, w, h);
+  }
+
+  noteDrawOutcome(ok);
+  releaseDecodeMemory();
+  if (!ok) {
+    Log::printf("[display] failed to draw a %u-byte RAM buffer (%s) in %dx%d rect at (%d,%d) "
+                "(8BIT largest=%u free=%u)",
+                static_cast<unsigned>(size), formatName(format), (int)w, (int)h, (int)x, (int)y,
+                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
   }
   return ok;
 }

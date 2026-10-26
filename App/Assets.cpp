@@ -39,6 +39,40 @@ uint8_t gAllocationRefusals = 0;
 constexpr uint8_t kMaxDrawAttempts = 3;
 constexpr uint32_t kDrawRetryDelayMs = 75;
 
+/// The size under which a cached file is re-fetched once after a draw refused
+/// for want of a block, rather than kept - see giveUpOnDecodeFailure() for the
+/// case this exists for.
+///
+/// Every airline logo the server holds is between 2,124 and 5,932 bytes, so
+/// 16,384 covers all 58 with room and stays well clear of the full-panel
+/// RGB565 assets at roughly 153,600, which are the ones the keep-it rule was
+/// written to protect.
+constexpr size_t kCheapRefetchBytes = 16384;
+
+/// Ids already re-fetched once this boot by the rule above, comma-joined with
+/// the same dedup as the decode-failure report.
+///
+/// Per boot, and once per id, because the rule has to terminate. A small asset
+/// this device genuinely cannot draw would otherwise refuse, invalidate,
+/// re-fetch and refuse again on every appearance of its card, which is the
+/// fetch loop the keep-the-cached-copy rule was put in to stop. One re-fetch
+/// is enough to replace bytes that went stale; a second would only be asking
+/// the same question twice.
+///
+/// **Two caps, and they are not the same cap.** The id list gives once per
+/// asset. kMaxCheapRefetches is a separate ceiling on the whole mechanism per
+/// boot, so after four drops no further asset is dropped this boot whatever
+/// its id. A device holding ten stale logos therefore recovers four per boot
+/// and the rest on the boots after. That is the deliberate trade: a fleet-wide
+/// re-encode must not turn one boot into a burst of fetches on a device that
+/// is already failing to draw.
+///
+/// Neither is ever cleared. clearDecodeFailures() resets the report, which is
+/// per reporting cycle; this budget is for the life of the boot.
+constexpr uint8_t kMaxCheapRefetches = 4;
+String gCheapRefetchedIds;
+uint8_t gCheapRefetchCount = 0;
+
 void recordDecodeFailure(const String& assetId) {
   // Dedup within one reporting cycle: an aircraft logo overlay redraws (and
   // can refail) every time that card is shown, and without this a single
@@ -54,6 +88,72 @@ void recordDecodeFailure(const String& assetId) {
     gDecodeFailureIds += assetId;
   }
   gDecodeFailureCount++;
+}
+
+/// Defined below, declared here for the refusal branch of
+/// giveUpOnDecodeFailure().
+String pathFor(const String& id);
+bool isSafeId(const String& id);
+
+/// The size of a cached asset, or 0 when there is no readable file.
+size_t cachedSizeOf(const String& id) {
+  if (!Sd::isReady() || !isSafeId(id)) {
+    return 0;
+  }
+  File f = SD.open(pathFor(id), FILE_READ);
+  if (!f) {
+    return 0;
+  }
+  const size_t size = f.size();
+  f.close();
+  return size;
+}
+
+/// One re-fetch of a small cached asset whose draw was refused for want of a
+/// block, so a re-encode on the server can reach a device that already cached
+/// the old bytes.
+///
+/// **The keep-the-cached-copy rule in giveUpOnDecodeFailure() below has a
+/// hole, and it is the whole reason this exists.** ensureCached() answers
+/// "already here" on SD.exists()
+/// alone - no hash comparison, nothing that would notice the server's copy
+/// changing underneath it. So when every airline logo was re-encoded from PNG
+/// to RGB565, the devices that had already cached a logo kept the PNG. The
+/// draw then refuses for want of the PNG decoder's ~44KB against a largest
+/// block of 32,756, the refusal branch keeps the cached copy, and the next
+/// draw asks the same question of the same bytes. Device 23 did that three
+/// times a draw, every three minutes, for bytes the server had replaced hours
+/// earlier.
+///
+/// The keep-it rule is still right for what it was written for: an RGB565
+/// full-panel asset is ~153,600 bytes, and re-fetching one lands on the same
+/// heap that just refused a band buffer. That reasoning is about size, so size
+/// is what this branches on - under kCheapRefetchBytes the re-fetch costs a
+/// few thousand bytes over a connection this device already has.
+///
+/// Returns whether the cached copy was dropped.
+bool reFetchIfCheap(const String& id) {
+  const size_t cached = cachedSizeOf(id);
+  if (cached == 0 || cached > kCheapRefetchBytes) {
+    return false;
+  }
+  if (gCheapRefetchedIds.indexOf(id) >= 0 || gCheapRefetchCount >= kMaxCheapRefetches) {
+    return false;
+  }
+
+  if (gCheapRefetchedIds.length() > 0) {
+    gCheapRefetchedIds += ",";
+  }
+  gCheapRefetchedIds += id;
+  ++gCheapRefetchCount;
+  invalidate(id);
+  Log::printf("[assets] '%s' is %u cached bytes and would not draw on this heap - dropping it so "
+              "the next fetch reads the server's current copy (drop %u of %u this boot, one per "
+              "asset)",
+              id.c_str(), static_cast<unsigned>(cached),
+              static_cast<unsigned>(gCheapRefetchCount),
+              static_cast<unsigned>(kMaxCheapRefetches));
+  return true;
 }
 
 /// Every kMaxDrawAttempts-exhausted call site funnels through here, so the
@@ -88,6 +188,9 @@ void giveUpOnDecodeFailure(const String& id) {
   if (Display::lastDrawFailedOnAllocation()) {
     if (gAllocationRefusals < UINT8_MAX) {
       ++gAllocationRefusals;
+    }
+    if (reFetchIfCheap(id)) {
+      return;
     }
     Log::printf("[assets] '%s' could not be drawn after %u attempt(s) - keeping the cached copy "
                 "and not reporting it as a decode failure, this heap had no block to draw it with "
@@ -1054,6 +1157,30 @@ bool drawRam(const String& id, const RamAssetBuffer& buffer) {
       // trace already gathered stays comparable with every trace gathered
       // after. A stage that has to be inserted later invalidates the history.
       HeapTrace::mark(HeapTrace::Stage::AfterDraw, id.c_str(), buffer.size);
+      return true;
+    }
+    if (attempt + 1 < kMaxDrawAttempts) {
+      delay(kDrawRetryDelayMs);
+    }
+  }
+  giveUpOnDecodeFailure(id);
+  return false;
+}
+
+bool drawRamInRect(const String& id, const RamAssetBuffer& buffer, int32_t x, int32_t y, int32_t w,
+                   int32_t h) {
+  if (buffer.data == nullptr || buffer.size == 0) {
+    return false;
+  }
+
+  // No HeapTrace::mark() bracketing here, unlike drawRam(). Those eight stages
+  // were laid out to measure one full-panel picture per refresh on a device
+  // with no card, and a logo redrawn on every appearance of the aircraft card
+  // would interleave its own stages into the middle of that sequence. The
+  // trace this file gathers reads as one subject at a time or it reads as
+  // nothing.
+  for (uint8_t attempt = 0; attempt < kMaxDrawAttempts; ++attempt) {
+    if (Display::drawImageFromBufferInRect(buffer.data, buffer.size, x, y, w, h)) {
       return true;
     }
     if (attempt + 1 < kMaxDrawAttempts) {

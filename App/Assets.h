@@ -223,6 +223,32 @@ void releaseRamBuffer(RamAssetBuffer& buffer);
 /// decodeFailureIds()/decodeFailureCount() report CheckIn.cpp already sends.
 bool drawRam(const String& id, const RamAssetBuffer& buffer);
 
+/// Same as drawRam(), bounded to a rectangle rather than the whole panel -
+/// what drawCachedInRect() is to drawCached().
+///
+/// **This is what lets a device with no SD card show an airline logo at all.**
+/// The logo was drawn only through drawCachedInRect(), which reads the SD
+/// cache, so on the two card-less displays in this fleet the draw path ended
+/// at "not cached" and the fetch path never ran: the journal recorded
+/// "logo unavailable" with no fetch line beside it. The graphic cards had
+/// had their fallback since fetchToRam() arrived; the logo simply was not
+/// wired to it. fetchToRam() fills `buffer` on the fetch path and this layers
+/// it onto the card Display::showAircraftCard() has already composed.
+///
+/// The network cost fetchToRam() accepts for a full-panel picture is far
+/// smaller here: an airline logo is a few thousand bytes re-fetched once per
+/// content refresh, against the tens of thousands a graphic card pays on the
+/// same schedule. Aircraft.cpp does re-fetch on every refresh rather than
+/// holding the bytes, for Graphic.cpp's reason - a RAM buffer is the one cache
+/// nothing can invalidate, so keeping it would make a card-less device the
+/// only one a re-encode on the server could never reach short of a restart.
+///
+/// Same kMaxDrawAttempts retry count and the same decode-failure accounting as
+/// every other draw in this file, so a logo drawn from RAM is reported exactly
+/// the way one drawn from SD is.
+bool drawRamInRect(const String& id, const RamAssetBuffer& buffer, int32_t x, int32_t y, int32_t w,
+                   int32_t h);
+
 /// How many assets are currently cached - reported by Telemetry so the
 /// fleet's storage view can show cache growth alongside sdUsedBytes.
 uint16_t cachedCount();

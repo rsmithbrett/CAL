@@ -409,6 +409,41 @@ namespace {
 Result gLast;
 bool gEverFetched = false;
 
+/// The logo's bytes when this device has no SD cache to hold them, and the id
+/// they belong to.
+///
+/// A card-less device reaches the logo the way Graphic.cpp's cards already
+/// reach their pictures: ensureCached() answers no, and the fetch path falls
+/// back to Assets::fetchToRam(). This card needs only one of these rather than
+/// Graphic.cpp's per-instance buffers, because there is one logo on screen at a
+/// time and the aircraft card is a single descriptor - but it is a file-scope
+/// static for the same reason theirs are, so the bytes survive from the fetch
+/// that filled them to however many draws follow before the next refresh.
+///
+/// gLogoRamId is what the buffer actually holds, not what gLast wants. The two
+/// diverge on the draw after a refresh that found a different airline: the
+/// buffer still has the previous logo until the new fetch replaces it, and
+/// drawing it then would put the wrong carrier's mark on the card.
+Assets::RamAssetBuffer gLogoRam;
+String gLogoRamId;
+
+/// Set when the bytes in gLogoRam reached the decoder and no picture came out,
+/// so the card stops asking.
+///
+/// Without it a logo that will not draw costs three attempts on every
+/// appearance of this card, forever, and each one counts toward the
+/// consecutive-draw-failure watchdog that restarts the device. A card-less
+/// device is the one that cannot recover from that on its own: Assets.cpp's
+/// re-fetch-once rule reads the SD cache to decide, so it declines for a
+/// device that has no cache, and nothing else would ever clear the count. One
+/// attempt per set of bytes is the same bargain Graphic.cpp strikes when it
+/// drops a card whose picture will not decode.
+///
+/// Cleared whenever a fetch puts different bytes in the buffer, so a logo the
+/// server re-encodes gets a fresh attempt rather than being written off for
+/// the uptime.
+bool gLogoRamUndrawable = false;
+
 /// millis() when gLast last became an Ok result - same field, same reasoning,
 /// same fix as Weather.cpp's gLastOkMs: "Updated just now" was previously
 /// hardcoded on every draw, including a redraw of a sighting fetched minutes
@@ -521,9 +556,67 @@ void cardFetch() {
     // ordinary case (no logo on file for this row yet) and skips the call
     // entirely rather than asking Assets to cache an empty id.
     if (gLast.nearest.airlineLogoAssetId.length() > 0) {
-      const bool logoReady = Assets::ensureCached(gLast.nearest.airlineLogoAssetId);
+      const String& logoId = gLast.nearest.airlineLogoAssetId;
+      const bool logoReady = Assets::ensureCached(logoId);
       Log::printf("[aircraft] logo %s for '%s': %s", logoReady ? "cached" : "unavailable",
-                  gLast.nearest.airlineCode.c_str(), gLast.nearest.airlineLogoAssetId.c_str());
+                  gLast.nearest.airlineCode.c_str(), logoId.c_str());
+
+      if (logoReady) {
+        // An SD cache answered, so anything the buffer is holding is a logo
+        // this device no longer needs - hand it back rather than carrying it
+        // for the uptime. Assets.h's releaseRamBuffer() sets out why a held
+        // buffer is worth reclaiming: a new TLS session needs 16,717 bytes
+        // contiguous twice, and the blocks this fleet reports are not large
+        // enough for both once a picture is sitting in one of them.
+        if (gLogoRam.data != nullptr) {
+          Assets::releaseRamBuffer(gLogoRam);
+          gLogoRamId = "";
+          gLogoRamUndrawable = false;
+        }
+      } else {
+        // The SD path answered no. On the two card-less displays in this fleet
+        // that is permanent and no retry of the SD side will change it, so the
+        // bytes come straight to RAM over the network this fetch already
+        // reached the server on - the same fallback Graphic.cpp's cards have
+        // had since fetchToRam() arrived, which the logo was never wired to.
+        //
+        // Re-fetched every cycle rather than kept once it is in hand, which is
+        // what Graphic.cpp's fetch() does with its own pictures and for the
+        // same reason: a RAM buffer is the one cache nothing can invalidate.
+        // ensureCached() answers "already here" on the file existing, so a
+        // device with a card cannot notice the server re-encoding an asset
+        // either - but that device at least has a cached file for Assets.cpp
+        // to drop. Holding these bytes for the uptime would make a card-less
+        // device the only one a re-encode could never reach short of a
+        // restart. A logo is a few thousand bytes against a picture card's ten
+        // to twenty on the same ten-minute schedule.
+        Log::printf("[aircraft] no SD cache for logo '%s' - fetching it straight to RAM",
+                    logoId.c_str());
+        const size_t heldBefore = gLogoRam.size;
+        if (Assets::fetchToRam(logoId, gLogoRam)) {
+          // A different id, or the same id with a different number of bytes,
+          // means these are not the bytes that failed to draw last time. Size
+          // is a weak test for "different" and it is the only one available
+          // here; the alternative is writing off a re-encoded logo until the
+          // device restarts.
+          if (gLogoRamId != logoId || gLogoRam.size != heldBefore) {
+            gLogoRamUndrawable = false;
+          }
+          gLogoRamId = logoId;
+          Log::printf("[aircraft] logo for '%s' is showing straight from RAM (%u bytes) - "
+                      "no SD card available",
+                      gLast.nearest.airlineCode.c_str(), static_cast<unsigned>(gLogoRam.size));
+        } else {
+          // fetchToRam() can leave a partial write behind, so what the buffer
+          // holds is no longer any id's bytes - see Assets.h on why the caller
+          // has to forget that itself.
+          gLogoRamId = "";
+          gLogoRamUndrawable = false;
+          Log::printf("[aircraft] logo '%s' could not be fetched to RAM either - no logo this "
+                      "cycle",
+                      logoId.c_str());
+        }
+      }
     }
 
     // Logged the same way it's drawn: per-side name-with-code-fallback, not
@@ -631,12 +724,22 @@ void cardDraw(uint16_t) {
       identifier = gLast.nearest.registration;
     }
 
+    // Whether a logo is going into the zone, decided before the card is drawn
+    // because the headline's width depends on it. Either source counts: the SD
+    // cache holding this id, or the RAM buffer holding bytes that have not
+    // already failed to draw. Asking isCached() costs a stat and no network -
+    // the same question drawCachedInRect() is about to ask itself.
+    const bool hasLogo =
+        gLast.nearest.airlineLogoAssetId.length() > 0 &&
+        (Assets::isCached(gLast.nearest.airlineLogoAssetId) ||
+         (gLogoRamId == gLast.nearest.airlineLogoAssetId && !gLogoRamUndrawable));
+
     Display::showAircraftCard(identifier, operatorName,
                               gLast.nearest.altitudeFeet, gLast.nearest.speedKnots,
                               gLast.nearest.headingDegrees, gLast.nearest.distanceMiles,
                               gLast.nearest.originCode, gLast.nearest.destinationCode,
                               gLast.nearest.originName, gLast.nearest.destinationName,
-                              describeFreshness(gLastOkMs), noRouteLine);
+                              describeFreshness(gLastOkMs), noRouteLine, hasLogo);
 
     // Drawn after showAircraftCard(), not by it - same module boundary
     // Graphic.cpp already keeps with Display.cpp: whoever holds the asset id
@@ -647,7 +750,27 @@ void cardDraw(uint16_t) {
     if (gLast.nearest.airlineLogoAssetId.length() > 0) {
       int16_t x, y, w, h;
       Display::aircraftLogoZone(x, y, w, h);
-      Assets::drawCachedInRect(gLast.nearest.airlineLogoAssetId, x, y, w, h);
+      // The SD cache first, then the RAM buffer the fetch path fills when
+      // there is no cache to read. Which one holds the bytes decides which
+      // draw reads them: drawCachedInRect() opens a file, drawRamInRect()
+      // reads the buffer, and using the wrong one for the wrong source is the
+      // same mistake Graphic.cpp's own gFromRam flag exists to prevent.
+      //
+      // The id is compared, not just the pointer: a buffer left over from the
+      // airline that was overhead last refresh would otherwise be drawn as
+      // this one's.
+      if (!Assets::drawCachedInRect(gLast.nearest.airlineLogoAssetId, x, y, w, h) &&
+          gLogoRamId == gLast.nearest.airlineLogoAssetId && !gLogoRamUndrawable) {
+        if (!Assets::drawRamInRect(gLast.nearest.airlineLogoAssetId, gLogoRam, x, y, w, h)) {
+          // Asked once per set of bytes - see gLogoRamUndrawable for why
+          // asking again on every appearance of this card would restart the
+          // device rather than eventually produce a picture.
+          gLogoRamUndrawable = true;
+          Log::printf("[aircraft] logo '%s' is in RAM and will not draw - leaving the space "
+                      "empty until different bytes arrive",
+                      gLast.nearest.airlineLogoAssetId.c_str());
+        }
+      }
     }
     return;
   }
@@ -757,5 +880,18 @@ String cardDescribe(uint16_t) {
 }();
 
 }  // namespace
+
+void releaseRamBuffer() {
+  // The id and the undrawable mark go with the bytes, and they are cleared
+  // whether or not there was a buffer to free. Assets.h's releaseRamBuffer()
+  // zeroes size and capacity but cannot reach a caller's own idea of what the
+  // buffer holds, and cardDraw() reads both of these to decide what to draw -
+  // so clearing them is the part that must not be skipped by the guard.
+  if (gLogoRam.data != nullptr) {
+    Assets::releaseRamBuffer(gLogoRam);
+  }
+  gLogoRamId = "";
+  gLogoRamUndrawable = false;
+}
 
 }  // namespace Aircraft

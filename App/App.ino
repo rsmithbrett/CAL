@@ -63,6 +63,10 @@ size_t getArduinoLoopTaskStackSize(void) {
 }
 
 #include "Actions.h"
+// For Aircraft::releaseRamBuffer() on the check-in failure path, beside
+// Graphic::releaseRamBuffers(). The card itself is reached through the
+// scheduler's descriptors, so this is the only direct call into it.
+#include "Aircraft.h"
 #include "AppService.h"
 #include "AppUpdater.h"
 #include "Assets.h"
@@ -2008,8 +2012,11 @@ void performCheckIn() {
       }
       // The one cheap remedy, and the only failure on this branch it is actually
       // aimed at - see the note on the call below. Spent on the first
-      // occurrence so the later ones mean something.
+      // occurrence so the later ones mean something. The aircraft card's logo
+      // buffer goes back with them: it is far smaller than a picture, and a
+      // small block sitting in the middle of a large hole denies the hole.
       Graphic::releaseRamBuffers();
+      Aircraft::releaseRamBuffer();
       return;
     }
 
@@ -2051,7 +2058,13 @@ void performCheckIn() {
     // It costs nothing at all on a device with a working SD card - those
     // instances hold no RAM buffer - so this is not gated on detecting
     // fallback mode, and does not need to be.
+    //
+    // The aircraft card's airline logo is held the same way on the same
+    // devices, so it is released here too. It is a few thousand bytes against
+    // a graphic's ten to twenty, which makes it worth less to reclaim and no
+    // less able to sit in the middle of the hole a handshake needs.
     Graphic::releaseRamBuffers();
+    Aircraft::releaseRamBuffer();
     return;
   }
 

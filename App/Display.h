@@ -252,15 +252,55 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
                       /// airframe has taken the headline, so "U.S. Navy" is not lost to
                       /// make room for "P-8 Poseidon". Empty for anything with a route,
                       /// which keeps its route.
-                      const String& noRouteLine = String());
+                      const String& noRouteLine = String(),
+
+                      /// Whether the caller is going to draw a logo into
+                      /// aircraftLogoZone() after this returns, which decides the card's
+                      /// whole top. False lays the card out as it always has at any width.
+                      /// True reserves the logo's column beside the headline on a panel
+                      /// wide enough for both, and on one that is not, drops every line
+                      /// below the logo instead so the headline keeps the full band - see
+                      /// aircraftLogoZone() for the measurement that chooses.
+                      ///
+                      /// This function cannot tell: the asset id belongs to Aircraft.cpp,
+                      /// which is also the only thing that knows whether the bytes are in
+                      /// hand, on the card or in RAM.
+                      bool hasLogo = false);
 
 /// The rectangle a small airline logo may be drawn into, alongside
 /// showAircraftCard()'s own text - geometry decided here for the same reason
 /// every other piece of card chrome is (see this file's own remarks on why),
-/// even though this file never draws into it itself. Positioned top-right of
-/// the content area: clear of the banner above it, clear of the headline
-/// text's left-aligned start, and above the distance/route line so a wide
-/// logo cannot run into either.
+/// even though this file never draws into it itself. Positioned at the
+/// right-hand end of the content band: clear of the banner above it, clear of
+/// the headline text's left-aligned start, and above the distance/route line so
+/// a wide logo cannot run into either.
+///
+/// **Placed from the panel, not from four literals.** Written as x220 y26
+/// 90x34 it ran from x220 to x310 on a panel 240 wide. What that showed
+/// depended on the logo's shape, because the draw centres what it fits: a
+/// 34x34 square mark was placed at x248 and reached the glass not at all,
+/// while a 90x15 wordmark showed the leftmost 20 of its 90 columns against the
+/// border.
+///
+/// The x is now measured back from kContentRight(), so the zone answers x220
+/// on 320x240 and x140 on 240x320 - the same 90x34 box, moved inboard.
+///
+/// **The width stays 90 on every panel and must.** Scaling it to the band
+/// would be right for text and is wrong here: an airline logo is RGB565, that
+/// format cannot be resampled on the way to the panel, and the server sizes
+/// every logo to fit 90x34 precisely because the device cannot. A 66px zone
+/// would take 12 columns off each side of a wordmark rather than shrinking it.
+/// See drawImageFromBufferInRect() for the format side of the same rule.
+///
+/// **On a turned panel the headline does not sit beside it.** 90 of a 220px
+/// band leaves the headline 120px, which is under what an ordinary carrier
+/// name needs at any size the fitting ladder offers - "Southwest Airlines"
+/// drew as "Southwe...", broken mid-word, with the bottom half of the card
+/// empty. So showAircraftCard() puts the logo on a row of its own there and
+/// drops its text below it, which is room a turned panel has: it is 80px
+/// narrower and 80px taller than a landscape one, so the width the logo needs
+/// beside the text is the height there is underneath it. The zone itself does
+/// not move either way - only the text does.
 void aircraftLogoZone(int16_t& x, int16_t& y, int16_t& w, int16_t& h);
 
 /// The aircraft card's non-Ok states, including "fetch succeeded, nothing is
@@ -964,6 +1004,39 @@ bool drawImageFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, 
 /// are already in RAM, so drawing them is one pushImage and no allocation at
 /// all - cheaper than either decoder by a wide margin.
 bool drawImageFromBuffer(const uint8_t* data, size_t size);
+
+/// Same bytes-already-in-RAM draw, bounded to a caller-given rectangle rather
+/// than the whole panel - the crossing of drawImageFromSdInRect() and
+/// drawImageFromBuffer(), and the one draw a device with no SD card can use for
+/// an airline logo.
+///
+/// Does NOT clear the screen first, for drawImageFromSdInRect()'s reason:
+/// clearing would erase the card this logo is being layered onto. Centred in
+/// (w, h); PNG and JPEG are scaled to fit on the way, RGB565 is not.
+///
+/// **RGB565 is the expected format here, not the unreachable one**, which is
+/// what sets this apart from drawImageFromBuffer() above. The reasoning there -
+/// that a card-less device cannot hold one of these - is about a full-panel
+/// asset and its ~153,600 bytes. The fleet's 58 airline logos run 2,124 to
+/// 5,932 bytes, every one sized by the server to fit 90x34: the tall ones are
+/// 34px high and narrower, the wide ones 90px across and shorter. All of them
+/// fit in a single contiguous block on a device whose largest 8-bit hole is
+/// the measured 28,660 to 40,948, and pushing one needs no decoder and no band
+/// buffer.
+///
+/// **So the rect must be at least 90x34, and that is a requirement rather
+/// than a preference.** This path cannot resample - drawRgb565FromBuffer()
+/// centres the frame and clips it to the rect - so a caller that hands over a
+/// box narrower than the asset does not get a smaller logo, it gets the middle
+/// of one with the ends cut off. AssetsOptions.cs states the same rule from
+/// the server's side: a type stored as RGB565 is sized to the rect it is drawn
+/// in. aircraftLogoZone() is the only caller and keeps its width at 90 on
+/// every panel for this reason.
+///
+/// PNG and JPEG are still sniffed and still drawn, and those two do scale, so
+/// a logo re-encoded back to either keeps working at any rect size.
+bool drawImageFromBufferInRect(const uint8_t* data, size_t size, int32_t x, int32_t y, int32_t w,
+                               int32_t h);
 
 /// Whether the most recent failed draw failed because this heap would not give
 /// up a block, rather than because the bytes were unreadable.

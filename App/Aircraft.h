@@ -211,4 +211,20 @@ struct Result {
 /// id-bearing route).
 Result fetchMine();
 
+/// Hands back the airline logo's RAM buffer, for the same trade
+/// Graphic::releaseRamBuffers() makes and on the same call path.
+///
+/// A device with no SD card holds its logo in a heap buffer for as long as the
+/// airline overhead stays the same, because there is nowhere else to keep it.
+/// That is a few thousand bytes against a graphic's ten to twenty, and it is
+/// still worth reclaiming on the check-in failure path: a new TLS session needs
+/// 16,717 bytes contiguous for each of two record buffers, and what denies it
+/// is not the size of a block but where the block sits. A small allocation in
+/// the middle of a large hole costs the whole hole.
+///
+/// Costs nothing on a device with a working SD card, which never fills the
+/// buffer - one null check and no log output. The logo comes back on the next
+/// successful fetch, exactly as a graphic's picture does.
+void releaseRamBuffer();
+
 }  // namespace Aircraft

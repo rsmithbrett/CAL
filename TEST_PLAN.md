@@ -1698,11 +1698,18 @@ careful about because its correct behaviour is a device **not** doing something.
 ### 12a. The cause reads `CANNOT_DRAW`
 
 Reproduce the trigger the cheap way: give a device one picture card whose asset
-cannot decode on it, and no second picture card. Device 39's own shape is the
-worked example - its only image-bearing card is `aircraft` and the airline logo
-is a PNG needing 45,056 contiguous bytes against a largest block that has never
-exceeded 36,852. A deliberately corrupted cached file does the same job on any
-device.
+cannot decode on it, and no second picture card. A deliberately corrupted
+cached file does the job on any device.
+
+Device 39's shape used to be the worked example - its only image-bearing card
+is `aircraft`, and the airline logo was a PNG needing 45,056 contiguous bytes
+against a largest block that has never exceeded 36,852. **That example no
+longer reproduces**, twice over: the server re-encoded every airline logo to
+RGB565 on 2026-10-26, which needs a 5,120-byte band buffer and no decoder, and
+a refusal on a cached file under 16,384 bytes now drops it once per boot so the
+next fetch collects the new encoding (see `reFetchIfCheap()` in `Assets.cpp`).
+A device still holding the old PNG reaches `CANNOT_DRAW` on the first pass and
+not on the second.
 
 1. Let it run past `kHeapCheckGraceMs` (3 minutes). The `[health]` line must
    report `consecutive failed draws=N/6` and must print the largest 8BIT block

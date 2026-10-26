@@ -614,11 +614,113 @@ from `cardFetch()`, never from `cardDraw()` — the same fetch/draw split every
 other card in this build follows, so stepping backwards through the rotation
 is never a network operation.
 
-This bounded-rectangle draw is **unverified on hardware more pointedly than
-most of this codebase**. Every other PNG draw here fills the whole panel; this
-is the first one that doesn't, and the auto-fit-within-a-box behaviour is read
-from LovyanGFX's own `drawPngFile` parameters, not confirmed against an actual
-decode of an actual logo on an actual panel.
+**The zone is derived from the panel, not written out as four numbers.** It
+was `x = 220; y = 26; w = 90; h = 34`, measured for a 320px panel, and on a
+240px one it ran from x220 to x310 against glass 240 wide. What that looked
+like depends on the logo's shape, because the draw centres what it fits: a
+34x34 square mark landed at x248..281 and reached the glass not at all, and a
+90x15 wordmark filled the zone and showed the leftmost 20 of its 90 columns
+against the right border. Both are photographed —
+`docs/ia/screens/panel-aircraft-hardcodedzone-{logo,wordmark}-portrait.png`
+in the server tree.
+
+The x is now measured back from `kContentRight()`, and the rows come from the
+banner above and the distance line below rather than from a literal 26 and 34.
+On 320x240 that answers x220 y26 90x34, which is what the literals said; on
+240x320 it answers x140 y26 90x34, inside the glass.
+
+**The width stays 90 on every panel, and scaling it would have been the wrong
+fix.** An airline logo is RGB565, that format cannot be resampled on the way
+to the panel — `drawRgb565FromBuffer()` centres the frame and clips it — and
+`AssetsOptions.cs` states the matching rule from the server's side: a type
+stored as RGB565 is sized to the rect it is drawn in, which for this one is
+90x34. A `kScaledWidth(90)` zone of 66px would therefore not shrink a wordmark,
+it would cut 12 columns off each end of it. The width is the contract; the x
+was the defect.
+
+**Which means the headline cannot sit beside it on a turned panel.** 90 of a
+220px band leaves 120px, and "Southwest Airlines" is about 140px of the 9pt
+the fitting ladder falls back to, so the name ellipsizes at any size on offer
+— it drew as "Southwe…", broken mid-word, while the bottom half of the same
+card was empty. So `kAircraftLogoStacked()` puts the logo on a row of its own
+below 160px of headline room, and every line under it drops by
+`kAircraftTextShift()`. A turned panel is 80px narrower and 80px taller than a
+landscape one, so the width the logo wanted beside the text is the height
+there is underneath it. Landscape keeps 200px and never takes the branch.
+
+The side-by-side headline is `kWidthBeside()` of the logo's width. It carried
+the literal 200, which is `300 - 90 - kColumnGap` done by hand for one panel
+width, and the two agreed only in a comment.
+
+**And the column is reserved only when a logo is coming.** `showAircraftCard()`
+could not tell before — the asset id belongs to `Aircraft.cpp` — so it held
+90px of glass empty for every sighting whose airline has no logo on file. It
+now takes a `hasLogo`, which `cardDraw()` answers from the SD cache or the RAM
+buffer, and a card with no logo lays out across the whole band at any width.
+
+**A device with no SD card draws the logo from RAM.** `drawCachedInRect()`
+reads the SD cache, so on a card-less display the draw path ended at "not
+cached" and the fetch path never ran — the journal recorded
+`[aircraft] logo unavailable for 'SWA'` with no fetch line beside it, on
+devices 12 and 32, the only two in the fleet reporting `SdTotalBytes = 0`.
+`Assets::fetchToRam()` had existed since the picture cards needed it and the
+logo was simply never wired to it. `cardFetch()` now falls back to it when
+`ensureCached()` answers no, and `cardDraw()` calls
+`Assets::drawRamInRect()` → `Display::drawImageFromBufferInRect()` when the
+buffer holds this airline's id. One buffer, file-scope, because one logo is on
+screen at a time; the id is compared on every draw so a buffer left from the
+previous airline is never drawn as this one's. A cache that starts answering
+hands the buffer back (`Assets::releaseRamBuffer()`) rather than carrying it
+for the uptime.
+
+RGB565 is the expected format on that path rather than the unreachable one,
+which is the one way it differs from the full-panel RAM draw. The argument
+there — that a card-less device cannot hold one of these — is about an asset
+of ~153,600 bytes. A logo is 2,124 to 5,932 bytes across all 58 the server
+holds, against a largest free block of 28,660 on device 12 and 40,948 on
+device 32.
+
+**A cached asset is never compared against the server's copy.**
+`ensureCached()` answers "already here" on `SD.exists()` alone, so when every
+logo was re-encoded from PNG to RGB565 the devices that had already cached one
+kept the PNG. The draw then refuses for want of the PNG decoder's ~44KB
+against device 23's largest block of 32,756, and the refusal branch of
+`giveUpOnDecodeFailure()` deliberately keeps the cached copy — right for a
+~153,600-byte RGB565 asset whose re-fetch would land on the same heap that
+just refused a band buffer, and a closed loop for a 2,328-byte logo the server
+replaced hours earlier. Device 23 did exactly that three times a draw, every
+three minutes.
+
+That branch now drops a cached file under `kCheapRefetchBytes` (16,384) so the
+next fetch reads the server's current copy, **once per asset per boot**. Once,
+because the rule has to terminate: a small asset this device genuinely cannot
+draw would otherwise refuse, invalidate, re-fetch and refuse again forever,
+which is the loop the keep-it rule was put in to stop. The size is what the
+branch turns on because size is what the keep-it reasoning was about.
+
+This leaves the real gap named rather than closed: **nothing on the device can
+notice the server's bytes changing.** One re-fetch per boot rescues an asset
+that went stale before this build, and a later re-encode still reaches a
+running device only through a restart or `wipeCache()`. Closing it properly
+means a content hash on the wire, which the compatibility gate puts out of
+reach today.
+
+A RAM logo that reaches the decoder and produces nothing is asked once, not
+once per appearance. `Aircraft.cpp`'s `gLogoRamUndrawable` is why: every
+attempt goes through `noteDrawOutcome()`, three per draw, and six consecutive
+failures restart the device — which is exactly how device 7 came to reboot
+every eleven minutes. `reFetchIfCheap()` cannot rescue a card-less device
+(`cachedSizeOf()` reads the SD cache to decide, and there is none), so without
+the mark the new path would have handed those two devices a restart loop in
+place of a blank space. The mark clears whenever a fetch brings a different
+number of bytes, so a re-encode still gets a fresh attempt.
+
+The bounded-rectangle draw itself is **still unverified on hardware.** No
+device has yet been observed drawing a logo into it successfully, from SD or
+from RAM. `AircraftPanel.cs` mirrors the placement and the clip — including
+the fact that RGB565 crops rather than scaling, so the screenshots cannot
+flatter the device — but a mirror is a hand port and agrees with the firmware
+only as long as someone keeps it agreeing.
 
 Both cards also gained a "content status" treatment for their non-Ok states
 (not yet activated, disabled for this owner, nothing currently in range, auth
