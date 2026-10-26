@@ -620,9 +620,16 @@ was `x = 220; y = 26; w = 90; h = 34`, measured for a 320px panel, and on a
 like depends on the logo's shape, because the draw centres what it fits: a
 34x34 square mark landed at x248..281 and reached the glass not at all, and a
 90x15 wordmark filled the zone and showed the leftmost 20 of its 90 columns
-against the right border. Both are photographed —
-`docs/ia/screens/panel-aircraft-hardcodedzone-{logo,wordmark}-portrait.png`
-in the server tree.
+against the right border.
+
+Both states are still photographable rather than merely described.
+`AircraftPanel.Draw(…, useHardcodedZone: true)` in the server tree lays the
+card out with those four literals, so the before and after come out of the
+same run of `AircraftPanelShot` as
+`panel-aircraft-hardcodedzone-{logo,wordmark}-{landscape,portrait}.png`. The
+images themselves are not kept — `docs/ia/screens` is gitignored, a cache the
+shot test refills — which is why the measurements are written down here and
+asserted in `AircraftPanelTests`.
 
 The x is now measured back from `kContentRight()`, and the rows come from the
 banner above and the distance line below rather than from a literal 26 and 34.

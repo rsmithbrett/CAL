@@ -23,6 +23,15 @@ dated heading after.
 
 ## Unreleased
 
+Nothing yet.
+
+---
+
+## v2026.10.26.0004 and v2026.10.26.0005
+
+One piece of work over two releases. The first three entries shipped in 0004;
+the fourth is 0005, which went out as soon as the restart was spotted.
+
 ### An airline logo reaches displays that have no memory card — App
 
 Two displays in service have no memory card, and the aircraft card's airline
