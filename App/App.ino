@@ -923,6 +923,14 @@ constexpr uint32_t kHeapCheckGraceMs = 3UL * 60UL * 1000UL;
 // all evening: the period was the content refresh interval, not this check's own
 // cadence. Worth knowing before reading a reboot period as a memory curve.
 //
+// The aircraft card's airline logo is a third contributor to the same count,
+// and it is the one that does not drop itself out of a rotation - the card has
+// text to show and goes on showing it. Its overlay draw retries three times
+// like any other, so Aircraft.cpp bounds it at kMaxLogoRamDrawFailures
+// episodes a boot for the RAM path, which is where the bound was missing: a
+// card-less device with no picture cards has nothing else that moves this
+// counter in either direction, so nothing there would ever reset it.
+//
 // Renamed from kMaxConsecutiveBufferAllocFailures. It never counted buffer
 // allocations - see the block above for what the old name cost.
 constexpr uint32_t kMaxConsecutiveDrawFailures = 6;

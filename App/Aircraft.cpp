@@ -428,21 +428,43 @@ Assets::RamAssetBuffer gLogoRam;
 String gLogoRamId;
 
 /// Set when the bytes in gLogoRam reached the decoder and no picture came out,
-/// so the card stops asking.
+/// so the card stops asking for them.
 ///
 /// Without it a logo that will not draw costs three attempts on every
 /// appearance of this card, forever, and each one counts toward the
-/// consecutive-draw-failure watchdog that restarts the device. A card-less
-/// device is the one that cannot recover from that on its own: Assets.cpp's
-/// re-fetch-once rule reads the SD cache to decide, so it declines for a
-/// device that has no cache, and nothing else would ever clear the count. One
-/// attempt per set of bytes is the same bargain Graphic.cpp strikes when it
-/// drops a card whose picture will not decode.
+/// consecutive-draw-failure watchdog that restarts the device at seven. A
+/// card-less device is the one that cannot recover from that on its own:
+/// Assets.cpp's re-fetch-once rule reads the SD cache to decide and so
+/// declines for a device that has none, and on a card-less device with no
+/// picture cards this draw is the only thing in the binary that moves the
+/// counter in either direction - so nothing would ever reset it either. One
+/// attempt per set of bytes is the bargain Graphic.cpp strikes when it drops a
+/// card whose picture will not decode.
 ///
-/// Cleared whenever a fetch puts different bytes in the buffer, so a logo the
+/// Cleared when a fetch puts different bytes in the buffer, so a logo the
 /// server re-encodes gets a fresh attempt rather than being written off for
 /// the uptime.
 bool gLogoRamUndrawable = false;
+
+/// How many sets of bytes may fail to draw before this card stops trying for
+/// the rest of the boot, and how many have.
+///
+/// **The mark above does not bound anything on its own**, which is the whole
+/// reason this counter exists. It is keyed to what the buffer holds, and three
+/// ordinary events empty or replace the buffer: a different airline overhead,
+/// a fetch that fails partway, and Aircraft::releaseRamBuffer() on the
+/// check-in failure path. Each of those clears the mark and buys three more
+/// failed attempts - and the last is the worst of the three, because a device
+/// short of contiguous heap is both the device whose check-ins fail and the
+/// device whose draws refuse, so the two re-arm each other. Two airlines
+/// overhead in half an hour reached seven failures and a restart with no fault
+/// anywhere but this.
+///
+/// Two episodes of three attempts is six, which is what App.ino's limit
+/// tolerates (it restarts past six, not at it). Never reset: a boot that has
+/// already asked this question twice has its answer.
+constexpr uint8_t kMaxLogoRamDrawFailures = 2;
+uint8_t gLogoRamDrawFailures = 0;
 
 /// millis() when gLast last became an Ok result - same field, same reasoning,
 /// same fix as Weather.cpp's gLastOkMs: "Updated just now" was previously
@@ -599,7 +621,12 @@ void cardFetch() {
           // is a weak test for "different" and it is the only one available
           // here; the alternative is writing off a re-encoded logo until the
           // device restarts.
-          if (gLogoRamId != logoId || gLogoRam.size != heldBefore) {
+          //
+          // Bounded by kMaxLogoRamDrawFailures, because the test above is
+          // keyed to the buffer and the buffer is emptied by things that are
+          // not an answer to "will these bytes draw" - see that constant.
+          if ((gLogoRamId != logoId || gLogoRam.size != heldBefore) &&
+              gLogoRamDrawFailures < kMaxLogoRamDrawFailures) {
             gLogoRamUndrawable = false;
           }
           gLogoRamId = logoId;
@@ -611,7 +638,9 @@ void cardFetch() {
           // holds is no longer any id's bytes - see Assets.h on why the caller
           // has to forget that itself.
           gLogoRamId = "";
-          gLogoRamUndrawable = false;
+          if (gLogoRamDrawFailures < kMaxLogoRamDrawFailures) {
+            gLogoRamUndrawable = false;
+          }
           Log::printf("[aircraft] logo '%s' could not be fetched to RAM either - no logo this "
                       "cycle",
                       logoId.c_str());
@@ -762,13 +791,19 @@ void cardDraw(uint16_t) {
       if (!Assets::drawCachedInRect(gLast.nearest.airlineLogoAssetId, x, y, w, h) &&
           gLogoRamId == gLast.nearest.airlineLogoAssetId && !gLogoRamUndrawable) {
         if (!Assets::drawRamInRect(gLast.nearest.airlineLogoAssetId, gLogoRam, x, y, w, h)) {
-          // Asked once per set of bytes - see gLogoRamUndrawable for why
-          // asking again on every appearance of this card would restart the
-          // device rather than eventually produce a picture.
+          // Asked once per set of bytes, and at most kMaxLogoRamDrawFailures
+          // times a boot - see those two for why asking again on every
+          // appearance of this card would restart the device rather than
+          // eventually produce a picture.
           gLogoRamUndrawable = true;
-          Log::printf("[aircraft] logo '%s' is in RAM and will not draw - leaving the space "
-                      "empty until different bytes arrive",
-                      gLast.nearest.airlineLogoAssetId.c_str());
+          if (gLogoRamDrawFailures < kMaxLogoRamDrawFailures) {
+            ++gLogoRamDrawFailures;
+          }
+          Log::printf("[aircraft] logo '%s' is in RAM and will not draw (%u of %u attempts this "
+                      "boot) - leaving the space empty",
+                      gLast.nearest.airlineLogoAssetId.c_str(),
+                      static_cast<unsigned>(gLogoRamDrawFailures),
+                      static_cast<unsigned>(kMaxLogoRamDrawFailures));
         }
       }
     }
@@ -882,16 +917,20 @@ String cardDescribe(uint16_t) {
 }  // namespace
 
 void releaseRamBuffer() {
-  // The id and the undrawable mark go with the bytes, and they are cleared
-  // whether or not there was a buffer to free. Assets.h's releaseRamBuffer()
-  // zeroes size and capacity but cannot reach a caller's own idea of what the
-  // buffer holds, and cardDraw() reads both of these to decide what to draw -
-  // so clearing them is the part that must not be skipped by the guard.
+  // The id goes with the bytes, and it is cleared whether or not there was a
+  // buffer to free. Assets.h's releaseRamBuffer() zeroes size and capacity but
+  // cannot reach a caller's own idea of what the buffer holds, and cardDraw()
+  // reads gLogoRamId to decide whether to draw from it - so clearing it is the
+  // part that must not be skipped by the guard.
+  //
+  // gLogoRamDrawFailures is deliberately NOT reset here. This runs on the
+  // check-in failure path, and a device short of contiguous heap is both the
+  // device whose check-ins fail and the device whose draws refuse; resetting
+  // the budget here would let those two re-arm each other into a restart.
   if (gLogoRam.data != nullptr) {
     Assets::releaseRamBuffer(gLogoRam);
   }
   gLogoRamId = "";
-  gLogoRamUndrawable = false;
 }
 
 }  // namespace Aircraft

@@ -48,6 +48,15 @@ the logo above it. Displays lying flat keep the layout they have.
 A sighting whose airline has no logo on file no longer holds that space empty.
 The name gets the whole width on any display.
 
+### A logo that will not draw no longer restarts the display — App
+
+A display restarts itself after a run of pictures it could not draw, which is
+how it recovers from running out of memory. A logo that would not draw counted
+toward that run every time the aircraft card came round, and on the two
+displays with no memory card nothing else ever reset the count, so the display
+would have rebooted every half hour for a picture. It now tries a logo twice
+at most and then leaves the space empty.
+
 ### A logo the server has replaced reaches a display that stored the old one — App
 
 Every airline logo was re-encoded into a form these displays can draw after
