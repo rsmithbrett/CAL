@@ -1145,3 +1145,86 @@ below it untouched. The widest string the new label draws is
 `No moonrise or set`, at roughly 170px against the 212 it is given.
 `No moonrise or moonset` was the first wording and it ellipsized in that
 column, which the card's own shot caught.
+
+## 13. The forecast header, the rule through the descenders, 2026-10-25
+
+Two defects on one card, found by eye in the same pass and solved together
+because neither has room to move without the other.
+
+### 13a. The squeeze was costed against a floor one panel does not have
+
+`contentIsTight()` answers "a button row is bound to this card", and the
+forecast card read that as "rearrange the header": the freshness stamp moves up
+onto the location row and the rule rises six pixels, which buys the compressed
+strip 28px against a 154px floor. 154 is `kButtonRowY() - 6` on the 240px-high
+landscape panel.
+
+A panel standing on its end has a floor of **234**, and its strip is rows rather
+than columns — rows that divide whatever the rule leaves. There is nothing for
+the squeeze to buy there, and it was charging the location row 138 of the 220px
+band to buy it: 41px left, so the shot showed `An...` where a town belongs.
+
+So the squeeze is `tight && !stackedStrip` rather than `tight`. Measured on the
+panel that now keeps its header whole: rule at 125, first row at 133, floor 234,
+four rows of 25px against a 9pt line that inks 18.
+
+### 13b. And where the squeeze is right, the row still did not fit
+
+Landscape with a button bound leaves the location 121px after the stamp
+reserves 179, and every town on this fleet is wider than that — `Annapolis, MD`
+125, `Severna Park, MD` 152, `Fort Washington, MD` 182. The pair wants 361 of a
+300px row and the card has no other 61 pixels.
+
+`Updated ` is 73 of the stamp's 171 and is the one part of the row that says
+nothing a reader standing in front of a town name and a time needs, so it is
+what comes off. 288 of 300, with 12 over. On its own row the stamp keeps the
+word, because that row has 300px for 171.
+
+The row is then split by measuring both rather than by a fixed reservation.
+Only a long town meeting a stale stamp runs it out, and then the stamp gives
+first down to an 80px floor — the same direction the 2026-09-27 cap took, for
+the same reason.
+
+| panel, action bound | location box before | after | widest town |
+|---|---|---|---|
+| 320x240 | 121px | 198px | 182px, fits |
+| 240x320 | 41px | 156px | 182px, Fort Washington still over |
+
+Fort Washington on a turned panel with a button bound is the one case left, and
+it ellipsizes at the same 156px the turned panel has always given the location
+row without a button bound. That is the `kDayNightWidth` reservation, not the
+squeeze.
+
+### 13c. The rule had been drawn through the freshness line since the card was written
+
+Both orientations, with no button bound, which is nine of nine fielded devices.
+The stack is a 12pt condition phrase at y=80 inking to 103, a 9pt freshness line
+at y=104 inking 104..121, and a strip label at 122. The rule at 118 crosses the
+`p` and the `g` of `Updated 59 min ago`. There is no slack between those three
+rows to move either of them into, which is why this needed 13a rather than a
+shifted y.
+
+**The slack is underneath.** The landscape strip bottoms at 199 against a 220
+floor. So the rule goes to 125 — three clear of the freshness ink — and the
+strip follows it down by eight: label 122 to 130, icon centre 155 to 163,
+temperature 178 to 186, bottoming at 208 with twelve to spare. The strip's own
+internal pitch does not move, so its three rows keep the spacing they were
+drawn with. The stacked strip takes the same rule and divides what is left.
+
+Squeezed, the rule stays at 112: the freshness line is up on the location row,
+104..121 is empty, and 112 is the first line clearing the condition phrase.
+
+### 13d. The faces are ASCII and four strings were not
+
+`LGFXBase::text_width()` substitutes 0x20 for any code outside the vendored
+tables, per byte, so a UTF-8 character draws as many blanks as it has bytes.
+`SUN · TODAY`, `MOON · TODAY` and the sports card's `Q3 · 7:42` each lost their
+U+00B7 to two spaces; the sun card's `↑ SUNRISE` and `↓ SUNSET` each lost three.
+Every one of them is a vertical bar or nothing now — see
+`docs/design/sun-moon-redesign/README.md` for the full count and the pictures.
+
+**What this does not have is a check.** Nothing in either repository fails when
+a non-ASCII byte reaches a face that cannot draw it; four of these shipped, and
+the only reason they are fixed is that somebody looked at a photograph of the
+moon card. A source scan over the string literals in `Display.cpp` would catch
+the next one and has not been written.

@@ -23,6 +23,30 @@ dated heading after.
 
 ## Unreleased
 
+### The forecast card shows the whole town name again — App
+
+With a button on the card, the town was cut to a few letters and a dot:
+"An..." where "Annapolis, MD" belongs, and the same for Severna Park and Fort
+Washington. The town gets the room back. On a display standing on its end the
+card keeps the layout it has without a button, because there was room there all
+along; lying flat, the "Updated" in front of the time is what gives way, so the
+line beside the town now reads "59 min ago".
+
+### The line across the forecast card no longer cuts through the words above it — App
+
+The thin rule that separates today's weather from the week ran straight through
+the bottom of "Updated 59 min ago". It sits lower now, clear of the text, and
+the week below it moved down with it into space that was already empty.
+
+### The sun card draws the dot and the arrows it was missing — App
+
+"SUN · TODAY" came out as "SUN  TODAY" with a gap in the middle, and the up and
+down arrows in front of SUNRISE and SUNSET did not draw at all — they left the
+sunrise label pushed sideways from the time under it. The heading reads
+"SUN | TODAY" now and the labels line up with their times. The moon card's
+heading and the sports card's period-and-clock line had the same gap for the
+same reason and are fixed the same way.
+
 ### The moon card says when the moon comes up next — App
 
 One line at the bottom of the card, and it's whichever comes next: `Moonrise

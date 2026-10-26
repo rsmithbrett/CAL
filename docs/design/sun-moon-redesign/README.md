@@ -75,7 +75,7 @@ neither survives a 240px panel. Measured against the vendored glyph table:
 
 | Line | Column it was given | What it needs | Before |
 |---|---|---|---|
-| `MOON · TODAY` | 122px | 137px at 9pt | ellipsized |
+| `MOON \| TODAY` | 122px | 137px at 9pt | ellipsized |
 | Phase name | 132px | 199px at 12pt for "Waning Crescent" | ellipsized |
 | `X% illuminated` | 132px | 146px at 9pt for "100% illuminated" | wrapped to two lines |
 | Each upcoming column | 55px | 68px at 9pt for "First qtr" | all four ellipsized |
@@ -91,12 +91,31 @@ nearly three times the area of the landscape hero. Landscape keeps them: the
 row fits there, and nothing about it reads badly in the shot.
 
 **The date is new, and it replaces the word TODAY.** The heading said
-`MOON · TODAY` and the card never showed a date. A heading saying TODAY beside a
+`MOON | TODAY` and the card never showed a date. A heading saying TODAY beside a
 line saying Saturday, October 25 says the same thing twice, so the narrow
 heading is just `MOON`. The date is `strftime("%A, %B %d")` off the same local
 time the card's own corner clock reads, which is the format and the source
 `showClockDate()` already uses, so the two cards cannot name different days.
-Landscape keeps `MOON · TODAY` and shows no date.
+Landscape keeps `MOON | TODAY` and shows no date.
+
+## Every separator on these two cards is ASCII
+
+The vendored `FreeSansBold` tables carry 0x20 to 0x7E and nothing else, and
+`LGFXBase::text_width()` substitutes a space for any code outside the face —
+**per byte**, so a UTF-8 character leaves as many blanks as it has bytes.
+
+Three of these shipped. `MOON · TODAY` and `SUN · TODAY` used U+00B7, two bytes,
+and reached the glass as `MOON  TODAY` and `SUN  TODAY` with a hole where the
+dot belongs. The sun card's two labels used U+2191 and U+2193, three bytes each,
+and drew as three blanks: the sunrise label sat indented from the 18pt time
+under it, and the sunset label, being right-aligned, kept its blanks on the side
+nobody sees. The sports card's `Q3 · 7:42` is the fourth and has the same cause.
+
+So the dot is a vertical bar, which is in the face at every size these cards
+use and reads as the same field separator, and the arrows are gone — `SUNRISE`
+and `SUNSET` name the direction without them, and the labels now line up with
+their own times. `panel-moonphase-*-landscape.png` and `panel-sun-*.png` are
+where this is visible.
 
 **Measured up from the content floor, not down from the top.** The next-event
 line sits 18px above whatever `contentBottom()` says, the date 22 above that, the
@@ -110,15 +129,43 @@ Photographed at both sizes, four phases each, with and without an action bound:
 `docs/ia/screens/panel-moonphase-*.png` in the server repository, written by
 `DAM_PANEL_SHOTS=1 dotnet test tests/DiscoverAroundMe.DeviceSimulator.Tests`.
 
+The sun card is photographed the same way now — `panel-sun-*.png`, day, night
+and the no-times case, both sizes, with and without an action bound — by a
+`SunMoonPanel` renderer that did not exist before. The shots also paint the
+action button row, which they did not: the band a bound action reserves used to
+photograph as empty glass, so a card that stopped short of its floor looked
+like a card with room to spare.
+
 **The sun card beside it does not have this problem.** Every string on it is
 given a column helper rather than a landscape constant — `kWidthBeside`,
 `kHalfColumnWidth`, `kContentWidth` — so each one narrows with the panel.
-"SUN · TODAY" measures 119px against the 122px the heading gets on a 240px
-panel, the labels and the daylight line have room, and the one line that
-outgrows its column is the 18pt time: "6:47 AM" is 130px against a 110px half
-column, so the fitting ladder draws it at 12pt instead. That is a hero losing a
-size on a narrow panel, not a card that stops reading, and it is logged when it
-happens. Left alone.
+"SUN | TODAY" measures about 119px against the 122px the heading gets on a 240px
+panel, the labels have room, and the one line that outgrows its column is the
+18pt time: "6:47 AM" is 130px against a 110px half column, so the fitting ladder
+draws it at 12pt instead.
+
+**That one is now a photograph rather than a measurement, and it stays left
+alone.** `panel-sun-day-portrait.png` shows the 12pt pair: both times are still
+twice the height of the `SUNRISE` and `SUNSET` labels above them and of the
+daylight line below, they are the largest type on the lower half of the card,
+and nothing is cut. A 12pt hero is smaller than an 18pt one and still the hero
+of its row, which is what the ladder exists to produce. The log says so on
+every draw — `1 line(s) of 23px, where one of 33px would have ellipsized`.
+
+**Two other things that picture shows, and neither is fixed here.** The card's
+whole composition is landscape constants — ridges at 144..179, labels at 150,
+times at 170, the daylight line at 202 — so on a 240x320 panel it finishes at
+y=240 and leaves the bottom 80 pixels an empty field of near ridge. And with an
+action bound it draws straight through the button row: the card never reads
+`contentBottom()`, so `panel-sun-day-landscape-action.png` shows both times and
+the daylight line covered by the button. The second is the one that costs a
+reader a fact.
+
+**The daylight line ellipsizes in the no-times case, on both panels.** When the
+server sends no sunrise and no sunset, `SunMoon.cpp` passes "No sunrise or
+sunset today for this location." — 9pt, past 300px in landscape and past 220 in
+profile, so it draws as "No sunrise or sunset today for th..." and the card
+stops saying which location it means. Visible in `panel-sun-notimes-*.png`.
 
 ## The next moonrise or moonset
 

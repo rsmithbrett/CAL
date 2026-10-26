@@ -288,7 +288,7 @@ int kScaledWidth(int designWidth) {
 /// <para>120px against the 300px landscape band, measured for a 9pt bold time.
 /// Taken as a literal it leaves the heading beside it kWidthBeside(120) = 90px
 /// on a 220px band, and device 17 in profile reported "sunmoon.heading" and
-/// "moon.heading" ellipsizing eight times each in twenty minutes - "SUN · TODAY"
+/// "moon.heading" ellipsizing eight times each in twenty minutes - "SUN | TODAY"
 /// needs about a hundred.
 ///
 /// <para>The clock is the column that does not need its landscape width: it
@@ -2371,9 +2371,15 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   // the near ridge below. Approximate within a band - the gradient moves a few
   // units across the height of one line - and exact enough that nothing shows
   // an edge.
+  // EVERY SEPARATOR ON THIS CARD IS ASCII, because the faces are. The
+  // FreeSansBold tables carry 0x20 to 0x7E and LGFXBase::text_width()
+  // substitutes a space for anything outside that, per byte - so U+00B7 drew as
+  // two blanks and this heading reached the glass as "SUN  TODAY" with a hole
+  // where the dot belongs. A vertical bar reads as the same field separator and
+  // is in the face at every size the card uses.
   lcd.setTextSize(1);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  layoutLine("SUN · TODAY", kCardMargin, 12, kWidthBeside(kClockColumnWidth()),
+  layoutLine("SUN | TODAY", kCardMargin, 12, kWidthBeside(kClockColumnWidth()),
              sky.heading, "sunmoon.heading",
              Align::Left, kTransparentText);
 
@@ -2398,9 +2404,15 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   // Lifted rather than exempted. One rule - nothing draws below 220 - is worth more
   // than a conditional one that a later card satisfies by claiming the exemption.
   // Labels 150..168, times 170..206, detail 202..220.
-  layoutLine("↑ SUNRISE", kCardMargin, 150, kHalfColumnWidth(), sky.label, "sunmoon.sunrise.label",
+  //
+  // The arrows these labels carried were U+2191 and U+2193, three bytes each
+  // and none of them in the face, so they drew as three blanks: the sunrise
+  // label sat indented from the time under it and the sunset label, being
+  // right-aligned, kept its blanks on the side nobody sees. The words name the
+  // direction on their own.
+  layoutLine("SUNRISE", kCardMargin, 150, kHalfColumnWidth(), sky.label, "sunmoon.sunrise.label",
              Align::Left, kTransparentText);
-  layoutLine("↓ SUNSET", kContentRight(), 150, kHalfColumnWidth(), sky.label,
+  layoutLine("SUNSET", kContentRight(), 150, kHalfColumnWidth(), sky.label,
              "sunmoon.sunset.label", Align::Right, kTransparentText);
 
   lcd.setFont(&fonts::FreeSansBold18pt7b);
@@ -2922,8 +2934,8 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
                Align::Left, kTransparentText);
   }
 
-  // PROGRESS AND CLOCK ARE TWO FIELDS JOINED BY A DOT, and the dot only appears
-  // when both are there. "Q3 · 7:42" when the provider supplies a clock, "Q3"
+  // PROGRESS AND CLOCK ARE TWO FIELDS JOINED BY A BAR, and the bar only appears
+  // when both are there. "Q3 | 7:42" when the provider supplies a clock, "Q3"
   // when it does not, and nothing at all when it supplies neither - a card that
   // invented 0:00 would have somebody watching a game that is not running.
   // Only the case that genuinely joins two labels builds a buffer, and it is a
@@ -2938,8 +2950,12 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
     // Both fields are short and bounded by the wire - a period is "6TH INN" at
     // its longest and a clock "12:00" - so a fixed buffer holds any real pair
     // and snprintf truncates rather than overruns if the server ever disagrees.
+    //
+    // ASCII, for the reason showSunMoonCard()'s heading gives: U+00B7 is not in
+    // the FreeSansBold tables and each of its two bytes drew as a space, so
+    // this row reached the glass as "Q3  7:42".
     char joined[48];
-    snprintf(joined, sizeof(joined), "%s \u00b7 %s", progressLabel, clockLabel);
+    snprintf(joined, sizeof(joined), "%s | %s", progressLabel, clockLabel);
     layoutLine(joined, kContentRight(), 42, kHalfColumnWidth(), sport.heading, "sports.progress",
                Align::Right, kTransparentText);
   } else if (haveClock) {
@@ -3427,7 +3443,9 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
 
   lcd.setTextSize(1);
   lcd.setFont(&fonts::FreeSansBold9pt7b);
-  layoutLine(narrow ? "MOON" : "MOON · TODAY", kCardMargin, 12,
+  // The separator is a bar for the reason showSunMoonCard() gives: U+00B7 is
+  // outside the face and drew as two blanks.
+  layoutLine(narrow ? "MOON" : "MOON | TODAY", kCardMargin, 12,
              kWidthBeside(kClockColumnWidth()), sky.heading, "moon.heading",
              Align::Left, kTransparentText);
 
@@ -4490,6 +4508,24 @@ String shortDayLabel(uint8_t index, const String& name) {
   return name.length() > 3 ? name.substring(0, 3) : name;
 }
 
+/// The freshness stamp without its leading verb, for the one row that cannot
+/// afford it.
+///
+/// <para>describeFreshness() in Forecast.cpp writes "Updated just now",
+/// "Updated 1 min ago" and "Updated N min ago". The word and its space measure
+/// 73px at 9pt against the vendored glyph table, which is what the location
+/// row is short by when the two share it. Anything that does not start with
+/// the word comes back unchanged, so a future wording cannot be cut mid-
+/// sentence by this.</para>
+String withoutUpdatedPrefix(const String& updatedAt) {
+  static const char kPrefix[] = "Updated ";
+  constexpr unsigned int kPrefixLength = sizeof(kPrefix) - 1;
+  if (updatedAt.startsWith(kPrefix) && updatedAt.length() > kPrefixLength) {
+    return updatedAt.substring(kPrefixLength);
+  }
+  return updatedAt;
+}
+
 // The combined current-plus-outlook layout (see Display.h's own remarks on
 // why this replaced both the old per-period paging version of this card and
 // the retired showWeatherCard()). Hero at top - icon, temperature, condition
@@ -4532,14 +4568,14 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // kButtonRowY() - kButtonBandGap (154) whenever an action is bound TO THIS
   // CARD - resolved per card by Actions::forCard() immediately before the
   // draw, not once per device. Measured against that floor the strip as it
-  // stands runs to y=200: its icon (cy=155, r=17) reaches 172, which is
-  // already 12px inside the band drawChrome() paints, and the day temperature
-  // at y=178 bottoms at 200, which is 46px past. The icon is the one worth
+  // stands runs to y=208: its icon (cy=163, r=17) reaches 180, which is
+  // already 20px inside the band drawChrome() paints, and the day temperature
+  // at y=186 bottoms at 208, which is 54px past. The icon is the one worth
   // naming, because it never passes through layoutText() and so the runtime
   // budget check at the bottom of that routine cannot see it at all - a
   // silently painted-over circle with nothing in the stream to say so.
   //
-  // Hero and strip together want about 200px of a 154px card, so roughly 46px
+  // Hero and strip together want about 208px of a 154px card, so roughly 54px
   // has to come from somewhere, and the decision (CARD_AUDIT_2026_09_27.md
   // section 9.1, approved) is that all of it comes from the strip: the hero
   // keeps its 24pt temperature, its 24px-radius icon and its condition phrase
@@ -4565,7 +4601,39 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // as it was.
   const bool tight = contentIsTight();
 
-  // THE FRESHNESS STAMP MOVES ONTO THE LOCATION ROW WHEN TIGHT.
+  // THE STRIP TURNS WITH THE PANEL, and the header above reads the answer.
+  //
+  // Five columns do not survive the turn. The band is 300px wide in landscape,
+  // so five days get 60px each and a day name sits above a temperature
+  // comfortably. In profile the band is 220 and each column is 44px - enough
+  // for "Mon" or for "72F" but not for both, so every column would ellipsize
+  // one of the two facts it exists to carry. Nothing overlaps; the card just
+  // stops answering its own question.
+  //
+  // A profile panel has the 80 pixels of height that the landscape one does
+  // not, which is exactly what five rows need. So the same five days run down
+  // the card instead of across it: the day on the left, its weather in the
+  // middle, the temperature right-aligned against the other edge.
+  const bool stackedStrip = kScreenH > kScreenW;
+
+  // THE HEADER SQUEEZE IS A LANDSCAPE ANSWER TO A LANDSCAPE FLOOR.
+  //
+  // Everything below about moving the freshness stamp up onto the location row
+  // was costed against a 154px floor, which is what kButtonRowY() - 6 comes to
+  // on the 240px-high landscape panel. A panel standing on its end has a floor
+  // of 234, and its strip is rows rather than columns: the rows divide
+  // whatever is left between the rule and the floor, so the 22px the squeeze
+  // reclaims buys four rows about five pixels each and costs the location 138
+  // of the 220px band. The shot showed the result as "An..." where a town
+  // name belongs.
+  //
+  // Measured on the panel that has it: rule at 125, first row at 133, floor
+  // 234, four rows of 25px against a 9pt line that inks 18. There is room
+  // there without taking any, so the narrow panel does not take any.
+  const bool squeezeHeader = tight && !stackedStrip;
+
+  // THE FRESHNESS STAMP MOVES ONTO THE LOCATION ROW WHEN THE HEADER IS
+  // SQUEEZED.
   //
   // This is the only thing reclaimed from ABOVE the rule, and it is reclaimed
   // for a reason rather than because it was the easiest row to move: a
@@ -4574,67 +4642,69 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // decision above set out to protect. Two qualifiers can share a row. A 24pt
   // temperature can share nothing.
   //
-  // RESERVED BY MEASUREMENT RATHER THAN BY A CONSTANT, which is the same call
-  // showSportsCard() makes below for its own status/age row and for the same
-  // reason. The stamp runs from "Updated just now" (150px at 9pt against the
-  // vendored glyph table) through "Updated 59 min ago" (171px) to "Updated
-  // 1439 min ago" (191px) on a card whose fetches have been failing for a day.
-  // Reserving the worst case would leave the location 45px of the 300px body
-  // on every ordinary draw, which is not a location, it is an ellipsis with a
-  // letter in front of it. Measuring hands the location whatever this
-  // particular stamp actually leaves.
+  // THE STAMP LOSES THE WORD "Updated" WHEN IT SHARES THE ROW, and that is
+  // what makes the pair fit at all. describeFreshness() in Forecast.cpp writes
+  // "Updated 59 min ago", 171px at 9pt against the vendored glyph table. The
+  // widest town this fleet draws, "Fort Washington, MD", is 182. With the 8px
+  // gap the pair wants 361 of a 300px row, and the row cannot be found another
+  // 61 pixels anywhere on this card. "Updated " is 73 of the stamp's 171 and
+  // says nothing a reader standing in front of a town name and a time needs,
+  // so it is the 73 that comes off: 288 of 300, with 12 over. On its own row
+  // the stamp keeps the word, because that row has 300px for 171.
   //
-  // THE CAP EXISTS SO THE RESERVATION CANNOT EAT THE WHOLE ROW.
-  // describeFreshness() in Forecast.cpp puts no upper bound on the minute
-  // count - it never rolls up into hours the way Listings.cpp's copy does - so
-  // a device offline long enough produces an arbitrarily wide string. Past the
-  // cap the stamp ellipsizes inside its own reservation instead of pushing the
-  // location off the card, which is the right way round: at that age the exact
-  // minute count has stopped being the interesting part of the sentence.
+  // THE ROW IS THEN SPLIT BY MEASURING BOTH, not by a constant reservation.
+  // Each takes what it measures, which on every ordinary draw leaves both whole
+  // - "Annapolis, MD" is 125 and "59 min ago" 98, inside the row with 69 to
+  // spare. Only a long town meeting a stale stamp runs the row out, and then
+  // the stamp gives first, down to a floor that keeps it a sentence rather than
+  // a stub: at that age the exact minute count has stopped being the
+  // interesting part of what it says, where the town never stops being the
+  // answer to "72 degrees where".
   //
-  // THE TIGHT LOCATION BOX DOES NOT ALSO STOP SHORT BY kDayNightWidth, AND THE
-  // UNTIGHT ONE STILL DOES.
+  // THE SQUEEZED LOCATION BOX DOES NOT ALSO STOP SHORT BY kDayNightWidth, AND
+  // THE UNSQUEEZED ONE STILL DOES.
   //
-  // The untight reservation stays exactly as it has been since this card was
+  // The unsqueezed reservation stays exactly as it has been since this card was
   // written, because nine of nine fielded devices draw that path and a change
   // they would all see needs a reason none of them have. But it is worth
-  // writing down what that reservation is actually worth, because the tight
+  // writing down what that reservation is actually worth, because the squeezed
   // row cannot afford to pay it twice: the Day/Night tag is on the row ABOVE.
   // It is drawn at y=4 and a 9pt line inks 18 rows, so its ink ends at 21
   // against a location whose box starts at kLocationY. They cannot collide. The
   // reservation guards against a future font change, not against any string
   // this card can be handed today.
   //
-  // Tight, that guard costs more than it protects. With the freshness stamp
+  // Squeezed, that guard costs more than it protects. With the freshness stamp
   // now sharing this row, keeping the kDayNightWidth term as well left the
   // location 67 to 86px of the 300px body - and measured against the vendored
   // glyph table "Annapolis" alone is 87px and "Annapolis, MD" is 125px, so
   // every real location on this fleet would have ellipsized, and it would have
   // ellipsized to protect two pixels of clearance from a row that is not
-  // there. Dropping the term recovers 64px and leaves the location between 101
-  // and 142px depending on how wide the stamp measured, which is enough for
-  // the ordinary case.
+  // there.
   //
-  // So the only thing the tight location reserves against is the stamp beside
-  // it - a real neighbour on a real row, with a measured reservation of its
-  // own just below.
+  // So the only thing the squeezed location reserves against is the stamp
+  // beside it - a real neighbour on a real row, measured just below.
   constexpr int kUpdatedGap = 8;
-  constexpr int kUpdatedMaxWidth = 200;
+  constexpr int kUpdatedMinWidth = 80;
+  const String rowStamp = squeezeHeader ? withoutUpdatedPrefix(updatedAt) : updatedAt;
   int updatedInkWidth = 0;
-  if (tight && updatedAt.length() > 0) {
-    updatedInkWidth = lcd.textWidth(updatedAt.c_str());
-    if (updatedInkWidth > kUpdatedMaxWidth) {
-      updatedInkWidth = kUpdatedMaxWidth;
+  if (squeezeHeader && rowStamp.length() > 0) {
+    updatedInkWidth = lcd.textWidth(rowStamp.c_str());
+    const int roomBesideLocation =
+        bodyWidth - kUpdatedGap - (location.length() > 0 ? lcd.textWidth(location.c_str()) : 0);
+    if (updatedInkWidth > roomBesideLocation) {
+      updatedInkWidth = roomBesideLocation > kUpdatedMinWidth ? roomBesideLocation
+                                                             : kUpdatedMinWidth;
     }
   }
   const int updatedReservation = updatedInkWidth > 0 ? updatedInkWidth + kUpdatedGap : 0;
 
-  // Said out loud on every tight draw, because this is the card rearranging
+  // Said out loud on every squeezed draw, because this is the card rearranging
   // itself and the remote debug stream is the only thing a deployed device has
   // to say so with. verbose rather than printf: a bound button is a
   // configuration somebody chose, not a fault, and this would otherwise repeat
   // on every appearance of the card forever.
-  if (tight) {
+  if (squeezeHeader) {
     // "when there is a strip under it" is not hedging - a one-period forecast
     // draws neither, and the strip block below says so on its own line. This
     // line runs before the column count is known, so it must not claim a rule
@@ -4644,20 +4714,25 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
                  "strip drops its 'Now' column and compresses the rest to one icon and one "
                  "joined line each",
                  contentBottom(), updatedReservation);
+  } else if (tight) {
+    Log::verbose("[display] forecast is tight (floor %d) on a turned panel - the header is not "
+                 "squeezed, because the stacked strip divides whatever the rule leaves and the "
+                 "22px the squeeze reclaims would come out of the location row instead",
+                 contentBottom());
   }
 
   // Location, same placement as the retired showWeatherCard()'s own line -
   // this card answers the identical "72 degrees *where*" question that one
   // did.
   if (location.length() > 0) {
-    // Untight, stops short of the Day/Night tag above it rather than running
+    // Unsqueezed, stops short of the Day/Night tag above it rather than running
     // the full card width: the tag is drawn first and a long enough city name
-    // would otherwise print straight through it. Tight, it stops short of the
-    // freshness stamp that has joined it on this row instead, and takes back
-    // the tag's 64px - see the two paragraphs above for why the tag's
+    // would otherwise print straight through it. Squeezed, it stops short of
+    // the freshness stamp that has joined it on this row instead, and takes
+    // back the tag's 64px - see the two paragraphs above for why the tag's
     // reservation is the one that can be given up and the stamp's is not.
     const int locationWidth =
-        tight ? bodyWidth - updatedReservation : bodyWidth - kDayNightWidth;
+        squeezeHeader ? bodyWidth - updatedReservation : bodyWidth - kDayNightWidth;
     if (locationWidth > 0) {
       layoutLine(location, kCardMargin, kLocationY, locationWidth, muted(), "forecast.location");
     } else {
@@ -4666,13 +4741,12 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
       // decision, and noticing it must not depend on somebody having switched
       // streaming on first.
       //
-      // Only reachable on a tight card - the untight box is a constant 236px
-      // and cannot go non-positive - and only if kUpdatedMaxWidth is ever
-      // raised past the body width, since the stamp is capped at 200 of 300
-      // today. Kept anyway: the cap and the body width are two constants in
-      // two places, and the day somebody moves one of them this line is the
-      // difference between a missing location and a missing location nobody
-      // can explain.
+      // Only reachable on a squeezed card - the unsqueezed box is a constant
+      // 236px and cannot go non-positive - and only if kUpdatedMinWidth is ever
+      // raised past the body width less the gap. Kept anyway: the floor and the
+      // body width are two constants in two places, and the day somebody moves
+      // one of them this line is the difference between a missing location and
+      // a missing location nobody can explain.
       Log::printf("[display] forecast.location: a %dpx freshness stamp left %dpx of the %dpx "
                   "row, so no location was drawn at all",
                   updatedReservation, locationWidth, bodyWidth);
@@ -4683,8 +4757,8 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // Drawn after the location rather than before so this reads down the row
   // left to right in source order; they cannot overlap either way, because the
   // location box was narrowed by exactly this much.
-  if (tight && updatedInkWidth > 0) {
-    layoutLine(updatedAt, kContentRight(), kLocationY, updatedInkWidth, muted(),
+  if (squeezeHeader && updatedInkWidth > 0) {
+    layoutLine(rowStamp, kContentRight(), kLocationY, updatedInkWidth, muted(),
                "forecast.updated", Align::Right);
   }
 
@@ -4735,10 +4809,10 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
                "forecast.condition");
   }
 
-  // The freshness stamp's own row, untight only - tight, it has already been
-  // drawn up on the location row above and this whole block is skipped. This
-  // is the row the tight layout reclaims; see the reasoning there.
-  if (!tight && updatedAt.length() > 0) {
+  // The freshness stamp's own row - squeezed, it has already been drawn up on
+  // the location row above and this whole block is skipped. This is the row the
+  // squeeze reclaims; see the reasoning there.
+  if (!squeezeHeader && updatedAt.length() > 0) {
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
     layoutLine(updatedAt, kCardMargin, 104, bodyWidth, muted(), "forecast.updated");
@@ -4752,7 +4826,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // kMaxForecastStripDays without leaving a lopsided gap.
   //
   // THREE ROWS UNTIGHT, TWO ELEMENTS TIGHT. The full-size column is a label at
-  // y=122, a 17px-radius icon at cy=155 and a temperature at y=178, which is
+  // y=130, a 17px-radius icon at cy=163 and a temperature at y=186, which is
   // the 200px-deep card the budget cannot afford. The compressed column is a
   // 10px-radius icon at cy=123 and then ONE line at y=132 carrying the day
   // label and the temperature together, bottoming at 154 exactly - 132 plus
@@ -4815,11 +4889,24 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // A thin rule separating "right now" from "the rest of the week" - the
   // only line-art on this card that is not a weather icon.
   //
-  // Six pixels higher when tight, which is exactly the room freed by the
-  // freshness row moving up: the condition phrase above it is 12pt at y=80 and
-  // bottoms at 109 in both cases, so 112 is the first line that still clears
-  // it, and every pixel taken off the rule is a pixel the compressed strip
-  // below gets back.
+  // IT WAS DRAWN THROUGH THE FRESHNESS LINE'S DESCENDERS, on both panels, from
+  // the day this card was written. The unsqueezed stack is a 12pt condition
+  // phrase at y=80 whose ink ends at 103, a 9pt freshness line at y=104 whose
+  // ink runs 104..121, and a strip label at 122 - which leaves the rule at 118
+  // crossing the p and the g of "Updated 59 min ago". There is no slack
+  // between those three rows to move either of them into.
+  //
+  // The slack is underneath. The landscape strip bottoms at y=199 against a
+  // 220 floor, so the rule goes to 125 - three pixels clear of the freshness
+  // ink - and the whole strip follows it down by eight: label 130, icon centre
+  // 163, temperature 186, bottoming at 208 with twelve to spare. The strip's
+  // own internal pitch does not move, so the three rows keep the spacing they
+  // were drawn with.
+  //
+  // Squeezed, the rule stays at 112. The freshness line is up on the location
+  // row there, 104..121 is empty, and 112 is the first line that clears the
+  // condition phrase - every pixel taken off the rule is a pixel the
+  // compressed strip below gets back against a 154px floor.
   //
   // AND IT IS NOT DRAWN AT ALL WHEN THE TIGHT STRIP HAS NO COLUMNS. A server
   // that sent a single period sent only "Now", and "Now" is the one column the
@@ -4838,9 +4925,10 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // there it is a separate change that nobody has asked for and that every
   // fielded household would see. The condition below is `!tight ||` for
   // exactly that reason, not because the untight case is right.
+  const int stripRuleY = squeezeHeader ? 112 : 125;
   const bool drawStripRule = !tight || stripColumns > 0;
   if (drawStripRule) {
-    lcd.drawFastHLine(kCardMargin, tight ? 112 : 118, bodyWidth, muted());
+    lcd.drawFastHLine(kCardMargin, stripRuleY, bodyWidth, muted());
   } else {
     // The whole absence in one line, rather than half of it - a reader of the
     // stream should not have to work out from "no columns" that the rule went
@@ -4853,26 +4941,15 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
                  static_cast<unsigned>(dayCount));
   }
 
-  // THE STRIP TURNS WITH THE PANEL, because five columns do not survive the
-  // turn. The band is 300px wide in landscape, so five days get 60px each and
-  // a day name sits above a temperature comfortably. In profile the band is
-  // 220 and each column is 44px - enough for "Mon" or for "72F" but not for
-  // both, so every column would ellipsize one of the two facts it exists to
-  // carry. Nothing overlaps; the card just stops answering its own question.
+  // The stacked strip's three columns of the content band - day on the left,
+  // weather in the middle, temperature right-aligned - are set up where
+  // stackedStrip is decided above the header.
   //
-  // A profile panel has the 80 pixels of height that the landscape one does
-  // not, which is exactly what five rows need. So the same five days run down
-  // the card instead of across it: the day on the left, its weather in the
-  // middle, the temperature right-aligned against the other edge. Three
-  // columns of the content band rather than five, and each one full width
-  // enough to hold a word.
-  const bool stackedStrip = kScreenH > kScreenW;
-
   // Measured from the rule to whatever floor this card actually has, rather
   // than from a constant: setContentBudget() has already dropped the floor to
   // clear the button row when a card has one bound, and five rows pitched
   // against the panel instead would be drawn straight through the buttons.
-  const int stackedTop = (tight ? 112 : 118) + 8;
+  const int stackedTop = stripRuleY + 8;
   const int stackedRowHeight =
       stripColumns > 0 ? (gContentBottom - stackedTop) / stripColumns : 0;
 
@@ -4941,7 +5018,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
     lcd.setFont(&fonts::FreeSansBold9pt7b);
     lcd.setTextSize(1);
     if (!tight) {
-      layoutLine(shortDayLabel(i, dayNames[i]), columnCentreX, 122, columnWidth, muted(),
+      layoutLine(shortDayLabel(i, dayNames[i]), columnCentreX, 130, columnWidth, muted(),
                  "forecast.daylabel", Align::Centre);
     }
 
@@ -4966,7 +5043,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
     // the text second: the text wins the overlap, and a clipped ray tip on one
     // of the four 20px icons is not a legibility problem. Reversing the order
     // would let a ray draw over a digit, which is.
-    drawWeatherIcon(classifyCondition(dayConditions[i]), columnCentreX, tight ? 123 : 155,
+    drawWeatherIcon(classifyCondition(dayConditions[i]), columnCentreX, tight ? 123 : 163,
                     /*radius=*/tight ? 10 : 17, /*isDaytime=*/true);
 
     if (tight) {
@@ -5010,7 +5087,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
     } else {
       char tempBuffer[12];
       snprintf(tempBuffer, sizeof(tempBuffer), "%d%s", dayTemperatures[i], dayUnits[i].c_str());
-      layoutLine(tempBuffer, columnCentreX, 178, columnWidth, ink(), "forecast.daytemp",
+      layoutLine(tempBuffer, columnCentreX, 186, columnWidth, ink(), "forecast.daytemp",
                  Align::Centre);
     }
   }
