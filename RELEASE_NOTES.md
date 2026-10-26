@@ -23,7 +23,19 @@ dated heading after.
 
 ## Unreleased
 
-_Nothing yet._
+### A price drop says what the price dropped from — App
+
+A card headed "Price drop" showed one number, so there was no way to tell what
+the price used to be. It now carries a second, smaller line under the asking
+price: "was $465,000".
+
+The line appears only when the email that brought that listing was a reduction
+and named both figures. A property that has held the same price for months
+shows nothing extra, and nothing on the display works out that a price moved -
+it draws what the email said, and stops drawing it when a later email says
+something else. On a display lying flat with a button on the card there is no
+room for a second line, so the asking price keeps the space and the "was" is
+left out.
 
 ---
 

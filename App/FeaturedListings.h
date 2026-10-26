@@ -97,6 +97,26 @@ struct Card {
   /// "$0" is worse than one showing no price at all.
   int32_t price = -1;
 
+  /// What `price` replaced, drawn as a second smaller line under it.
+  ///
+  /// **Negative means the email stated none**, which is the ordinary case and
+  /// the shape `price` has always used for "not stated". A new match, a status
+  /// change and an alert about a house that has held one price all carry one
+  /// figure.
+  ///
+  /// **Nothing here works out that a price moved.** The sender says so and
+  /// names both figures, and the server stores the one it struck through. So
+  /// this is drawn when it arrives and not drawn when it does not, with no
+  /// comparison against `price` and no reading of how old the listing is. A
+  /// property that dropped once and then sat gets this cleared by its next
+  /// alert, server-side, rather than by a rule here.
+  ///
+  /// Older firmware has no member for this and the server sends it last and
+  /// optional, so a binary predating it ignores the member and draws the card
+  /// it drew before - the compatibility gate that closed on 2026-09-22 permits
+  /// nothing else.
+  int32_t previousPrice = -1;
+
   Fact facts[kMaxFacts];
   uint8_t factCount = 0;
 

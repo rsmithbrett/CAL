@@ -669,9 +669,16 @@ struct FactLine {
 ///
 /// <para>`price` below zero means the source stated none, and nothing is drawn
 /// in its place. A $0 on a wall is worse than a blank.</para>
+///
+/// <para>`previousPrice` is what that price replaced, drawn as a second smaller
+/// line beneath it - "was $465,000". Below zero means the email stated none,
+/// which is the ordinary case and draws nothing. The card compares the two
+/// figures for nothing and reads no date: a listing carries this only when its
+/// own alert named both figures.</para>
 void showFeaturedListingCard(const String& title, const String& headline, const String& subhead,
-                      int32_t price, const FactLine* facts, uint8_t factCount,
-                      const String& updatedAt, const String& cachedImageId = String());
+                      int32_t price, int32_t previousPrice, const FactLine* facts,
+                      uint8_t factCount, const String& updatedAt,
+                      const String& cachedImageId = String());
 
 void showListingsStatus(const String& headline, const String& detail, bool isProblem);
 

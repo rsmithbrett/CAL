@@ -1743,6 +1743,74 @@ Step 5 is the one that can be wrong in the quiet direction. A streak that never
 clears turns this watchdog off permanently on any device that has ever hit it,
 and nothing on screen would say so.
 
+## 13. What a price drop dropped from, on the featured-listing card
+
+`App/FeaturedListings.h`, `App/FeaturedListings.cpp`, `App/Display.cpp`. The server reads
+the figure Compass struck through and sends it as `previousPrice`; this side draws it as a
+second 9pt muted line under the 18pt price, reading "was $465,000".
+
+**None of this has run on hardware.** The build figures are from a clean compile on
+2026-10-25: App 1,568,599 of ota_0's 1,966,080 bytes (79%), 114,156 bytes of global data.
+A clean compile proves the member parses and the layout call type-checks, not that the two
+figures look right on glass.
+
+What it has run on is the simulator mirror. `FeaturedListingPanel` in the server repository
+is a statement-for-statement port of `showFeaturedListingCard()`, and twelve images of this
+card at 240x320 and 320x240, with and without a picture and with and without an action
+bound, are in `docs/ia/screens/` there. That is closer to evidence than a compile and it is
+still not a device.
+
+### What changed
+
+`Card::previousPrice` is an `int32_t` defaulting to -1, read the same way `price` is: a
+null or an absent member lands on -1 and nothing is drawn. The sender decides whether a
+price moved and names both figures, so there is no comparison against `price` here and no
+reading of how old the listing is.
+
+The line costs 18px plus a 4px gap, taken from the same budget every block below the
+headline measures against, and the subhead yields to it as it already yields to the price.
+It advances `y` by 20 rather than the 22 the blocks above use: 22 cost a flat card with no
+picture two fact rows and left a row of white above the freshness line.
+
+### 13a. A reduction draws both figures
+
+Needs a listing whose last email was a price drop. The card reads the address, then the
+asking price large, then "was" and the older figure smaller and grey beneath it. Both
+figures grouped with commas - an ungrouped one is the `formatPrice` defect that reached a
+real card once already.
+
+### 13b. A listing with no reduction is unchanged
+
+Every other card, which is almost all of them. No second line, and the title, address,
+price and fact rows land exactly where they did. This is the case that runs most of the
+time and the one a regression would hide in.
+
+### 13c. A flat display with a button on the card
+
+320x240 with an action bound drops the content floor to y=154, where the price already
+ends at y=158 with a picture. The "was" line is left out and the price is kept, and the
+device says so on its stream: `[display] featuredlistings: no room for the previous price`.
+A display standing on its end has the room and draws it.
+
+### 13d. An older server
+
+Point the device at a build predating the field. `previousPrice` reads absent, lands on -1,
+and the card draws what it drew before - the 6-month compatibility case, from this side.
+The other side of it is asserted in the server repository by
+`FeaturedListingWireCompatibilityTests`.
+
+### Known gaps
+
+- **Nothing here has been on a panel.** Every figure above is from the mirror or the
+  compiler.
+- **Whether the "was" line reads as part of the fact rows below it.** It is 9pt grey and so
+  are they, and on a flat card with no picture it sits directly above "Bedrooms". The
+  pictures say it reads as a price because it is left-aligned prose against the facts'
+  label-left value-right columns, which is a judgement rather than a measurement.
+- **A listing whose price a person corrected.** The server clears the previous price when
+  somebody sets the price by hand, so this device should never see the pair. It is not
+  guarded here.
+
 ## What a clean compile does and does not prove
 
 Recorded once, because several commits in this repository lean on it:

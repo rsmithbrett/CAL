@@ -4170,8 +4170,9 @@ void showListingsCard(const String& address, const String& propertyType, int pri
 }
 
 void showFeaturedListingCard(const String& title, const String& headline, const String& subhead,
-                      int32_t price, const FactLine* facts, uint8_t factCount,
-                      const String& updatedAt, const String& cachedImageId) {
+                      int32_t price, int32_t previousPrice, const FactLine* facts,
+                      uint8_t factCount, const String& updatedAt,
+                      const String& cachedImageId) {
   lcd.fillScreen(bg());
   drawCardBanner("YOUR SEARCH", kListingsBanner, 150);
 
@@ -4228,6 +4229,7 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   constexpr int kTitleHeight = 18;
   constexpr int kSubheadHeight = 18;
   constexpr int kPriceHeight = 34;
+  constexpr int kPreviousPriceHeight = 18;
 
   // The keyword line, when a rule matched. Drawn above the address because it
   // is the thing that changed - a household glancing at a card they have seen
@@ -4274,8 +4276,15 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   // The subhead yields to the price rather than the other way round: a
   // neighbourhood line is context, an asking price is the number a household
   // came to the card for. So it draws only where both still fit.
+  //
+  // It yields to what the price dropped from as well. A card headed "Price
+  // drop" is about the pair of figures, and showing one of them while a
+  // neighbourhood name keeps its row is the wrong way round.
   const bool priceWillDraw = price > 0;
-  const int roomNeededAfterSubhead = priceWillDraw ? kPriceHeight : 0;
+  const bool previousWillDraw = priceWillDraw && previousPrice > 0;
+  const int roomNeededAfterSubhead =
+      (priceWillDraw ? kPriceHeight : 0)
+      + (previousWillDraw ? kPreviousPriceHeight + 4 : 0);
 
   if (subhead.length() > 0
       && y + kSubheadHeight + roomNeededAfterSubhead + (priceWillDraw ? 4 : 0) <= gContentBottom) {
@@ -4288,6 +4297,7 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
 
   // Below zero means the source stated none, and nothing is drawn in its
   // place. A $0 on a wall is worse than a blank.
+  bool priceDrew = false;
   if (priceWillDraw && y + kPriceHeight <= gContentBottom) {
     // formatPrice, not a bare snprintf. This drew "$514000" on a real card while
     // formatPrice sat in this same file grouping "$450,000" correctly for the other
@@ -4299,6 +4309,41 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
                            static_cast<int16_t>(textWidth), 34, 1, Align::Left};
     layoutText(priceText.c_str(), priceBox, ink(), "featuredlistings.price");
     y += 38;
+    priceDrew = true;
+  }
+
+  // WHAT THE PRICE DROPPED FROM, under it in muted 9pt against the price's 18pt
+  // black. A card headed "Price drop" showed one number, so a household could
+  // read that something had changed and not what it changed from.
+  //
+  // Only under a price that drew: "was $465,000" with no figure above it says
+  // nothing. And only where it fits - the tightest panel the fleet has is
+  // 320x240 with an action bound to this card, where gContentBottom is 154 and
+  // a three-line address can leave this nothing. Dropped there rather than
+  // drawn through the button row, the same check the price itself makes.
+  //
+  // Nothing here decides a price moved. The sender said so and named both
+  // figures; this draws the second one when the server sends it.
+  if (previousWillDraw && priceDrew && y + kPreviousPriceHeight <= gContentBottom) {
+    // formatPrice again, for the reason the line above it uses it: six figures
+    // with no separators is the number a household is being asked to read at a
+    // glance, and this one is 16px rather than 20.
+    const String wasText = "was " + formatPrice(previousPrice);
+    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    const TextBox wasBox{static_cast<int16_t>(kContentLeft()), static_cast<int16_t>(y),
+                         static_cast<int16_t>(textWidth), 18, 1, Align::Left};
+    layoutText(wasText.c_str(), wasBox, muted(), "featuredlistings.previousprice");
+
+    // 20, which is the fact row step rather than the 22 every block above this one
+    // uses. The 4px version cost a landscape card with no picture two fact rows and
+    // left 18px of white above the freshness line; 2px bought one of them back and
+    // closed the hole. The line keeps its own 4px under the price, where the
+    // separation is worth having.
+    y += 20;
+  } else if (previousWillDraw && priceDrew) {
+    Log::printf("[display] featuredlistings: no room for the previous price at y=%d - %dpx to "
+                "the content floor, %d needed",
+                y, gContentBottom - y, kPreviousPriceHeight);
   }
 
   // The freshness line is reserved before the facts are drawn, not placed after

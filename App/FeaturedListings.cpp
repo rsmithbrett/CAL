@@ -148,6 +148,12 @@ Result fetch() {
     // zero for exactly this reason, and turning that into 0 here would undo it.
     out.price = card["price"].isNull() ? -1 : (card["price"] | -1);
 
+    // What that price replaced, read the same way and for the same reason. A
+    // member that is absent reads as null here too, so a response from a server
+    // that predates the field lands on -1 and the second line is not drawn.
+    out.previousPrice =
+        card["previousPrice"].isNull() ? -1 : (card["previousPrice"] | -1);
+
     strlcpy(out.imageKey, card["imageKey"] | "", sizeof(out.imageKey));
 
     out.factCount = 0;
@@ -330,8 +336,9 @@ void cardDraw(uint16_t itemIndex) {
                   card.imageKey);
     }
 
-    Display::showFeaturedListingCard(card.title, card.headline, card.subhead, card.price, lines,
-                              card.factCount, describeFreshness(gLastOkMs),
+    Display::showFeaturedListingCard(card.title, card.headline, card.subhead, card.price,
+                              card.previousPrice, lines, card.factCount,
+                              describeFreshness(gLastOkMs),
                               hasPicture ? card.imageKey : "");
     return;
   }
