@@ -1186,7 +1186,7 @@ Figures are the bottom of the lowest content drawn, the same thing
 |---|---:|---:|
 | `showAircraftCard` | ~211, or ~229 with a two-line route (rows every 30px from y=100 or y=118, then the freshness line 4px under the last) | 57–75px |
 | `showListingsCard` | ~213 (four 26px stat rows from y=88, then the distance/freshness footer at y=196) | ~59px |
-| `showForecastCard` | ~195 (strip icons centred at y=155, r=17; column temperatures at y=178) | ~41px |
+| `showForecastCard` | ~208 (strip icons centred at y=163, r=17; column temperatures at y=186) | ~54px |
 | `showMoonPhaseCard` | ~194 (phase name at y=150, "% illuminated" at y=176) | ~40px |
 | `showNoContent` | ~192 at full headline and detail line counts | ~38px |
 | `showClockDate` | ~185 (date block from y=145, up to two 20px lines) | ~31px |
