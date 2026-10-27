@@ -1,3 +1,8 @@
+// sdkconfig.h first, or CONFIG_IDF_TARGET_ESP32S3 is undefined when the board gate
+// below is evaluated and an S3 build silently takes the autodetect branch. That
+// cost a flash: the Panellan pin map was absent from a binary that compiled
+// clean, because nothing outside the header referenced it.
+#include "sdkconfig.h"
 // The board is chosen here and nowhere else. Everything below this block, and
 // every drawing call in this file, is the same on both boards.
 //
@@ -105,9 +110,27 @@ void startPanel() {
   }
   gPanelStarted = true;
 
-  lcd.init();
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  // Backlight driven directly, before the driver touches it. On this panel
+  // nothing is visible until GPIO47 is high, and a Light_PWM whose output never
+  // reaches the pin is indistinguishable from a bus that never reaches the
+  // glass: both are a black screen with a clean init behind them. Asserting it
+  // here separates the two, and costs one pin write on a board whose backlight
+  // is wanted whenever the panel is.
+  pinMode(panellan::kBacklight, OUTPUT);
+  digitalWrite(panellan::kBacklight, HIGH);
+#endif
+
+  const bool panelReady = lcd.init();
   lcd.setRotation(1);  // 320x240 landscape
   lcd.setBrightness(255);
+
+  // init() false means the driver could not bring the panel up at all. The
+  // dimensions say whether rotation landed where the card layouts expect.
+  Journal::printf("[display] panel init=%d %ux%u",
+                  panelReady ? 1 : 0,
+                  static_cast<unsigned>(lcd.width()),
+                  static_cast<unsigned>(lcd.height()));
   clear();
 
   // Non-fatal: without it the brand splash simply never appears and CAL falls
