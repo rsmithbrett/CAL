@@ -53,8 +53,305 @@
 namespace Display {
 namespace {
 
+// ---- The drawing boundary -------------------------------------------------
+//
+// Every layout function below draws through Canvas, which names no graphics
+// library. The driver block after it holds the one implementation that does,
+// and is the only code in this file that mentions LovyanGFX.
+// FIRMWARE_CORE_AND_DRIVERS_DESIGN.md section 2 has the shape.
+
+/// A colour in one of the two forms this file produces: a 24-bit value from the
+/// palette constants, or the 16-bit value to565() computes for this panel.
+///
+/// Which of the two it is travels with the value. LovyanGFX selects its
+/// conversion from the C++ type it is handed - 16 bits means RGB565, 32 means
+/// RGB888 - so a 565 value widened to 32 bits reaches the glass as a different
+/// colour. Both constructors are implicit, so a call site passes the expression
+/// it already had.
+class Colour {
+ public:
+  constexpr Colour(uint32_t rgb888) : value_(rgb888), rgb565_(false) {}
+  constexpr Colour(uint16_t rgb565) : value_(rgb565), rgb565_(true) {}
+
+  constexpr uint32_t value() const { return value_; }
+  constexpr bool isRgb565() const { return rgb565_; }
+
+ private:
+  uint32_t value_;
+  bool rgb565_;
+};
+
+/// The faces a card can ask for. The driver's fontFor() maps each one to a font
+/// object, and nothing above that table names a font.
+///
+/// PanelDefault is the panel's own bitmap face, which restoreDefaultFont() puts
+/// back; the four Sans tiers are the bold family the cards lay out in.
+enum class FontId : uint8_t {
+  PanelDefault,
+  Sans9,
+  Sans12,
+  Sans18,
+  Sans24,
+};
+
+/// Where drawString() anchors the string it is handed. The five this file sets.
+enum class TextDatum : uint8_t {
+  TopLeft,
+  TopCentre,
+  TopRight,
+  MiddleCentre,
+  BottomRight,
+};
+
+/// The surface the cards draw on.
+class Canvas {
+ public:
+  virtual ~Canvas() = default;
+
+  // Viewport. Everything below is in pixels.
+  virtual int width() const = 0;
+  virtual int height() const = 0;
+
+  // Text state and metrics.
+  virtual void setFont(FontId font) = 0;
+  virtual FontId font() const = 0;
+  virtual void setTextSize(float size) = 0;
+  virtual void setTextDatum(TextDatum datum) = 0;
+  virtual void setTextColor(Colour foreground) = 0;
+  virtual void setTextColor(Colour foreground, Colour background) = 0;
+  virtual int textWidth(const char* text) = 0;
+  virtual int fontHeight() = 0;
+
+  // Text.
+  virtual void drawString(const char* text, int x, int y) = 0;
+
+  // The String forms half this file hands over, routed to the two above rather
+  // than duplicated in the driver.
+  int textWidth(const String& text) { return textWidth(text.c_str()); }
+  void drawString(const String& text, int x, int y) { drawString(text.c_str(), x, y); }
+
+  // Shapes.
+  virtual void fillScreen(Colour colour) = 0;
+  virtual void fillRect(int x, int y, int w, int h, Colour colour) = 0;
+  virtual void fillRoundRect(int x, int y, int w, int h, int r, Colour colour) = 0;
+  virtual void drawRoundRect(int x, int y, int w, int h, int r, Colour colour) = 0;
+  virtual void fillCircle(int x, int y, int r, Colour colour) = 0;
+  virtual void drawCircle(int x, int y, int r, Colour colour) = 0;
+  virtual void fillEllipse(int x, int y, int rx, int ry, Colour colour) = 0;
+  virtual void fillArc(int x, int y, int r0, int r1, float angle0, float angle1,
+                       Colour colour) = 0;
+  virtual void fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, Colour colour) = 0;
+  virtual void drawLine(int x0, int y0, int x1, int y1, Colour colour) = 0;
+  virtual void drawFastHLine(int x, int y, int w, Colour colour) = 0;
+
+  // Images. littleEndian says which way round the 565 pairs sit in the buffer,
+  // which is a fact about the asset rather than about the board.
+  virtual void pushImage(int x, int y, int w, int h, const uint8_t* rgb565,
+                         bool littleEndian) = 0;
+  virtual bool drawPng(const uint8_t* data, size_t length, int x, int y, int w, int h) = 0;
+  virtual bool drawPngFile(const char* path, int x, int y, int w, int h) = 0;
+  virtual bool drawJpg(const uint8_t* data, size_t length, int x, int y, int w, int h) = 0;
+  virtual bool drawJpgFile(const char* path, int x, int y, int w, int h) = 0;
+
+  /// Hands decoder scratch back. A board with room to spare may do nothing here.
+  virtual void releaseDecoderScratch() = 0;
+
+  // Clipping.
+  virtual void setClipRect(int x, int y, int w, int h) = 0;
+  virtual void clearClipRect() = 0;
+};
+
+/// The panel rather than the surface: brought up, turned, lit, and read for
+/// touches. begin(), setBrightness() and readTouchRaw() use this; no layout
+/// function does.
+class Panel {
+ public:
+  virtual ~Panel() = default;
+
+  virtual void init() = 0;
+  virtual void setRotation(int rotation) = 0;
+  virtual void setBrightness(uint8_t level) = 0;
+  virtual bool getTouch(int32_t& x, int32_t& y) = 0;
+};
+
+// ---- The driver -----------------------------------------------------------
+//
+// The only block in this file that names LovyanGFX.
+
 // Same panel as CAL - see CAL's own Display.cpp for why autodetect over a pin map.
-LGFX lcd;
+LGFX panelDevice;
+
+/// FontId to face, one row per name. A board carrying a different family
+/// changes this table and nothing above it.
+const lgfx::IFont* fontFor(FontId id) {
+  switch (id) {
+    case FontId::Sans9:  return &fonts::FreeSansBold9pt7b;
+    case FontId::Sans12: return &fonts::FreeSansBold12pt7b;
+    case FontId::Sans18: return &fonts::FreeSansBold18pt7b;
+    case FontId::Sans24: return &fonts::FreeSansBold24pt7b;
+    case FontId::PanelDefault: break;
+  }
+  return &fonts::Font0;
+}
+
+/// The same table read backwards, for Canvas::font(). A face this board does not
+/// name reads back as PanelDefault.
+FontId fontIdOf(const lgfx::IFont* font) {
+  if (font == &fonts::FreeSansBold9pt7b)  { return FontId::Sans9; }
+  if (font == &fonts::FreeSansBold12pt7b) { return FontId::Sans12; }
+  if (font == &fonts::FreeSansBold18pt7b) { return FontId::Sans18; }
+  if (font == &fonts::FreeSansBold24pt7b) { return FontId::Sans24; }
+  return FontId::PanelDefault;
+}
+
+lgfx::textdatum_t datumFor(TextDatum datum) {
+  switch (datum) {
+    case TextDatum::TopCentre:    return lgfx::textdatum_t::top_center;
+    case TextDatum::TopRight:     return lgfx::textdatum_t::top_right;
+    case TextDatum::MiddleCentre: return lgfx::textdatum_t::middle_center;
+    case TextDatum::BottomRight:  return lgfx::textdatum_t::bottom_right;
+    case TextDatum::TopLeft:      break;
+  }
+  return lgfx::textdatum_t::top_left;
+}
+
+/// Selects the pending draw colour in the form the Colour was built from. The
+/// shape calls below then use LovyanGFX's own colourless overloads, which is
+/// what its colour-carrying ones do internally.
+void applyColour(Colour colour) {
+  if (colour.isRgb565()) {
+    panelDevice.setColor(static_cast<uint16_t>(colour.value()));
+  } else {
+    panelDevice.setColor(colour.value());
+  }
+}
+
+/// Text colours are stored as RGB888 whichever form they arrive in, so the one
+/// conversion happens here and the setTextColor() calls take a single type.
+uint32_t toRgb888(Colour colour) {
+  return colour.isRgb565() ? lgfx::convert_to_rgb888(static_cast<uint16_t>(colour.value()))
+                           : lgfx::convert_to_rgb888(colour.value());
+}
+
+/// Every drawXxx on this board auto-fits and centres: offsets zero, scales zero,
+/// anchor middle_center. The cards pass a box and let the decoder place inside it.
+constexpr lgfx::textdatum_t kImageAnchor = lgfx::textdatum_t::middle_center;
+
+class LgfxCanvas final : public Canvas {
+ public:
+  int width() const override { return panelDevice.width(); }
+  int height() const override { return panelDevice.height(); }
+
+  void setFont(FontId font) override { panelDevice.setFont(fontFor(font)); }
+  FontId font() const override { return fontIdOf(panelDevice.getFont()); }
+  void setTextSize(float size) override { panelDevice.setTextSize(size); }
+  void setTextDatum(TextDatum datum) override { panelDevice.setTextDatum(datumFor(datum)); }
+
+  void setTextColor(Colour foreground) override {
+    panelDevice.setTextColor(toRgb888(foreground));
+  }
+  void setTextColor(Colour foreground, Colour background) override {
+    panelDevice.setTextColor(toRgb888(foreground), toRgb888(background));
+  }
+  int textWidth(const char* text) override { return panelDevice.textWidth(text); }
+  int fontHeight() override { return panelDevice.fontHeight(); }
+
+  void drawString(const char* text, int x, int y) override { panelDevice.drawString(text, x, y); }
+
+  void fillScreen(Colour colour) override {
+    applyColour(colour);
+    panelDevice.fillScreen();
+  }
+  void fillRect(int x, int y, int w, int h, Colour colour) override {
+    applyColour(colour);
+    panelDevice.fillRect(x, y, w, h);
+  }
+  void fillRoundRect(int x, int y, int w, int h, int r, Colour colour) override {
+    applyColour(colour);
+    panelDevice.fillRoundRect(x, y, w, h, r);
+  }
+  void drawRoundRect(int x, int y, int w, int h, int r, Colour colour) override {
+    applyColour(colour);
+    panelDevice.drawRoundRect(x, y, w, h, r);
+  }
+  void fillCircle(int x, int y, int r, Colour colour) override {
+    applyColour(colour);
+    panelDevice.fillCircle(x, y, r);
+  }
+  void drawCircle(int x, int y, int r, Colour colour) override {
+    applyColour(colour);
+    panelDevice.drawCircle(x, y, r);
+  }
+  void fillEllipse(int x, int y, int rx, int ry, Colour colour) override {
+    applyColour(colour);
+    panelDevice.fillEllipse(x, y, rx, ry);
+  }
+  void fillArc(int x, int y, int r0, int r1, float angle0, float angle1,
+               Colour colour) override {
+    applyColour(colour);
+    panelDevice.fillArc(x, y, r0, r1, angle0, angle1);
+  }
+  void fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, Colour colour) override {
+    applyColour(colour);
+    panelDevice.fillTriangle(x0, y0, x1, y1, x2, y2);
+  }
+  void drawLine(int x0, int y0, int x1, int y1, Colour colour) override {
+    applyColour(colour);
+    panelDevice.drawLine(x0, y0, x1, y1);
+  }
+  void drawFastHLine(int x, int y, int w, Colour colour) override {
+    applyColour(colour);
+    panelDevice.drawFastHLine(x, y, w);
+  }
+
+  void pushImage(int x, int y, int w, int h, const uint8_t* rgb565,
+                 bool littleEndian) override {
+    if (littleEndian) {
+      // rgb565_t is the little-endian layout, and handing it over as that type
+      // makes LovyanGFX convert per pixel rather than copy.
+      panelDevice.pushImage(x, y, w, h, reinterpret_cast<const lgfx::rgb565_t*>(rgb565));
+    } else {
+      // swap565_t is a byte-for-byte match for what this panel writes, so this
+      // is a straight copy.
+      panelDevice.pushImage(x, y, w, h, reinterpret_cast<const lgfx::swap565_t*>(rgb565));
+    }
+  }
+  bool drawPng(const uint8_t* data, size_t length, int x, int y, int w, int h) override {
+    return panelDevice.drawPng(data, length, x, y, w, h, 0, 0, 0.0f, 0.0f, kImageAnchor);
+  }
+  bool drawPngFile(const char* path, int x, int y, int w, int h) override {
+    return panelDevice.drawPngFile(SD, path, x, y, w, h, 0, 0, 0.0f, 0.0f, kImageAnchor);
+  }
+  bool drawJpg(const uint8_t* data, size_t length, int x, int y, int w, int h) override {
+    return panelDevice.drawJpg(data, length, x, y, w, h, 0, 0, 0.0f, 0.0f, kImageAnchor);
+  }
+  bool drawJpgFile(const char* path, int x, int y, int w, int h) override {
+    return panelDevice.drawJpgFile(SD, path, x, y, w, h, 0, 0, 0.0f, 0.0f, kImageAnchor);
+  }
+
+  void releaseDecoderScratch() override { panelDevice.releasePngMemory(); }
+
+  void setClipRect(int x, int y, int w, int h) override {
+    panelDevice.setClipRect(x, y, w, h);
+  }
+  void clearClipRect() override { panelDevice.clearClipRect(); }
+};
+
+class LgfxPanel final : public Panel {
+ public:
+  void init() override { panelDevice.init(); }
+  void setRotation(int rotation) override { panelDevice.setRotation(rotation); }
+  void setBrightness(uint8_t level) override { panelDevice.setBrightness(level); }
+  bool getTouch(int32_t& x, int32_t& y) override { return panelDevice.getTouch(&x, &y); }
+};
+
+LgfxCanvas gCanvas;
+LgfxPanel gPanel;
+
+// ---- What the rest of this file draws on ----------------------------------
+
+Canvas& lcd = gCanvas;
+Panel& panel = gPanel;
 
 // THE VIEWPORT IS A RUNTIME FACT, not a compile-time one, because a display can
 // be mounted either way round - see DISPLAY_ORIENTATION_DESIGN.md phase 1 and
@@ -629,16 +926,16 @@ void drawClock() {
   // forecast plus its "updated" line already reaches roughly y=186. So a bigger
   // clock is a card-layout change, not a font change.
   // Raw rather than through layoutText(), and carrying the sentinel the CI
-  // gate looks for. bottom_right is the datum this corner needs - the baseline
+  // gate looks for. BottomRight is the datum this corner needs - the baseline
   // is pinned 4px off the bottom edge inside the 16px band described above,
   // which a top-anchored TextBox cannot express - and clockText is
   // formatTimeOfDay()'s own output, bounded to eight characters and already
   // clamped to "--:--" for anything it cannot render. There is no wire string
   // here for an ellipsis to protect.
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   lcd.setTextSize(1);
   lcd.setTextColor(ink(), bg());
-  lcd.setTextDatum(bottom_right);
+  lcd.setTextDatum(TextDatum::BottomRight);
   lcd.drawString(clockText, kScreenW - 6, kScreenH - 4);  // LAYOUT-PRIMITIVE
 }
 
@@ -817,10 +1114,10 @@ TextResult layoutText(const char* text, const TextBox& box, uint32_t colour, con
     lcd.setTextColor(colour, background == kUseCardBackground ? bg() : background);
   }
   switch (box.align) {
-    case Align::Centre: lcd.setTextDatum(top_center); break;
-    case Align::Right:  lcd.setTextDatum(top_right);  break;
+    case Align::Centre: lcd.setTextDatum(TextDatum::TopCentre); break;
+    case Align::Right:  lcd.setTextDatum(TextDatum::TopRight);  break;
     case Align::Left:
-    default:            lcd.setTextDatum(top_left);   break;
+    default:            lcd.setTextDatum(TextDatum::TopLeft);   break;
   }
 
   char line[kLayoutLineBytes];
@@ -973,9 +1270,9 @@ TextResult layoutText(const char* text, const TextBox& box, uint32_t colour, con
 
   // Left the datum where it found it, the way drawRightJustified() used to.
   // Half the card bodies below draw a literal label straight after a
-  // right-aligned value, and a leaked top_right datum would silently
+  // right-aligned value, and a leaked TopRight datum would silently
   // right-align the next thing somebody adds rather than failing visibly.
-  lcd.setTextDatum(top_left);
+  lcd.setTextDatum(TextDatum::TopLeft);
 
   if (!measureOnly) {
     if (result.ellipsized) {
@@ -1014,19 +1311,18 @@ TextResult layoutText(const String& text, const TextBox& box, uint32_t colour, c
 // record as unreadable at arm's length, and text that has reached 9pt and still
 // does not fit has run out of family. TEXT_LAYOUT_DESIGN.md section 10a has the
 // measurements and section 10e the one face that could be added.
-using LayoutFont = decltype(lcd.getFont());
-
-const LayoutFont kSansTiers[] = {
-    &fonts::FreeSansBold24pt7b,
-    &fonts::FreeSansBold18pt7b,
-    &fonts::FreeSansBold12pt7b,
-    &fonts::FreeSansBold9pt7b,
+constexpr FontId kSansTiers[] = {
+    FontId::Sans24,
+    FontId::Sans18,
+    FontId::Sans12,
+    FontId::Sans9,
 };
 constexpr int kSansTierCount = sizeof(kSansTiers) / sizeof(kSansTiers[0]);
 
-/// Where a face sits in kSansTiers, or -1 for one outside it - Font0, or any
-/// face the caller scaled with setTextSize(), both of which get no ladder.
-int sansTierIndex(LayoutFont font) {
+/// Where a face sits in kSansTiers, or -1 for one outside it - the panel's own
+/// face, or any face the caller scaled with setTextSize(), both of which get no
+/// ladder.
+int sansTierIndex(FontId font) {
   for (int i = 0; i < kSansTierCount; ++i) {
     if (kSansTiers[i] == font) {
       return i;
@@ -1068,7 +1364,7 @@ int sansTierIndex(LayoutFont font) {
 TextResult layoutLine(const char* text, int x, int y, int width, uint32_t colour,
                       const char* what, Align align = Align::Left,
                       uint32_t background = kUseCardBackground, int roomBelow = 0) {
-  const LayoutFont callerFont = lcd.getFont();
+  const FontId callerFont = lcd.font();
   const int slot = lcd.fontHeight();
   const TextBox asked{static_cast<int16_t>(x), static_cast<int16_t>(y),
                       static_cast<int16_t>(width), static_cast<int16_t>(slot), 1, align};
@@ -1173,7 +1469,7 @@ constexpr int16_t kProseSmallLineHeight = 18;
 TextResult drawProseBody(const String& text, const char* what) {
   const int16_t bodyWidth = kContentWidth();
 
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setFont(FontId::Sans12);
   lcd.setTextSize(1);
   const TextBox largeBox{kCardMargin, kProseTopY, bodyWidth, kProseLargeLineHeight,
                          linesToBudget(kProseTopY, kProseLargeLineHeight), Align::Left};
@@ -1182,7 +1478,7 @@ TextResult drawProseBody(const String& text, const char* what) {
     return layoutText(text, largeBox, ink(), what);
   }
 
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   const TextBox smallBox{kCardMargin, kProseTopY, bodyWidth, kProseSmallLineHeight,
                          linesToBudget(kProseTopY, kProseSmallLineHeight), Align::Left};
   Log::verbose("[display] %s: dropped to the 9pt tier, the 12pt one would have ellipsized", what);
@@ -1203,7 +1499,7 @@ TextResult drawProseBody(const String& text, const char* what) {
 // The box is the coloured rect less the 8px inset on each side.
 void drawCardBanner(const String& label, uint32_t bannerColour, int width) {
   lcd.fillRect(0, 0, width, kBannerHeight, bannerColour);
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   lcd.setTextSize(1);  // GFX fonts are sized at their own point size - see drawCardBanner's callers
   const TextBox box{8, 4, static_cast<int16_t>(width - 16), kBannerHeight, 1, Align::Left};
   layoutText(label, box, kBannerLabelInk, "card.banner", bannerColour);
@@ -1217,8 +1513,8 @@ void drawCardBanner(const String& label, uint32_t bannerColour, int width) {
 // which never call setFont themselves and assume whatever the default is -
 // would render in whatever bold font the last card left selected.
 void restoreDefaultFont() {
-  lcd.setFont(&fonts::Font0);
-  lcd.setTextDatum(top_left);
+  lcd.setFont(FontId::PanelDefault);
+  lcd.setTextDatum(TextDatum::TopLeft);
 }
 
 // The hand-drawn-degree-ring technique from the original centeredTemperature
@@ -1237,7 +1533,7 @@ void restoreDefaultFont() {
 void drawTemperature(int temperature, const String& unit, int x, int y, uint32_t colour,
                      int ringRadius) {
   lcd.setTextColor(colour, bg());
-  lcd.setTextDatum(top_left);
+  lcd.setTextDatum(TextDatum::TopLeft);
 
   // The three pieces below advance a cursor across the panel rather than
   // filling a box, so they do not go through layoutText() and carry the
@@ -1720,7 +2016,7 @@ uint8_t gBrightnessPercent = 100;
 }  // namespace
 
 void begin(Orientation orientation) {
-  lcd.init();
+  panel.init();
 
   // ROTATION 1 IS LANDSCAPE AND 0 IS PORTRAIT, confirmed on a panel on
   // 2026-10-16. This board's real configuration lives in LovyanGFX's table
@@ -1736,7 +2032,7 @@ void begin(Orientation orientation) {
   // correct for the person looking at the glass.
   const bool portrait = orientation == Orientation::Portrait;
   gPortrait = portrait;
-  lcd.setRotation(portrait ? 0 : 1);
+  panel.setRotation(portrait ? 0 : 1);
 
   // Read back from the panel rather than assumed from the rotation, so a
   // rotation this code did not predict still leaves the viewport matching what
@@ -1750,7 +2046,7 @@ void begin(Orientation orientation) {
   // lay themselves out against a floor 80 pixels up the glass.
   gContentBottom = kClockTop();
 
-  lcd.setBrightness(255);
+  panel.setBrightness(255);
   clear();
 }
 
@@ -1782,11 +2078,11 @@ void setBrightness(uint8_t percent) {
   // identical to one that has dimmed and come back. 0 is likewise exact - the
   // backlight is genuinely off, not almost off.
   if (percent == 100) {
-    lcd.setBrightness(255);
+    panel.setBrightness(255);
     return;
   }
   if (percent == 0) {
-    lcd.setBrightness(0);
+    panel.setBrightness(0);
     return;
   }
 
@@ -1804,7 +2100,7 @@ void setBrightness(uint8_t percent) {
   if (level == 0) {
     level = 1;
   }
-  lcd.setBrightness(level);
+  panel.setBrightness(level);
 }
 
 uint8_t brightness() { return gBrightnessPercent; }
@@ -1918,7 +2214,7 @@ String describeAnswerAge(time_t observedAtUtc) {
 }
 
 bool readTouchRaw(int32_t& x, int32_t& y) {
-  return lcd.getTouch(&x, &y);
+  return panel.getTouch(x, y);
 }
 
 
@@ -2144,7 +2440,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   const int shift = kAircraftTextShift(hasLogo);
   const bool hasAirlineName = airlineName.length() > 0;
   const String headline = hasAirlineName ? airlineName : callsign;
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setFont(FontId::Sans12);
   lcd.setTextSize(1);
   layoutLine(headline, kCardMargin, kAircraftHeadlineY + shift, kAircraftHeadlineWidth(hasLogo),
              ink(), "aircraft.headline");
@@ -2152,7 +2448,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   // Callsign drops to this secondary line, alongside distance, only when the
   // airline name took the headline slot above it - otherwise callsign is
   // already the headline and repeating it here would be the same fact twice.
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   // Plain ASCII separator, not a middle-dot or any other non-ASCII glyph -
   // this font has no Unicode coverage (see drawTemperature's hand-drawn
   // degree ring for the same constraint hit and worked around elsewhere in
@@ -2183,7 +2479,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
       destinationName.length() > 0 ? destinationName.c_str() : destinationCode.c_str();
   int routeLines = 0;
   if (originDisplay[0] != '\0') {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     lcd.setTextSize(1);
     // Built into a stack buffer through shortenAirportName() above rather
     // than by concatenating Strings, which is the truncation fix and a heap
@@ -2253,7 +2549,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
     // One line, not the route's two: this is a short phrase rather than a
     // pair of airport names, and the stat rows below shift by routeLines
     // either way.
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     lcd.setTextSize(1);
     const TextBox box{kCardMargin, 82 + shift, kContentWidth(), kRouteLineHeight, 1,
                       Align::Left};
@@ -2346,7 +2642,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   // record as having failed on real hardware ("simply not there"). Same
   // fix, same face.
   if (updatedAt.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     lcd.setTextSize(1);
     layoutLine(updatedAt, kCardMargin, rowY + 4, kContentWidth(), muted(),
                "aircraft.updated");
@@ -2365,7 +2661,7 @@ void showAircraftStatus(const String& headline, const String& detail, bool isPro
   lcd.fillScreen(bg());
   drawCardBanner("OVERHEAD", kAircraftBanner, 130);
 
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   lcd.setTextSize(1);
   const uint32_t headlineColour = isProblem ? kWarn : muted();
   const TextBox headlineBox{kCardMargin, 40, kContentWidth(), 22, 3, Align::Left};
@@ -2485,7 +2781,7 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   // where the dot belongs. A vertical bar reads as the same field separator and
   // is in the face at every size the card uses.
   lcd.setTextSize(1);
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   layoutLine("SUN | TODAY", kCardMargin, 12, kWidthBeside(kClockColumnWidth()),
              sky.heading, "sunmoon.heading",
              Align::Left, kTransparentText);
@@ -2522,14 +2818,14 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
   layoutLine("SUNSET", kContentRight(), 150, kHalfColumnWidth(), sky.label,
              "sunmoon.sunset.label", Align::Right, kTransparentText);
 
-  lcd.setFont(&fonts::FreeSansBold18pt7b);
+  lcd.setFont(FontId::Sans18);
   layoutLine(sunriseText, kCardMargin, 170, kHalfColumnWidth(), sky.value, "sunmoon.sunrise",
              Align::Left, kTransparentText);
   layoutLine(sunsetText, kContentRight(), 170, kHalfColumnWidth(), sky.value, "sunmoon.sunset",
              Align::Right, kTransparentText);
 
   if (detail.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     layoutLine(detail, kContentCentreX(), 202, kContentWidth(), sky.footnote,
                "sunmoon.detail", Align::Centre, kTransparentText);
   }
@@ -2634,12 +2930,12 @@ void drawTideRow(int top, int height, const String& label, const String& timeTex
   const int textRight = kRowX + kRowW - 16;
   const int textWidth = kRowW - (14 + discRadius * 2) - 34;
 
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   lcd.setTextSize(1);
   layoutLine(label, textRight, top + 10, textWidth, tide.label, labelWhat, Align::Right,
              kTransparentText);
 
-  lcd.setFont(&fonts::FreeSansBold18pt7b);
+  lcd.setFont(FontId::Sans18);
   layoutLine(timeText, textRight, top + 28, textWidth, tide.value, valueWhat, Align::Right,
              kTransparentText);
 }
@@ -2664,7 +2960,7 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
 
   fillVerticalGradient(0, kScreenH, tide.backdropTop, tide.backdropBottom);
 
-  lcd.setFont(&fonts::FreeSansBold18pt7b);
+  lcd.setFont(FontId::Sans18);
   lcd.setTextSize(1);
   layoutLine("TIDES", kContentCentreX(), 8, kContentWidth(), tide.heading, "tides.heading",
              Align::Centre, kTransparentText);
@@ -2687,7 +2983,7 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
   struct tm localTm;
   gmtime_r(&localNow, &localTm);
 
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   layoutLine(formatTimeOfDay(localTm.tm_hour, localTm.tm_min), kContentCentreX(), 198,
              kContentWidth(), tide.heading, "tides.clock", Align::Centre,
              kTransparentText);
@@ -2751,7 +3047,7 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
                  kAddressLines * kAddressLineHeight);
   }
   if (drawAddress) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     lcd.setTextSize(1);
     const TextBox addressBox{kCardMargin, 30, kContentWidth(), kAddressLineHeight,
                              kAddressLines, Align::Left};
@@ -2844,7 +3140,7 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // The label is measured rather than the value, because the two labels are
   // fixed strings and the value is the part that varies: giving each label
   // exactly what it needs leaves the dollar figures everything else.
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setFont(FontId::Sans12);
   lcd.setTextSize(1);
 
   const int rowWidth = rightX - kCardMargin;
@@ -2920,7 +3216,7 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
     const int roomForDetail = complianceY - 6 - nextY;
     const int detailLinesAllowed = roomForDetail / 18;
     if (detailLinesAllowed >= 1) {
-      lcd.setFont(&fonts::FreeSansBold9pt7b);
+      lcd.setFont(FontId::Sans9);
       const TextBox detailBox{
           kCardMargin, static_cast<int16_t>(nextY), kContentWidth(), 18,
           static_cast<uint8_t>(detailLinesAllowed > 2 ? 2 : detailLinesAllowed), Align::Left};
@@ -2939,7 +3235,7 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // position, or lower if the detail block ended up below it, so it is never
   // overlapped by the thing above it either.
   const int drawComplianceAt = nextY > complianceY ? nextY : complianceY;
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   const TextBox complianceBox{kCardMargin, static_cast<int16_t>(drawComplianceAt),
                               kContentWidth(), kComplianceLineHeight,
                               kComplianceLines, Align::Left};
@@ -2973,7 +3269,7 @@ struct SportPalette {
 /// A filled pill with a label in it, for the sport chip and the LIVE badge.
 int drawSportsPill(int x, int y, const char* label, uint32_t fill, uint32_t ink,
                    const char* what, bool withDot = false) {
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   lcd.setTextSize(1);
 
   const int dotRoom = withDot ? 14 : 0;
@@ -3024,7 +3320,7 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
   }
 
   if (competitionLabel != nullptr && competitionLabel[0] != '\0') {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     layoutLine(competitionLabel, kContentRight(), 13, kHalfColumnWidth(), sport.muted,
                "sports.competition", Align::Right, kTransparentText);
   }
@@ -3036,7 +3332,7 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
     drawSportsPill(kCardMargin, 42, "LIVE", sport.liveFill, sport.liveInk, "sports.live",
                    /*withDot=*/true);
   } else if (status.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     layoutLine(status, kCardMargin, 45, kHalfColumnWidth(), sport.muted, "sports.status",
                Align::Left, kTransparentText);
   }
@@ -3049,7 +3345,7 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
   // fixed one on the stack. Either label alone is drawn straight from the
   // caller's own bytes. Nothing on this path reaches the heap, which is the
   // whole point: see the scoreline rows below and HeapRatchet.h.
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setFont(FontId::Sans12);
   const bool haveProgress = progressLabel != nullptr && progressLabel[0] != '\0';
   const bool haveClock = clockLabel != nullptr && clockLabel[0] != '\0';
 
@@ -3112,12 +3408,12 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
   for (int row = 0; row < 2; ++row) {
     const int top = kPanelTop + row * kRowHeight;
 
-    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    lcd.setFont(FontId::Sans12);
     layoutLine(names[row], kCardMargin + 14, top + 14, nameWidth, sport.name,
                row == 0 ? "sports.away" : "sports.home", Align::Left, kTransparentText);
 
     if (hasScores) {
-      lcd.setFont(&fonts::FreeSansBold18pt7b);
+      lcd.setFont(FontId::Sans18);
       layoutLine(*scores[row], kContentRight() - 14, top + 8, scoreWidth, sport.score,
                  row == 0 ? "sports.away.score" : "sports.home.score", Align::Right,
                  kTransparentText);
@@ -3127,7 +3423,7 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
   // The age, when the server has judged this card stale, and the counter when
   // there is more than one game. Both muted and both below the panel, where
   // they qualify the figures above without competing with them.
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
 
   if (ageText.length() > 0) {
     layoutLine(ageText, kCardMargin, 188, kWidthBeside(90), sport.muted, "sports.age",
@@ -3178,7 +3474,7 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
   }
 
   if (competitionLabel != nullptr && competitionLabel[0] != '\0') {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     layoutLine(competitionLabel, kContentRight(), 13, kHalfColumnWidth(), sport.muted,
                "board.competition", Align::Right, kTransparentText);
   }
@@ -3256,13 +3552,13 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
 
     // Away first, home second, which is how a scoreline is read aloud and what
     // the single-game card does.
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     layoutLine(row.awayName, awayNameLeft, text, kNameWidth, sport.name,
                "board.away", Align::Left, kTransparentText);
     layoutLine(row.homeName, homeNameLeft, text, kNameWidth, sport.name,
                "board.home", Align::Left, kTransparentText);
 
-    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    lcd.setFont(FontId::Sans12);
     layoutLine(row.awayScore, awayScoreRight, text - 2, kScoreWidth, sport.score,
                "board.away.score", Align::Right, kTransparentText);
     layoutLine(row.homeScore, homeScoreRight, text - 2, kScoreWidth, sport.score,
@@ -3272,7 +3568,7 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     // Everything else - a start time, a period, FINAL - is muted, so the one
     // row somebody should look at is the one that catches the eye.
     if (row.status[0] != '\0') {
-      lcd.setFont(&fonts::FreeSansBold9pt7b);
+      lcd.setFont(FontId::Sans9);
       layoutLine(row.status, statusRight, text, statusWidth,
                  row.isLive ? sport.liveFill : sport.muted,
                  "board.status", Align::Right, kTransparentText);
@@ -3280,12 +3576,12 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
   }
 
   if (count == 0) {
-    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    lcd.setFont(FontId::Sans12);
     layoutLine("No games today", kContentCentreX(), 110, kContentWidth(), sport.muted,
                "board.empty", Align::Centre, kTransparentText);
   }
 
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
 
   if (ageText.length() > 0) {
     layoutLine(ageText, kCardMargin, kAgeY, kWidthBeside(90), sport.muted, "board.age",
@@ -3317,7 +3613,7 @@ void showIssFlyoverCard(const String& distanceText, const String& directionText,
   const int rowValueWidth = kHalfColumnWidth();
   const int rowLabelWidth = rightX - rowValueWidth - kCardMargin;
 
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setFont(FontId::Sans12);
   lcd.setTextSize(1);
 
   layoutLine("Distance", kCardMargin, 44, rowLabelWidth, muted(), "iss.distance.label");
@@ -3327,7 +3623,7 @@ void showIssFlyoverCard(const String& distanceText, const String& directionText,
   layoutLine(directionText, rightX, 90, rowValueWidth, ink(), "iss.direction", Align::Right);
 
   if (detail.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     const TextBox detailBox{kCardMargin, 140, kContentWidth(), 20, 2, Align::Left};
     layoutText(detail, detailBox, muted(), "iss.detail");
   }
@@ -3351,7 +3647,7 @@ void showIssNextPassCard(const String& riseTimeText, const String& riseDirection
   const int rowValueWidth = kHalfColumnWidth();
   const int rowLabelWidth = rightX - rowValueWidth - kCardMargin;
 
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setFont(FontId::Sans12);
   lcd.setTextSize(1);
 
   layoutLine("Next pass", kCardMargin, 44, rowLabelWidth, muted(), "iss.nextpass.label");
@@ -3361,7 +3657,7 @@ void showIssNextPassCard(const String& riseTimeText, const String& riseDirection
   layoutLine(riseDirectionText, rightX, 90, rowValueWidth, ink(), "iss.risedir", Align::Right);
 
   if (detail.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     const TextBox detailBox{kCardMargin, 140, kContentWidth(), 20, 2, Align::Left};
     layoutText(detail, detailBox, muted(), "iss.detail");
   }
@@ -3549,7 +3845,7 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
   const bool narrow = kScreenH > kScreenW;
 
   lcd.setTextSize(1);
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   // The separator is a bar for the reason showSunMoonCard() gives: U+00B7 is
   // outside the face and drew as two blanks.
   layoutLine(narrow ? "MOON" : "MOON | TODAY", kCardMargin, 12,
@@ -3606,12 +3902,12 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
                  sky.outline);
 
     if (phaseName.length() > 0) {
-      lcd.setFont(&fonts::FreeSansBold12pt7b);
+      lcd.setFont(FontId::Sans12);
       layoutLine(phaseName, kContentCentreX(), nameY, kContentWidth(), sky.name, "moon.phase",
                  Align::Centre, kTransparentText);
     }
 
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     layoutLine(pctBuffer, kContentCentreX(), illuminatedY, kContentWidth(), sky.detail,
                "moon.illuminated", Align::Centre, kTransparentText);
     layoutLine(dateBuffer, kContentCentreX(), dateY, kContentWidth(), sky.detail, "moon.date",
@@ -3629,12 +3925,12 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
   drawMoonDisc(53, 74, 30, k, waxingRight, sky.lit, sky.dark, sky.outline);
 
   if (phaseName.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    lcd.setFont(FontId::Sans12);
     layoutLine(phaseName, 98, 56, kScreenW - 98 - kCardMargin, sky.name, "moon.phase",
                Align::Left, kTransparentText);
   }
 
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   // The buffer straight through rather than String(pctBuffer): the temporary
   // that wrapping cost was a heap allocation on the draw path for a string
   // that is already a flat array.
@@ -3723,7 +4019,7 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
         upcomingX, kUpcomingY, kUpcomingRadius, item.illuminated, itemWaxingRight,
         sky.lit, sky.dark, sky.outline);
 
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     // 184..202, directly under the disc, which ends at 181. Moved up with the line
     // below it: leaving this at 196 while that went to 202 would have overlapped them.
     layoutLine(item.label, upcomingX, 184, kUpcomingColumn, sky.name, "moon.upcoming.name",
@@ -3770,9 +4066,9 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
 void showClockDate(const String& timeText, const String& dateText) {
   lcd.fillScreen(bg());
 
-  lcd.setFont(&fonts::FreeSansBold24pt7b);
+  lcd.setFont(FontId::Sans24);
   lcd.setTextColor(ink(), bg());
-  lcd.setTextDatum(middle_center);
+  lcd.setTextDatum(TextDatum::MiddleCentre);
 
   lcd.setTextSize(2);
   const int maxTimeWidth = kContentWidth();
@@ -3780,8 +4076,8 @@ void showClockDate(const String& timeText, const String& dateText) {
     lcd.setTextSize(1);
   }
   // One of the three raw draws left in this file, and the only one on a card.
-  // The hero wants middle_center so the numerals sit centred on y=100, which
-  // is a datum a top-anchored TextBox does not express, and it already
+  // The hero wants a middle-centre datum so the numerals sit centred on y=100,
+  // which a top-anchored TextBox does not express, and it already
   // measures and gives up a whole size rather than clipping - the one thing
   // layoutText() would add is an ellipsis on a string that formatTimeOfDay()
   // bounds to eight characters. If even size 1 will not fit, that is a font
@@ -3808,14 +4104,14 @@ void showClockDate(const String& timeText, const String& dateText) {
   // why "Sunday," came out with "October 11" drawn through it.
   // kProseLargeLineHeight is the figure the prose cards settled on for this
   // face, and the 9pt tier takes kProseSmallLineHeight for the same reason.
-  lcd.setFont(&fonts::FreeSansBold12pt7b);
+  lcd.setFont(FontId::Sans12);
   lcd.setTextSize(1);
   const TextBox oneLineAt12{kContentCentreX(), 145, kBootTextWidth(), kProseLargeLineHeight, 1,
                             Align::Centre};
   if (layoutText(dateText, oneLineAt12, muted(), "clockdate.date", kUseCardBackground,
                  /*measureOnly=*/true)
           .ellipsized) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     const TextBox twoLinesAt9{kContentCentreX(), 145, kBootTextWidth(), kProseSmallLineHeight, 2,
                               Align::Centre};
     Log::verbose("[display] clockdate.date: dropped to the 9pt tier, '%s' will not fit one 12pt "
@@ -3850,7 +4146,7 @@ void showCalendarCard(const String& text, uint8_t itemNumber, uint8_t itemCount)
   // "something else is coming" is most of what a glance at this card is for.
   // Omitted for a lone item, where "1 of 1" is noise.
   if (itemCount > 1 && itemNumber >= 1) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     lcd.setTextSize(1);
     // snprintf into a buffer rather than String(itemNumber) + " of " + ... :
     // that expression was three heap allocations per draw for a string this
@@ -3915,7 +4211,7 @@ void showBannerCard(const String& text) {
   lcd.fillRect(0, 0, kScreenW, kBannerStripHeight, kBannerStripFill);
 
   if (text.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    lcd.setFont(FontId::Sans12);
     // Centred, not left-margined like showAnnouncementCard()'s body text -
     // a short reminder read from across a room sits better centred in a
     // strip than ranged left against an edge nothing else in the strip lines
@@ -4006,11 +4302,16 @@ void showQrTextCard(const String& qrData, const String& caption) {
   const int x0 = (kScreenW - side) / 2;
   const int y0 = 28;
 
-  lcd.fillRect(x0, y0, side, side, 0xFFFFFFu);
+  // Outside the day/night swap: a reader needs dark modules on a light quiet
+  // zone whichever way the theme runs.
+  constexpr uint32_t kQrLight = 0xFFFFFFu;
+  constexpr uint32_t kQrDark = 0x000000u;
+
+  lcd.fillRect(x0, y0, side, side, kQrLight);
   for (uint8_t y = 0; y < qr.size; ++y) {
     for (uint8_t x = 0; x < qr.size; ++x) {
       if (qrcode_getModule(&qr, x, y)) {
-        lcd.fillRect(x0 + (x + quiet) * scale, y0 + (y + quiet) * scale, scale, scale, 0x000000u);
+        lcd.fillRect(x0 + (x + quiet) * scale, y0 + (y + quiet) * scale, scale, scale, kQrDark);
       }
     }
   }
@@ -4043,11 +4344,11 @@ void showQrTextCard(const String& qrData, const String& caption) {
     // font's advance and this card was carrying its own number to compensate.
     // The layout is the same layout; it has simply stopped disagreeing with
     // the face drawn into it.
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     layoutLine(caption, kContentCentreX(), y, bodyWidth, ink(), "qr.caption", Align::Centre);
     y += 22 + 2;
   }
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   // One line, not two, once a caption is already on screen - see this
   // function's own header comment for why.
   const TextBox dataBox{kContentCentreX(), static_cast<int16_t>(y), static_cast<int16_t>(bodyWidth),
@@ -4079,7 +4380,7 @@ void showListingsCard(const String& address, const String& propertyType, int pri
   // was allowed to grow.
   constexpr int kCounterWidth = 64;
   if (total > 1) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     lcd.setTextSize(1);
     char caption[16];
     snprintf(caption, sizeof(caption), "%u of %u", static_cast<unsigned>(index) + 1,
@@ -4120,7 +4421,7 @@ void showListingsCard(const String& address, const String& propertyType, int pri
   const int bodyWidth = kContentWidth();
   const bool tight = contentIsTight();
 
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   lcd.setTextSize(1);
 
   const int addressTopY = tight ? 26 : 30;
@@ -4238,7 +4539,7 @@ void showListingsCard(const String& address, const String& propertyType, int pri
   // around the card as other fields change length.
   char distanceBuf[32];
   snprintf(distanceBuf, sizeof(distanceBuf), "%.1f mi away", distanceMiles);
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   lcd.setTextSize(1);
   // The freshness column is reserved first, so the distance gets what is left
   // of the row rather than the two of them overprinting each other.
@@ -4343,7 +4644,7 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   // five times needs "Price drop" to be the first thing they read, not the
   // address they already know.
   if (title.length() > 0 && y + kTitleHeight <= gContentBottom) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     lcd.setTextSize(1);
     const TextBox titleBox{static_cast<int16_t>(kContentLeft()), static_cast<int16_t>(y),
                            static_cast<int16_t>(textWidth), 18, 1, Align::Left};
@@ -4360,7 +4661,7 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   // 186px wide instead of 300. 12pt over two lines does not hold these titles
   // at either column width; section 4 of the design document carries the
   // widths.
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   lcd.setTextSize(1);
 
   // Fewer lines when three would not fit. The headline is the only block drawn
@@ -4395,7 +4696,7 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
 
   if (subhead.length() > 0
       && y + kSubheadHeight + roomNeededAfterSubhead + (priceWillDraw ? 4 : 0) <= gContentBottom) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     const TextBox subBox{static_cast<int16_t>(kContentLeft()), static_cast<int16_t>(y),
                          static_cast<int16_t>(textWidth), 18, 1, Align::Left};
     layoutText(subhead, subBox, muted(), "featuredlistings.subhead");
@@ -4411,7 +4712,7 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
     // listing card. Six figures without separators is the number a household is
     // being asked to read at a glance.
     const String priceText = formatPrice(price);
-    lcd.setFont(&fonts::FreeSansBold18pt7b);
+    lcd.setFont(FontId::Sans18);
     const TextBox priceBox{static_cast<int16_t>(kContentLeft()), static_cast<int16_t>(y),
                            static_cast<int16_t>(textWidth), 34, 1, Align::Left};
     layoutText(priceText.c_str(), priceBox, ink(), "featuredlistings.price");
@@ -4436,7 +4737,7 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
     // with no separators is the number a household is being asked to read at a
     // glance, and this one is 16px rather than 20.
     const String wasText = "was " + formatPrice(previousPrice);
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     const TextBox wasBox{static_cast<int16_t>(kContentLeft()), static_cast<int16_t>(y),
                          static_cast<int16_t>(textWidth), 18, 1, Align::Left};
     layoutText(wasText.c_str(), wasBox, muted(), "featuredlistings.previousprice");
@@ -4509,7 +4810,7 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   // draws and stopping at the floor. Called a second time with the held-back rows
   // when the picture they paid for does not reach the glass.
   auto drawFactRows = [&](uint8_t first, uint8_t limit) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     for (uint8_t i = first; i < limit; ++i) {
       if (y + 18 > factFloor) {
         Log::printf("[display] featuredlistings: no room for the '%s' row - %dpx between y=%d and "
@@ -4586,7 +4887,7 @@ void showListingsStatus(const String& headline, const String& detail, bool isPro
   lcd.fillScreen(bg());
   drawCardBanner("LISTINGS", kListingsBanner, 130);
 
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   lcd.setTextSize(1);
   const uint32_t headlineColour = isProblem ? kWarn : muted();
   const TextBox headlineBox{kCardMargin, 40, kContentWidth(), 22, 3, Align::Left};
@@ -4708,7 +5009,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // through now that every period draws on one slide, but the flag itself
   // is still worth a glance: shortForecast for "Tonight" reads differently
   // than the same phrase would for "Today".
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   lcd.setTextSize(1);
   constexpr int kDayNightWidth = 64;
   layoutLine(currentIsDaytime ? "Day" : "Night", kContentRight(), 4, kDayNightWidth,
@@ -4944,7 +5245,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   drawWeatherIcon(classifyCondition(currentShortForecast), kHeroIconCx,
                   kHeroInkTop + kHeroIconRadius, kHeroIconRadius, currentIsDaytime);
 
-  lcd.setFont(&fonts::FreeSansBold24pt7b);
+  lcd.setFont(FontId::Sans24);
   lcd.setTextSize(1);
   drawTemperature(currentTemperature, currentUnit, 76, kHeroInkTop - 2,
                   gIsDaytime ? kForecastBanner : ink(), /*ringRadius=*/8);
@@ -4955,7 +5256,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // grow into a second or third line; a full phrase is still one touch away
   // in the debug stream's own fetch-side log line (see Forecast.cpp).
   if (currentShortForecast.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold12pt7b);
+    lcd.setFont(FontId::Sans12);
     lcd.setTextSize(1);
     layoutLine(currentShortForecast, 76, 80, kScreenW - 76 - kCardMargin, ink(),
                "forecast.condition");
@@ -4965,7 +5266,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // the location row above and this whole block is skipped. This is the row the
   // squeeze reclaims; see the reasoning there.
   if (!squeezeHeader && updatedAt.length() > 0) {
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     lcd.setTextSize(1);
     layoutLine(updatedAt, kCardMargin, 104, bodyWidth, muted(), "forecast.updated");
   }
@@ -5133,7 +5434,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
       // clock or the button band.
       const int textTop = rowMiddle - 9;
 
-      lcd.setFont(&fonts::FreeSansBold9pt7b);
+      lcd.setFont(FontId::Sans9);
       lcd.setTextSize(1);
 
       // "Now" is dropped from the tight strip for the reason the column path
@@ -5167,7 +5468,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
       continue;
     }
 
-    lcd.setFont(&fonts::FreeSansBold9pt7b);
+    lcd.setFont(FontId::Sans9);
     lcd.setTextSize(1);
     if (!tight) {
       layoutLine(shortDayLabel(i, dayNames[i]), columnCentreX, 130, columnWidth, muted(),
@@ -5252,7 +5553,7 @@ void showForecastStatus(const String& headline, const String& detail, bool isPro
   lcd.fillScreen(bg());
   drawCardBanner("FORECAST", kForecastBanner, 130);
 
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   lcd.setTextSize(1);
   const uint32_t headlineColour = isProblem ? kWarn : muted();
   const TextBox headlineBox{kCardMargin, 40, kContentWidth(), 22, 3, Align::Left};
@@ -5270,7 +5571,7 @@ void showForecastStatus(const String& headline, const String& detail, bool isPro
 void showNoContent(const String& headline, const String& detail) {
   lcd.fillScreen(bg());
 
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   lcd.setTextSize(1);
   const TextBox headlineBox{kCardMargin, 60, kContentWidth(), 22, 3, Align::Left};
   const TextResult drew = layoutText(headline, headlineBox, muted(), "nocontent.headline");
@@ -5336,7 +5637,7 @@ void drawOneButton(uint8_t index, uint8_t count, const String& label, uint32_t f
   }
 
   lcd.fillRoundRect(x, y, w, h, kButtonRadius, fill);
-  lcd.setFont(&fonts::FreeSansBold9pt7b);
+  lcd.setFont(FontId::Sans9);
   lcd.setTextSize(1);
   lcd.setTextColor(kButtonInk, fill);
 
@@ -6175,18 +6476,10 @@ bool drawRgb565FromSd(const String& path, int32_t boxX, int32_t boxY, int32_t bo
       break;
     }
 
-    if (littleEndianPixels) {
-      // The unexercised branch - see this function's remarks. rgb565_t is the
-      // little-endian layout, and handing it over as that type makes LovyanGFX
-      // convert per pixel rather than copy, which is slower and correct.
-      lcd.pushImage(originX, originY + y, width, linesThisBand,
-                    reinterpret_cast<const lgfx::rgb565_t*>(band));
-    } else {
-      // The ordinary path: swap565_t is a byte-for-byte match for what this
-      // panel writes, so this is a straight copy.
-      lcd.pushImage(originX, originY + y, width, linesThisBand,
-                    reinterpret_cast<const lgfx::swap565_t*>(band));
-    }
+    // The little-endian branch is the unexercised one - see this function's
+    // remarks. Which layout costs a per-pixel conversion and which is a straight
+    // copy is the driver's business; this says only which one the bytes are in.
+    lcd.pushImage(originX, originY + y, width, linesThisBand, band, littleEndianPixels);
   }
 
   lcd.clearClipRect();
@@ -6250,12 +6543,7 @@ bool drawRgb565FromBuffer(const uint8_t* data, size_t size, int32_t boxX, int32_
   // One push for the whole frame rather than bands: the bytes are already
   // contiguous in RAM, so banding would buy nothing and cost a loop.
   lcd.setClipRect(boxX, boxY, boxW, boxH);
-  if (littleEndianPixels) {
-    lcd.pushImage(originX, originY, width, height, reinterpret_cast<const lgfx::rgb565_t*>(pixels));
-  } else {
-    lcd.pushImage(originX, originY, width, height,
-                  reinterpret_cast<const lgfx::swap565_t*>(pixels));
-  }
+  lcd.pushImage(originX, originY, width, height, pixels, littleEndianPixels);
   lcd.clearClipRect();
 
   Log::verbose("[display] drew %dx%d rgb565 straight from a RAM buffer (no decoder, no band copy)",
@@ -6313,9 +6601,9 @@ bool drawImageFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, 
 
   bool ok = false;
   if (format == ImageFormat::Jpeg) {
-    ok = lcd.drawJpgFile(SD, path.c_str(), x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
+    ok = lcd.drawJpgFile(path.c_str(), x, y, w, h);
   } else if (format == ImageFormat::Png) {
-    ok = lcd.drawPngFile(SD, path.c_str(), x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
+    ok = lcd.drawPngFile(path.c_str(), x, y, w, h);
     if (!ok) {
       notePngDrawFailure("drawImageFromSdInRect");
     }
@@ -6385,9 +6673,9 @@ bool drawImageFromBufferInRect(const uint8_t* data, size_t size, int32_t x, int3
 
   bool ok = false;
   if (format == ImageFormat::Jpeg) {
-    ok = lcd.drawJpg(data, size, x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
+    ok = lcd.drawJpg(data, size, x, y, w, h);
   } else if (format == ImageFormat::Png) {
-    ok = lcd.drawPng(data, size, x, y, w, h, 0, 0, 0.0f, 0.0f, middle_center);
+    ok = lcd.drawPng(data, size, x, y, w, h);
     if (!ok) {
       notePngDrawFailure("drawImageFromBufferInRect");
     }
@@ -6453,7 +6741,7 @@ bool drawImageFromBufferInRect(const uint8_t* data, size_t size, int32_t x, int3
 /// its author points out, never had any of these problems.
 void releaseSplashDecodeMemory() {
   const size_t before = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  lcd.releasePngMemory();
+  lcd.releaseDecoderScratch();
   const size_t after = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
 
   // Logged as a pair because the figure is the whole point of the call, and
@@ -6665,8 +6953,8 @@ bool drawImageFromSd(const String& path) {
   } else {
     logHeapSnapshot(beforeLabel);
     ok = (format == ImageFormat::Jpeg)
-             ? lcd.drawJpgFile(SD, path.c_str(), 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center)
-             : lcd.drawPngFile(SD, path.c_str(), 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
+             ? lcd.drawJpgFile(path.c_str(), 0, 0, 0, 0)
+             : lcd.drawPngFile(path.c_str(), 0, 0, 0, 0);
     logHeapSnapshot(afterLabel);
   }
 
@@ -6719,9 +7007,9 @@ bool drawImageFromBuffer(const uint8_t* data, size_t size) {
   // no-image case here is the empty-buffer return above instead.
   format = classifyHeader(data, size);
   if (format == ImageFormat::Jpeg) {
-    ok = lcd.drawJpg(data, size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
+    ok = lcd.drawJpg(data, size, 0, 0, 0, 0);
   } else if (format == ImageFormat::Png) {
-    ok = lcd.drawPng(data, size, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, middle_center);
+    ok = lcd.drawPng(data, size, 0, 0, 0, 0);
     if (!ok) {
       notePngDrawFailure("drawImageFromBuffer");
     }
