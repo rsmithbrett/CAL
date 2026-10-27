@@ -81,6 +81,15 @@ arduino-cli lib install "LovyanGFX@${LOVYANGFX_VERSION}" "ArduinoJson@${ARDUINOJ
 # lands in a separate change. What the report is for is the day one half of a
 # pair is deleted.
 #
+# SelfTest/ IS NOT IN THIS, AND IT HAS ITS OWN TABLE. This script builds CAL and
+# App, and it pairs those two directories. SelfTest/partitions.csv is a third
+# sketch's copy that nothing here compares to anything, and as of 2026-10-27 it
+# holds the layout from before the 2026-09-15 rebalance, with no callog partition
+# in it. Pairing it would fail the build today over a question that wants deciding
+# rather than gating: whether a SelfTest merged image can reach a device at all,
+# and whether that table is deliberate. Named here so it is a known gap rather
+# than an oversight a reader of the loop below has to spot.
+#
 # The 4MB pair also backstops compile-cal-s3.cmd and compile-app-s3.cmd, which
 # swap a board's table in under the name partitions.csv and restore it
 # afterwards. A run interrupted between the two leaves the 8MB table under the
