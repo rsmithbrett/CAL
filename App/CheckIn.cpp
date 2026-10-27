@@ -1,5 +1,10 @@
 #include "CheckIn.h"
 
+// sdkconfig.h before the board gate further down, for the reason Display.cpp
+// gives at its own top: without it CONFIG_IDF_TARGET_ESP32S3 is undefined at
+// that point and an S3 build reports the wrong board while compiling clean.
+#include "sdkconfig.h"
+
 #include <ArduinoJson.h>
 #include <time.h>
 
@@ -18,6 +23,26 @@ namespace CheckIn {
 namespace {
 
 constexpr const char* kPath = "/api/checkin";
+
+/// Which board this binary was built for, as the wire name DeviceBoards::
+/// ToWireName() produces server-side. The two values are defined in
+/// src/DiscoverAroundMe.SharedKernel/Devices/DeviceBoard.cs and nothing here may
+/// invent a third: a name the server has never heard of leaves the stored board
+/// alone and gets logged, which is the right outcome but not a useful one.
+///
+/// GATED ON THE SAME MACRO THE PIN MAP IS, so the reported board cannot disagree
+/// with the binary carrying it. A board field set from a runtime probe, a build
+/// flag or a config value could be wrong about the chip it is running on; this
+/// one follows the FQBN through the SDK and there is nothing to pass in.
+///
+/// Chip id is coarser than board. A second S3 panel would need a marker of its
+/// own here rather than this gate, because CONFIG_IDF_TARGET_ESP32S3 cannot tell
+/// two S3 boards apart.
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+constexpr const char* kBoardWireName = "panellan-zx2d80ce02s";
+#else
+constexpr const char* kBoardWireName = "esp32-2432s028";
+#endif
 
 String nowAsIso8601Utc() {
   time_t now = time(nullptr);
@@ -724,6 +749,27 @@ Result perform() {
     requestDoc["assetDecodeFailureCount"] = Assets::decodeFailureCount();
     requestDoc["assetDecodeFailureIds"] = Assets::decodeFailureIds();
   }
+
+  // THE BOARD RIDES THE CHECK-IN REQUEST, for the reason motionCapability a few
+  // dozen lines above does: the response has to pick a firmware manifest while
+  // answering this very check-in, and a board sourced from telemetry would make
+  // that answer depend on call ordering. A device's first check-in after a
+  // reflash could not be answered correctly.
+  //
+  // ADDED LAST AND ALWAYS SENT. Last because the field is additive and nothing
+  // ahead of it moves - the 6-month compatibility mandate is binding and this is
+  // an optional trailing field, so a server reading an older request sees the
+  // same bytes it saw before. Always because the value is a compile-time fact
+  // rather than a measurement: there is no "has not said" state for it, which is
+  // what separates it from motionCapability's omit-when-empty.
+  //
+  // An absent board still means the ESP32-2432S028 server-side, which is what
+  // every binary predating this line reports by saying nothing. This line does
+  // not change that meaning; it stops the Panellan relying on it.
+  //
+  // CAL does not send this. The loader has no check-in path of its own on a
+  // healthy device, and the server reads the board from the App.
+  requestDoc["board"] = kBoardWireName;
 
   String body;
   serializeJson(requestDoc, body);

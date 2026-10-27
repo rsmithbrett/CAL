@@ -2,6 +2,18 @@
 
 // Panel configuration for the Panellan ZX2D80CE02S-V10 (WT32-S3-WROVER-N8R2).
 //
+// ONE COPY, REACHED FROM BOTH SKETCHES. Arduino compiles each sketch folder on
+// its own and shares no headers between them, which is why Display, Identity,
+// Tls, BootDiag and CalQr each exist twice in this repository. A pin map is the
+// one of those that must not: two copies of the numbers below, with nothing
+// comparing them, is a dark panel the first time somebody corrects one of them.
+// So it lives in a library and both sketches include it as <BoardPanellan.h>.
+// The compile scripts put that library on the search path with --libraries.
+//
+// Only a file that is byte-for-byte identical in both trees belongs here. The
+// board configuration is the only one today - CAL's Display.cpp and App's have
+// diverged substantially and are not candidates.
+//
 // The other board needs no file like this. LGFX_AUTODETECT probes a panel ID
 // over the bus and matches it against LovyanGFX's own table, and the
 // ESP32-2432S028 is in that table. This board is not, under any name, so an

@@ -28,10 +28,35 @@
 // size was 11,340 with a largest block of 6,132.
 #include <esp_heap_caps.h>
 
-#define LGFX_AUTODETECT
 #include <Preferences.h>
+
+// sdkconfig.h first, or CONFIG_IDF_TARGET_ESP32S3 is undefined when the board
+// gate below is evaluated and an S3 build takes the autodetect branch. That
+// branch compiles clean and carries no Panellan pin map, which cost a flash in
+// CAL before the same include was added there.
+#include "sdkconfig.h"
+// The board is chosen here and nowhere else. Everything below this block, and
+// every drawing call in this file, is the same on both boards.
+//
+// CONFIG_IDF_TARGET_ESP32S3 comes from the SDK, so it follows the FQBN without
+// anything having to pass it in. Only the taken branch compiles, which means a
+// break in the other one stays invisible until somebody builds for that board -
+// CI has to build BOTH or the untaken branch rots.
+//
+// The pin map comes from the DamBoards library, not from this folder, so CAL and
+// App read one copy of it. Arduino compiles each sketch folder on its own and
+// shares no headers between them - which is why Display, Identity, Tls, BootDiag
+// and CalQr each exist twice here - and a library is how a file escapes that.
+// The compile scripts put it on the search path with --libraries.
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#include <LovyanGFX.hpp>
+#include <BoardPanellan.h>
+#else
+#define LGFX_AUTODETECT
 #include <LovyanGFX.hpp>
 #include <LGFX_AUTODETECT.hpp>
+#endif
+
 #include <time.h>
 
 // Vendored copy of ricmoo/QRCode, renamed - identical copy and identical reasoning as
@@ -339,7 +364,19 @@ class LgfxCanvas final : public Canvas {
 
 class LgfxPanel final : public Panel {
  public:
-  void init() override { panelDevice.init(); }
+  void init() override {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    // Backlight driven directly, before the driver touches it. On this panel
+    // nothing is visible until GPIO47 is high, and a Light_PWM whose output
+    // never reaches the pin looks the same as a bus that never reaches the
+    // glass: both are a black screen behind a clean init. Asserting it here
+    // separates the two, and costs one pin write on a board whose backlight is
+    // wanted whenever the panel is.
+    pinMode(panellan::kBacklight, OUTPUT);
+    digitalWrite(panellan::kBacklight, HIGH);
+#endif
+    panelDevice.init();
+  }
   void setRotation(int rotation) override { panelDevice.setRotation(rotation); }
   void setBrightness(uint8_t level) override { panelDevice.setBrightness(level); }
   bool getTouch(int32_t& x, int32_t& y) override { return panelDevice.getTouch(&x, &y); }

@@ -10,9 +10,13 @@
 // anything having to pass it in. Only the taken branch compiles, which means a
 // break in the other one stays invisible until somebody builds for that board -
 // CI has to build BOTH or the untaken branch rots.
+//
+// The pin map comes from the DamBoards library, not from this folder, so CAL and
+// App read one copy of it. The compile scripts put that library on the search
+// path with --libraries.
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 #include <LovyanGFX.hpp>
-#include "BoardPanellan.h"
+#include <BoardPanellan.h>
 #else
 #define LGFX_AUTODETECT
 #include <LovyanGFX.hpp>

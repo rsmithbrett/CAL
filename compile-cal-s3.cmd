@@ -30,6 +30,14 @@ REM   build.flash_size=8MB
 REM                   The generic esp32s3 board has NO FlashSize menu and hard
 REM                   defaults to 4MB. Left at 4MB the image header disagrees
 REM                   with an 8MB table and partitions past 4MB are rejected.
+REM
+REM --libraries %ROOT%\libraries puts the in-repo DamBoards library on the search
+REM path, which is where BoardPanellan.h lives now that CAL and App read one copy
+REM of it. It is passed rather than relying on a copy under the sketchbook's own
+REM libraries folder, because a library that exists only on this workstation is
+REM not in version control and is not on a CI machine - the build would work here
+REM and fail there. The flag ADDS to the default search path, so LovyanGFX and
+REM ArduinoJson still resolve from the sketchbook as before.
 
 setlocal
 set ROOT=C:\Users\Administrator\Documents\CAL
@@ -55,6 +63,7 @@ echo ==^> Compiling
 C:\Tools\arduino-cli\arduino-cli.exe compile ^
   --fqbn esp32:esp32:esp32s3:PSRAM=enabled,CDCOnBoot=cdc,PartitionScheme=custom ^
   --build-property build.flash_size=8MB ^
+  --libraries "%ROOT%\libraries" ^
   --export-binaries . > "%ROOT%\cal-s3-compile.log" 2>&1
 set BUILD_RC=%ERRORLEVEL%
 echo EXIT=%BUILD_RC% >> "%ROOT%\cal-s3-compile.log"

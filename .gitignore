@@ -24,3 +24,11 @@ compile-done.flag
 cal-done.flag
 cal-s3-compile.log
 cal-s3-done.flag
+app-s3-compile.log
+app-s3-done.flag
+
+# The partition table a board script swaps in, parked while it builds. Restored
+# and checked by the script; ignored here so an interrupted run never gets
+# committed as a change to the 4MB table.
+partitions.csv.4mb-backup
+App/partitions.csv.4mb-backup
