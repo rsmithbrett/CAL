@@ -22,3 +22,5 @@ cal-compile.log
 
 compile-done.flag
 cal-done.flag
+cal-s3-compile.log
+cal-s3-done.flag

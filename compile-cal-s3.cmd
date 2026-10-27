@@ -22,6 +22,10 @@ REM                   Declares build.partitions empty and lifts
 REM                   upload.maximum_size to 16777216, so the sketch's own table
 REM                   is used and the min_spiffs ceiling of 1966080 does not
 REM                   refuse a valid build.
+REM
+REM Output goes to the build directory arduino-cli names after the FQBN, so the
+REM two boards do not clobber each other and .gitignore already covers both.
+REM
 REM   build.flash_size=8MB
 REM                   The generic esp32s3 board has NO FlashSize menu and hard
 REM                   defaults to 4MB. Left at 4MB the image header disagrees
@@ -51,7 +55,6 @@ echo ==^> Compiling
 C:\Tools\arduino-cli\arduino-cli.exe compile ^
   --fqbn esp32:esp32:esp32s3:PSRAM=enabled,CDCOnBoot=cdc,PartitionScheme=custom ^
   --build-property build.flash_size=8MB ^
-  --build-path "%ROOT%\build-s3" ^
   --export-binaries . > "%ROOT%\cal-s3-compile.log" 2>&1
 set BUILD_RC=%ERRORLEVEL%
 echo EXIT=%BUILD_RC% >> "%ROOT%\cal-s3-compile.log"
