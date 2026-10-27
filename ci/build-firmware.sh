@@ -48,7 +48,7 @@ arduino-cli lib install "LovyanGFX@${LOVYANGFX_VERSION}" "ArduinoJson@${ARDUINOJ
 # binary's own partition table (magic 0xAA50 entries) rather than trusted
 # from the CLI's summary line, which reports against the FQBN's static
 # memory map and not against the table actually baked into the binary.
-# THE TWO PARTITION TABLES MUST BE THE SAME FILE'S CONTENTS.
+# A BOARD'S TWO PARTITION TABLES MUST BE THE SAME FILE'S CONTENTS.
 #
 # Each sketch takes the partitions.csv sitting beside it, so App/ has its own
 # copy - and on 2026-09-15 that copy was found to be two revisions stale: it
@@ -64,14 +64,71 @@ arduino-cli lib install "LovyanGFX@${LOVYANGFX_VERSION}" "ArduinoJson@${ARDUINOJ
 # Checked rather than copied here on purpose: copying would fix the build and
 # leave the repository lying, so the next person reading App/partitions.csv would
 # still see the wrong numbers.
-echo "==> Checking the two partition tables agree"
-if ! diff -q partitions.csv App/partitions.csv >/dev/null; then
-  echo "ERROR: partitions.csv and App/partitions.csv differ." >&2
-  echo "       Both sketches must be built against the same layout, and App.ino.merged.bin" >&2
-  echo "       bakes its copy into the published image - a stale one silently re-tables any" >&2
-  echo "       device it is flashed to. Make them identical and re-run." >&2
-  diff partitions.csv App/partitions.csv >&2 || true
+#
+# ONE PAIR PER BOARD, NOT ONE DIFF ACROSS ALL OF THEM. There is a second table
+# now, partitions-panellan-8mb.csv for the 8MB ESP32-S3 panel, and the two
+# boards' layouts are different files that must not match each other. The names
+# are what pair them: a root partitions-<board>.csv is compared against
+# App/partitions-<board>.csv, and plain partitions.csv against
+# App/partitions.csv for the 4MB board. Every pair present on both sides is
+# compared, so the property above holds per board, which is what it has to do:
+# each board's App.ino.merged.bin bakes that board's own table at 0x8000.
+#
+# A table on one side with no counterpart on the other is named and does not
+# stop the build. Nothing publishes a merged image for a board whose sketch has
+# no table to build against, so there is no stale copy for a device to be
+# flashed with, and the Panellan arrives root-side first while its App copy
+# lands in a separate change. What the report is for is the day one half of a
+# pair is deleted.
+#
+# The 4MB pair also backstops compile-cal-s3.cmd and compile-app-s3.cmd, which
+# swap a board's table in under the name partitions.csv and restore it
+# afterwards. A run interrupted between the two leaves the 8MB table under the
+# 4MB name, that pair then differs, and this is the check those scripts' own
+# comments point at.
+echo "==> Checking each board's two partition tables agree"
+TABLES_DIFFER=0
+UNPAIRED=""
+shopt -s nullglob
+for ROOT_TABLE in partitions.csv partitions-*.csv; do
+  [ -f "$ROOT_TABLE" ] || continue
+  APP_TABLE="App/$ROOT_TABLE"
+  if [ ! -f "$APP_TABLE" ]; then
+    UNPAIRED="${UNPAIRED}       $ROOT_TABLE has no $APP_TABLE
+"
+    continue
+  fi
+  if ! diff -q "$ROOT_TABLE" "$APP_TABLE" >/dev/null; then
+    echo "ERROR: $ROOT_TABLE and $APP_TABLE differ." >&2
+    diff "$ROOT_TABLE" "$APP_TABLE" >&2 || true
+    TABLES_DIFFER=1
+  fi
+done
+for APP_TABLE in App/partitions.csv App/partitions-*.csv; do
+  [ -f "$APP_TABLE" ] || continue
+  ROOT_TABLE="${APP_TABLE#App/}"
+  if [ ! -f "$ROOT_TABLE" ]; then
+    UNPAIRED="${UNPAIRED}       $APP_TABLE has no $ROOT_TABLE
+"
+  fi
+done
+shopt -u nullglob
+
+if [ "$TABLES_DIFFER" -ne 0 ]; then
+  echo "       Both sketches must be built against the same layout for the board they" >&2
+  echo "       name, and App.ino.merged.bin bakes its copy into the published image. A" >&2
+  echo "       stale one re-tables any device it is flashed to, with nothing on the" >&2
+  echo "       device reporting that it happened. Make each pair above identical and" >&2
+  echo "       re-run." >&2
   exit 1
+fi
+
+if [ -n "$UNPAIRED" ]; then
+  echo "NOTE: a board's partition table exists on one side only:" >&2
+  printf '%s' "$UNPAIRED" >&2
+  echo "       Not a build failure. A board whose sketch has no table publishes no" >&2
+  echo "       merged image for that board, so there is no stale copy to flash. Named" >&2
+  echo "       here so a deleted half of a pair is visible." >&2
 fi
 
 # EVERY PUBLIC MOTION ENTRY POINT MUST HAVE A CALLER.
