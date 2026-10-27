@@ -1,0 +1,221 @@
+#line 1 "C:\\Users\\Administrator\\Documents\\CAL\\App\\Impressions.h"
+#pragma once
+
+#include <Arduino.h>
+
+/// What this display drew, buffered until the next check-in.
+///
+/// The server keeps every showing for ninety days and rolls them into
+/// quarter-hour rows kept for thirteen months, so a report can answer which
+/// listings got looked at and when. See CARD_IMPRESSIONS_DESIGN.md in the
+/// server repository, and the superseded section of
+/// BOOT_BUTTON_AND_IMPRESSIONS_DESIGN.md here, which had the device keeping
+/// totals instead.
+///
+/// Three facts only this device can answer, which is why they are reported
+/// rather than worked out on the server:
+///
+/// - **Which item was on the glass.** The provider cache behind a card can be
+///   replaced between the draw and its delivery, so reconstructing it there
+///   would be a guess that looks exactly like a fact.
+/// - **Whether a person was there.** The motion sensor, or somebody working
+///   the controls. Either is proof, and a card crossed during a rewind was
+///   looked at whether or not they stopped on it.
+/// - **Whether it came up in the interleave.** The server could derive it from
+///   the policy and a draw sequence, and would be wrong whenever the policy
+///   changed in between, in a way nothing downstream could detect.
+///
+/// One entry per showing, not a total per card. A total loses the time within
+/// the check-in interval, so a display reporting every half hour could never
+/// produce the quarter-hour shape of a day.
+namespace Impressions {
+
+/// How many showings are held between check-ins.
+///
+/// A fifteen-second dwell fills this in about twelve minutes, which is shorter
+/// than some check-in intervals, so overflow is an ordinary condition rather
+/// than a fault - which is why it is counted and reported rather than logged.
+constexpr uint8_t kMaxEntries = 48;
+
+/// The longest summary carried, matching what the server's column takes.
+constexpr uint8_t kMaxSummary = 200;
+
+/// The longest content key carried.
+constexpr uint8_t kMaxContentKey = 64;
+
+/// "AA:BB:CC:DD:EE:FF:" and a counter - 28 characters at the widest the counter
+/// ever gets, so this has room and a terminator.
+constexpr uint8_t kMaxInstanceId = 40;
+
+/// A policy entry's id. The longest this firmware registers is "sportsscores".
+constexpr uint8_t kMaxEntryCardId = 32;
+
+/// ISO 8601 UTC, "2026-10-11T18:15:00Z", twenty characters.
+constexpr uint8_t kMaxShownAt = 24;
+
+/// A frame identifier, unique only within one check-in's batch - the instance
+/// id of the entry that opened it, which is already unique per device.
+constexpr uint8_t kMaxFrameId = kMaxInstanceId;
+
+/// How many extra entities one showing may carry beside its own. Four games on
+/// a scoreboard is three beside the first, and SportsOptions.MaxGamesPerScoreboard
+/// caps the server at four for a heap reason this shares.
+constexpr uint8_t kMaxFrameMembers = 3;
+
+/// How a showing came up.
+enum class Arrival : uint8_t {
+  /// The dwell timer advanced to it.
+  Rotation,
+  /// A singleton interleaved into the rotation.
+  Shuffle,
+  /// Somebody pressed forward or back.
+  Manual,
+};
+
+/// One finished showing, in the shape the check-in sends.
+///
+/// <para>FIXED BUFFERS, NOT Strings, and the forty-eight of these are a .bss
+/// array. Five Strings a row across forty-eight rows is up to two hundred and
+/// forty heap allocations held between check-ins, on a board whose largest
+/// contiguous block decides whether it can open a TLS session at all. The same
+/// reasoning Sports::Game and Display::SportsBoardRow already follow - see
+/// SPORTS_CARDS_V2_GENERIC_DESIGN.md section 13 and the 2026-10-11 incident
+/// that produced it.</para>
+///
+/// <para>It costs roughly 14KB more .bss than the String version, which is the
+/// trade this board wants: static memory is allocated once at link time and
+/// cannot fragment, and fragmentation is what actually took the fleet down.</para>
+struct Entry {
+  /// Device-local and unique, "<mac>:<counter>". The server deduplicates on
+  /// it, which is what makes a retried check-in safe.
+  char instanceId[kMaxInstanceId + 1];
+
+  /// The policy entry's own id, as this firmware knows it.
+  char cardId[kMaxEntryCardId + 1];
+
+  /// Which listing or item was on the glass. Empty for a card that is its own
+  /// content, such as a clock.
+  char contentKey[kMaxContentKey + 1];
+
+  /// What the card was showing, one line, as the device composed it then.
+  char summary[kMaxSummary + 1];
+
+  /// When it came up, ISO 8601 UTC by this device's clock. A display that has
+  /// not reached NTP is wrong here, which the server knows: it stamps its own
+  /// arrival time and every report reads that one.
+  char shownAtUtc[kMaxShownAt + 1];
+
+  /// How long it stayed up.
+  uint32_t dwellMs;
+
+  /// How much of that a person was confirmed there. Never more than the dwell.
+  uint32_t seenMs;
+
+  /// Whether it came up through the interleave.
+  bool fromShuffle;
+
+  /// Whether somebody navigated to it and stayed.
+  bool wasSought;
+
+  /// Ties several entries together as one thing a person looked at, or empty
+  /// for the ordinary card that draws one thing.
+  ///
+  /// <para>A scoreboard draws four games at once. One entry for the card cannot
+  /// say which game was on screen, and four unrelated entries say the card
+  /// appeared four times and give each game the whole dwell. Both are wrong in
+  /// a way nothing downstream can detect - see CardImpressionReport.FrameId on
+  /// the server, which has accepted this since 1496995f.</para>
+  ///
+  /// <para>Only unique within one check-in's batch, because nothing joins
+  /// across batches on it.</para>
+  char frameId[kMaxFrameId + 1];
+
+  /// Whether this entry's dwell and seen time are the frame's, or a repeat of
+  /// a figure already counted.
+  ///
+  /// <para>Exactly one entry in a frame says true. The others carry the same
+  /// card, the same instant and their own content, and zero time - not because
+  /// they were not on screen, but because counting the frame's seconds once per
+  /// game would multiply a display's measured day by the number of games on
+  /// it.</para>
+  bool carriesScreenTime;
+};
+
+/// Reads the persisted instance counter. Call once at startup, before any
+/// showing begins.
+void begin();
+
+/// Starts timing a showing, closing the one before it.
+///
+/// Called from the one place a card goes up. `contentKey` and `summary` may be
+/// null or empty for a card that is its own content, and both are copied,
+/// because the strings a card hands back are rebuilt on its next draw.
+void beginShowing(const char* cardId, const char* contentKey, const char* summary,
+                  Arrival arrival);
+
+/// Adds another thing the showing now on screen is also displaying.
+///
+/// <para>Called after beginShowing(), once per extra entity, by a card that
+/// draws several at a time. A four-game scoreboard calls it three times: the
+/// first game went in through beginShowing() and carries the frame's time, and
+/// these three carry their own content and none of it.</para>
+///
+/// <para>Ignored when no showing is open, when the frame is already full, and
+/// when the content key is empty - all three are a caller mistake rather than a
+/// condition worth refusing, and a dropped member costs one row of attribution
+/// rather than the whole showing.</para>
+void addFrameMember(const char* contentKey, const char* summary);
+
+/// Closes the showing on screen without starting another. For going blank: a
+/// policy that removed every card, or a shutdown.
+void endShowing();
+
+/// Tells the buffer whether a person is there right now.
+///
+/// Both sources call it: the motion sensor on a state change, and the touch
+/// handler on any deliberate press. Presence accrues against whatever is on
+/// screen, so a run of back presses credits every card it crossed.
+///
+/// Idempotent, so the motion poll can call it every loop without reasoning
+/// about edges.
+void setPresent(bool present);
+
+/// Records that somebody navigated to the card on screen and stayed on it.
+///
+/// Narrower than presence, deliberately: a card flicked past on the way
+/// somewhere else was seen and not sought. Called when the auto-advance hold
+/// expires with the card still up, which is this firmware's own definition of
+/// having stayed.
+void markSought();
+
+/// How many finished showings are waiting to be reported.
+uint8_t pendingCount();
+
+/// How many showings were dropped because the buffer was full.
+///
+/// Reported alongside the entries so a report can say "and 40 further
+/// showings" rather than dropping them with nothing to say so.
+uint16_t droppedCount();
+
+/// One finished showing, oldest first, or null past the end.
+///
+/// READ IN PLACE RATHER THAN COPIED OUT. This was a snapshot that filled a
+/// caller-supplied array, and the only caller gave it a static one of
+/// kMaxEntries - a second full buffer, 4,432 bytes of RAM on a board whose
+/// free heap is measured in tens of kilobytes, holding a copy of what this
+/// module already had. The showing on screen is never among these: it has no
+/// dwell yet.
+const Entry* entryAt(uint8_t index);
+
+/// Forgets the showings the server acknowledged, and the dropped count with
+/// them.
+///
+/// Not called after a failed check-in: the entries ride the next one instead,
+/// and the server deduplicates on the instance id, so a retry cannot
+/// double-count.
+void clearReported(uint8_t count);
+
+/// Drops everything buffered and the showing in progress.
+void reset();
+
+}  // namespace Impressions

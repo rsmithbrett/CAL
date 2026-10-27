@@ -1,0 +1,142 @@
+#line 1 "C:\\Users\\Administrator\\Documents\\CAL\\Identity.h"
+#pragma once
+
+#include <Arduino.h>
+
+/// The device's persistent identity and the state CAL needs across reboots.
+///
+/// All of it lives in NVS rather than in the application partition, because the
+/// application partition is overwritten by every update and this must survive
+/// that. The device secret in particular is written once at provisioning time -
+/// the loader flashes an NVS image containing it - and is never regenerated on
+/// the device.
+namespace Identity {
+
+/// Presented in the X-Device-Secret header on every request.
+///
+/// Empty on a freshly flashed unit, and that is the ordinary first-boot state
+/// rather than a fault. Every device receives the identical image; identity is
+/// established afterwards, by CAL reporting its hardware address and an
+/// administrator assigning it a key. See Enrollment.
+String deviceSecret();
+
+bool hasSecret();
+
+void saveSecret(const String& secret);
+
+/// Forgets the stored secret, so the next boot's `!hasSecret()` check is true
+/// again and CAL re-enrolls via Enrollment/RegisterViaMacAddress instead of
+/// presenting a value the server has already rejected forever. See
+/// App/Loader.cpp's `returnToLoaderForReprovisioning()` - the only caller -
+/// for why a rejected secret needs this and a rejected WiFi network does not.
+void clearSecret();
+
+// Stable device-specific WPA2 passphrase for the temporary setup network.
+// Stored in NVS; generated only once and never logged. Empty on storage failure.
+String setupApPassword();
+
+/// The hardware address, formatted as the server expects it. This is what
+/// identifies an unprovisioned unit, since it has nothing else to offer.
+String macAddress();
+
+/// Remembered networks, most recently joined first.
+///
+/// More than one on purpose. A device is enrolled at an agent's office and then
+/// carried to a household, and a unit that remembers only the network it is
+/// currently on has to be re-provisioned by hand every time it moves. Three is
+/// enough to cover office, home and one spare without turning NVS into a
+/// database.
+static constexpr uint8_t kMaxNetworks = 3;
+
+struct Network {
+  String ssid;
+  String password;
+};
+
+/// Index 0 is the most recently joined.
+uint8_t networkCount();
+Network network(uint8_t index);
+
+/// Records a successful join. An SSID already known is moved to the front and
+/// its password refreshed rather than duplicated; the least recently used entry
+/// is dropped once the list is full.
+void rememberNetwork(const String& ssid, const String& password);
+
+void clearNetworks();
+
+bool hasAnyNetwork();
+
+/// One-shot, same shape and lifecycle as updateRequested below: set before a
+/// reboot into CAL, read (and consumed) once by the code deciding whether to
+/// open Provisioning::run() unconditionally, false again afterward.
+///
+/// Exists so the BOOT-hold "reset WiFi" gesture can force the captive portal
+/// open without calling clearNetworks() to do it - forcing via network count
+/// meant every reprovisioning wiped everything already remembered before
+/// adding the one new network the portal captures, which is why a unit set
+/// up at more than one site only ever answered to the last one. See the
+/// README's "the 3-remembered-networks design had no path to ever reach 2"
+/// for the incident this fixes.
+bool provisioningForced();
+void setProvisioningForced(bool forced);
+
+/// The application version currently installed in ota_0, as reported by the
+/// manifest that installed it. Empty means nothing is installed yet.
+String installedAppVersion();
+void setInstalledAppVersion(const String& version);
+
+/// Set by the application to ask CAL to perform an update on next boot. The
+/// application cannot write its own partition, so this flag plus a reboot is
+/// how it hands the job over.
+bool updateRequested();
+void setUpdateRequested(bool requested);
+
+/// Incremented by CAL immediately before handing control to the application,
+/// and cleared by the application once it reaches steady state. A value above
+/// the threshold means the installed application is not surviving boot, and CAL
+/// should treat it as bad rather than handing over again.
+uint8_t bootAttempts();
+void recordBootAttempt();
+void clearBootAttempts();
+
+/// Phase 2 of the CAL-over-the-air design - see CAL_OTA_DESIGN.md section 10.
+///
+/// A CAL running from ota_0 is a CANDIDATE: its job is to copy itself into
+/// factory and get out of the way. It cannot measure its own length, because the
+/// partition is larger than the image, so phase 1 records the size and hash of
+/// what it downloaded and the candidate reads them back here. No recorded values
+/// means this CAL is in ota_0 for a reason nobody wrote down, and it refuses
+/// rather than guessing.
+void recordCalCandidate(uint32_t sizeBytes, const String& sha256, const String& version);
+uint32_t calCandidateSize();
+String calCandidateSha();
+String calCandidateVersion();
+void clearCalCandidate();
+
+/// Set by the candidate immediately before erasing otadata; acted on by the next
+/// boot, which runs from factory and can therefore safely erase ota_0. This is
+/// the boot-loop guard, not housekeeping: ota_0 holds a valid CAL image, and a
+/// factory CAL that hands over to it gets another candidate, forever.
+void setCalCleanupPending(bool pending);
+bool calCleanupPending();
+
+/// Bounds the one failure this design cannot otherwise escape: a copy that keeps
+/// failing on hardware. After three attempts the candidate stops rather than
+/// looping, which is the only state here that needs a cable.
+uint8_t calCopyAttempts();
+void recordCalCopyAttempt();
+
+/// Which CAL is installed in factory. Written by the trampoline when it commits -
+/// the exact mirror of installedAppVersion(), which installApplication writes.
+///
+/// Empty on every device until an OTA-capable CAL has installed one, and that
+/// emptiness is a real answer rather than a gap: it means "running a CAL too old
+/// to say". The App reads this and puts it on telemetry, because CAL never checks
+/// in and cannot report anything about itself.
+String installedCalVersion();
+void setInstalledCalVersion(const String& version);
+static constexpr uint8_t kMaxBootAttempts = 3;
+
+void begin();
+
+}  // namespace Identity

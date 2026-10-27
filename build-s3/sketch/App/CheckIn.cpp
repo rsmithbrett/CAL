@@ -1,0 +1,1115 @@
+#line 1 "C:\\Users\\Administrator\\Documents\\CAL\\App\\CheckIn.cpp"
+#include "CheckIn.h"
+
+#include <ArduinoJson.h>
+#include <time.h>
+
+#include "Actions.h"
+#include "Impressions.h"
+#include "Assets.h"
+#include "CardManager.h"
+#include "Config.h"
+#include "Http.h"
+#include "Identity.h"
+#include "Log.h"
+#include "Sports.h"
+#include "Motion.h"
+
+namespace CheckIn {
+namespace {
+
+constexpr const char* kPath = "/api/checkin";
+
+String nowAsIso8601Utc() {
+  time_t now = time(nullptr);
+  struct tm utc;
+  gmtime_r(&now, &utc);
+  char buffer[21];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc);
+  return String(buffer);
+}
+
+/// Days from the civil epoch (1970-01-01) to the given UTC calendar date -
+/// Howard Hinnant's well-known days_from_civil algorithm. Used by
+/// parseIso8601Utc() below instead of reaching for timegm()/mktime(): both
+/// depend on libc/TZ behavior that varies by platform, where this is a pure
+/// integer calculation with no timezone concept to get wrong - exactly what
+/// is needed here since every field this parses is already UTC.
+long daysFromCivil(int year, int month, int day) {
+  year -= month <= 2 ? 1 : 0;
+  const long era = (year >= 0 ? year : year - 399) / 400;
+  const unsigned yearOfEra = static_cast<unsigned>(year - era * 400);
+  const unsigned dayOfYear =
+      (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+  const unsigned dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear;
+  return era * 146097 + static_cast<long>(dayOfEra) - 719468;
+}
+
+/// Parses the server's "2026-09-08T21:42:00Z"-style ISO-8601 UTC instant
+/// into epoch seconds, for the ISS next-pass fields below - see CheckIn.h's
+/// own remarks on why these are absolute instants rather than the
+/// minutes-into-today shape sunrise/tide fields use. Returns 0 (this
+/// firmware's "absent" sentinel for these fields) for a JSON null, a missing
+/// field, or anything this sscanf() cannot parse - deliberately tolerant
+/// rather than asserting, since a malformed instant is exactly as much "no
+/// answer" to this device as a JSON null is.
+time_t parseIso8601Utc(const char* text) {
+  if (text == nullptr || text[0] == '\0') {
+    return 0;
+  }
+  int year, month, day, hour, minute, second;
+  if (sscanf(text, "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &minute, &second) != 6) {
+    return 0;
+  }
+  const long days = daysFromCivil(year, month, day);
+  return static_cast<time_t>(days) * 86400 + hour * 3600 + minute * 60 + second;
+}
+
+/// Rides the ordinary check-in rather than getting an endpoint of its own -
+/// that is the whole shape of the feature. A press is a passive push: it is
+/// recorded locally, carried along on the next heartbeat, and the device's
+/// job ends there. Worst-case latency is one check-in interval, which the
+/// server already controls, so tightening it is a config change rather than
+/// a new route.
+///
+/// The field is omitted entirely when there is nothing pending, so an
+/// ordinary check-in body is byte-identical to what firmware predating this
+/// sent.
+
+/// How many showings the request in flight carried, so the response clears
+/// exactly those and leaves anything that arrived behind them.
+uint8_t gImpressionsSent = 0;
+
+/// What this display drew since the last acknowledged check-in.
+///
+/// One entry per showing, not a total per card: a total loses the time within
+/// the interval, so a display reporting every five minutes could never produce
+/// the quarter-hour shape of a day - which is what answers when an
+/// announcement should be up. CARD_IMPRESSIONS_DESIGN.md in the server
+/// repository.
+///
+/// Omitted entirely when there is nothing to report, so an ordinary check-in
+/// from a display nobody is watching stays byte-identical to what firmware
+/// predating this sent.
+void addImpressions(JsonDocument& requestDoc) {
+  gImpressionsSent = 0;
+
+  const uint8_t count = Impressions::pendingCount();
+  if (count == 0) {
+    return;
+  }
+
+  gImpressionsSent = count;
+
+  JsonArray array = requestDoc["impressions"].to<JsonArray>();
+  for (uint8_t i = 0; i < count; ++i) {
+    const Impressions::Entry* held = Impressions::entryAt(i);
+    if (held == nullptr) {
+      break;
+    }
+
+    const Impressions::Entry& drawn = *held;
+    JsonObject entry = array.add<JsonObject>();
+    entry["cardId"] = drawn.cardId;
+    entry["instanceId"] = drawn.instanceId;
+    entry["shownAtUtc"] = drawn.shownAtUtc;
+    entry["dwellMs"] = drawn.dwellMs;
+
+    // The three below are omitted at their zero, for the reason
+    // addPendingActions() gives: this request is built with ArduinoJson, which
+    // wants roughly the payload's size again in heap to serialise it, and a key
+    // carrying a default nobody will read is heap spent for nothing on the
+    // device that can least afford it. The server reads an absent field and a
+    // false or zero one identically.
+    if (drawn.fromShuffle) {
+      entry["fromShuffle"] = true;
+    }
+    if (drawn.wasSought) {
+      entry["wasSought"] = true;
+    }
+    if (drawn.seenMs > 0) {
+      entry["seenMs"] = drawn.seenMs;
+    }
+
+    // Both omitted at their default, like the three above and for the same
+    // reason: every card that draws one thing sends neither, which is every
+    // card except the scoreboard, so the ordinary request is unchanged. The
+    // server defaults a missing frameId to null and a missing
+    // carriesScreenTime to true - see CardImpressionReport.
+    if (drawn.frameId[0] != '\0') {
+      entry["frameId"] = drawn.frameId;
+    }
+    if (!drawn.carriesScreenTime) {
+      entry["carriesScreenTime"] = false;
+    }
+
+    // A flat object of strings. The server composes its own document from what
+    // arrives, so a key this device leaves out is simply absent there.
+    if (drawn.contentKey[0] != '\0' || drawn.summary[0] != '\0') {
+      JsonObject attributes = entry["attributes"].to<JsonObject>();
+      if (drawn.contentKey[0] != '\0') {
+        attributes["contentKey"] = drawn.contentKey;
+      }
+      if (drawn.summary[0] != '\0') {
+        attributes["summary"] = drawn.summary;
+      }
+    }
+  }
+
+  const uint16_t dropped = Impressions::droppedCount();
+  if (dropped > 0) {
+    Log::printf("[checkin] carrying %u showing(s), %u dropped when the buffer filled",
+                static_cast<unsigned>(count), static_cast<unsigned>(dropped));
+  } else {
+    Log::printf("[checkin] carrying %u showing(s)", static_cast<unsigned>(count));
+  }
+}
+
+void addPendingActions(JsonDocument& requestDoc) {
+  Actions::Pending pending[Actions::kMaxPending];
+  const uint8_t count = Actions::pendingSnapshot(pending, Actions::kMaxPending);
+  if (count == 0) {
+    return;
+  }
+
+  JsonArray array = requestDoc["pendingActions"].to<JsonArray>();
+  for (uint8_t i = 0; i < count; ++i) {
+    JsonObject entry = array.add<JsonObject>();
+    entry["actionId"] = pending[i].actionId;
+    entry["instanceId"] = pending[i].instanceId;
+    entry["pressedAtUtc"] = pending[i].pressedAtUtc;
+    // Omitted entirely when there is nothing to say, rather than sent as "".
+    // This request is built with ArduinoJson, which needs roughly the payload's
+    // size again in heap to serialise it, and a key nobody will read is heap
+    // spent for nothing on the device that can least afford it. The server
+    // treats a missing field and an empty one identically - see
+    // PendingDeviceAction.OnScreenSummary.
+    if (pending[i].onScreenSummary.length() > 0) {
+      entry["onScreenSummary"] = pending[i].onScreenSummary;
+    }
+
+    // Omitted when absent, for the reason above. The server reads a missing field and an
+    // empty one the same way - see PendingDeviceAction.CompassPid.
+    //
+    // SENT UNDER BOTH NAMES FROM THE ONE FIELD, and the server keeps whichever it
+    // recognises. This field holds whatever the card on screen said identified its item,
+    // and that is a different kind of value per card: the listings card gives a numeric
+    // Compass id, the featured listings card gives the 32-character association key the
+    // server minted. Each name is normalised to its own shape on arrival - digits and at
+    // most thirty for compassPid, exactly 32 hex for contentKey - and no string can match
+    // both, so exactly one survives and the other reads as "the device did not say".
+    //
+    // The alternative was teaching this function which cards produce which kind of id,
+    // which is knowledge the server already holds and this file would then hold a second,
+    // driftable copy of. It costs about thirty bytes a press.
+    //
+    // Before contentKey existed the association key went out as compassPid alone and that
+    // normaliser discarded it, so a tour request reached the press log naming no property
+    // and the count against it stayed at zero.
+    if (pending[i].compassPid.length() > 0) {
+      entry["compassPid"] = pending[i].compassPid;
+      entry["contentKey"] = pending[i].compassPid;
+    }
+  }
+  Log::printf("[checkin] carrying %u pending action(s)", count);
+}
+
+/// The announcements a household has cleared by touching the notice, which is
+/// the only way one with no button can be dealt with.
+///
+/// Repeated on every check-in while the id is still held, rather than sent once
+/// and forgotten. There is no acknowledgement to wait for and nothing persists
+/// across a reboot - see Cards::clearedAnnouncementIds - so repeating is what
+/// makes a lost request cost nothing. The server stops listing the announcement
+/// once it has heard, and this stops naming it on the check-in after that.
+///
+/// Omitted entirely when nothing has been cleared, so an ordinary check-in body
+/// stays byte-identical to what firmware predating this sent.
+void addClearedAnnouncements(JsonDocument& requestDoc) {
+  char ids[Cards::kMaxAnnouncements][sizeof(Cards::Announcement::id)] = {};
+  const uint8_t count = Cards::clearedAnnouncementIds(ids, Cards::kMaxAnnouncements);
+  if (count == 0) {
+    return;
+  }
+
+  JsonArray cleared = requestDoc["dismissedAnnouncementIds"].to<JsonArray>();
+  for (uint8_t i = 0; i < count; ++i) {
+    cleared.add(ids[i]);
+  }
+
+  Log::printf("[checkin] carrying %u cleared announcement(s)", count);
+}
+
+/// Turns the response's ISO-8601 `maintenanceUntilUtc` into an epoch second, or
+/// 0 for absent, null, malformed, or already past.
+///
+/// Hand-parsed rather than handed to strptime() because the ESP32 newlib build
+/// does not provide it, and timegm() is likewise absent - so the conversion uses
+/// mktime(), which is correct here only because this device's timezone IS UTC:
+/// AppService.cpp calls configTime(0, 0, ...) with a zero GMT offset and a zero
+/// DST offset, so local time and UTC are the same clock. If that ever changes,
+/// this function breaks silently by the size of the new offset. Only the shape the
+/// server emits is accepted: "YYYY-MM-DDTHH:MM:SS" with an optional fractional
+/// part and a trailing Z or offset, all of which the server always writes as UTC.
+/// Anything else yields 0, which means "no window" - the safe direction, since a
+/// window that fails to parse costs a restart during a deploy, while one wrongly
+/// accepted suppresses the watchdog on a device that really is unreachable.
+time_t parseMaintenanceUntil(JsonVariantConst value) {
+  if (value.isNull()) {
+    return 0;
+  }
+  const char* text = value.as<const char*>();
+  if (text == nullptr) {
+    return 0;
+  }
+
+  int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+  if (sscanf(text, "%4d-%2d-%2dT%2d:%2d:%2d", &year, &month, &day, &hour, &minute, &second) != 6) {
+    Log::printf("[checkin] maintenanceUntilUtc '%s' is not an instant this build can read - ignored", text);
+    return 0;
+  }
+
+  struct tm parts = {};
+  parts.tm_year = year - 1900;
+  parts.tm_mon = month - 1;
+  parts.tm_mday = day;
+  parts.tm_hour = hour;
+  parts.tm_min = minute;
+  parts.tm_sec = second;
+  parts.tm_isdst = 0;
+
+  const time_t until = mktime(&parts);
+  if (until <= 0 || until < Config::kEarliestPlausibleTime) {
+    return 0;
+  }
+  return until;
+}
+
+/// Every field here is optional on the wire. A server that predates them -
+/// or one that simply has nothing to say this time - leaves `present` false
+/// and the counts at zero, and the device carries on with whatever it
+/// already had. That is the firmware half of the standing six-month
+/// backward-compatibility mandate: new response fields must never be
+/// required.
+void parseMotionPolicy(JsonVariantConst source, Motion::Policy& policy) {
+  // Same contract as parseCardPolicy below: absent or null leaves present false,
+  // and the module reads that as "keep doing what you do". An omitted policy must
+  // never be able to darken a screen that was working.
+  if (source.isNull()) {
+    return;
+  }
+  policy.present = true;
+  policy.enabled = source["enabled"] | false;
+  policy.fallbackMode = String(source["fallbackMode"] | "legacyAlwaysOn");
+
+  // Defaults matter here as much as the values: a server that sends a partial
+  // object must not leave a 0% active brightness behind, which would read to a
+  // household as a dead panel. The server clamps before sending (CFG 03), so
+  // these are the second of two guards.
+  policy.activePercent = static_cast<uint8_t>(source["activePercent"] | 100);
+  policy.dimPercent = static_cast<uint8_t>(source["dimPercent"] | 25);
+  policy.activeTimeoutSeconds = static_cast<uint32_t>(source["activeTimeoutSeconds"] | 120);
+  policy.dimTimeoutSeconds = static_cast<uint32_t>(source["dimTimeoutSeconds"] | 180);
+
+  if (policy.activePercent > 100) policy.activePercent = 100;
+  if (policy.dimPercent > policy.activePercent) policy.dimPercent = policy.activePercent;
+  if (policy.activeTimeoutSeconds == 0) policy.activeTimeoutSeconds = 120;
+  if (policy.dimTimeoutSeconds == 0) policy.dimTimeoutSeconds = 180;
+}
+
+void parseCardPolicy(JsonVariantConst source, Cards::Policy& policy) {
+  if (source.isNull()) {
+    return;
+  }
+  policy.present = true;
+  policy.defaultDwellSeconds = source["defaultDwellSeconds"] | 0;
+  policy.manualNavHoldSeconds = source["manualNavHoldSeconds"] | 0;
+
+  JsonArrayConst cards = source["cards"].as<JsonArrayConst>();
+  if (cards.isNull()) {
+    return;
+  }
+  for (JsonVariantConst card : cards) {
+    if (policy.entryCount >= Cards::kMaxPolicyCards) {
+      Log::printf("[checkin] cardPolicy has more than %u cards - the rest are ignored",
+                  Cards::kMaxPolicyCards);
+      break;
+    }
+    Cards::PolicyEntry& entry = policy.entries[policy.entryCount++];
+    entry.id = String(card["id"] | "");
+    entry.kind = String(card["kind"] | "");
+    entry.order = card["order"] | 0;
+    entry.dwellSeconds = card["dwellSeconds"] | 0;
+    entry.interleaveEvery = card["interleaveEvery"] | 0;
+    entry.notableDwellSeconds = card["notableDwellSeconds"] | 0;
+    // Absent is the ordinary case and is NOT "no cap" - applyPolicy() resolves a
+    // zero to Cards::kDefaultMaxItems. Absent means the operator never set one,
+    // not that the server economised: an explicit 3 arrives as 3, because
+    // stripping it would have cost more bytes than it saved (the response
+    // serializer writes nulls) without changing what this device does.
+    entry.maxItems = card["maxItems"] | 0;
+    // Optional, and absent from every card that draws no picture. Empty is
+    // the ordinary case, not a fault: the card it names simply reports
+    // itself as having nothing to show and the scheduler passes over it.
+    entry.assetId = String(card["assetId"] | "");
+    // Same optionality as assetId immediately above, for the announcement
+    // card's text instead of a picture. Absent (or blank) is the ordinary
+    // case for every card that is not an announcement, and for an
+    // announcement card nobody has typed anything into yet.
+    entry.text = String(card["text"] | "");
+    // Same optionality again, for the QR card's payload. Absent (or blank) is
+    // the ordinary case for every card that does not draw a QR code, and for
+    // a QR card nobody has entered data into yet.
+    entry.qrData = String(card["qrData"] | "");
+    // Same optionality again, for the one card that shows a single owner
+    // location and needs to be told which - "home" or "target", absent
+    // meaning Home. Every other card must ignore this field entirely, the
+    // same tolerance already given to a stray assetId/text/qrData landing on
+    // a card that draws none of those.
+    entry.location = String(card["location"] | "");
+    // Optional again: whether this card may be overlaid by a banner
+    // announcement. Absent means false, which is every policy saved before the
+    // feature existed. See Cards::CardSpec::allowBanner for why this is
+    // eligibility rather than a promise, and for the per-card `theme` string it
+    // replaced.
+    entry.allowBanner = card["allowBanner"] | false;
+    // These two arrive as ISO-8601 UTC instants, same shape as the ISS
+    // next-pass fields below - parsed straight to epoch seconds here rather
+    // than carried as strings, since nothing downstream needs the unparsed
+    // form. A JSON null, a missing field, or anything parseIso8601Utc() can't
+    // read all come back 0 - this struct's own "no bound" sentinel, the same
+    // absent-means-unrestricted tolerance every other optional card-policy
+    // field already gets.
+    entry.effectiveFromUtc = parseIso8601Utc(card["effectiveFromUtc"] | "");
+    entry.effectiveToUtc = parseIso8601Utc(card["effectiveToUtc"] | "");
+  }
+}
+
+void parseCardActions(JsonVariantConst source, Result& result) {
+  JsonArrayConst actions = source.as<JsonArrayConst>();
+  if (actions.isNull()) {
+    return;
+  }
+  for (JsonVariantConst action : actions) {
+    if (result.cardActionCount >= Actions::kMaxDefinitions) {
+      break;
+    }
+    Actions::Definition& definition = result.cardActions[result.cardActionCount++];
+    definition.cardId = String(action["cardId"] | "");
+    definition.actionId = String(action["actionId"] | "");
+    definition.label = String(action["label"] | "");
+  }
+}
+
+/// Copies a JSON string into a fixed char buffer, truncating rather than
+/// dropping. Announcement text and ids are display/matching values with no
+/// "well-formed but wrong" failure mode - unlike an asset id, where a
+/// truncated value is a perfectly valid id for some *other* asset and so has
+/// to be dropped instead.
+void copyBounded(const char* source, char* destination, size_t capacity) {
+  if (source == nullptr || capacity == 0) {
+    destination[0] = '\0';
+    return;
+  }
+  strncpy(destination, source, capacity - 1);
+  destination[capacity - 1] = '\0';
+}
+
+/// copyBounded()'s disclosing sibling, for a field whose loss changes what the
+/// panel SAYS rather than merely shortening it. Same bounded copy, plus two
+/// things: a visible "..." written into the tail when anything was dropped,
+/// and a line in the stream naming the field and the loss.
+///
+/// WHY THE WIRE-LEVEL CUTS NEEDED THIS AT ALL. App/Display.cpp's layoutText()
+/// marks and reports everything it shortens, which is the whole point of
+/// TEXT_LAYOUT_DESIGN.md - but it can only mark what reaches it. These fields
+/// are cut HERE, in the parser, several layers before any box exists, and
+/// until now they were cut by a bare strncpy() that reported nothing to
+/// anybody. A team name arriving as "Golden State Warrio" is then perfectly
+/// short enough for the panel, so the display never ellipsizes it and nothing
+/// anywhere says a character was lost. That is precisely the silent
+/// truncation the layout work was done to eliminate, surviving one layer
+/// upstream of where anyone went looking for it.
+///
+/// So the panel carries the evidence too, not only the stream: "Golden State
+/// Wa..." reads as a name that did not fit, where "Golden State Warrio" reads
+/// as a name somebody misspelled.
+///
+/// NOT FOR IDS. A truncated identifier is a perfectly valid identifier for
+/// something else, and one with "..." glued on matches nothing at all - which
+/// is why copyBounded() above keeps the ids and this one takes display text.
+void copyBoundedMarked(const char* source, char* destination, size_t capacity,
+                       const char* field) {
+  if (capacity == 0) {
+    return;
+  }
+  if (source == nullptr) {
+    destination[0] = '\0';
+    return;
+  }
+  const size_t room = capacity - 1;
+  const size_t length = strlen(source);
+  if (length <= room) {
+    memcpy(destination, source, length + 1);
+    return;
+  }
+
+  // Three of the surviving bytes go to the mark. A field with no room for even
+  // that keeps as much of the value as it can instead: a buffer filled edge to
+  // edge with "..." would carry strictly less than the fragment it replaced.
+  const bool marking = room > 3;
+  const size_t kept = marking ? room - 3 : room;
+  memcpy(destination, source, kept);
+  if (marking) {
+    destination[kept] = '.';
+    destination[kept + 1] = '.';
+    destination[kept + 2] = '.';
+  }
+  destination[kept + (marking ? 3 : 0)] = '\0';
+
+  // printf rather than verbose: a field arriving longer than this device can
+  // hold is the server and the firmware disagreeing about a bound, and
+  // noticing it must not depend on somebody having switched streaming on
+  // first. Not a hot path - these run once per check-in over at most a
+  // handful of items.
+  Log::printf("[checkin] %s arrived %u characters long and this device holds %u, so %u were cut "
+              "on the wire%s",
+              field, static_cast<unsigned>(length), static_cast<unsigned>(room),
+              static_cast<unsigned>(length - kept),
+              marking ? " and the stored value is marked '...'" : "");
+}
+
+/// Where parsed announcements actually live - see CheckIn::Result's own
+/// remarks on why this is file-static rather than an inline array on that
+/// struct. Overwritten by every perform() call, which is safe because the one
+/// consumer (App.ino's performCheckIn) reads it immediately and this firmware
+/// is single-threaded.
+Cards::Announcement gAnnouncementBuffer[Cards::kMaxAnnouncements];
+
+void parseAnnouncements(JsonVariantConst source, Result& result) {
+  result.announcements = gAnnouncementBuffer;
+  result.announcementCount = 0;
+
+  // Cleared even when the response carries no announcements array at all, so
+  // a stale set from the previous check-in can never be re-applied.
+  for (uint8_t i = 0; i < Cards::kMaxAnnouncements; ++i) {
+    gAnnouncementBuffer[i] = Cards::Announcement{};
+  }
+
+  JsonArrayConst announcements = source.as<JsonArrayConst>();
+  if (announcements.isNull()) {
+    return;
+  }
+  uint8_t offered = 0;
+  for (JsonVariantConst item : announcements) {
+    offered++;
+    if (result.announcementCount >= Cards::kMaxAnnouncements) {
+      // Counted and reported below rather than dropped in silence. This
+      // codebase's rule is that a card which quietly never appears is close to
+      // undiagnosable on firmware with no tests (see registerCard's own
+      // remarks), and a banner nobody can explain the absence of is the same
+      // failure. The bound itself is deliberate - see Cards::kMaxAnnouncements
+      // on why it is sized against DRAM.
+      continue;
+    }
+
+    Cards::Announcement& announcement = gAnnouncementBuffer[result.announcementCount];
+
+    copyBounded(item["id"] | "", announcement.id, sizeof(announcement.id));
+    // Marked and reported: the text is what a household reads off the banner,
+    // and 120 bytes is a bound this device chose against DRAM rather than one
+    // the server promised to respect. The id above stays unmarked for the
+    // reason copyBoundedMarked() gives.
+    copyBoundedMarked(item["text"] | "", announcement.text, sizeof(announcement.text),
+                      "announcement text");
+    announcement.isAction = item["isAction"] | false;
+    copyBounded(item["actionId"] | "", announcement.actionId, sizeof(announcement.actionId));
+
+    // Empty or absent stays empty, which is the wildcard - "every card whose
+    // policy allows banners" - not "no cards". See
+    // Cards::Announcement::targetCardIds.
+    announcement.targetCount = 0;
+    JsonArrayConst targets = item["targetCardIds"].as<JsonArrayConst>();
+    if (!targets.isNull()) {
+      for (JsonVariantConst target : targets) {
+        if (announcement.targetCount >= Cards::kMaxAnnouncementTargets) {
+          break;
+        }
+        const char* cardId = target.as<const char*>();
+        if (cardId == nullptr || strlen(cardId) == 0) {
+          continue;
+        }
+        copyBounded(cardId, announcement.targetCardIds[announcement.targetCount],
+                    Cards::kMaxAnnouncementCardIdLength + 1);
+        announcement.targetCount++;
+      }
+    }
+
+    // An announcement with no id cannot be told apart from another one across
+    // check-ins, and one with no text has nothing to draw - neither is worth
+    // carrying, and both would occupy a slot a usable announcement could have
+    // had. Dropped rather than repaired: this device cannot invent either
+    // field, and a silent drop with the count left short is exactly what the
+    // "hold the first N" bound below already does.
+    if (strlen(announcement.id) == 0 || strlen(announcement.text) == 0) {
+      Log::line("[banner] dropped an announcement with no id or no text");
+      announcement = Cards::Announcement{};
+      continue;
+    }
+
+    // Local dismissal is never taken from the wire - the server has no idea
+    // what this device has shown - so it always starts false here and is
+    // carried across by Cards::setAnnouncements() matching on id.
+    announcement.dismissedLocally = false;
+    result.announcementCount++;
+  }
+
+  if (offered > result.announcementCount) {
+    Log::printf("[banner] server offered %u announcement(s), holding %u",
+                static_cast<unsigned>(offered),
+                static_cast<unsigned>(result.announcementCount));
+  }
+}
+
+void parseAcceptedActionIds(JsonVariantConst source, Result& result) {
+  JsonArrayConst ids = source.as<JsonArrayConst>();
+  if (ids.isNull()) {
+    return;
+  }
+  for (JsonVariantConst id : ids) {
+    if (result.acceptedActionCount >= Actions::kMaxPending) {
+      break;
+    }
+    const char* text = id.as<const char*>();
+    if (text == nullptr) {
+      continue;
+    }
+    result.acceptedActionIds[result.acceptedActionCount++] = String(text);
+  }
+}
+
+}  // namespace
+
+Result perform() {
+  Result result;
+
+  if (!Http::ready()) {
+    Log::line("[checkin] TLS setup failed, skipping this check-in");
+    return result;
+  }
+
+  // Nothing else opens a TLS session while this one is up. The log stream is
+  // the only thing that would, and two sessions each wanting a contiguous
+  // record buffer is a memory event on this board even where either alone
+  // would have been affordable. Released by whichever of this function's
+  // several exits it takes - see Log::UploadSuppression for why that is a
+  // guard rather than a pair of calls.
+  Log::UploadSuppression noOverlappingSession;
+
+  const String url = String("https://") + Config::kServiceHost + kPath;
+  if (!Http::beginRequest(url)) {
+    Log::line("[checkin] could not begin request, skipping this check-in");
+    return result;
+  }
+  HTTPClient& http = Http::client();
+  http.setTimeout(Config::kHttpTimeoutMs);
+  http.addHeader("X-Device-Secret", Identity::deviceSecret());
+  http.addHeader("Content-Type", "application/json");
+
+  // THE REQUEST IS SCOPED SO IT IS GONE BEFORE THE RESPONSE IS PARSED, and that
+  // brace is the point of this block rather than tidiness.
+  //
+  // Three things used to be alive at deserializeJson() below: this document's
+  // node tree, the serialized copy of it in `body`, and responseDoc growing as
+  // it read. The first two are finished the moment POST returns and were being
+  // held through the one allocation on this device that cannot afford a
+  // neighbour.
+  //
+  // What that costs is measured, not assumed. Averaged over three hours of
+  // device_telemetry_history on 2026-10-09, the check-in phase spent 48,687,
+  // 53,817 and 54,749 bytes on the three live displays while fetch, draw and
+  // idle spent hundreds or nothing. All three were below
+  // Http::kTlsRecordBufferBytes - 16,717 bytes CONTIGUOUS for one TLS record
+  // buffer - against 110,580 at boot, and a device under that floor cannot open
+  // a session, so Http::canOpenNewSession() fails and the device restarts to
+  // reclaim heap. That is SOFTWARE_RESET+UNREACHABLE, which reads like a
+  // network fault and is a heap figure.
+  int status;
+  {
+  JsonDocument requestDoc;
+  requestDoc["deviceUtcTimestamp"] = nowAsIso8601Utc();
+  requestDoc["firmwareVersion"] = Identity::installedAppVersion();
+  // No battery on this board - see CheckIn.h's own remarks.
+  requestDoc["batteryPercent"] = 100;
+  requestDoc["charging"] = true;
+
+  // THE CAL VERSION RIDES THE CHECK-IN REQUEST, for the same reason capability does
+  // a few lines below: the thing that has to act on it is here, not in telemetry.
+  // The server answers `calUpdateAvailable` by comparing this against the CAL build
+  // marked current, and it has to make that comparison while composing THIS response
+  // - not from whatever a telemetry post happened to leave behind earlier.
+  //
+  // SENT EVEN WHEN EMPTY, which is the opposite of what telemetry does with the same
+  // value (Telemetry.cpp omits it when blank, so a pre-OTA CAL is reported as absent
+  // rather than as a blank string). Here the empty string is the whole signal: it
+  // means "the CAL in factory predates recording itself", it differs from every
+  // version a server can offer, and that difference is precisely what makes a device
+  // eligible for the first loader it is ever offered. Omitting it would make the
+  // server unable to distinguish "no CAL recorded" from "firmware too old to say",
+  // and those want opposite answers.
+  requestDoc["calVersion"] = Identity::installedCalVersion();
+
+  // CAPABILITY RIDES THE CHECK-IN REQUEST. It also rides telemetry, and only one of
+  // those two reaches the thing that uses it.
+  //
+  // MOTION_AWARE_DISPLAY_DESIGN.md section 2 says capability travels on check-in and
+  // not on telemetry, and it is right for a concrete reason: the policy gate resolves
+  // at check-in time. Server-side, RecordMotionCapabilityAsync - the only writer of
+  // Device.MotionCapability, which is the field ResolveMotionPolicyAsync gates on - is
+  // called from CheckInGatewayService and from nowhere else. The telemetry path copies
+  // the same value onto the telemetry report row, which is a diagnostic snapshot and
+  // feeds no decision.
+  //
+  // Until 2026-09-16 this firmware sent it on telemetry ONLY. The effect was that a
+  // device could never retire the operator's declaration: Device.MotionCapability
+  // stayed null forever, the declared value did all the work permanently, and device
+  // 17 reported "motion detected 4 seconds ago" on telemetry while the server's own
+  // record of whether it had a sensor was still empty. The device was telling the
+  // truth into a field nothing read.
+  //
+  // The caller gate in ci/build-firmware.sh did not catch it, and could not:
+  // capabilityToReport() HAD a caller, just the wrong one. That gate counts call sites
+  // and says so in its own comment - it knows wired from unwired, not right place from
+  // wrong place.
+  //
+  // Sent on both paths deliberately rather than moved. Telemetry's copy is a
+  // diagnostic worth keeping - it is how the contradiction above became visible at all
+  // - and the two cannot disagree, because both call the same function in the same
+  // loop iteration.
+  //
+  // EMPTY STRING MEANS SAY NOTHING, and the field is omitted rather than sent blank:
+  // an idle sensor and an absent one are electrically identical at this pin, so this
+  // device can honestly claim Present once it has seen motion and can never claim
+  // Absent. Omission leaves the server's record and the operator's declaration exactly
+  // as they are, which is what silence has to mean (CAP 05).
+  const String motionCapability = Motion::capabilityToReport();
+  if (motionCapability.length() > 0) {
+    requestDoc["motionCapability"] = motionCapability;
+  }
+  addPendingActions(requestDoc);
+  addClearedAnnouncements(requestDoc);
+  addImpressions(requestDoc);
+
+  // Reports how the *previous* policy this device received actually turned
+  // out - the same "N of M entries known" applyPolicy() already logs to the
+  // remote debug stream, ridden along on the very next check-in instead of
+  // only ever existing there for however long someone happens to be
+  // watching. Omitted entirely (rather than sent as 0/0) before this device
+  // has ever applied a policy at all, so the server can tell "never
+  // configured" apart from "configured with zero entries known".
+  if (CardManager::lastPolicyTotalCount() > 0) {
+    requestDoc["cardPolicyKnownCount"] = CardManager::lastPolicyKnownCount();
+    requestDoc["cardPolicyTotalCount"] = CardManager::lastPolicyTotalCount();
+    const String unknownIds = CardManager::lastPolicyUnknownIds();
+    if (unknownIds.length() > 0) {
+      requestDoc["cardPolicyUnknownIds"] = unknownIds;
+    }
+  }
+
+  // Reports any asset that downloaded and SHA-256-verified fine but still
+  // would not decode as a picture - see Assets.h's own remarks. Omitted
+  // entirely when nothing has failed, the same "absent, not zero" contract
+  // cardPolicyKnownCount above uses. Cleared only once this request actually
+  // succeeds (see below), so a failed check-in never loses the report.
+  if (Assets::decodeFailureCount() > 0) {
+    requestDoc["assetDecodeFailureCount"] = Assets::decodeFailureCount();
+    requestDoc["assetDecodeFailureIds"] = Assets::decodeFailureIds();
+  }
+
+  String body;
+  serializeJson(requestDoc, body);
+
+  // Every outgoing check-in, verbatim - the always-on summary line at the
+  // bottom of this function only ever reports the fields this firmware
+  // itself parsed back out of the response, never the raw exchange. With
+  // streaming off this costs nothing beyond Log::verbose()'s own early
+  // return.
+  Log::verbose("[checkin] POST %s body=%s", url.c_str(), body.c_str());
+
+  status = http.POST(body);
+  }  // requestDoc and body released here, before responseDoc exists.
+
+  Log::verbose("[checkin] response status=%d", status);
+  if (status == 401) {
+    result.secretRejected = true;
+    http.end();
+    Log::line("[checkin] rejected: device secret no longer valid (401)");
+    return result;
+  }
+  if (status != 200) {
+    http.end();
+    Log::printf("[checkin] failed, http status=%d", status);
+    // A negative status is HTTPClient's catch-all for everything that failed
+    // before a response existed - DNS, TCP connect and the TLS handshake all
+    // report as -1. Http::diagnoseFailure() walks those layers and says which
+    // one actually broke. Only for negatives: a real status (401, 500, ...)
+    // means the server was reached and answered, which needs no archaeology.
+    if (status < 0) {
+      Http::diagnoseFailure("checkin");
+    }
+    return result;
+  }
+
+  JsonDocument responseDoc;
+  const DeserializationError err = deserializeJson(responseDoc, http.getStream());
+  http.end();
+  if (err) {
+    // The code was being thrown away, and the line that replaced it named the
+    // wrong party. DeserializationError distinguishes InvalidInput,
+    // IncompleteInput, EmptyInput, TooDeep and NoMemory, and only the first four
+    // are anything to do with what arrived: NoMemory means the bytes were fine
+    // and THIS DEVICE could not hold them. ArduinoJson needs roughly the
+    // response size again in heap while parsing, this is the largest parse the
+    // firmware does, and on a board whose contiguous heap decays all evening
+    // NoMemory is by far the likeliest of the five. "response was not valid
+    // JSON" sent every one of those to look at the server.
+    // MEASURED ONCE, HERE, AND PRINTED ON EVERY BRANCH. The figure is what
+    // decides the classification below, so it has to be the same number the log
+    // line shows - reading it twice would let the message and the decision
+    // disagree about a value that moves between two calls.
+    //
+    // Both heap figures, for the reason App.ino's [health] line prints both:
+    // ESP.getMaxAllocHeap() reads a constant 32,756 on this board and has
+    // already caused wrong diagnoses, so the honest number is printed beside the
+    // misleading one rather than instead of it.
+    const size_t largest = Http::largestContiguousBytes();
+    const unsigned freeHeap = static_cast<unsigned>(ESP.getFreeHeap());
+
+    // A FRESH TLS SESSION NEEDS 16,717 CONTIGUOUS BYTES TWICE - see
+    // Http::kTlsRecordBufferBytes. When the largest single block is below the
+    // pair, no single run can hold both, and the second allocation has only the
+    // remainder to live in.
+    const bool couldNotHoldAFreshSession = largest < (2 * Http::kTlsRecordBufferBytes);
+
+    // TWO WAYS TO BE AN OUT-OF-MEMORY FAILURE, AND THE SECOND ONE WAS BEING
+    // BLAMED ON THE SERVER FOR TEN DAYS.
+    //
+    // NoMemory is the honest one: ArduinoJson itself said it could not hold the
+    // parse. IncompleteInput is the one that lies. The stream really was short,
+    // so by the letter of the code the input WAS incomplete - but on this board
+    // the usual reason it is short is that the read buffer could not be
+    // allocated, not that the server sent less than it promised.
+    //
+    // Confirmed on device 17 over 74 minutes of stream on 2026-09-15: every
+    // failure in the run followed an rgb565 graphic card draw, at free8BIT
+    // around 30,650 with a largest block of 25,588. The first record buffer fits
+    // in that block; the second has about 14KB of remainder and does not. Every
+    // POST was recorded server-side and every other device answered ok in the
+    // same minutes, so nothing was wrong with the server on any of them.
+    //
+    // WHY THE OBVIOUS DISPROOF IS NOT ONE. Successful check-ins were logged at
+    // largest=18,420, BELOW figures at which others failed, which looks like it
+    // rules the heap out and does not: a REUSED session allocates neither
+    // buffer. Largest-block alone does not predict success. What predicts it is
+    // whether a fresh handshake was needed. That inference was got wrong once
+    // already and is written down here so it is not got wrong again.
+    //
+    // THE MIRROR ERROR IS ACCEPTED DELIBERATELY. A genuinely truncated stream,
+    // arriving on a reused session while heap happens to be low, is now
+    // attributed to heap. That is the wrong attribution in that case, and it is
+    // the better trade: the action it produces (release the RAM buffers, and
+    // restart to reclaim memory if it keeps up) is harmless when the server was
+    // at fault, whereas the action the old classification produced counted
+    // toward UNREACHABLE and told the fleet the network had failed. One is a
+    // wasted remedy; the other is a permanent false record of what broke.
+    result.responseOutOfMemory =
+        err == DeserializationError::NoMemory
+        || (err == DeserializationError::IncompleteInput && couldNotHoldAFreshSession);
+
+    if (err == DeserializationError::NoMemory) {
+      Log::printf("[checkin] response did not parse: %s - the server answered and the bytes were "
+                  "fine, THIS DEVICE had no heap to hold them (largest 8BIT block=%u, free heap=%u)",
+                  err.c_str(), static_cast<unsigned>(largest), freeHeap);
+    } else if (result.responseOutOfMemory) {
+      Log::printf("[checkin] response did not parse: %s - the stream was short, and this device "
+                  "could not have held a fresh TLS session when it happened, so the likeliest "
+                  "cause is THIS DEVICE rather than the server (largest 8BIT block=%u needs %u "
+                  "twice, free heap=%u). NOT counted toward the unreachable threshold",
+                  err.c_str(), static_cast<unsigned>(largest),
+                  static_cast<unsigned>(Http::kTlsRecordBufferBytes), freeHeap);
+    } else {
+      // The heap figures are printed here too, and that is the whole point of
+      // the change: the suggestion that produced it asked for the largest block
+      // beside the error code on EVERY parse failure, so that the next person
+      // can see for themselves whether these cluster below the floor. A log
+      // line that only prints the measurement when the code already decided it
+      // mattered cannot be used to check the decision.
+      Log::printf("[checkin] response did not parse: %s - this device could have held a fresh TLS "
+                  "session, so the server's answer is what was wrong (largest 8BIT block=%u, "
+                  "free heap=%u)",
+                  err.c_str(), static_cast<unsigned>(largest), freeHeap);
+    }
+    return result;
+  }
+
+  result.ok = true;
+
+  // The raw response, re-serialized from what was just parsed rather than
+  // captured while streaming off http.getStream() above - that stream is
+  // consumed once, straight into responseDoc, precisely so this device never
+  // has to hold the whole body as a second, separate String at the same time
+  // it holds the parsed JsonDocument. Guarded on streamingEnabled() rather
+  // than left to Log::verbose()'s own internal gate, since building this
+  // String at all is the cost worth avoiding on every ordinary check-in, not
+  // just the verbose() call that would follow it.
+  if (Log::streamingEnabled()) {
+    String rawResponse;
+    serializeJson(responseDoc, rawResponse);
+    Log::verbose("[checkin] response body=%s", rawResponse.c_str());
+  }
+
+  // The round trip actually completed, so whatever decode failures were
+  // just reported above are now the server's problem to have seen - clear
+  // them so a persistent failure is reported once per occurrence rather
+  // than resending the same ids on every check-in forever. Symmetric with
+  // Actions::clearAccepted() below: both only drop what this exact
+  // successful response confirms was received.
+  if (Assets::decodeFailureCount() > 0) {
+    Assets::clearDecodeFailures();
+  }
+
+  // The showings this request carried are now the server's. Cleared by COUNT
+  // rather than wholesale, because the buffer keeps filling while the request
+  // is in flight: a draw that finished between the snapshot and this line was
+  // never sent, and clearing everything would lose it with nothing to say so.
+  //
+  // Only on a completed round trip, the same rule the presses and the decode
+  // failures above follow. A failed check-in leaves them buffered for the next
+  // one, and the server deduplicates on the instance id, so a retry cannot
+  // double-count.
+  if (gImpressionsSent > 0) {
+    Impressions::clearReported(gImpressionsSent);
+    gImpressionsSent = 0;
+  }
+
+  result.acknowledged = responseDoc["acknowledged"] | false;
+  result.updateAvailable = responseDoc["updateAvailable"] | false;
+  // Absent reads as false, which is the only safe default for a field whose
+  // effect is a reboot: a server that has never heard of CAL updates asks for
+  // nothing. Firmware predating the field and a server predating it both
+  // degrade to today's behaviour rather than to a reboot loop.
+  result.calUpdateAvailable = responseDoc["calUpdateAvailable"] | false;
+  result.debugStreamRequested = responseDoc["debugStreamRequested"] | false;
+
+  // Compared against the one token rather than parsed, because there is exactly
+  // one value that turns a display and everything else is landscape. `| ""`
+  // covers absent, null and a non-string together, so a server predating this
+  // field leaves the display exactly as it was.
+  result.portraitRequested = strcmp(responseDoc["displayOrientation"] | "", "portrait") == 0;
+  result.tlsReconnectProbeRequested = responseDoc["tlsReconnectProbeRequested"] | false;
+  result.sdReformatRequested = responseDoc["sdReformatRequested"] | false;
+  // An ISO-8601 instant on the wire, converted to an epoch second here so the
+  // watchdog compares two integers rather than parsing a string on every health
+  // check. The server has already dropped a window that elapsed by ITS clock;
+  // this device checks again against its own, because the two can disagree and a
+  // suppressed watchdog on a genuinely unreachable device is the one harm this
+  // feature could do. See CheckIn::Result::maintenanceUntilUtc.
+  result.maintenanceUntilUtc = parseMaintenanceUntil(responseDoc["maintenanceUntilUtc"]);
+  result.utcOffsetMinutes = responseDoc["utcOffsetMinutes"] | 0;
+  // `| false` covers a server predating this field, which means 24-hour - the
+  // same thing an explicit false means. See CheckIn.h's own remarks.
+  result.use12HourClock = responseDoc["use12HourClock"] | false;
+  result.isDaytime = responseDoc["isDaytime"] | true;
+  // `| -1` covers a JSON null and a field an older server never sends at all. Both
+  // mean the same thing to this client - no sunrise or sunset to show - so neither
+  // needs distinguishing here.
+  result.sunriseMinutesUtc = responseDoc["sunriseMinutesUtc"] | -1;
+  result.sunsetMinutesUtc = responseDoc["sunsetMinutesUtc"] | -1;
+  // `| -1.0` covers a JSON null and a field an older server never sends at all, the
+  // same reasoning as sunriseMinutesUtc/sunsetMinutesUtc above - both mean "nothing
+  // to show" here, since unlike sunrise/sunset there is no separate polar-style
+  // absent case to distinguish for the Moon's phase.
+  result.moonPhase = responseDoc["moonPhase"] | -1.0;
+  result.moonIlluminatedFraction = responseDoc["moonIlluminatedFraction"] | -1.0;
+  result.moonPhaseName = String(responseDoc["moonPhaseName"] | "");
+  // The next moonrise or moonset, already chosen by the server. `| -1` and `| ""`
+  // cover a JSON null and a field an older server never sends at all, the same
+  // reasoning as sunriseMinutesUtc above - but here the kind carries one more
+  // state than the minute does. An empty kind is "the server said nothing";
+  // "none" with a minute of -1 is "the server looked and there is no event to
+  // name". The card draws those two differently, so they are not collapsed here.
+  result.nextMoonEventMinutesUtc = responseDoc["nextMoonEventMinutesUtc"] | -1;
+  result.nextMoonEventKind = String(responseDoc["nextMoonEventKind"] | "");
+  // `| -1` covers a JSON null and a field an older server never sends at all, the
+  // same reasoning as sunriseMinutesUtc/sunsetMinutesUtc above - both mean "no
+  // tide to show" here.
+  result.nextHighTideMinutesUtc = responseDoc["nextHighTideMinutesUtc"] | -1;
+  result.nextLowTideMinutesUtc = responseDoc["nextLowTideMinutesUtc"] | -1;
+  // `| -999.0`/`| -1.0` cover a JSON null and a field an older server never sends at
+  // all, the same reasoning as nextHighTideMinutesUtc/nextLowTideMinutesUtc above -
+  // all mean "no ISS position to show" here.
+  result.issLatitude = responseDoc["issLatitude"] | -999.0;
+  result.issLongitude = responseDoc["issLongitude"] | -999.0;
+  result.issDistanceMiles = responseDoc["issDistanceMiles"] | -1.0;
+  result.issBearingDegrees = responseDoc["issBearingDegrees"] | -1.0;
+  // A different feature from the live position just above - the station's
+  // next predicted pass. `| ""` then parseIso8601Utc() covers a JSON null and
+  // a field an older server never sends at all the same way `| -1.0` does
+  // for the plain-number fields; parseIso8601Utc() itself returns 0 (this
+  // struct's "absent" sentinel for a time_t) for both. See CheckIn.h's own
+  // remarks on issNextPassRiseUtc for the full reasoning.
+  result.issNextPassRiseUtc = parseIso8601Utc(responseDoc["issNextPassRiseUtc"] | "");
+  result.issNextPassRiseAzimuthDegrees = responseDoc["issNextPassRiseAzimuthDegrees"] | -1.0;
+  result.issNextPassMaxElevationUtc = parseIso8601Utc(responseDoc["issNextPassMaxElevationUtc"] | "");
+  result.issNextPassMaxElevationDegrees = responseDoc["issNextPassMaxElevationDegrees"] | -1.0;
+  result.issNextPassMaxElevationAzimuthDegrees =
+      responseDoc["issNextPassMaxElevationAzimuthDegrees"] | -1.0;
+  result.issNextPassSetUtc = parseIso8601Utc(responseDoc["issNextPassSetUtc"] | "");
+  result.issNextPassSetAzimuthDegrees = responseDoc["issNextPassSetAzimuthDegrees"] | -1.0;
+  // `| -1`/`| -1.0` cover a JSON null and a field an older server never sends
+  // at all, the same reasoning as every other optional numeric field above -
+  // all mean "no home value estimate to show" here. `| ""` then
+  // parseIso8601Utc() for the refresh timestamp is the same "both null and
+  // missing become 0" treatment issNextPassRiseUtc gets above. See
+  // CheckIn.h's own homeValueEstimate remarks.
+
+  // SPORTS. Applied straight to Sports:: rather than staged through
+  // CheckInResult, which is a deliberate break from how every field above is
+  // handled and is worth the inconsistency: the games are the only
+  // variable-length payload here, and carrying them on the result struct too
+  // would mean a second full copy of up to four cards x four games resident at
+  // once. On the heap whose LARGEST CONTIGUOUS BLOCK decides whether TLS opens,
+  // a duplicate that exists only to preserve a code shape is the wrong trade.
+  //
+  // A MISSING "sports" KEY CLEARS NOTHING. Absent means the server said nothing
+  // about sports - an older server, or a device with no sports card - and the
+  // right response is to leave whatever is on screen alone. An explicitly empty
+  // array is different: that is the server saying there is nothing on, and it
+  // clears. Conflating the two would blank a card every time an old server
+  // answered.
+  if (responseDoc["sports"].is<JsonArrayConst>()) {
+    JsonArrayConst sportsCards = responseDoc["sports"].as<JsonArrayConst>();
+
+    if (sportsCards.size() == 0) {
+      Sports::clearAll();
+    } else {
+      for (JsonObjectConst card : sportsCards) {
+        const char* cardId = card["cardId"] | "";
+        if (cardId[0] == '\0') { continue; }
+
+        // HOW OLD THIS CARD'S ANSWER IS, and absent on the ordinary path.
+        //
+        // `| ""` then parseIso8601Utc() gives 0 for a JSON null, for a server
+        // predating the field, and for anything the parser cannot read - the
+        // same "both null and missing become 0" treatment issNextPassRiseUtc
+        // and homeValueUpdatedAtUtc already get above. Here 0 carries real
+        // meaning rather than being a mere sentinel: the server sends this key
+        // ONLY when it judges the answer old, so its absence is the server
+        // saying the card is current, and old firmware ignoring it is exactly
+        // what makes the field additive against the closed compatibility gate.
+        // See SportsCardPayload.StaleSinceUtc and Sports.h's setGames().
+        //
+        // Read once per card rather than per game, which is the shape the
+        // server sends and the shape a reader needs - see
+        // CARD_ABSENCE_AND_AGE_DESIGN.md section 8.
+        const time_t staleSinceUtc = parseIso8601Utc(card["staleSinceUtc"] | "");
+
+        // WHAT THIS CARD IS SHOWING - the sport as API-Sports' own slug, and the
+        // league's display name. Card-level, like the timestamp above and for the
+        // same reason given there.
+        //
+        // `| ""` covers all three of absent, null and a non-string, so a server
+        // predating SportsCardPayload.Sport and .Competition (added 2026-10-09)
+        // produces two empty strings and a card that draws exactly as it did
+        // before the fields existed. That is what makes them additive against the
+        // closed compatibility gate.
+        const char* sport = card["sport"] | "";
+        const char* competition = card["competition"] | "";
+
+        Sports::Game games[Sports::kMaxGames];
+        uint8_t count = 0;
+
+        for (JsonObjectConst game : card["games"].as<JsonArrayConst>()) {
+          if (count >= Sports::kMaxGames) { break; }
+
+          Sports::Game& slot = games[count];
+          slot.startsAtUtc = parseIso8601Utc(game["startsAtUtc"] | "");
+
+          // An unrecognised state maps to Unknown rather than to a guess. A
+          // wrong "live" is the costliest reading: it invites somebody to watch
+          // a score that will never move.
+          const char* state = game["state"] | "";
+          if (strcmp(state, "live") == 0)            { slot.state = Sports::State::Live; }
+          else if (strcmp(state, "final") == 0)      { slot.state = Sports::State::Final; }
+          else if (strcmp(state, "scheduled") == 0)  { slot.state = Sports::State::Scheduled; }
+          else if (strcmp(state, "postponed") == 0)  { slot.state = Sports::State::Postponed; }
+          else                                       { slot.state = Sports::State::Unknown; }
+
+          // -1 for absent, which is Sports::kNoScore - and distinct from 0,
+          // because a nil-nil draw is a real scoreline and a game that has not
+          // started is not 0-0.
+          slot.homeScore = game["homeScore"] | static_cast<int>(Sports::kNoScore);
+          slot.awayScore = game["awayScore"] | static_cast<int>(Sports::kNoScore);
+
+          // Bounded copies: these strings came off a wire and their length is
+          // not this firmware's to trust.
+          //
+          // Through copyBoundedMarked() rather than a bare strncpy(), which is
+          // what these three were. A 20-byte cap cuts real team names -
+          // "Golden State Warriors" is 21 - and the cut fragment then fits the
+          // panel perfectly well, so layoutText() has nothing to mark and the
+          // household reads a misspelling instead of a truncation. The period
+          // is capped at 8, which "HALFTIME" fills exactly and "1ST QUARTER"
+          // does not; it gets the same treatment for the same reason, even
+          // though 8 is enough for nearly every code the provider sends.
+          copyBoundedMarked(game["home"] | "", slot.home, sizeof(slot.home), "sports home team");
+          copyBoundedMarked(game["away"] | "", slot.away, sizeof(slot.away), "sports away team");
+          copyBoundedMarked(game["period"] | "", slot.period, sizeof(slot.period),
+                            "sports period");
+
+          ++count;
+        }
+
+        Sports::setGames(cardId, games, count, staleSinceUtc, sport, competition);
+      }
+    }
+  }
+  result.homeValueEstimate = responseDoc["homeValueEstimate"] | -1;
+  result.homeValueRangeLow = responseDoc["homeValueRangeLow"] | -1;
+  result.homeValueRangeHigh = responseDoc["homeValueRangeHigh"] | -1;
+  result.homeValuePricePerSquareFoot = responseDoc["homeValuePricePerSquareFoot"] | -1.0;
+  result.homeValueUpdatedAtUtc = parseIso8601Utc(responseDoc["homeValueUpdatedAtUtc"] | "");
+  // `| ""` covers a JSON null, and a server predating this field that never
+  // sends it at all - same reasoning as moonPhaseName below. Both mean "no
+  // address to put at the top of the card" here, which is a real answer: a
+  // valuation the server resolved from a position fix rather than a stored
+  // address has none. See CheckIn.h's own homeValueAddress remarks.
+  result.homeValueAddress = String(responseDoc["homeValueAddress"] | "");
+  // `| ""` covers a JSON null and a field an older server never sends at all, the
+  // same reasoning as moonPhaseName above - both mean "no splash configured" here.
+  // See CheckIn.h's own splashAssetId remarks for what this device does with it.
+  result.splashAssetId = String(responseDoc["splashAssetId"] | "");
+  const int intervalSeconds = responseDoc["checkInIntervalSeconds"] | 300;
+  result.intervalMs = static_cast<uint32_t>(intervalSeconds) * 1000UL;
+
+  parseCardPolicy(responseDoc["cardPolicy"], result.cardPolicy);
+  parseMotionPolicy(responseDoc["motionPolicy"], result.motionPolicy);
+  parseCardActions(responseDoc["cardActions"], result);
+  parseAcceptedActionIds(responseDoc["acceptedActionIds"], result);
+  parseAnnouncements(responseDoc["announcements"], result);
+
+  Log::printf(
+      "[checkin] ok (acknowledged=%d updateAvailable=%d calUpdateAvailable=%d debugStream=%d "
+      "sdReformat=%d "
+      "intervalSeconds=%d utcOffsetMinutes=%d isDaytime=%d cardPolicy=%d cards=%u actions=%u "
+      "accepted=%u splashAssetId=%s)",
+      result.acknowledged, result.updateAvailable, result.calUpdateAvailable,
+      result.debugStreamRequested,
+      result.sdReformatRequested, intervalSeconds, result.utcOffsetMinutes, result.isDaytime,
+      result.cardPolicy.present, result.cardPolicy.entryCount, result.cardActionCount,
+      result.acceptedActionCount,
+      result.splashAssetId.length() > 0 ? result.splashAssetId.c_str() : "(none)");
+  return result;
+}
+
+}  // namespace CheckIn

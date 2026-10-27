@@ -1,0 +1,6962 @@
+#line 1 "C:\\Users\\Administrator\\Documents\\CAL\\README.md"
+# CAL — Client Application Loader
+
+The first application flashed onto a Discover Around Me device, and the only
+one that is never delivered over the air. CAL lives in the `factory` partition,
+gets the unit onto a network, authenticates it with its device secret, installs
+the real product application into the OTA partition, and hands over. It is a
+loader and a recovery image, not a product.
+
+The server this talks to lives in a separate repository
+(`DiscoverAroundMe`, https://github.com/rsmithbrett/DiscoverAroundMe); its
+`Firmware` domain is the catalog half — upload, checksum, mark-current, and the
+device-authenticated manifest/binary endpoints CAL consumes.
+
+## Why this is a separate project
+
+The product application and the loader have opposite constraints, and putting
+them in one binary means one of the two gets the wrong treatment.
+
+The application changes constantly and must be replaceable remotely — a bug in
+it costs a download. CAL cannot be replaced without physically recovering the
+hardware and putting a USB cable into it, so a bug in CAL costs a truck roll or
+a returned unit. That difference is what justifies the split: CAL is written to
+do as little as possible and change as rarely as possible. It renders no cards,
+holds no product logic, resolves no policy, and knows nothing about weather,
+listings, calendars or content. It gets the device to the point where something
+that *can* be updated takes over, and it stays behind as the fallback if that
+ever fails.
+
+Keeping it in its own repository rather than its own folder follows the same
+reasoning. The two are versioned on completely different clocks and share no
+build; a shared history would imply a coupling that does not exist.
+
+## Hardware
+
+An LCDWIKI **E32R28T**, from the "Cheap Yellow Display" family — ESP32-WROOM-32E,
+**4 MB flash**, no PSRAM, an ILI9341 240×320 panel driven in landscape
+(320×240), and an XPT2046 resistive touch controller. CAL does not use touch at
+all; every one of its screens is either informational or a QR code, and the one
+place a person has to type something (a WiFi password) deliberately happens on
+their phone rather than on a resistive panel.
+
+**Measured, not assumed** - `esptool`'s own chip read against a real unit on
+the bench (`esptool.exe --chip esp32 --port COMx write_flash ...`), not the
+generic "ESP32" the module part number alone implies:
+
+```
+Chip type:          ESP32-D0WD-V3 (revision v3.1)
+Features:           Wi-Fi, BT, Dual Core + LP Core, 240MHz, Vref calibration in eFuse, Coding Scheme None
+Crystal frequency:  40MHz
+```
+
+The specific silicon revision matters for exactly one thing this project has
+already been burned by not knowing precisely: what a raw `esptool write_flash`
+at a hand-picked offset actually needs to match. See "Recovering a device from
+a bare/erased chip" below for why a whole-chip erase followed by the wrong
+merged image very nearly turned a stale-secret problem into two bricked
+partitions instead of one.
+
+The display is brought up through LovyanGFX's **`LGFX_AUTODETECT`** rather than
+a hand-written pin map. This is not laziness. Most published CYD pin maps
+describe the Sunton boards, and the E32R28T's HSPI-style pinout differs from
+them — a copied pin map produces a blank or scrambled panel, while autodetect
+senses the board correctly. If autodetect is ever replaced with an explicit
+configuration, it must be measured against this specific board and not against
+the family name.
+
+For the record, since a mistaken belief about this board's buses cost this
+project several weeks: **the panel is on SPI2/HSPI (SCLK 14, MISO 12, MOSI 13,
+CS 15) and the SD card is on SPI3/VSPI (18/19/23, CS 5). They are separate
+buses and do not contend.** The section further down titled "The likely root
+cause: the SD card's SPI lines are shared with the display's" is superseded and
+kept only as a record of the wrong turn; "The shared SPI bus was never there"
+at the end of this file has the evidence.
+
+## Partition layout
+
+`partitions.csv`, at the repo root. Asymmetric on purpose, and this is the
+single decision the whole project rests on.
+
+The server-side README records the measurement that forced it: the product
+application, as flashed, is **2,166,784 bytes**, while the largest app slot in a
+conventional dual-slot OTA layout on 4 MB flash (`min_spiffs`) is **1,966,080
+bytes** — about 196 KB short. That gap was treated as a hard ceiling, and it was,
+*given the assumption that OTA requires two equal app partitions*. It does not.
+It requires somewhere to write an image that is not the partition currently
+executing. Splitting the flash unevenly satisfies that and removes the ceiling:
+
+| Name | Type | SubType | Offset | Size | Bytes | Holds |
+|---|---|---|---|---:|---:|---|
+| `nvs` | data | nvs | `0x9000` | `0x5000` | 20,480 | Device secret, WiFi, installed version, flags |
+| `otadata` | data | ota | `0xE000` | `0x2000` | 8,192 | Which app partition boots |
+| `factory` | app | factory | `0x10000` | `0x160000` | 1,441,792 | **CAL** — never written by OTA |
+| `ota_0` | app | ota_0 | `0x170000` | `0x240000` | 2,359,296 | The product application |
+| `callog` | data | `0x99` | `0x3B0000` | `0x10000` | 65,536 | CAL's boot journal |
+| `spiffs` | data | spiffs | `0x3C0000` | `0x30000` | 196,608 | Cached branding assets |
+| `coredump` | data | coredump | `0x3F0000` | `0x10000` | 65,536 | Panic backtraces — `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` |
+
+That fills 4 MB exactly, with nothing left over. `factory` was sized against a
+measured CAL build (see below) rather than a guess, with room to grow; `ota_0`
+is **2,359,296 bytes against a 2,166,784-byte build** — about 188 KB of headroom
+where there was previously a 196 KB deficit.
+
+**`callog` is newer than the rest of this table**, and was carved out of
+`ota_0`, which held the only real slack in the layout. `factory` was not
+touched — that is the warning this table has always carried and the one that
+cannot be walked back — and no existing partition's *offset* moved, so bringing
+an already-flashed unit onto this table is a table-only write that preserves its
+secret, its remembered networks and its installed App. The full argument, the
+four storage options that were rejected first, and the migration procedure are
+in *CAL can say why now: a boot journal in raw flash, read over USB* at the end
+of this file. The consequence worth stating
+plainly: the previously proposed remedy of dropping the ESP32-A2DP Bluetooth
+audio stack to reclaim 300–500 KB is **no longer required by the size ceiling**.
+It may still be worth doing on its own merits, but it is no longer the price of
+having OTA at all.
+
+The `spiffs` label is what the ESP32 Arduino LittleFS library looks for by
+default; the partition is formatted and used as LittleFS despite the name. That
+is conventional, not an oversight, but it is the kind of detail that reads as a
+bug six months later.
+
+**CAL's own size is measured, not guessed - but "re-verified on every build"
+overstated what actually happens, and that gap is worth being honest about.**
+The byte-for-byte partition-table decode described under *Building* below was
+a one-time manual diagnosis, not something `ci/build-firmware.sh` (or anything
+else) repeats automatically on every run. Every ordinary build only ever shows
+`arduino-cli`'s own generic percentage - which, as the App figure below has
+said for a while, reads against the *wrong* ceiling. Nothing currently fails
+loudly if a build actually exceeds its real partition. As of the last measured
+build: **1,323,599 bytes**, comfortably inside the 1,441,792-byte `factory`
+partition (118,193 bytes / 8.2% spare). Re-measure before trusting these
+numbers if the firmware grows meaningfully - `factory` cannot be resized for a
+unit already flashed, and there is no automated check standing between a
+future build and that exact mistake yet.
+
+**Re-measured with the boot journal in, 2026-09-15: 1,337,207 bytes** (the
+flashable `CAL.ino.bin` is 1,337,360), leaving **104,432 bytes / 7.2% spare** in
+`factory`. The journal pass cost 13,608 bytes, most of it the format strings of
+its roughly eighty new call sites rather than `Journal.cpp` itself. Worth
+restating in this exact paragraph, since it is the one that warns about it:
+`factory` cannot be resized on a unit already flashed, and that pass spent an
+eighth of the headroom that was left.
+
+**The App's own size, measured the same way.** As of tonight's ISS-pass-
+prediction / SD-mount-retry / RAM-fallback-graphics build: **1,474,960 bytes**,
+against the real `ota_0` partition - which is **2,359,296** bytes since `callog`
+was carved out of it, so **62.5%**, with 884,336 bytes spare. (It was 2,424,832
+and 60.8% before that change; the App did not grow, the slot shrank.)
+`arduino-cli` reports this same build as "75% of 1,966,080 bytes" - that is the
+stock `min_spiffs` table's own app slot, not this project's layout, and it is
+the wrong ceiling to read. `ota_0` above is the real one.
+
+**Found live, the hard way, the night this paragraph was last touched:** a
+bare-chip recovery flash used `App.ino.merged.bin` - a *standalone* merged
+image that assumes its own sketch owns the first app slot at `0x10000` - via
+a raw `esptool write_flash 0x0`. On this board's real, asymmetric table that
+address is `factory` (CAL's slot, 1,441,792 bytes), not `ota_0`. The result:
+`factory` got the App's bytes at the wrong offset and size ceiling ("Image
+length 1474960 doesn't fit in partition length 1441792"), `ota_0` was left
+entirely unwritten ("invalid magic byte"), and the device had no bootable
+partition of either kind - confirmed via a live serial monitor session, not
+guessed at. **`App.ino.merged.bin` and `CAL.ino.merged.bin` are not
+interchangeable for a bare-chip recovery, ever** - see "Recovering a device
+from a bare or erased chip" immediately below.
+
+## Recovering a device from a bare or erased chip
+
+Every release publishes, per sketch, a `bootloader.bin` + `partitions.bin` +
+raw `.ino.bin` trio and a single merged image combining all three at their
+correct offsets for that sketch alone. **The merged image is a convenience
+for flashing that one sketch onto a chip with nothing else on it** - it is
+not aware that this board's real, deployed layout has CAL and the App
+sharing one partition table. Each sketch's own merged build places its
+compiled binary at `0x10000`, because from that sketch's own standalone
+perspective that is simply "the first app slot" - correct for `CAL.ino.merged.bin`
+(CAL's rightful home really is `factory` at `0x10000`), silently wrong for
+`App.ino.merged.bin` (the App's rightful home is `ota_0` at `0x170000`, not
+`0x10000`).
+
+**To recover a device with nothing bootable on it (a fresh chip, or one that
+was just `erase_flash`'d):**
+
+1. Download that release's `CAL.ino.merged.bin` - never `App.ino.merged.bin` -
+   from its GitHub release assets.
+2. `esptool.exe --chip esp32 --port COMx write_flash 0x0 CAL.ino.merged.bin`
+   (no separate erase step needed if the chip is already blank; run
+   `erase_flash` first only if it is not).
+3. Power-cycle. CAL boots, shows its splash, and - since a full erase also
+   wipes remembered WiFi credentials, not just the device secret - opens its
+   own captive-portal WiFi setup (a QR code, network name
+   `Discover-Setup-XXXX`). Complete that on a phone.
+4. From there CAL's own `Updater::installApplication()` takes over: it finds
+   no bootable App installed, fetches the fleet's current release, and writes
+   it into `ota_0` through the ESP-IDF OTA partition API - which resolves the
+   real offset and size itself rather than needing anyone to know `0x170000`
+   by heart. This is the *only* correct way to get the App onto a bare chip;
+   never `write_flash` an App image directly unless you have independently
+   confirmed the exact offset and size against this file's own partition
+   table above, for this exact release.
+
+If a device only needs its *identity* (not its WiFi, not its installed App)
+reset, prefer the BOOT-button hold gesture over a full erase-and-reflash
+entirely - see "Two BOOT-button gestures" below, which as of this same
+incident has a second, longer tier that does exactly this without a serial
+cable at all.
+
+## The boot ladder
+
+`setup()` in `CAL.ino` is the whole of CAL's control flow, and
+it is written to be read top to bottom.
+
+0. **Open the journal and dump the previous boot**, before anything else is
+   initialised — see *CAL can say why now* at the end of this file. This is
+   ahead of the display on purpose: a hang inside `lcd.init()` is one of the
+   things it exists to make visible, and it cannot record that if it runs
+   afterwards. Budgeted at under 400 ms so it does not eat into the two-second
+   rule in step 4.
+1. **Load identity from NVS.** No device secret means the unit was never
+   provisioned. That is a manufacturing fault, not something a household can
+   resolve, so CAL says exactly that and stops rather than starting a setup
+   flow that cannot succeed. This runs *ahead of the display*, and only because
+   step 3 needs `bootAttempts` and `updreq` to decide who owns the panel. It is
+   `prefs.begin()` and a handful of NVS reads — milliseconds, no flash erase, no
+   network — so step 4's two-second rule is unaffected, and anything inserted
+   here has to keep that true.
+2. **Check the BOOT button.** Two tiers on one gesture — see *Two BOOT-button
+   gestures* below. When it is held, this draws its own prompt straight away,
+   which is also what stops step 3 from ever handing over with an abandoned
+   "keep holding" prompt left on the glass.
+3. **Decide whether to contact the server at all, and who draws this boot's
+   loading screen.** If a healthy application is installed and no update was
+   requested, CAL hands over immediately — see *CAL must not need the network to
+   boot* immediately below. On that branch **and only that branch**, if three
+   further conditions also hold, CAL paints nothing at all and lets the App draw
+   the restart's single loading screen; every other path, CAL is loud. The
+   conditions, the reasoning, and the convention for anybody adding a message to
+   a boot path in *either* binary are in
+   **[`BOOT_SCREEN_OWNERSHIP.md`](BOOT_SCREEN_OWNERSHIP.md)**. Read it before
+   adding a boot message: the question is which binary owns the panel at that
+   instant, before it is a question about wording.
+4. **Display, within about two seconds of power.** A dark screen is
+   indistinguishable from a dead device and will be unplugged mid-setup. The
+   cached brand splash is shown if one exists, otherwise a neutral one. Every
+   `showStatus()` screen for the rest of this ladder now draws that same
+   image again as its backdrop (moved up slightly to leave room for the
+   status line under it) rather than clearing to a blank screen and retyping
+   text - so a boot that works through several status lines in a row reads as
+   one continuous branded screen, not the brand flashing once and vanishing.
+   Skipped *only* on step 3's quiet handover. `Display::begin()` is idempotent
+   and every draw function brings the panel up itself if it has not been called,
+   so that skip is the absence of a draw rather than a disabled display — there
+   is no reachable state in which CAL wants to draw and cannot.
+5. **Hand over immediately** if step 3 found a healthy application and no reason
+   to contact the server. This is where the overwhelming majority of this
+   device's boots end.
+6. **Join WiFi** with stored credentials, retrying, and fall back to the
+   captive-portal provisioning flow if that fails.
+7. **Synchronise the clock over SNTP.** Mandatory, and mandatory *in this
+   position*. The device has no RTC and boots believing it is 1970, so every
+   certificate it is offered looks not-yet-valid and TLS fails. A result earlier
+   than `Config::kEarliestPlausibleTime` is treated as a failure rather than an
+   answer, because SNTP itself is unauthenticated. The failure is reported to the
+   household as "cannot reach the internet", which is what they can act on — not
+   as a certificate error.
+8. **Fetch the discovery document**, cache brand assets (cosmetic, never fatal),
+   compare the manifest against the installed version, install if they differ.
+9. **Hand over**, or — if there is no application to hand over to — show the
+   server-supplied QR and wait.
+
+### CAL must not need the network to boot
+
+Step 3 is the rule that matters most in the field. If an application is installed
+and healthy, CAL hands control over **without contacting the server**, and lets
+the application decide when to check for updates. The alternative — checking on
+every boot before handing over — makes a service outage, an expired
+certificate, or a DNS mistake into a fleet outage in which every device in every
+household stops working at once. `mustContactServer()` returns true only when the
+application asked for an update or when there is no bootable application to run.
+
+Failures at every rung are terminal-with-a-message rather than
+reboot-and-retry. A unit repeating a failed boot every few seconds is much
+harder to diagnose than one sitting on a screen that names the problem, and the
+screen always says what to do, never only what went wrong.
+
+## Updates: reboot to the updater
+
+With a single OTA slot, the application **cannot update itself** — it cannot
+write the partition it is executing from. This is the direct cost of the
+asymmetric layout, and it is paid deliberately.
+
+The flow is:
+
+1. The application discovers a new build is available and sets the
+   `updreq` flag in NVS.
+2. It reboots. The bootloader runs `factory`, so CAL comes up.
+3. `mustContactServer()` sees the flag, so CAL joins WiFi, syncs time, fetches
+   discovery and the manifest, and downloads the binary into `ota_0`.
+4. The image is streamed in 1 KB chunks with a running SHA-256, and the hash is
+   compared against the manifest **before** `Update.end()` commits it. A
+   truncated or tampered download is discarded rather than marked bootable, so a
+   half-written partition can never become the running application.
+5. On success CAL records the installed version, clears the boot-attempt
+   counter and the update flag, then sets the boot partition and restarts into
+   the new application.
+
+**The trade-off, stated honestly:** there is no instant A/B rollback to the
+*previous version*, because there is no second slot holding it. What there is
+instead is a permanent recovery image. A bad build cannot brick a unit — the
+worst case is a device that falls back to CAL and re-downloads. For hardware
+sitting in strangers' kitchens with no console and no service technician, an
+image that always boots is worth more than the ability to revert one version.
+
+### The anti-brick counter
+
+Handing control to an application that crashes on startup would otherwise be
+unrecoverable: the device would boot the bad image, crash, boot it again, and
+never reach the code that could replace it.
+
+`Updater::bootApplication()` therefore **increments an NVS boot-attempt counter
+immediately before handing over**, and the application is expected to call the
+clearing path once it reaches steady state. `haveBootableApplication()` returns
+false once the counter reaches `Identity::kMaxBootAttempts` (3), at which point
+CAL stops handing over, treats the installed application as bad, and
+re-downloads it instead.
+
+The ordering is the whole mechanism. The counter is written *before* the jump,
+by the component that survives the crash, and cleared *after* success by the
+component that only runs if things worked. A counter incremented after a
+successful boot would prove nothing.
+
+## The App firmware
+
+`App/` is the product application the sections above refer to only from CAL's
+side of the fence — the thing "the application" means throughout *Updates:
+reboot to the updater*. It runs from `ota_0`, installed and started by CAL,
+and reuses CAL's own `Identity.h`/`.cpp` and `Tls.h`/`.cpp` verbatim (same NVS
+namespace, same TLS trust setup) plus a trimmed `Config.h`. Unlike CAL, it is
+meant to run indefinitely — failures here retry rather than halt, because a
+display that goes dark until someone finds a USB cable is a worse outcome for
+a household than one that keeps trying. It renders a rotation of cards —
+weather, aircraft overhead, a picture the server picks, sunrise/sunset, and a
+standalone clock/date card — scheduled by a policy the server hands down on
+check-in and navigable by touch (see *The card
+manager*, below).
+
+### The weather and aircraft cards, styled after CYD-Dickey
+
+A separate, more mature project on similar hardware — `CYD-Dickey`, a
+Discover Around Me build for the same ESP32/ILI9341 panel — already has a
+working weather card and an aircraft-overhead card. `App/`'s own weather card
+was restyled to match its actual look, and its aircraft card is new; CAL had
+no aircraft rendering of any kind before this.
+
+**The weather card** (`Display::showWeatherCard`) moved from a screen-centered
+black card to CYD-Dickey's actual layout: a white background, a small
+colour-banded "WEATHER" label in the top-left corner (`Display.cpp`'s
+`drawCardBanner`, mirroring their `lcd.fillRect(0, 0, 110, 22, TFT_NAVY)` +
+bold-white-label pattern from `drawWeatherCard()`), the temperature set
+**left-aligned** in a bold sans GFX font rather than centered bitmap text, and
+the short-forecast text below it left-margined instead of centered. The
+hand-drawn degree ring from before (`drawTemperature`, formerly
+`centeredTemperature`) stayed — CYD-Dickey sidesteps the missing-glyph problem
+by never printing a degree sign at all (`"%.0fF\n"`), but CAL already had the
+better fix, and regressing to their plain "72F" would be a downgrade dressed
+up as alignment. `location` (Home or Target's city/state, which CYD-Dickey's
+card has no equivalent field for) is kept.
+
+#### Why the weather card was restyled a second time
+
+That first pass copied CYD-Dickey's *elements* faithfully and was still
+reported as worse than the original once it was seen on hardware. Reading the
+two implementations side by side explains why, and it is not a detail either
+version got wrong.
+
+CYD-Dickey's card carries **five live readings and a five-day strip**:
+temperature, condition, feels-like, humidity and wind, then a bottom band of
+`M/D` plus high/low for five days (`drawWeatherCard()`, `WeatherInfo`,
+`DailyForecast`). It fills the panel top to bottom, and its modest 12pt
+temperature is the right size *because* four other readings and a forecast
+band are competing with it for the same 320×240.
+
+CAL's card has **three fields** — temperature, condition, location — because
+that is all `/api/myweather/mine` sends. Copying a dense layout's type sizes
+onto a third of its content produced the worst of both: roughly 70 vertical
+pixels of content on a 240-pixel panel, everything below y≈120 blank, and
+nothing set large enough to read from across a room. It was *small* and
+*empty* at the same time.
+
+So the second pass stopped imitating their density and spent the space
+instead — fewer facts, set larger:
+
+- **The temperature is now a hero number** at `FreeSansBold24pt7b` (35px
+  digits) rather than sharing 12pt with everything else, with the hand-drawn
+  degree ring scaled to match. `drawTemperature` takes the ring radius as a
+  parameter now, because a fixed 5px ring that read as a degree mark beside a
+  12pt numeral reads as a stray speck beside a 24pt one; at large radii it
+  draws two concentric circles so the ring has a stroke weight in the same
+  family as the bold digits beside it.
+- **The two supporting lines are legible.** `location` and the "updated" line
+  were both `Font0` — the 6×8 bitmap font — in muted grey. That is the exact
+  combination this file already records as having *failed on real hardware*
+  for the corner clock: about 3mm tall on a 2.8" panel, low contrast, and
+  reported by the first person who saw it as simply not being there. The clock
+  was fixed at the time; these two lines on the same card had the identical
+  defect for the identical reason and were not. Both are now set in that same
+  bold 9pt face, and `location` moved to its own line under the banner.
+- **The condition phrase picks a size that fits rather than clipping.** NWS's
+  `shortForecast` is a whole phrase ("Chance Showers And Thunderstorms then
+  Partly Sunny"), not CYD-Dickey's one-or-two-word `weatherCodeDescription()`.
+  It renders at 12pt while it lands in two lines or fewer and drops to 9pt and
+  three lines when it does not (`wrappedLeftText` gained a `measureOnly` mode
+  so the same wrap that draws is the one that measures). Truncating mid-phrase
+  can invert the meaning of exactly the sentences worth reading — "…then
+  Clearing".
+- **The "updated" line is now true.** It was the hardcoded string `"Updated
+  just now"` passed on *every* draw, including redraws of a forecast fetched
+  twenty minutes earlier and including reverse navigation into card history,
+  where it was false by construction. `Weather.cpp` now records `millis()` at
+  each successful fetch and the card says "Updated 7 min ago". A freshness
+  label that is always the same string is worse than none, because it reads as
+  a live measurement and is not one. It is pinned to a fixed baseline rather
+  than flowing under the condition block, so it does not jump around the card
+  when the forecast wording changes length.
+
+**What was deliberately not done:** the empty space was not padded with
+invented content. There is no placeholder humidity, no fake wind reading and
+no forecast strip drawn from data the device does not have.
+
+#### What CYD-Dickey's weather card shows that this server does not send
+
+This is the real reason the two cards cannot be made to match, and it is
+**server-side, not firmware-side**.
+
+*Not modelled server-side.* Feels-like, humidity and wind come from
+Open-Meteo's `current` block in CYD-Dickey (`apparent_temperature`,
+`relative_humidity_2m`, `wind_speed_10m`). DiscoverAroundMe's weather pipeline
+is built on the US National Weather Service instead, and `WeatherPeriod` — the
+server's own model — carries none of the three. The cost of adding them is not
+uniform, and it is worth being exact rather than lumping them together:
+
+- **Wind** is the cheap one. NWS's `/forecast` periods *do* carry `windSpeed`
+  and `windDirection`; `NwsForecastClient.ForecastPeriod` simply does not map
+  them. That is a field on an existing DTO, not a new integration.
+- **Humidity and feels-like** are not in what this endpoint's periods provide.
+  Getting them means a different NWS endpoint or a second provider — a data
+  source change, not a display field.
+
+None of this is done here, and none of it is faked on the card.
+
+*Available on the server, deliberately withheld from the device.* The five-day
+strip is the bigger loss and the more fixable one. `WeatherResult.Periods` is
+a full NWS forecast — roughly a fortnight of periods, each with `Name`
+("Tuesday", "Tuesday Night"), `IsDaytime`, `Temperature`, `ShortForecast` and
+`StartTimeUtc`. `MyWeatherEndpoints.ForDeviceLocation` **trims that to
+`Periods[0]`** before it goes over the wire, for a documented and entirely
+sound reason: the untrimmed response measured 9,194 bytes for a real account,
+and a real device failed to parse it, because ArduinoJson's DOM parser needs
+roughly its own input size again in heap on a chip that has already spent most
+of it on WiFi and TLS.
+
+So the data exists and the device is not allowed to see it. Closing this gap
+is a small, bounded server change — send the first *N* periods carrying only
+`name`, `temperature` and `shortForecast`, which is a few hundred bytes rather
+than nine thousand, nowhere near the ceiling that forced the trim — and then a
+firmware change to render the strip. **Neither is done here**, and the card is
+designed around the three fields that genuinely arrive rather than around a
+strip that would have to be faked to appear. The aircraft card below applied
+this same standard to its own missing airline/route data for a while, until
+that gap was closed server-side — see "Airline name, logo, and route" below
+for what changed once it was.
+
+#### The weather card retired, folded into Forecast
+
+The five-day-strip gap described above was eventually closed server-side —
+`MyWeatherEndpoints.ForDeviceForecast` now sends up to
+`Forecast::kMaxPeriods` (10) trimmed periods over `/api/myweather/forecast`,
+and `App/Forecast.h`/`.cpp` became its own card built around that endpoint,
+independent of `Weather.h`. For a while the two lived side by side in the
+rotation: `weather` (`Display::showWeatherCard`) showing "right now" from
+`/api/myweather/mine`'s `periods[0]`, and up to five `forecast`/`forecast2`…
+instances each cycling through their own fetched periods one per dwell,
+paged with the same "N of M" caption `showListingsCard()` uses.
+
+That split stopped making sense once Forecast existed: `/api/myweather/mine`
+and `/api/myweather/forecast?location=home` resolve to the *same* NWS period
+for "today" — `Weather::fetchMine()`'s "current conditions" was never a
+distinct live reading, just periods[0] of a forecast response fetched from a
+second endpoint with its own auth round-trip. Two cards, two HTTP requests,
+one underlying fact. Brett asked for them to become one card — a single
+slide per Forecast instance showing today's reading as a hero the way
+Weather's card used to, with the rest of the week beneath it — so:
+
+- **`Weather.h`/`.cpp` and `Display::showWeatherCard`/`showWeatherStatus` are
+  deleted outright**, not deprecated in place. Nothing else called them —
+  `Weather::fetchMine()` was cited in `Aircraft.h`'s and `Listings.h`'s own
+  comments only as an example of the shared auth idiom, never actually
+  invoked from either — so there was no caller left to leave a compatibility
+  path for.
+- **Each Forecast instance now draws one combined slide instead of paging
+  through its periods.** `periods[0]` — "Today" in daylight, "Tonight" after
+  dark, whichever the NWS response's own first entry is — takes the hero
+  spot `showWeatherCard()`'s temperature used to occupy, doing double duty as
+  both "current conditions" and "day one of five". Beneath it, a five-column
+  strip reads `periods[0, 2, 4, 6, 8]` — every other entry, skipping the
+  interleaved overnight periods NWS always returns between two daytime ones —
+  so the strip is five distinct calendar days regardless of whether the
+  device happens to fetch at 2pm or 2am. This is the same data Forecast
+  already pulls in one request; the redesign costs no additional fetch.
+  `Cards::Kind::List`'s own "N of M" paging caption drops off this card as a
+  result — there is nothing left to page through — the same way it was never
+  drawn at all for a single-period response before this.
+- **Every period, hero and strip alike, gets a condition icon.** NWS's
+  `shortForecast` is free text ("Chance Showers And Thunderstorms then Partly
+  Sunny"), not a coded enum, so `Display.cpp`'s `classifyCondition()` matches
+  it against a short, ordered list of keywords — thunder/storm, snow/flurries/
+  sleet, rain/showers/drizzle, fog/haze/mist, cloud/overcast, partly, clear/
+  sunny/fair — and falls back to a plain cloud glyph for anything it does not
+  recognise, rather than guessing. The icons themselves
+  (`drawWeatherIcon()`/`drawCloudShape()`) are hand-drawn with LovyanGFX
+  primitives — filled circles for a sun, three overlapping circles plus a
+  base for a cloud, short lines or dots layered under it for rain/snow, a
+  filled zigzag for a storm bolt — the same reasoning `drawTemperature()`'s
+  hand-drawn degree ring already applies to this font: no bitmap asset, no SD
+  card or network fetch, nothing that can fail to decode. They are sized as a
+  parameter (`radius`) so the identical drawing code serves both the larger
+  hero icon and the five small strip icons.
+
+**No automated test exists for this change**, or for any `App/` display
+code — there is no ESP32 test harness in this repository (see the C# side's
+own `TEST_PLAN.md` for what *is* covered, none of it firmware rendering).
+This is called out rather than silently skipped: the change is verified by
+compiling clean, by CAL's CI (`ci/build-firmware.sh`) producing a real
+release build, and by Brett confirming on real hardware — inspection and a
+live device, not a test suite, same limitation `Assets.cpp`'s decode-retry
+logic and every other `App/` change this session shared.
+
+**The aircraft card** (`Display::showAircraftCard`, `App/Aircraft.h`/`.cpp`)
+is new. It fetches `/api/myaircraft/mine` with the device's own secret — the
+same authentication, refusal-body shape (`reason`/`message`), and
+`NetworkClientSecure`/`HTTPClient`/`Tls::configure` idiom as `Weather.h`/`.cpp`
+and `CheckIn.cpp` already use — and shows the nearest aircraft the server
+reports (the response is already sorted by distance and pre-filtered to
+airborne traffic within the owner's radius). Visually it borrows CYD-Dickey's
+`drawFeaturedAircraft()` layout: a bold headline at top-left, then stat rows
+below with a muted label on the left and the value right-justified against
+the card's right margin, using the same truncate-and-right-justify technique
+as their `drawTruncatedRight()` (`Display.cpp`'s `drawRightJustified`) so a
+short value and a long one both end flush at the same edge. The 8-point
+compass-direction lookup for `headingDegrees` is also a direct port of theirs.
+
+**Airline name, logo, and route — added after the gap above was closed
+server-side.** `AircraftSighting` carries seven more fields, all optional:
+`airlineCode`, `airlineName`, `airlineLogoAssetId`, `originCode`,
+`originName`, `destinationCode`, `destinationName`. The server resolves these
+the same way CYD-Dickey's own `Airlines.h`/`Route.h` did, just fleet-wide in
+one cache instead of twelve entries of per-device RAM lost on every reboot.
+`originName`/`destinationName` reached the wire the same day the codes did —
+this card simply didn't read them yet; see below for why that changed.
+
+`airlineName` takes over the headline slot CYD-Dickey gives its logo/name and
+this card previously gave the bare callsign; callsign drops to the secondary
+line alongside distance instead of disappearing (`"UAL123 - 4.2 mi away"`).
+Empty `airlineName` — a server old enough to predate the field entirely, the
+6-month backward-compatibility case — falls straight back to callsign as the
+headline, this card's entire original behaviour with nothing new to detect or
+branch on.
+
+A route line appears between the distance line and the stat rows whenever
+either side resolves to *something* — a name or a code — and says nothing at
+all when neither does, the same "nothing configured, nothing shown" rule
+Graphic.cpp already follows for a missing picture: this card does not
+fabricate a dash or a placeholder where there is no data.
+
+What used to be codes-only (`"KRDU -> KLGA"`) now prefers each side's name and
+falls back to that side's bare code independently — not as an all-or-nothing
+pair. That "independently" matters because hexdb can resolve a route's ICAO
+code without a name for one particular airport (see `AircraftSighting.cs`'s
+own remarks on the server side), so a route with a good name for the origin
+and only a code for the destination shows exactly that:
+`"Raleigh-Durham Intl, NC -> KLGA"`, not a demotion of the whole line back to
+codes because one side came up short. A server old enough to predate
+`originName`/`destinationName` entirely — the 6-month compatibility case,
+same as every other optional field this card reads — sends codes on both
+sides, and the card renders precisely what it always has.
+
+The tradeoff the codes-only version of this line was dodging is real: two
+full airport names plus everything else already on this card (headline,
+distance, three stat rows, freshness) doesn't fit on one line of a 320x240
+panel the way two 4-letter codes always did. Rather than shrinking the font
+or truncating a name mid-word to force it back onto one line — the identical
+"small and empty vs. too dense" tradeoff the missing weather forecast strip
+above chose *not* to fake data for — this line wraps, up to two lines, using
+the same `wrappedLeftText` word-wrap the boot-ladder screens already use for
+server-supplied strings of a length this file doesn't control. The stat rows
+below aren't at a fixed y any more, either: they start right after however
+many lines the route text actually used (`Display::showAircraftCard`'s own
+`kRouteLineHeight` constant explains the arithmetic), so a plain one-line
+code route lands the stat rows at the exact same y=100 this card always used,
+and only a genuinely long name-based route pushes them down to make room.
+
+**The logo** is the first image this build draws that is *not* the whole
+card. Every existing PNG draw here (`Assets::drawCached`/`drawFullScreen`,
+`Graphic.cpp`'s picture card) fills the entire 320x240 panel; a small airline
+logo alongside text needed a new primitive, `Display::drawPngFromSdInRect()`
+and `Assets::drawCachedInRect()`, bounded to a caller-given rectangle rather
+than clearing and filling the whole screen. The rectangle itself —
+`Display::aircraftLogoZone()`, top-right of the content area — is decided in
+`Display.cpp` for the same reason all of this build's card chrome geometry
+lives there, even though `Display.cpp` never touches `Assets.h` itself:
+`Aircraft.cpp` owns the asset id and calls `Assets::drawCachedInRect()`
+directly from its own `cardDraw()`, the identical module boundary
+`Graphic.cpp` already keeps. The logo is fetched (`Assets::ensureCached()`)
+from `cardFetch()`, never from `cardDraw()` — the same fetch/draw split every
+other card in this build follows, so stepping backwards through the rotation
+is never a network operation.
+
+**The zone is derived from the panel, not written out as four numbers.** It
+was `x = 220; y = 26; w = 90; h = 34`, measured for a 320px panel, and on a
+240px one it ran from x220 to x310 against glass 240 wide. What that looked
+like depends on the logo's shape, because the draw centres what it fits: a
+34x34 square mark landed at x248..281 and reached the glass not at all, and a
+90x15 wordmark filled the zone and showed the leftmost 20 of its 90 columns
+against the right border.
+
+Both states are still photographable rather than merely described.
+`AircraftPanel.Draw(…, useHardcodedZone: true)` in the server tree lays the
+card out with those four literals, so the before and after come out of the
+same run of `AircraftPanelShot` as
+`panel-aircraft-hardcodedzone-{logo,wordmark}-{landscape,portrait}.png`. The
+images themselves are not kept — `docs/ia/screens` is gitignored, a cache the
+shot test refills — which is why the measurements are written down here and
+asserted in `AircraftPanelTests`.
+
+The x is now measured back from `kContentRight()`, and the rows come from the
+banner above and the distance line below rather than from a literal 26 and 34.
+On 320x240 that answers x220 y26 90x34, which is what the literals said; on
+240x320 it answers x140 y26 90x34, inside the glass.
+
+**The width stays 90 on every panel, and scaling it would have been the wrong
+fix.** An airline logo is RGB565, that format cannot be resampled on the way
+to the panel — `drawRgb565FromBuffer()` centres the frame and clips it — and
+`AssetsOptions.cs` states the matching rule from the server's side: a type
+stored as RGB565 is sized to the rect it is drawn in, which for this one is
+90x34. A `kScaledWidth(90)` zone of 66px would therefore not shrink a wordmark,
+it would cut 12 columns off each end of it. The width is the contract; the x
+was the defect.
+
+**Which means the headline cannot sit beside it on a turned panel.** 90 of a
+220px band leaves 120px, and "Southwest Airlines" is about 140px of the 9pt
+the fitting ladder falls back to, so the name ellipsizes at any size on offer
+— it drew as "Southwe…", broken mid-word, while the bottom half of the same
+card was empty. So `kAircraftLogoStacked()` puts the logo on a row of its own
+below 160px of headline room, and every line under it drops by
+`kAircraftTextShift()`. A turned panel is 80px narrower and 80px taller than a
+landscape one, so the width the logo wanted beside the text is the height
+there is underneath it. Landscape keeps 200px and never takes the branch.
+
+The side-by-side headline is `kWidthBeside()` of the logo's width. It carried
+the literal 200, which is `300 - 90 - kColumnGap` done by hand for one panel
+width, and the two agreed only in a comment.
+
+**And the column is reserved only when a logo is coming.** `showAircraftCard()`
+could not tell before — the asset id belongs to `Aircraft.cpp` — so it held
+90px of glass empty for every sighting whose airline has no logo on file. It
+now takes a `hasLogo`, which `cardDraw()` answers from the SD cache or the RAM
+buffer, and a card with no logo lays out across the whole band at any width.
+
+**A device with no SD card draws the logo from RAM.** `drawCachedInRect()`
+reads the SD cache, so on a card-less display the draw path ended at "not
+cached" and the fetch path never ran — the journal recorded
+`[aircraft] logo unavailable for 'SWA'` with no fetch line beside it, on
+devices 12 and 32, the only two in the fleet reporting `SdTotalBytes = 0`.
+`Assets::fetchToRam()` had existed since the picture cards needed it and the
+logo was simply never wired to it. `cardFetch()` now falls back to it when
+`ensureCached()` answers no, and `cardDraw()` calls
+`Assets::drawRamInRect()` → `Display::drawImageFromBufferInRect()` when the
+buffer holds this airline's id. One buffer, file-scope, because one logo is on
+screen at a time; the id is compared on every draw so a buffer left from the
+previous airline is never drawn as this one's. A cache that starts answering
+hands the buffer back (`Assets::releaseRamBuffer()`) rather than carrying it
+for the uptime.
+
+RGB565 is the expected format on that path rather than the unreachable one,
+which is the one way it differs from the full-panel RAM draw. The argument
+there — that a card-less device cannot hold one of these — is about an asset
+of ~153,600 bytes. A logo is 2,124 to 5,932 bytes across all 58 the server
+holds, against a largest free block of 28,660 on device 12 and 40,948 on
+device 32.
+
+**A cached asset is never compared against the server's copy.**
+`ensureCached()` answers "already here" on `SD.exists()` alone, so when every
+logo was re-encoded from PNG to RGB565 the devices that had already cached one
+kept the PNG. The draw then refuses for want of the PNG decoder's ~44KB
+against device 23's largest block of 32,756, and the refusal branch of
+`giveUpOnDecodeFailure()` deliberately keeps the cached copy — right for a
+~153,600-byte RGB565 asset whose re-fetch would land on the same heap that
+just refused a band buffer, and a closed loop for a 2,328-byte logo the server
+replaced hours earlier. Device 23 did exactly that three times a draw, every
+three minutes.
+
+That branch now drops a cached file under `kCheapRefetchBytes` (16,384) so the
+next fetch reads the server's current copy, **once per asset per boot**. Once,
+because the rule has to terminate: a small asset this device genuinely cannot
+draw would otherwise refuse, invalidate, re-fetch and refuse again forever,
+which is the loop the keep-it rule was put in to stop. The size is what the
+branch turns on because size is what the keep-it reasoning was about.
+
+This leaves the real gap named rather than closed: **nothing on the device can
+notice the server's bytes changing.** One re-fetch per boot rescues an asset
+that went stale before this build, and a later re-encode still reaches a
+running device only through a restart or `wipeCache()`. Closing it properly
+means a content hash on the wire, which the compatibility gate puts out of
+reach today.
+
+A RAM logo that reaches the decoder and produces nothing is asked once, not
+once per appearance. `Aircraft.cpp`'s `gLogoRamUndrawable` is why: every
+attempt goes through `noteDrawOutcome()`, three per draw, and six consecutive
+failures restart the device — which is exactly how device 7 came to reboot
+every eleven minutes. `reFetchIfCheap()` cannot rescue a card-less device
+(`cachedSizeOf()` reads the SD cache to decide, and there is none), so without
+the mark the new path would have handed those two devices a restart loop in
+place of a blank space. The mark clears whenever a fetch brings a different
+number of bytes, so a re-encode still gets a fresh attempt.
+
+The bounded-rectangle draw itself is **still unverified on hardware.** No
+device has yet been observed drawing a logo into it successfully, from SD or
+from RAM. `AircraftPanel.cs` mirrors the placement and the clip — including
+the fact that RGB565 crops rather than scaling, so the screenshots cannot
+flatter the device — but a mirror is a hand port and agrees with the firmware
+only as long as someone keeps it agreeing.
+
+Both cards also gained a "content status" treatment for their non-Ok states
+(not yet activated, disabled for this owner, nothing currently in range, auth
+or network trouble) — `Display::showWeatherStatus`/`showAircraftStatus` keep
+these in the same white/bannered card family rather than routing them through
+the black boot-ladder `showStatus()`/`showFailure()` screens, matching
+CYD-Dickey's own split between `drawStatusMessage()`'s black Wi-Fi/menu
+screens and `drawNoAircraftScreen()`/`drawNoListingsScreen()`'s white,
+card-styled ones for content problems specifically. The boot-ladder screens
+themselves (Wi-Fi joining, time sync, update-in-progress) are unchanged.
+
+**The two-way toggle these cards used to live on is gone.** An earlier
+version of this document called that out as "a known simplification":
+`App.ino` held an `enum class CardKind { Weather, Aircraft }` and flipped
+between them on the content-refresh timer, while CYD-Dickey's real scheduler
+— independent interleave timers, touch-driven forward/back, a history buffer
+so rewinding replays exactly what was shown — had nothing to attach to.
+That is no longer true. Both cards are now ordinary registered descriptors
+and the scheduler is real; see *The card manager* below.
+
+### A corner clock and a day/night theme, both driven by check-in
+
+`/api/checkin`'s response carries two more fields alongside
+`checkInIntervalSeconds`/`updateAvailable`/`debugStreamRequested`:
+`utcOffsetMinutes` (signed minutes to add to UTC for this device's correct
+local time, DST already applied) and `isDaytime` (whether the Sun is up
+right now at the device's location) — both recomputed by the server fresh
+on every check-in from the device's own location, not looked up once and
+cached or guessed at from a fixed schedule. `CheckIn::Result` parses both
+the same way as every other check-in field, and `performCheckIn()` in
+`App.ino` persists them into two more file-local statics
+(`lastUtcOffsetMinutes`/`lastIsDaytime`, alongside the existing
+`checkInIntervalMs`) on every *successful* check-in — not one-shot, so both
+track the server's current answer rather than latching whatever the first
+check-in ever said. `isDaytime` defaults to `true` before this run's first
+check-in ever completes, matching the server's own fallback for a location
+it can't yet resolve (`DeviceLocalTimeResult.Fallback` in the DiscoverAroundMe
+repo) — there is nothing to persist across a reboot for a value the server
+itself only guesses at until it knows better.
+
+**`utcOffsetMinutes` gets one more copy than `isDaytime` does, because its gap
+is worse.** A device that has just powered on — WiFi still joining, or SNTP
+still failing and retrying every 10s in `synchroniseTime()` — can go through
+several minutes of drawing cards before its first check-in of this boot ever
+lands, and until this existed every one of those frames drew raw UTC as if it
+were local time. `Identity::setLastUtcOffsetMinutes()` mirrors the offset to
+NVS (key `utcoffmin`, same `"cal"` namespace as everything else in
+`Identity.h`) on every successful check-in, right alongside the existing
+in-RAM copy, and `setup()` reads it back with `Identity::
+lastUtcOffsetMinutes()` before WiFi, time sync, or anything else in that
+function has run. A device that has completed even one check-in in its life
+therefore draws with that offset — stale by at most a day, never by more,
+since check-ins keep refreshing it — from its very first frame, instead of
+raw UTC while it waits. A device that has never completed a check-in — the
+factory-fresh case, NVS empty — reads back `0` and behaves exactly as it did
+before this existed: not a new failure mode, just a narrower one than before.
+
+**The clock** (`Display.cpp`'s `drawClock()`) is `time(nullptr) +
+utcOffsetMinutes * 60`, turned into wall-clock fields with `gmtime_r` and
+formatted `HH:MM` — the same time_t-to-tm idiom `CheckIn.cpp`'s
+`nowAsIso8601Utc()` already uses, just shifted by the offset instead of left
+at UTC, and with no DST logic of its own since the server already folded
+that into the offset. It's drawn bottom-right, small and muted, by every one
+of the four card-family functions (`showWeatherCard`/`showAircraftCard` and
+their `*Status` variants) — deliberately including the error states, since a
+clock is chrome, not content, and shouldn't disappear just because a card
+is showing a problem. It is **not** on its own per-second ticker: it
+redraws only when the card underneath it redraws (a content refresh, a
+forced update check, or now a touch tap), which was judged the right amount
+of engineering for a small corner clock rather than building a partial-
+redraw path that ticks independently of everything else on screen — stated
+here plainly as a real trade-off, not an oversight.
+
+**The theme** (`Display.cpp`'s `bg()`/`ink()`/`muted()`) is a wholesale
+swap between two palettes that both already existed in this file before
+this change, applied uniformly: "day" is exactly the white-background/
+black-ink/grey-muted look the content-card family already had, and "night"
+is exactly the black-background/white-ink look the boot-ladder screens
+(`showStatus`/`showFailure`) already had. Rather than leaving that a fixed
+split — cards always white, boot screens always black — every screen this
+file draws now picks whichever pair `isDaytime` currently says, so the
+*whole* App matches what a household would see out their own window at
+that moment, not just the two content cards. The one deliberate exception
+is the weather card's big temperature number, which is tinted with the
+weather banner's own navy by day (it reads fine against white, and echoes
+the banner colour) but falls back to the plain theme ink colour at night,
+since that same navy would be nearly invisible against a black background
+— the banner rect above it still carries the navy accent either way, so
+nothing brand-identifying is actually lost. The colour-banded banners
+themselves (`WEATHER` navy, `OVERHEAD` blue) and the amber warning colour
+are deliberately **not** part of the swap — both already read fine against
+either background, and giving them night variants too would be theme-
+following for its own sake rather than solving a real legibility problem.
+
+### Touch input: the XPT2046 controller, used for the first time
+
+This board — 2.8" ILI9341 + XPT2046 resistive touch, the same "Cheap Yellow
+Display" family as `CYD-Dickey` — has always had a touch controller; the App
+simply never used it, wiring card advancement to a plain timer instead.
+`App/Touch.h`/`.cpp` is a small, reusable, card-agnostic module: one physical
+tap produces exactly one event, edge-detected the same way
+`forceUpdateCheckRequested()` already debounces the BOOT button, polled once
+per `loop()` iteration.
+
+**The coordinate is no longer thrown away.** The first version of this file
+returned a bare `bool` from `wasTapped()` — `Display::readTouchRaw()` was
+already handing back `x` and `y` and they were discarded, so a tap anywhere
+on the glass meant one single thing. `Touch::poll()` now classifies the tap
+into a zone: an action button, the reverse (left edge) strip, the forward
+(right edge) strip, or none. The edge strips were originally 16px wide and
+full height, the same dimensions CYD-Dickey settled on for the same panel
+(`x < 16` / `x > 304` in its own touch handler); widened to roughly 1/3 of
+the 320px panel (106px) per side after real-device feedback that the
+original width was too easy to miss and made edge navigation feel
+unresponsive, matching the approved backlog suggestion to enlarge this
+touch area. The inner ~108px strip is what a card has left to itself.
+
+**Navigation is left and right on every panel, and the strip narrows instead
+of the axis turning.** Left is previous and right is next, which is the
+direction reading runs in English, Spanish and French — the three languages
+this product ships. A turned panel used to page on its top and bottom edges,
+and the reason was arithmetic rather than a principle: two 106px strips on a
+240px-wide panel leave a 28px middle, so the pair would have taken almost the
+whole glass. The strip is sized per panel now.
+
+| Panel | Strip per side | Middle left to the card |
+|---|---|---|
+| 320 wide (lying flat) | 106px — a third of the width | 108px |
+| 240 wide (standing on its end) | 60px — a quarter of the width | 120px |
+
+60px is the figure, and two things set it. The first is the touch floor: 44px
+is the smallest target this product accepts, and a 26px one found by eye on
+`/content` is on record as a defect, so 60 clears the floor by 16px with the
+strip running the full 320px height — width is the only dimension under any
+pressure. The second is what the middle has to hold. Half the panel is the
+line, and 120px holds the moon card's hero disc (120px across, centred) whole
+with the strips either side of it. A centred line of text is wider than that
+on either panel — the sun card's own detail line already spans the full 300px
+band in landscape — so this is not a promise that no text sits under a strip.
+It is a promise that half the glass still reads as the card rather than as
+navigation.
+
+The zones are the **image's** left and right, not the board's.
+`lcd.getTouch()` returns coordinates in the active rotation, so x=0 is
+whichever edge the reader sees on the left, and a panel that came up the other
+way round moves the card and the strip together. `Touch.cpp` reads the width
+from `Display` rather than storing it, so nothing has to tell it which way the
+panel is mounted. On a card
+showing a banner it has one further meaning: a tap there clears an announcement
+that has no button to press, which *A notice with no button is cleared by touching
+it* at the end of this file covers.
+
+**Zone priority is fixed, not incidental:** action buttons are tested first,
+edges second. The edge strips have no visible chrome of their own and run the
+full height of the screen, so a button that happens to sit near an edge has to
+win — the same ordering CYD-Dickey uses, where its corner menu buttons are
+checked before its edge zones for exactly that reason. Geometry is decided by
+`Display` (which is the only thing that knows this panel's layout and what
+else is already drawn on it) and handed to `Touch::setActionZones()` after
+every card draw, so the hit test and the drawing can never disagree about
+where a button is, and a zone belonging to the previous card can never still
+be live under the current one. Nothing in `Touch.h`'s shape assumes cards are
+the only thing that will ever consume it: this file knows about rectangles and
+screen edges, not about what advancing means.
+
+`loop()`'s trailing `delay()` came down from 1000ms to 50ms as part of this.
+Everything else in that loop is gated on its own `millis()` comparison and
+does not care how often it is asked, but touch is sampled inside
+`CardManager::poll()`, and sampling once a second misses most of a real tap —
+a finger is on the glass for a fraction of that. That was already true when a
+tap only advanced a card, where a missed tap costs nothing worse than tapping
+again. It is much less acceptable now that a tap can be a button press whose
+whole design is that the person gets no confirmation, and so would never learn
+it had not registered.
+
+The actual hardware read (`lcd.getTouch(&x, &y)`) lives in
+`Display::readTouchRaw()`, not in `Touch.cpp` itself — `Display.cpp` already
+owns the one `LGFX` instance for this panel (via `LGFX_AUTODETECT`, the same
+autodetection CAL's own `Display.cpp` uses for the screen), and giving
+`Touch.cpp` a second `LGFX_AUTODETECT` instance addressing the same physical
+SPI bus/controller would risk re-initialising hardware `Display::begin()`
+already brought up. `Touch.cpp` calls that accessor and adds only the
+debounced event shape on top — no hand-rolled SPI or XPT2046 register
+access anywhere in this codebase; LovyanGFX's autodetect wires up
+calibration and reading for this board the same way it wires up the panel,
+confirmed by `CYD-Dickey/TouchKeyboard.cpp` (`lcd.getTouch(&x, &y)`) already
+working this way on the same hardware family.
+
+**Stated plainly, because a compile can't prove this one:** nobody has
+confirmed touch actually works on this exact ELEGOO board. The display
+itself was separately confirmed compatible earlier — that confirmation
+never exercised touch. This firmware has no automated tests at all (see
+*Open questions*), and touch specifically has zero automated coverage
+possible even in principle here — proving it out needs an actual finger on
+actual glass, which as of this commit nobody has done. Treat the tap-to-
+advance behaviour above as designed and compiled, not as verified.
+
+Zones make that unverified assumption *load-bearing* in a way a bare
+tap-anywhere never was. Before, an inverted or unscaled axis would have gone
+completely unnoticed — every tap did the same thing. Now it would send a
+"forward" tap backwards, or put a button's hit zone somewhere other than
+where the button is drawn. Calibration is LovyanGFX's autodetect's job and
+`CYD-Dickey/TouchKeyboard.cpp` relies on it working on the same hardware
+family, but that is inherited confidence, not measurement.
+
+### The card manager: a registry, not a toggle
+
+`App/Cards.h` and `App/CardManager.h`/`.cpp` replace the two-way toggle
+described above with the real scheduler, ported from CYD-Dickey's
+`Screen::Ready` rotation — its `computeNextCard()`, `advanceCard()`,
+`rewindCard()` and the long design comment above them.
+
+**What a card is, now.** A card used to be smeared across three places: a
+fetch module (`Weather.cpp`, `Aircraft.cpp`), a draw function in
+`Display.cpp`, and the hardcoded `CardKind` toggle in `App.ino` that named
+both of them. Adding a third card meant editing all three. A card is now a
+`Cards::CardSpec` descriptor — an id, a kind, a fetch function, an
+item-count function, a draw function, an optional "is this item notable"
+predicate, an optional `describe` function naming the item on screen for a
+button press to carry (`Cards::DescribeFn` — see *What a press carries*,
+below) — that the card module registers itself at static-init time (see
+the block at the bottom of `Weather.cpp` and `Aircraft.cpp`). `App.ino` does
+not name a single card anywhere any more; it brings up the hardware and the
+network, calls `CardManager::begin()`, and pumps `CardManager::poll()` once
+per `loop()` iteration.
+
+**Deliberately not CYD-Dickey's shape, in exactly one place.** That project
+uses a hardcoded `enum class CardSlot { Base, Weather, Splash, Qr }` plus
+three separately-named globals, `cardsSinceWeather` / `cardsSinceSplash` /
+`cardsSinceQr`. A fifth card type there needs a new enum case, a new global,
+a new `if` in `computeNextCard()` and a new `case` in
+`drawDashboardScreen()`. Card types on this project are expected to keep
+growing, so every one of those named globals is a per-descriptor struct field
+here (`CardSpec::cardsSince`) and the enum is a registry index. Adding a card
+type is registering a descriptor plus server-side config; the scheduler does
+not change.
+
+**Interstitials interleave, they do not take a slot.** Two kinds exist.
+A `list` card is a variable-length collection whose items are cycled one at a
+time. An `interstitial` is a singleton that shows *after every N other cards*
+(`interleaveEvery`) rather than occupying one fixed position in a rotation.
+That distinction is carried over deliberately and the reason is recorded
+rather than guessed at: with a fixed slot, a device tracking a dozen list
+items showed its singletons proportionally less often — CYD-Dickey's own note
+says "with a dozen+ data cards, once every couple minutes, easy to miss
+entirely." Every active card's counter ticks on every computed card, the
+first to exceed its own `interleaveEvery` wins, and ties break on `order`,
+lowest first. The counters are fully independent: an earlier CYD-Dickey
+version forced two of its singletons into a fixed pair (QR always following
+splash) and records having corrected that, so nothing here couples one
+interstitial's cadence to another's.
+
+**Forward and reverse share one history, not two code paths.** Every
+genuinely-new card is recorded in a 24-entry ring buffer as it is first shown
+(`CARD_HISTORY_CAP = 24` there, the same here). Rewinding walks the cursor
+back and replays recorded entries exactly — including landing back on an
+interstitial, not just on list items. Advancing after a rewind replays
+*forward* through that same recorded stretch rather than recomputing:
+recomputing could put a different card in a position the user just stepped
+past, which would make "which card is where" depend on which direction you
+happen to be travelling. Only once the cursor reaches the frontier does
+advancing compute something new. The ring collapses to a single entry
+whenever a card refetches, for the reason CYD-Dickey's `resetCardHistory()`
+exists — a recorded item index must never be replayed against a list that no
+longer holds the same items at the same positions — and deliberately leaves
+the interleave counters alone, so a data refresh does not throw off the
+singletons' cadence.
+
+**Navigation never fetches.** `fetch()` and `draw()` are separate functions
+on the descriptor and the scheduler only ever calls `fetch()` from its own
+refresh timer, never from a navigation path. A rewind is a pure redraw of
+state the card is already holding. If it refetched, stepping back could show
+you something you never saw going forward, which defeats the entire point of
+the history buffer. `CardManager::poll()` refreshes at most one due card per
+call, so a refresh sweep never blocks `loop()` on several HTTP round trips
+back to back.
+
+**Manual navigation holds off the timer.** A deliberate tap suppresses
+auto-advance for `manualNavHoldSeconds`, so a card someone picked on purpose
+is not yanked away a second later. CYD-Dickey hardcodes this as
+`MANUAL_NAV_HOLD_MS = 30000`; here 30 seconds is the built-in default and the
+server can change it.
+
+**Empty cards are skipped, blank cards are not shown.** A card reporting zero
+items is passed over entirely. Note what does *not* count as empty: a card
+holding an explanatory status — "no aircraft within 10 mi right now",
+"weather is not showing yet" — reports one item, because that message is
+content and has always been shown. In practice the skip fires for a card that
+has not fetched yet, which is the ordinary state for the first second or two
+after boot. If nothing at all has anything, `Display::showNoContent()` says
+so rather than leaving the panel blank.
+
+**The policy comes from the server, on the check-in that already exists.**
+`CheckInResponse.cardPolicy` carries `defaultDwellSeconds`,
+`manualNavHoldSeconds`, and a `cards` array of `{id, kind, order,
+dwellSeconds, interleaveEvery?, notableDwellSeconds?, assetId?}`. Three rules
+keep this safe in both directions of the six-month firmware
+backward-compatibility mandate:
+
+- **No policy means keep the one you have.** An omitted or empty `cardPolicy`
+  is explicitly not "show nothing" — a server that cannot resolve a policy
+  must never blank a screen that was working. A device that has never
+  received one uses the built-in defaults compiled into each descriptor.
+- **An unknown card id is ignored, not an error.** That is what lets the
+  server add a card type before firmware supports it.
+- **A policy that matches *nothing* leaves every card active.** The mirror
+  image of the rule above: a newer server whose whole policy names card types
+  an older device does not have would otherwise switch every card off and
+  leave a dark screen. A card the policy *does* omit while naming others is
+  taken out of the rotation, which is how the server turns a card off — the
+  fallback only fires when nothing matched at all.
+
+`notableDwellSeconds` is the generalised form of CYD-Dickey's
+`aircraftOverheadSeconds = 20`: a longer hold for an item the card itself
+considers more interesting. The aircraft card's `isNotable` uses their rule
+too — 20% of the configured tracking radius with a 1-mile floor, so
+"practically overhead" still means something whether the owner tracks 3 miles
+or 30, rather than a hardcoded mile count.
+
+`assetId` is the newest of these and the only one that is *content* rather
+than scheduling: it names the picture a card should draw, and it exists so
+that changing which picture a household sees is a config edit rather than a
+firmware release. It is optional, absent from every card that draws no
+picture, and empty is an ordinary state and not a fault — see *A picture as a
+card*, below. The server side of it is being built in parallel with this
+firmware, so nothing has ever sent one.
+
+**Corrected later: the `cards` array listed above has grown, and one field that
+was briefly on it has been taken back off again.** Each entry also carries
+`text` (the announcement card's content), `qrData` (the QR card's), `location`
+(which of two places a forecast instance is for), and `allowBanner` — all of
+them content or eligibility rather than scheduling, all optional, all absent
+from every card that has no use for them. `allowBanner` in particular replaced
+a `theme` string ("banner"/"bannerbutton"/absent) that a superseded first draft
+of the banner feature put here, along with an `effectiveFromUtc`/
+`effectiveToUtc` pair the same draft added and the server has since dropped —
+see *Banners: a per-card theme replaced by the announcement queue the server
+actually speaks* at the end of this file for the whole story, including why a
+per-card field could never express what that feature needed. The three rules
+above are unaffected by any of it: every one of these fields is optional and
+additive in both directions, which is the same backward-compatibility mandate
+they exist to serve.
+
+### Card buttons and the pending-action queue
+
+`App/Actions.h`/`.cpp` adds buttons a card can draw and a queue of presses
+waiting to be delivered. Two halves that only touch each other at the moment
+of a press: the **definitions** (`CheckInResponse.cardActions`, held in RAM
+because the server re-sends them every time, so persisting them would just be
+another thing to fall out of sync) and the **pending queue** (NVS-backed,
+because a press a power cycle eats is a press the household believes they
+made).
+
+**The device reports intent, never meaning.** `actionId` is opaque here. This
+firmware knows `"im-ok"` was pressed; it does not know an email goes out, or
+to whom. That binding is a database row in the server's `Commands` domain, so
+changing who gets notified is a config change rather than a firmware release
+across a fleet. `label` is drawn verbatim and never interpreted.
+
+**Passive push, no confirmation, no new endpoint.** A press is recorded
+locally, rides the next ordinary `/api/checkin` as `pendingActions`, and the
+device's job ends there. There is no round trip and no "sent" state for the
+user to wait on. Worst-case latency is one check-in interval — which the
+server already controls, so tightening it is a config change, not a new
+route. A single press fires the action; there is no confirm tap.
+
+**`instanceId` exists for dedup and for nothing else.** It is
+`"<device>:<monotonic counter>"`, the counter persisted in NVS and
+incremented *before* the press is stored, so a power loss mid-write costs an
+unused id rather than two presses sharing one. Its whole purpose is that if a
+check-in succeeds but its response is lost, the device re-sends the same press
+and the recipient is not notified twice. It is not user-visible
+confirmation and nothing in the UI is built on it. The prefix is the device's
+MAC address rather than its server-side device id, because nothing has ever
+told a device its own id — `CheckInRequest` deliberately carries no
+`DeviceId` at all — and the server, which already knows who is calling, only
+needs the prefix to be stable and device-local.
+
+**One-shot consume, running the other way.** The device keeps carrying a press
+until `acceptedActionIds` in a response names its `instanceId`; only then does
+it drop it from NVS. This is the same handshake shape as
+`FirmwareUpdateForced`, in the opposite direction. The queue holds eight
+presses; a press arriving at a full queue is dropped and logged rather than
+evicting one already recorded, because a queue that deep means check-ins have
+been failing for a long stretch and the *earliest* presses are the ones that
+still describe what happened.
+
+**The one thing drawn that the contract does not describe:** a pressed button
+answers with a big green checkmark held centre-screen for half a second
+(`Display::showButtonPressConfirmation`), then the card redraws underneath
+it. That acknowledges the *press*, not the delivery — a button that does not
+visibly react to a finger reads as a dead button, which is its own separate
+failure — and it claims nothing about what the server did with it. An
+earlier version of this just recolored the button itself
+(`Display::flashActionButton`); that was too easy to miss from any distance
+and was replaced outright once this bigger confirmation existed, rather than
+kept around unused. Pressing also triggers the same manual-nav hold a
+navigation tap does, so a card someone just pressed a button on is not
+swapped out from under them.
+
+Geometry is entirely the device's: a row of up to three buttons along the
+bottom, from x=8 to x=312 and ending at y=220, clearing the corner clock's
+bottom-right patch above it. It does *not* need to clear the reverse/forward
+edge strips on either side (now 106px lying flat and 60px on end, up from an
+original 16px) the way it
+looks like it should — `Touch.cpp`'s `poll()` checks action-button zones
+before the edge strips, so a tap landing inside a button rect is always a
+button press regardless of how close it sits to the physical edge; real
+fingers found the original, edge-clearing width too narrow to hit reliably.
+The server says what a button is called and what it means; only the device
+knows its own panel.
+
+**Reverse/forward taps flash too, the same way** (`Display::flashNavEdge`),
+for the identical reason: an edge strip with no visible chrome of its own
+gave a tap there no acknowledgment at all before rewind()/advance() ran.
+The flash only fills up to `kButtonRowY`, not the panel's full height,
+specifically because the edge strip's x-range overlaps the button row's —
+Touch::poll()'s button-first priority means a tap actually lands on
+Hit::Reverse/Hit::Forward there only where no button covers it, but a
+flash filling the whole column would still paint over a button that *is*
+drawn at that x within the button row, and painting over a button is only
+harmless because the very next thing to happen is `drawCurrent()` redrawing
+everything — except on the one path that skips that redraw entirely
+(`rewind()` when there is no history to step back into), where the button
+would otherwise stay visibly bitten into until some unrelated redraw fixed
+it.
+
+### What a press carries: the card says what was on screen
+
+A press carried `actionId`, `instanceId` and `pressedAtUtc`. The button sits on
+a rotating card, so by the time the press reaches the server on the next
+check-in the card is showing something else, and the server is told only which
+*kind* of card was pressed. A press on the listings card named no house.
+
+**`Cards::DescribeFn` is an optional per-card function returning one line
+naming the item currently on screen** — `String (*)(uint16_t itemIndex)`, held
+on `CardSpec::describe`, `nullptr` by default.
+
+`CardManager::handleTap()` asks at the instant of the press, before anything can
+rotate — the only moment the answer exists:
+
+```cpp
+String onScreen;
+if (gCurrent.card >= 0 && gCards[gCurrent.card].describe != nullptr) {
+  onScreen = gCards[gCurrent.card].describe(gCurrent.item);
+}
+Actions::recordPress(pressed, onScreen);
+```
+
+**Only the device can answer it.** The rotation position is never reported, and
+the provider cache behind a card can be replaced between the press and its
+delivery, so the server rebuilding this line would be a guess that looks exactly
+like a fact.
+
+**`nullptr` means "nothing worth naming"** — the honest answer for a clock, a
+moon phase or a splash. The server stores empty for those and every surface
+renders it as "not reported" rather than as a gap. It is optional per card
+precisely so the cards where it would be noise do not have to invent something.
+
+Implemented today:
+
+| Card | What the line says |
+|---|---|
+| `listings` | Address, price, beds/baths. Distance and days-on-market are left out: both are relative to this device and this moment, and neither survives usefully into an email read hours later. A status screen returns empty rather than "No listings nearby" |
+| `homevalue` | Address and estimate; the estimate alone when there is no address. Carries no "automated estimate, not an appraisal" qualifier — that wording is a display requirement for the card, and this string lands in a press-log column and an email body where the surrounding text is the server's to write |
+| `aircraft` | Callsign, route and distance. Distance is included here, unlike on listings, because for an aircraft it is the point of the press. Names fall back to codes per side independently, matching how the card draws its own route |
+| `announcement` | The notice text itself, re-read rather than cached. On this card the text *is* the content, so there is nothing to summarise, and several instances can be configured at once with no item id to tell them apart |
+
+**`calendar` has no `describe`, and that is a requirement rather than a
+judgement call.** `Calendar.h` quotes the server's own rule — nothing in
+`CalendarEventSummary` may ever be written to a log, an audit record or an
+exception message. A press-log row *is* an audit record, read later by an admin
+who is not necessarily the household, and the press email is a copy of it sent
+outside the system entirely — a wider exposure than the remote debug stream that
+rule already forbids, which is why that file logs counts and never titles. A
+press on a calendar card records that a calendar button was pressed and nothing
+about which appointment. The thinner result is the point.
+
+**Capped at 200 characters**, in `Actions::recordPress` rather than at the call
+site, so every path into the queue gets the same limit and a card returning
+something long cannot push an NVS write past what the slot holds.
+`Actions::kMaxOnScreenSummaryLength` matches the server's own
+`CheckInGatewayService.MaxOnScreenSummaryLength` and both press columns, so the
+device never sends something the store would have to cut.
+
+**The NVS queue format went from three fields to four, and reads both.**
+`packEntry`/`unpackEntry` separate on `'\n'`. A three-field entry is not
+corrupt, it is older — a press queued by firmware predating the field, sitting
+in NVS across a reboot — and it must keep its press rather than be dropped by
+the update meant to improve things. Absent reads as empty, which is what the
+server stores for a card that had nothing to name, so the two arrive at the same
+place.
+
+The summary is the **last** field for a reason: it is the only one composed from
+provider text rather than from ids this firmware controls. Being last means a
+summary that somehow contained a newline can only corrupt itself, never the
+`instanceId` that server-side dedup depends on.
+
+**Omitted from the check-in JSON entirely when empty**, rather than sent as
+`""`. The request is built with ArduinoJson, which needs roughly the payload's
+size again in heap to serialise it, and a key nobody reads is heap spent for
+nothing on the device that can least afford it. The server treats a missing
+field and an empty one identically.
+
+### The content budget: a card knows whether a button will cover it
+
+`CardManager` drew the card and **then** called `drawChrome()`, which paints the
+button row on top. The card was never told, so every card laid itself out
+against the full panel and a card with a button silently lost the 60px band from
+y=160 down — whatever it had drawn there was covered. On the home value card
+that band is where "Automated estimate, not an appraisal" lands, and that line
+is not allowed to go missing.
+
+**The buttons are resolved before the card draws.** `drawCurrent()` calls
+`Actions::forCard()` once, records the count in `gButtonCount`, and tells the
+display:
+
+```cpp
+gButtonCount = Actions::forCard(card.id, gButtons, Actions::kMaxButtonsPerCard);
+Display::setContentBudget(gButtonCount > 0);
+```
+
+`drawChrome()` no longer recomputes the count. Two `Actions::forCard()` calls
+around a draw could disagree if a policy arrived in between, and the card would
+have budgeted for one number of buttons while a different number got painted
+over it.
+
+| Call | Returns |
+|---|---|
+| `Display::contentBottom()` | The lowest y a card may draw to: **220** with no buttons (`kClockTop`, where the corner clock's bottom-right patch begins), **154** with them (`kButtonRowY` 160 less a 6px gap) |
+| `Display::contentIsTight()` | True when a button row is taking the bottom of the panel |
+| `Display::noteContentOverrun(name, reachedY)` | Logs a card that drew past its budget, with how many pixels are underneath what |
+
+Read `contentBottom()` rather than hardcoding either number. The band has moved
+once already — `kButtonRowY` went from 190 to 160 when the button row doubled in
+height — and a card that reads it survives the next move.
+
+`gContentBottom` starts at the no-buttons value, so a card drawn outside the
+normal path (a boot splash, an error screen) sees a sane budget rather than
+zero.
+
+**An overrun is logged, not clipped.** Clipping hides the problem behind a card
+that merely looks a bit short; the remote debug stream is the only diagnostic
+channel a deployed device has, and a card overrunning its budget is exactly the
+kind of thing nobody notices until a household complains that a line they needed
+is missing.
+
+**The home value card reserves its compliance line first, not last.**
+`complianceY = contentBottom() - 18`. The detail block (price per square foot
+and the RentCast refresh date) gets whatever is left above it, at whatever line
+count fits, and is dropped entirely when that is nothing — with a log line
+saying how many pixels were left. Price per square foot is worth having; it is
+not worth pushing a legal qualifier off the panel. The address headline and both
+stat rows also move up and close up in tight mode (50/80 with an address, 38/72
+without, against 62/100 and 44/90 in full mode).
+
+**Which cards read the budget: `homevalue`, and nothing else yet.** Every other
+renderer in `Display.cpp` still lays itself out against the full panel. Measured
+against the 154 floor, by reading the renderers:
+
+Figures are the bottom of the lowest content drawn, the same thing
+`showHomeValueCard` passes to `noteContentOverrun()`.
+
+| Renderer | Bottom of content | Over 154 by |
+|---|---:|---:|
+| `showAircraftCard` | ~211, or ~229 with a two-line route (rows every 30px from y=100 or y=118, then the freshness line 4px under the last) | 57–75px |
+| `showListingsCard` | ~213 (four 26px stat rows from y=88, then the distance/freshness footer at y=196) | ~59px |
+| `showForecastCard` | ~208 (strip icons centred at y=163, r=17; column temperatures at y=186) | ~54px |
+| `showMoonPhaseCard` | ~194 (phase name at y=150, "% illuminated" at y=176) | ~40px |
+| `showNoContent` | ~192 at full headline and detail line counts | ~38px |
+| `showClockDate` | ~185 (date block from y=145, up to two 20px lines) | ~31px |
+| `showSunMoonCard`, `showIssFlyoverCard`, `showIssNextPassCard` | ~180 when the optional detail line is present (y=140, up to two 20px lines) | ~26px |
+| `showAircraftStatus`, `showListingsStatus`, `showForecastStatus` | ~172 at three headline lines plus three detail lines | ~18px |
+| `showQrTextCard` | ~164 with a caption, ~156 without | 2–10px |
+| `showAnnouncementCard`, `showCalendarCard` | 150 at the 5×24px tier, 156 at the 7×18px fallback tier | 0–2px |
+
+Within budget as drawn: `showTidesCard` (bottom stat row and its icon end
+~y=115) and `showBannerCard` (the strip is `kBannerStripHeight`, 100px).
+
+The announcement card is the near miss worth reading: its own comment records
+30–156 as "a tighter but still real 4px clearance", which was measured against
+`kButtonRowY` at 160. The budget's floor is 154 — `kButtonRowY` less a 6px gap —
+so the 7-line fallback tier is 2px into the gap rather than into the buttons.
+
+`showListingsCard` is the one worth acting on first. It is the card the press
+mechanism exists for, so it is the card most likely to have a button bound, and
+its bottom two stat rows and its whole footer sit under the button row.
+`showAircraftCard` is the larger overrun but the less likely to carry a button.
+
+Nothing here is a regression — these cards behave exactly as they did before the
+budget existed — but `noteContentOverrun()` is only called by
+`showHomeValueCard` today, so the rest overrun silently. A card adopting the
+budget adds a `contentIsTight()` branch and one `noteContentOverrun()` call at
+the end of its draw.
+
+**The horizontal half of the same problem is
+[`TEXT_LAYOUT_DESIGN.md`](TEXT_LAYOUT_DESIGN.md).** The budget above says how
+far *down* a card may draw. Nothing said how far *right* a string may run, and
+on 2026-09-25 two cards came back from real hardware losing characters at the
+right edge: a sports card reading `Houston Astr`, and a notice card reading
+`Test device: this rotation h` with the `as` of `has` nowhere on the panel. Two
+different pieces of code making the same mistake differently. `App/Display.cpp`
+had five separate ways of putting a string into a bounded region and now has
+one, `layoutText()`, which breaks on word boundaries against measured width,
+ellipsizes visibly, allocates nothing, and narrates what it lost to the debug
+stream. Read that document before adding a card that draws text. The two
+documents meet at `linesToBudget()`, which turns `contentBottom()` into the line
+budget the routine wants — the notice and calendar cards are the first to use it
+instead of a hardcoded line count, which is also what made their 9pt fallback
+tier reachable for the first time.
+
+### Assets and the SD card
+
+`App/SdStorage.h`/`.cpp` mounts the card (CS pin 5, the same one `CYD-Dickey`'s
+`SdCard.cpp` uses on this board family — unlike the panel, a card slot's CS
+line is just a wiring fact, not something autodetect can find). `App/Assets.h`
+/`.cpp` is a cache of images on top of it, addressed by server-side asset id:
+**SD hit → draw. SD miss → fetch → store → draw. Fetch failed → draw
+nothing.** A miss must never block a card; a household staring at a frozen
+screen while a PNG times out is a far worse outcome than a card with no
+picture on it. Same storage approach as CYD-Dickey, which keeps its PNGs on SD
+and addresses them by path (`splashImage = "/LRBH.PNG"`); the difference is
+that the path is derived from a server id rather than typed in by a person, so
+the server's catalog is the source of truth and a device populates its own
+cache on demand.
+
+Downloads stream straight to the card rather than through a `String` — an
+asset is tens of kilobytes and this device has roughly 274KB of free heap, so
+buffering the whole body first is exactly the allocation that would turn a
+slightly-too-large image from slow into fatal. They are written to a `.part`
+name and renamed on success, so an interrupted download cannot leave a
+truncated file that every later lookup then treats as a cache hit.
+
+**The device never validates image size.** The server normalises every image
+at upload time — resized to a per-asset-type target, re-encoded, metadata
+stripped — so what arrives here is already device-appropriate. A device with
+274KB of heap must never be the thing that discovers an image was too big;
+that discovery belongs at upload, where a person can see it.
+
+Two small mechanical details are inherited from CYD-Dickey and both matter.
+`SD.h` must be included *before* `LovyanGFX.hpp` in `Display.cpp`: LovyanGFX
+detects SD image support by checking whether the SD library's own include
+guard is already defined, and including it afterwards fails to compile with
+`abstract type DataWrapperT<fs::SDFS>`. And `lcd.releasePngMemory()` is called
+unconditionally after every PNG draw, including a failed one — LovyanGFX keeps
+the decoder's buffers allocated on purpose for cheap repeat-draws, and
+CYD-Dickey found that starving the memory its Bluetooth init needed
+immediately afterwards.
+
+**The second of those two is no longer true of this firmware, and the whole
+argument about it is further down.** `lcd.releasePngMemory()` is *not* called
+after a draw here: the decoder's ~44KB scratch is deliberately allocated once,
+by the boot splash, while a large contiguous block is still available, and
+kept for the rest of the uptime — see "Why the PNG decoder's scratch buffer is
+never released" below for why, and "Reversing 'never released' — halfway, and
+the split is the load-bearing part" for the half of that decision that was
+later reversed and the half that was not. What *is* handed back after every
+draw is `Display.cpp`'s own file-copy buffer, which is a different block with
+a different lifetime; the two are easy to confuse and the difference is the
+entire fix.
+
+**Storage is treated as effectively unlimited but measured.** The card is
+user-upgradeable, and a cache that has to reason about eviction is a great
+deal of machinery for a problem a larger card solves. "Unlimited" is only a
+defensible position while somebody can see how full it is, so `Telemetry` now
+reports `sdTotalBytes`, `sdUsedBytes` and `assetCount` alongside free heap —
+same mechanism, same cadence, so storage pressure shows up fleet-wide on
+`/diag/telemetry` before it shows up as a device that quietly stopped caching.
+All three read zero on a device with no card in the slot, which is an ordinary
+state and not a fault: nothing mounts, nothing caches, weather and aircraft
+carry on untouched, and the graphic card below simply never appears.
+
+**Two callers, and they ask different questions.**
+`Assets::showBootSplash()` puts a cached `splash` asset up at boot if there is
+one, the way CYD-Dickey's `showSplashScreen()` does, and silently does nothing
+otherwise — deliberately without fetching, since boot is the one moment where
+waiting on the network to draw a decoration is least defensible. The graphic
+card (below) is the other, and it needs the fetch and the draw to be separate
+calls, so `Assets` exposes both halves: `ensureCached()` / `drawFullScreen()`
+may hit the network and belong on a fetch path, while `isCached()` /
+`drawCached()` never touch it and are what a card's `draw()` is allowed to
+call.
+
+**Partially run now, on real hardware — and it found a real bug.** The fetch
+path written above, `/api/assets/{id}`, was this firmware's guess at a route
+that did not exist yet when it was written, and nobody went back to check it
+once the server side actually shipped with a different shape:
+`GET /api/assets/{id}/content` (see `AssetsEndpoints.cs`). A real device
+reached the real server correctly — TLS, `X-Device-Secret`, the request
+itself all worked — and got back a real, honest 404, because the path was
+simply wrong. Caught from the device's own remote debug log
+(`[assets] fetch of '...' failed, http status=404`), which is exactly the
+diagnostic this domain exists to provide. Fixed to the real path.
+
+What is still genuinely unverified is everything past a 200: no device has
+decoded a real PNG or written one to its own SD card, because no fetch has
+yet succeeded far enough to try. A clean compile plus one confirmed-real
+404-to-be-fixed is the current state of verification, which is more than a
+clean compile alone but well short of "this works."
+
+### A picture as a card, chosen by the server - three of them
+
+`App/Graphic.h`/`.cpp` puts an image into the rotation as a card of its own,
+and provides **three independently-configured instances**: ids `graphic`,
+`graphic2` and `graphic3`. Each registers its own `CardSpec` exactly the way
+`Weather.cpp` and `Aircraft.cpp` register theirs, and adding all three
+required **no change to the scheduler at all** — which is the property the
+registry was built to have, and the first time anything has exercised that
+claim for more than one descriptor from the same module. A household can
+therefore rotate through up to three separately-chosen pictures - a seasonal
+notice, a house rule, a QR code - rather than being limited to one.
+
+The three instances share one implementation, not three copies of it:
+`Graphic.cpp` factors the fetch/itemCount/draw logic into a single
+`template <int N> struct Instance`, explicitly instantiated for `N = 1, 2, 3`
+(the one piece that cannot be written generically - each instance's id - is
+the only explicitly-specialized member). Each instantiation gets its own set
+of static globals from the compiler, which is what gives `graphic`, `graphic2`
+and `graphic3` fully independent state - one instance's cached asset going
+stale has no effect on the other two - without hand-duplicating the module.
+This was the only workable option given `Cards::CardSpec::fetch/itemCount/draw`
+are raw function pointers with no per-instance context parameter (see
+Cards.h): a single runtime class holding an id data member would have nowhere
+to stash `this` for the scheduler to pass back in.
+
+**None of the three has content of its own.** Weather and aircraft each own a
+server route, a response shape and a status vocabulary. These own none of
+that: what each one draws is whatever asset its own policy entry names.
+`CardPolicyEntry.assetId` (optional, string) is carried through
+`Cards::PolicyEntry` and `CardManager::applyPolicy()` onto that instance's own
+descriptor as `Cards::CardSpec::assetId`, and each instance resolves it
+independently through the `Assets` cache described above. That indirection is
+the whole point: **changing which picture a household sees is a config edit,
+not a firmware release.**
+CYD-Dickey's nearest equivalents are its splash and QR cards, which are this
+card with the image hardcoded (`splashImage = "/LRBH.PNG"`) and therefore need
+a reflash to change.
+
+`assetId` is a fixed 48-character buffer on the descriptor rather than a
+`String`, and that is not an arbitrary choice. The registry is
+constant-initialised precisely so it exists before any card module's
+static initialiser runs; a `String` member would make it dynamically
+initialised instead, and initialisation order across translation units is
+undefined — the card that registered first would be writing into an array that
+had not been constructed yet. An id longer than the buffer is **dropped, not
+truncated**: a truncated id is a perfectly well-formed id for some *other*
+asset, and showing the wrong picture is worse than showing none.
+
+**Interstitial, not list - all three.** Each instance is one picture, not a
+feed, and `interleaveEvery`'s "show after every N other cards" is the honest
+description of how a picture should appear — on a cadence of its own, no
+matter how many aircraft happen to be overhead. A list card would take one
+fixed slot in the list sequence and be seen proportionally less often as that
+sequence grows, which is the specific mistake recorded above as having been
+corrected on a running CYD-Dickey device. All three share the same `order`
+and `interleaveEvery` defaults: they are peers of the same kind of card, not a
+priority chain, so there is no meaningful ranking to invent between three
+pictures a household picks independently.
+
+**Missing is the ordinary state, and it is silent, per instance.** With no
+`assetId` in a given instance's policy entry — which is every instance on
+every device until somebody sets one — that instance reports zero items and
+the scheduler's existing empty-card skipping passes over it entirely. Same for
+an asset that will not fetch and for one that will not decode. This is
+deliberately the opposite of what weather and aircraft do, whose "not
+activated" and "nothing overhead right now" states report one item because
+those messages are real content worth a screen. There is nothing informative
+to say about a picture that isn't there, and a card reading "no image
+configured" in a household's living room is a worse outcome than a card that
+simply never appears. A household that wants only one picture configures only
+`graphic`; `graphic2` and `graphic3` then sit silent, exactly as `graphic`
+alone used to for a device with no policy at all.
+
+A decode failure is the one case an instance cannot see coming, since it is
+only discovered inside `draw()`. It clears that instance's own ready flag, so
+the card is out of the rotation by the next computed card and a corrupt asset
+costs one dwell rather than reappearing every cycle - and only that one
+instance is affected, not the other two. The cached file is deliberately
+**not** deleted: a PNG that will not decode will not decode next time either,
+and deleting it would turn a permanent failure into an HTTP fetch on every
+refresh, forever — loud on the network and no better on screen.
+
+**Fetch and draw stay strictly separate**, like every other card, for each
+instance independently. `fetch()` calls `Assets::ensureCached()` (an SD stat
+on a hit, one HTTP fetch on a miss) and is called only by the scheduler's
+refresh timer; `draw()` calls `Assets::drawCached()`, which never reaches for
+the network, so stepping backwards through the rotation is a pure redraw.
+Both re-read the configured `assetId` off that instance's own descriptor
+rather than caching it, which is what makes a policy change take effect
+immediately: the moment the server names a different asset for a given
+instance, the one that instance is holding stops counting as content and
+stays uncounted until the next refresh has actually fetched the new one.
+Without that, a device told to change a picture would keep showing the old
+one for up to a full refresh interval.
+
+The theme and the centring come for free — `Display::drawPngFromSd()` already
+clears to the day/night background before decoding and centres the image on it
+— and the corner clock and action buttons are drawn by `CardManager` after
+every card's `draw()` returns, so there is nothing card-specific to do for
+either.
+
+**Falling back to RAM when there is no SD card at all.** Everything above
+assumes `ensureCached()` can at least stat or write a file — true for the
+ordinary "no card in the slot" case, and true again once `Sd::begin()`'s own
+retry recovers a marginal mount. It stopped being true for one real device
+tonight: three-plus consecutive power cycles, reseated in between, and the
+card would not mount at all — a bad card or connector, not a timing problem
+firmware can retry its way out of. Brett's standing rule is blunt about what
+that means: **if it cannot do Graphics, it does not exist.** A device that
+can reach the server perfectly well over WiFi but shows no pictures purely
+because of a dead SD slot is not an acceptable place to land.
+
+So `Graphic.cpp`'s `fetch()` now tries one more thing before giving up:
+when `Assets::ensureCached()` fails — no SD card, or a genuine cache-write
+failure — it calls `Assets::fetchToRam()`, the RAM-only sibling of
+`fetchToCard()`. Same HTTPS GET, same `X-Device-Secret` header, same
+streamed sha256 checked against the server's `X-Asset-Sha256`, but the
+response body lands in a heap buffer instead of an SD file, so the whole
+path never touches SD at all. Each `Instance<N>` owns its own
+`Assets::RamAssetBuffer` — static and grow-only, realloc'd in place exactly
+like `Display.cpp`'s own `gFileBuffer` (see the "Memory management approach"
+and "Why the PNG decoder's scratch buffer is never released" sections above)
+— rather than one buffer shared across all five, because a shared buffer
+would let one instance's fallback fetch silently overwrite another's
+still-showing picture in between fetches. `Display::drawPngFromBuffer()` is
+the matching draw entry point: same `fillScreen()`-first, same non-release
+of the decoder's scratch buffer, just skipping the SD read `drawPngFromSd()`
+would otherwise do, since the bytes are already in RAM.
+
+**The tradeoff, stated plainly rather than left implicit:** a RAM-fetched
+picture is not persisted anywhere — there is no SD to persist it to — so it
+re-fetches over the network on every `kContentRefreshIntervalMs` cycle
+(10 minutes) for as long as the fallback stays active, instead of the usual
+one-fetch-ever an SD-backed asset costs. That is real, ongoing network use
+this codebase does not normally ask of a cached asset. Accepted deliberately:
+a device already reaching this path has a working network connection (a
+fetch attempt happening at all proves it), and paying a repeated fetch is a
+far better trade than a household staring at a blank card where a picture
+belongs. `fetch()` logs distinctly at every stage of this — the fallback
+being tried, succeeding (with byte count), or failing — and `noteState()`
+reports "asset '...' is showing straight from RAM - no SD card available" on
+any state change, so a remote debug-log observer can see a device running
+this degraded path as a plainly visible, distinct state rather than
+inferring it from the absence of the ordinary SD-cache log line. A
+healthy-SD device's behaviour is completely unchanged: this fallback only
+ever runs after `ensureCached()` has already failed.
+
+### An announcement card: admin-typed text, chosen by the server
+
+`App/Announcement.h`/`.cpp` is the text equivalent of the picture card just
+above: the server picks an image for `graphic`, and picks *words* for
+`announcement`. It registers a `CardSpec` with id `announcement` the same way
+every other card module does, and needed no scheduler change either.
+
+**Not to be confused with `Cards::Announcement`**, added much later: that is a
+banner message from the server's Announcements domain, which overlays some
+*other* card's draw with a header strip, and has nothing to do with this card
+beyond the shared word. See *Banners: a per-card theme replaced by the
+announcement queue the server actually speaks* at the end of this file.
+
+**No fetch at all, unlike every other card in this build.** A picture is an
+id that has to be resolved through the `Assets` cache — an SD stat, maybe an
+HTTP round trip, maybe a PNG decode. Text is not: `CardPolicyEntry.Text`
+arrives already complete, inside the policy itself, on every check-in, so
+there is nothing to cache and nothing that can fail to fetch or decode.
+`Announcement.cpp` registers no `fetch` function at all (`spec.fetch` is left
+`nullptr`), which `CardManager.cpp`'s scheduler already tolerates — it guards
+every call site with `card.fetch == nullptr` for exactly this reason. The
+"fetch" for this card, such as it is, is `CardManager::applyPolicy()` writing
+straight onto the descriptor.
+
+`Text` is carried through `Cards::PolicyEntry::text` and
+`CardManager::applyPolicy()` onto `Cards::CardSpec::text` — a fixed
+281-character buffer (`Cards::kMaxTextLength + 1`) for the same
+constant-initialisation reason `assetId`'s buffer is fixed rather than a
+`String` (see the picture-card section above): the registry exists before any
+card module's static initialiser runs, and a `String` member would make it
+dynamically initialised instead, racing that guarantee. An over-long value is
+**dropped, not truncated**, mirroring `assetId`'s own rule: a notice cut off
+mid-sentence on a household's screen is a worse outcome than one that simply
+does not appear, and in practice this should never fire at all — the server's
+policy editor already refuses to save anything past its own limit.
+
+**`Cards::kMaxTextLength` (280) must equal
+`DiscoverAroundMe.AdminUI.CardPolicyEditing.MaxTextLength` on the server.**
+The two live in separate repositories with no shared build, so
+`Announcement.cpp` carries a `static_assert` pinning this firmware's own
+constant to the number both sides' comments agree on — it cannot catch the
+server's number changing out from under it, but it does catch this side
+drifting from what both comments say it must be. Change one number, you must
+notice and change the other; that is the same discipline
+`Cards::kMaxAssetIdLength`/`Assets::kMaxIdLength` already keep for the picture
+card, just without a same-repository `static_assert` to enforce the
+cross-repository half of it.
+
+**Interstitial, not list**, for the same reason the picture card is: one
+notice is not a feed. **Missing text is the ordinary state, and it is
+silent** — with no `text` in the policy, which is every device until an admin
+types one, the card reports zero items and is passed over entirely, the same
+"no image configured" tolerance the picture card already has for words
+instead of a picture.
+
+Drawing is `Display::showAnnouncementCard()`, a new function alongside
+`showWeatherCard()`/`showAircraftCard()`/`showSunMoonCard()` in the same
+white/bannered card family. It reuses `wrappedLeftText()`'s existing
+greedy word-wrap rather than inventing new text-layout code, and picks between
+two size tiers the same way `showWeatherCard()` already does for its own
+free-text `shortForecast` phrase: 12pt/5 lines if the whole notice fits there,
+9pt/7 lines if it does not. Either tier clears the button row that starts at
+y=190. A banner reading "NOTICE" in a new muted green
+(`kAnnouncementBanner`) keeps it visually distinct from weather's navy,
+aircraft's blue and sunrise/sunset's amber.
+
+### A moon-phase card: the first illustrated card, not just text/data
+
+`App/MoonPhase.h`/`.cpp` is structurally the sunrise/sunset card's twin —
+same "fetches nothing, pushed in from the check-in path" shape as
+`SunMoon.cpp` — but it is the first of a new family the product owner wants:
+**graphical style cards**, illustrated rather than text/data. Every card
+before this one draws numbers, prose, or a server-chosen picture; this one
+draws something computed, as an actual picture.
+
+**No fetch, same as `SunMoon.cpp`, for the same reason.** `moonPhase`,
+`moonIlluminatedFraction` and `moonPhaseName` arrive on the check-in response
+the device already makes (see the DiscoverAroundMe README's "The moon phase
+card"), so `App.ino` pushes them into `MoonPhase::setPhase()` right alongside
+`SunMoon::setTimes()` — one more call in the same spot, no new timer, no new
+failure mode.
+
+**A simpler absent case than `SunMoon.cpp`'s.** Sunrise and sunset can be
+absent for three different reasons and `SunMoon.cpp` still shows a card
+explaining which in words. The Moon's phase has only one absent case — a
+device whose position has never resolved — and nothing useful to say about
+it in words that "no card" doesn't already say, so `MoonPhase.cpp`'s
+`cardItemCount()` reports zero items rather than inventing a message, the
+same tolerance a picture card with no `assetId` chosen already gets.
+
+**Drawing an actual disc from three primitives, not an image asset.**
+`Display::showMoonPhaseCard()` (see that function's own long comment in
+`Display.cpp` for the full derivation) uses a well-known technique for
+faking a lunar-phase disc with nothing but `fillCircle`/`fillArc`/
+`fillEllipse`:
+
+1. Fill the whole disc `muted()` — start dark.
+2. Fill the hemisphere currently facing the Sun `ink()`, as a half-disc
+   wedge (`fillArc` from radius 0 to the disc's radius, sweeping 180
+   degrees) rather than a `fillRect` — a rectangle's bounding-box corners
+   poke past the round limb; a wedge's do not.
+3. Overlay an ellipse, same centre and vertical radius as the disc,
+   horizontal radius `radius * |1 - 2 * illuminatedFraction|`, to grow or
+   shrink the lit area away from the exact-half case step 2 drew — filled
+   `muted()` below 0.5 illuminated (eating back toward new moon) or `ink()`
+   above it (growing toward full), skipped entirely at exactly 0.5 where it
+   would have zero width.
+
+**Waxing lights the right, waning lights the left — a stated
+simplification, not a guess.** `phase < 0.5` (waxing, growing toward full)
+picks the right half in step 2; `phase > 0.5` (waning) picks the left. This
+is the Northern Hemisphere convention: a Southern Hemisphere household sees
+its own sky mirrored left-right from what this draws. There is no
+per-device hemisphere signal today to draw the correct picture for both, and
+`Display.cpp`'s own comment says so rather than leaving it to be discovered
+on a real device.
+
+`phaseName` is captioned underneath the disc in bold, with an "N%
+illuminated" line below that in muted grey — the picture is the point, but
+the card is not purely an unlabeled image.
+
+**Registered at `order` 4, interleaving every 7 cards** — grouped with
+`sunmoon` and `announcement`, the other once-a-day-fact singletons, between
+`sunmoon`'s 6 (sunrise/sunset earns a slightly shorter gap; it is worth
+seeing about that often) and `announcement`'s 8 (a household notice, seen
+more rarely). A fresh, illustrated card the product owner wants seen
+regularly does not belong buried as rarely as a notice, but the Moon's phase
+changes more slowly than sunrise/sunset does, so it does not need sunmoon's
+own cadence either.
+
+**`Cards::kMaxCards` moved from 8 to 10.** Eight registrations already
+existed (`weather`, `aircraft`, `graphic` × 3, `sunmoon`, `announcement`,
+`clockdate`) — exactly at the cap — so `moonphase` as a ninth would have hit
+`registerCard()`'s silent-log-and-drop overflow path on firmware with no
+automated tests to catch it. Sized to 10, one spare slot, rather than
+exactly 9, so the next card type is a registration, not also a bump here.
+
+**`kBannerHeight`/`kCardMargin`/font choices are unchanged** — this card
+reuses the same white/bannered card family and layout primitives as every
+card before it, in a new banner colour (`kMoonPhaseBanner`, deep indigo)
+distinct from weather's navy, aircraft's blue, sunrise/sunset's amber and
+announcement's green, since it is visually a new kind of card, not a
+variation on an existing one.
+
+### A QR-plus-text card: the App renders a QR code for the first time
+
+`App/QrText.h`/`.cpp` is the first card in this build where the App itself
+draws a scannable QR code — a fixed-URL-only image renders a QR code on
+CAL's own bootloader side (its setup-wizard "scan this to configure WiFi"
+screen, root `Display.cpp`'s `showQr()`), but nothing in `App/` did until
+now. `Display.cpp`'s own comment used to say so explicitly
+(`// No CalQr.h here: the App never renders a QR code.`); that comment is
+gone, because it is no longer true.
+
+**The rendering technique is ported verbatim, not redesigned.** CAL's own
+`showQr()` is proven, working code, so `Display::showQrTextCard()` reuses it
+almost unchanged: the same vendored, renamed copy of ricmoo/QRCode
+(`App/CalQr.h`/`.c` — a second copy of the two files at the repo root,
+because the Arduino build model compiles each sketch folder independently
+and `App/` cannot reach across to CAL's own copy, the same reason `App/`
+already carries its own `Display.cpp` rather than sharing CAL's), the same
+fixed version-6/ECC-LOW static buffer sizing (`qrcode_getBufferSize()` is a
+runtime function and cannot size a compile-time array), and the same
+`qrcode_initText()`/`qrcode_getModule()` render loop with a failure screen
+on a non-zero `qrcode_initText()` return rather than drawing garbage.
+
+**What changed is only the surrounding layout**, because this card has to
+share the panel with a banner above it, a caption/fallback line beneath it,
+and the App's own button row and corner clock further down — CAL's own
+`showQr()` owns the whole 240px-tall panel and answers to nothing else. The
+code is drawn at scale 2 (a 90px square) rather than CAL's own scale 3
+(135px): `kButtonRowY` starts at 190 and the banner already claims the top
+22px, leaving roughly 160px of drawable height against CAL's ~228, with a
+caption line and a fallback data line still to fit beneath the code. This is
+an honest, documented trade-off, not an oversight — see `showQrTextCard()`'s
+own remarks in `Display.cpp` — and, like every card in this build, it is
+**UNVERIFIED ON HARDWARE**: scan reliability at this smaller size has not
+been checked against a real camera on real glass.
+
+**Two content fields with two different roles, unlike every other single-field
+card.** The announcement card (above) has one field, `text`, that is both its
+content and its required-content gate. This card has two:
+
+- `qrData` (`CardPolicyEntry.QrData` → `Cards::PolicyEntry::qrData` →
+  `Cards::CardSpec::qrData`, a new fixed 101-byte buffer alongside `text` on
+  the same `CardSpec`) is the actual payload encoded into the code, and is
+  **required** — with nothing to encode there is no code to draw, so
+  `QrText::cardItemCount()` reports zero items exactly the way
+  `Announcement::cardItemCount()` does with no text.
+- `text` (the same field the announcement card uses) is an **optional**
+  caption shown above the code's raw-data fallback line, mirroring the role
+  a caption plays in CAL's own `showQr()`, where the URL itself is always
+  drawn and a caption is supplementary. A QR card with `qrData` but no
+  `text` is a perfectly ordinary, silent, caption-less code.
+
+**No fetch, same reasoning as the announcement card.** Both `qrData` and
+`text` arrive already complete on every check-in via
+`CardManager::applyPolicy()`, so there is nothing to cache and nothing that
+can fail to fetch — `QrText.cpp` registers no `fetch` function, and
+`CardManager.cpp`'s existing `card.fetch == nullptr` tolerance covers it.
+
+**`Cards::kMaxQrDataLength` (100) must equal
+`DiscoverAroundMe.AdminUI.CardPolicyEditing.MaxQrDataLength` on the server**,
+the same cross-repository discipline `kMaxTextLength` already keeps for the
+announcement card, pinned by a `static_assert` in `QrText.cpp`. The
+server-side number was derived from QR version 6's own published byte-mode
+capacity at ECC LOW (134 characters) with roughly 25% of that held back as
+margin — see that constant's own remarks on the server for the full
+derivation. An over-long `qrData` is **dropped, not truncated**, for a
+stronger reason than the announcement card's own "cut off mid-sentence": a
+QR payload chopped off mid-string is not a shorter version of the same
+code, it is a different one, and showing nothing is more honest than
+showing the wrong code.
+
+**Interstitial, registered at `order` 4 (grouped with `sunmoon`, `moonphase`
+and `announcement` — all four are singleton facts or admin-authored content
+rather than a feed) and `interleaveEvery` 9** — one past `announcement`'s 8
+and one before `clockdate`'s 10. Scanning a code asks more of a person than
+reading a line of text (find a phone, open the camera, wait for it to
+focus), so it earns a slightly longer gap than the plain-text notice beside
+it, while still appearing distinctly more often than the big clock face,
+which nobody needs to interact with at all.
+
+**`Cards::kMaxCards` moved from 10 to 11.** Ten registrations already
+existed (`weather`, `aircraft`, `graphic` × 3, `sunmoon`, `announcement`,
+`clockdate`, `moonphase`) — exactly at the cap — so `qrtext` as an eleventh
+would have hit `registerCard()`'s silent-log-and-drop overflow path.
+Sized to 11, one spare slot, rather than exactly 10, so the next card type
+is a registration, not also a bump here.
+
+A new banner colour, `kQrTextBanner` (teal), keeps this card visually
+distinct from every banner before it — weather's navy, aircraft's blue,
+sunrise/sunset's amber, moon's indigo and the notice's green all already
+carry a meaning this card should not borrow.
+
+### Multi-instance, generalized beyond the graphic card
+
+The graphic card above shipped as three independently-configured instances
+(`graphic`/`graphic2`/`graphic3`) from the start, via a hand-rolled
+`template <int N> class Instance` in `Graphic.cpp`. Brett asked for that
+pattern generalized to **every** card type, budgeted for up to five instances
+each. This section records what actually happened, because "every card type"
+turned out not to mean the same thing for all of them.
+
+**The dividing line: does the card's own descriptor carry a field an admin
+can set differently per instance?** Graphic has `assetId`. Announcement has
+`text`. QrText has `qrData` (and the same optional `text`). Forecast has
+`location` (Home vs Target). A second instance of any of these four is a
+real, independently-useful configuration — a second picture, a second
+notice, a second QR code, a second address's outlook — not a copy of the
+first. Weather, Aircraft and Listings each hit an unparameterised `/mine`
+endpoint with no field on their descriptor a policy could vary between two
+instances; a second instance would issue an identical HTTP request and draw
+an identical card, for the price of a second round trip every refresh. Tides
+is pushed unconditionally on every check-in with nothing to distinguish a
+second copy. SunMoon, MoonPhase and ClockDate each compute one fact for the
+device's own position/time — there is no field at all on their descriptor a
+second instance could be configured differently from; "clockdate2" would
+show the identical clock as "clockdate", forever.
+
+So `Graphic.cpp` widened from three instances to five (adding `graphic4`/
+`graphic5`, same `Instance<N>` template, same `order`/`interleaveEvery` for
+all five), and `Announcement.cpp`/`QrText.cpp` gained the identical
+`Instance<N>` treatment for the first time — five ids each
+(`announcement`..`announcement5`, `qrtext`..`qrtext5`). Both are simpler
+templates than Graphic's: neither has a cache or a ready flag to hold
+per-instance, since neither has a network fetch at all (see their own
+sections above) — the entire template is a pure read of whatever
+`text`/`qrData` the instance's own descriptor currently holds, so every
+member except `id()` needs no static data.
+
+**Forecast is the one fetch-driven card that got this treatment anyway**,
+because its `location` field is a real per-instance axis the other four
+fetch-driven cards lack. `Forecast.cpp`'s `Instance<N>` is the closest sibling
+to Graphic's own: each instantiation gets its own `gLast`/`gEverFetched`/
+`gLastOkMs`, and each instance's `fetch()` reads its *own* Location choice
+and issues its *own* GET to `/api/myweather/forecast`, entirely unaware of
+what any other instance fetched. A household can now configure "forecast" for
+Home and "forecast2" for Target as two independent rotation entries. One
+sharp edge worth stating plainly: `Cards::CardSpec::active` defaults to
+`true` until the first policy arrives (see `Cards.h`), so a freshly-booted
+device fetches all five forecast instances once each before that first
+check-in narrows the set down to whatever an admin actually configured —
+five requests instead of one, bounded and one-time, not a steady-state cost.
+
+**Corrected later: "entirely unaware of what any other instance fetched" and
+the five-request burst are both now out of date.** `Forecast.cpp` memoizes the
+response to each of its two possible URLs, so five instances issue at most two
+requests per refresh window rather than five — see "Three allocation-churn
+fixes" near the end of this file for how, and for why each instance still reads
+its *own* Location choice every time. The paragraph above is kept as written
+because the sharp edge it identifies is exactly what made the memoization worth
+doing.
+
+Weather, Aircraft, Listings, Tides, SunMoon, MoonPhase and ClockDate were
+deliberately left single-instance. This is a judgment call, not something
+Brett specified precisely for these seven — he named the fetch-driven ones
+as a real open question and asked for it to be flagged rather than silently
+decided. It is flagged here, in `Cards.h`'s own `kMaxCards` comment, and in
+each of the four multi-instance cards' own header remarks.
+
+**`Cards::kMaxCards` moved from 14 to 28.** 27 registrations exist now: the
+seven single-instance cards above, plus Graphic/Announcement/QrText/Forecast
+at five instances each (20). Sized to 28, one spare slot, rather than exactly
+27, the same convention every earlier bump in this file has kept.
+
+**A real bug, found and fixed alongside this work: `Cards::kMaxPolicyCards`
+was a stale, independent literal (8), not tied to `kMaxCards` at all.**
+`CheckIn.cpp`'s `parseCardPolicy()` silently drops any policy entry past the
+8th, logging one line nobody watching a device would see. With 27
+registrations now possible, a policy naming more than 8 of them would have
+lost the rest with no symptom beyond "some of the cards I configured never
+show up" — exactly the kind of silent-until-noticed failure this codebase's
+own conventions exist to prevent. `kMaxPolicyCards` is now defined as
+`kMaxCards` rather than its own number, which makes this specific class of
+truncation structurally impossible rather than something the next
+card-count bump has to remember to also apply here.
+
+### Deciding when to reboot to the updater
+
+Three independent things can make the App call `Loader::requestUpdate()` —
+which sets the `updreq` flag and reboots into CAL, as described above:
+
+1. **Check-in (`CheckIn.h`/`.cpp`) — the fast path, and the primary
+   mechanism.** `performCheckIn()` POSTs to `/api/checkin` every
+   `checkInIntervalMs`, sending the device's current UTC timestamp (ISO8601,
+   built with `gmtime_r`/`strftime`), its installed firmware version
+   (`Identity::installedAppVersion()`), and battery/charging fields. This
+   board has no battery — the ELEGOO/CYD is USB-powered — so
+   `batteryPercent`/`charging` go over as fixed placeholders (`100`, `true`)
+   rather than being omitted: `CheckInRequest` has no way to say "not
+   applicable," and a battery-powered sibling board will want the real fields
+   this same call already sends. The response's `checkInIntervalSeconds`
+   becomes the next `checkInIntervalMs` — a fleet's polling cadence is the
+   server's decision, not a constant baked into every device's firmware — and
+   defaults to 5 minutes (matching `CheckInGatewayService`'s own
+   `DefaultIntervalSeconds`) until the first real response replaces it. When
+   the response's `updateAvailable` comes back true, `performCheckIn()` calls
+   `Loader::requestUpdate()` directly. This is the path an admin's "Force
+   update" button on the server actually reaches, and it's what makes a fresh
+   build visible to a device within one check-in interval rather than within
+   the hour.
+
+   A check-in that fails for an ordinary reason (no network, a momentary
+   server outage) changes nothing; the next attempt is still
+   `checkInIntervalMs` away, same as a normal one. A check-in rejected with
+   `401` is different and is not treated as ordinary: it means this device's
+   own secret no longer authenticates, the case an admin's "Allow
+   re-registration" or a secret regeneration produces on a device that is
+   still mid-run rather than freshly booted. The App cannot re-enroll itself
+   (only CAL can), so `CheckIn::Result::secretRejected` carries this specific
+   case back to `performCheckIn()`, which calls
+   `Loader::returnToLoaderForReprovisioning()` immediately rather than
+   retrying the same dead secret forever. Before this existed, a device
+   caught by a server-side re-registration mid-run would sit silently
+   failing every `checkInIntervalMs` with no way back - invisible on its own
+   screen, since a failed check-in draws nothing - until someone noticed and
+   held its BOOT button for 3 seconds by hand. Unlike the BOOT-hold gesture
+   below, this reboot does not force the WiFi-setup portal - see this file's
+   "the secret-rejected path forced a WiFi reset it didn't need" for why a
+   rejected secret and a wrong network are different problems that got
+   conflated for a while.
+2. **`AppUpdater::checkForUpdate()` — kept, explicitly as a slower
+   fallback.** This is the same manifest check it always was, still run
+   independently on `Config::kUpdateCheckIntervalMs` (1 hour). `App.ino`
+   comments the call site to say so directly: check-in above is the fast path
+   that actually reaches an admin's "Force update" button or a newly-current
+   build; this hourly timer is belt-and-braces only, kept so an update can
+   never be permanently missed if check-in itself were ever broken.
+
+   It was called `newerVersionAvailable()` and returned a plain yes/no, and
+   **"plain yes/no" was a bug rather than a simplification** — every failure
+   path returned "no", which the BOOT-button path below rendered as "Already up
+   to date" to someone standing at a device that could not reach the server at
+   all. It now returns a three-state `UpdateCheck`; see "An update check that
+   could not happen, reported as 'already up to date'" near the end of this
+   file. This hourly timer deliberately still acts only on `Newer` and does
+   nothing at all on `CheckFailed`, which is the opposite of what the button
+   does and the right answer for both.
+3. **A single BOOT-button press**, covered next.
+
+### Two BOOT-button gestures, distinguished only by hold time
+
+The App reads the same pin CAL itself uses (`kBootButtonPin`, GPIO0,
+`INPUT_PULLUP`) for two different gestures — deliberately, so a household
+never needs to know which binary is running to know how to fix a problem:
+
+- **Hold for 3 seconds — reset stored WiFi.** `wifiResetRequested()` checks
+  this once, at boot, before the button is read for anything else, and
+  reboots into CAL via `Loader::returnToLoaderForReprovisioning()` if held.
+  The App has no captive-portal flow of its own (see WifiJoin, below), so
+  this is the only way out of "nothing remembered works."
+- **A plain press during normal operation — check for an update now.**
+  `forceUpdateCheckRequested()` edge-detects against the previous `loop()`
+  iteration's reading (a static `wasPressed`), so it fires exactly once per
+  physical press rather than repeatedly while held; a plain press during
+  normal operation was otherwise unused and is free to mean this.
+  `forceUpdateCheck()` shows "Checking for update," then reboots into the
+  updater with "Updating", or reports "Already up to date" and falls through to
+  a normal weather refresh. Saying so explicitly on screen either way matters:
+  a press that silently does nothing reads as a dead button, and without an
+  explicit answer, "nothing happened" and "already checked, nothing new" look
+  identical.
+
+  **There is a third outcome now, and its absence was the bug.** "Could not
+  check — The service could not be reached" is shown when the check itself
+  could not happen, held on screen longer than the up-to-date case because it
+  is the one that asks to be read. The reasoning above is right and stopped one
+  case short: two answers were not enough, because the third state was being
+  reported as the reassuring one. See "An update check that could not happen,
+  reported as 'already up to date'" near the end of this file.
+
+### Bug fix: the WiFi-reset hold only worked at boot, not when actually stuck
+
+Found live on a physical device. `wifiResetRequested()`'s 3-second BOOT hold
+was, before this fix, checked exactly once — in `setup()`, before
+`ensureWifiConnected()` is ever called. A device that passed that one check
+(WiFi looked fine, or the hold window was simply missed) and only lost its
+ability to join WiFi *afterwards* — bad credentials, a router swap, whatever
+— fell into `ensureWifiConnected()`'s retry loop, which showed "Could not
+join WiFi… Hold BOOT for 3 seconds to set up WiFi again" and then called a
+blind `delay(30000)` between attempts. That `delay()` never read the button
+at all. A household holding BOOT for 3 seconds *while already stuck on that
+exact screen* — precisely what it told them to do — did nothing, because the
+gesture's only working instant had already passed back in `setup()`. The
+only actual way out was a precisely-timed power-cycle-then-immediately-hold,
+which the on-screen text never described and which is not something a
+household member would discover on their own.
+
+The fix keeps the same ~30-second pace between join attempts but polls for
+the gesture throughout the wait instead of blocking blind: every 100ms it
+checks the BOOT pin, and a press hands off to `wifiResetRequested()` itself
+— reused as-is rather than reimplemented, so there is exactly one definition
+of "was the 3-second hold actually completed" for both call sites to share,
+not two subtly different ones drifting apart over time. A confirmed hold
+calls `Loader::returnToLoaderForReprovisioning()` immediately, from inside
+the retry loop, rather than waiting for the next `joinStoredNetwork()`
+attempt to fail first. A press released early (before the 3 seconds
+complete) leaves `wifiResetRequested()`'s own "Keep holding…" prompt on
+screen, which `ensureWifiConnected()` explicitly redraws back to "Could not
+join WiFi" afterward — so the screen never keeps telling someone to
+"release now to cancel" a hold that already ended.
+
+### Bug fix: the 3-remembered-networks design had no path to ever reach 2
+
+`Identity.h`'s own doc comment on `kMaxNetworks = 3` explains the intent
+plainly: "a device is enrolled at an agent's office and then carried to a
+household, and a unit that remembers only the network it is currently on has
+to be re-provisioned by hand every time it moves. Three is enough to cover
+office, home and one spare." `rememberNetwork()` genuinely implements that —
+an already-known SSID is promoted and refreshed, a new one is added, and only
+once the list is full does the least-recently-used entry get dropped.
+
+None of that mattered in practice, because the only door into the captive
+portal that adds a network was also the one that emptied the list first. The
+BOOT-hold "reset WiFi" gesture — the sole way to teach a device any network
+it does not already have, since the App carries no captive portal of its own
+(see this file's "Two BOOT-button gestures" above) — called
+`Identity::clearNetworks()` immediately before opening the portal, in both
+`App/Loader.cpp`'s `returnToLoaderForReprovisioning()` and `CAL.ino`'s own
+handling of the gesture. The portal itself (`Provisioning::run()`) accepts
+exactly one SSID/password per visit and returns. So every real provisioning
+session — however many times a technician repeated it — went wipe, add one,
+wipe, add one, and a device could never carry more than the single most
+recently provisioned network. Found live: two units in the field that had
+each been set up at more than one site still only answered to the last one.
+
+Why the wipe was there at all, and why deleting the call outright would have
+been worse: `Provisioning::run()` only gets invoked when
+`Provisioning::joinStoredNetwork()` first fails (`CAL.ino`: `if
+(!Provisioning::joinStoredNetwork()) { Provisioning::run(); ... }`) - the
+portal is not offered unconditionally, only as a fallback. `clearNetworks()`
+was doing double duty as the thing that *forced* that fallback to trigger,
+by making `joinStoredNetwork()` fail outright (`WifiJoin.cpp`: zero
+remembered networks is an immediate `return false`). Simply removing the
+call would have meant a device still in range of a network it already knows
+would rejoin silently and skip the portal entirely - the BOOT-hold gesture
+turning into the exact "dead button" failure mode the fix directly above
+this one already went to some trouble to rule out, just relocated from a
+timing bug to a logic one.
+
+The fix separates the two jobs `clearNetworks()` was accidentally doing.
+`Identity::provisioningForced()`/`setProvisioningForced()` is a new one-shot
+NVS flag, the same shape and lifecycle as `updateRequested` (set before a
+reboot into CAL, read once, cleared by the reader) rather than
+`kMaxNetworks`-shaped state. Both gesture handlers now call
+`setProvisioningForced(true)` instead of `clearNetworks()`; CAL's
+join-or-provision decision becomes `if (Identity::provisioningForced() ||
+!Provisioning::joinStoredNetwork())`, consuming the flag right before
+`Provisioning::run()`. Short-circuit evaluation means a forced request never
+even attempts the existing networks first - the portal opens immediately,
+exactly as before - but nothing already remembered is discarded to make that
+happen. A network added through the portal still lands through the same
+`rememberNetwork()` every automatic rejoin already uses, so the existing
+office/home/spare accumulation happens for the first time in practice
+instead of only on paper. `clearNetworks()` itself is unchanged and still
+exists for whatever genuinely wants a hard wipe - there is simply no caller
+left that reaches for it to solve "how do I force the portal open."
+
+No automated test covers this - see this file's own remarks elsewhere on why
+`App/` firmware changes are verified by a clean compile, CAL's CI producing
+a real release build, and confirmation on real hardware, not a test suite.
+
+### Bug fix: the secret-rejected path forced a WiFi reset it didn't need
+
+Found live: a device whose secret was reset server-side (an admin's "Allow
+re-registration," or a straight `RegenerateSecret`) rebooted as designed via
+`performCheckIn()` → `Loader::returnToLoaderForReprovisioning()`, and landed
+on the captive-portal QR screen asking a person to redo WiFi setup - on a
+unit that had never moved, still sitting a foot from the same router it had
+joined a minute earlier.
+
+The cause was the previous fix directly above this one. It gave the
+BOOT-hold gesture and `returnToLoaderForReprovisioning()` the identical
+`setProvisioningForced(true)` call, on the reasoning that both were "force
+the provisioning flow open" requests. They are not the same request.
+BOOT-hold means a person is standing at the device asking to change its
+network - short-circuiting `joinStoredNetwork()` there is correct, exactly
+as documented above, because trying the old network first and quietly
+succeeding would make the gesture look dead. A rejected secret means the
+*server* stopped trusting this device's credential; it says nothing
+whatsoever about which WiFi network is right, and the network is
+overwhelmingly likely to still be correct. Forcing the portal in that case
+does not fix the actual problem (the secret) and adds a second, unrelated
+one (a device now stranded waiting for someone to re-enter WiFi credentials
+it already had).
+
+The fix: `returnToLoaderForReprovisioning()` no longer calls
+`setProvisioningForced`. It still calls `setUpdateRequested(true)`, which is
+all it ever needed - that alone makes `CAL.ino`'s `mustContactServer()`
+true, so CAL does its own WiFi join instead of handing straight back to the
+same still-installed App. CAL's ordinary `if (forced ||
+!Provisioning::joinStoredNetwork())` then behaves exactly like any other
+boot with `forced` false: it tries the remembered network first (which
+works, since nothing about the network changed) and only falls back to the
+portal if that genuinely fails. The BOOT-hold gesture is untouched - it is
+the one caller of `setProvisioningForced` left, and its short-circuit
+behaviour is exactly what that gesture still wants.
+
+This fix alone was still not enough - see the next one. It stopped the
+device from stranding itself on a WiFi-setup screen, but the underlying
+check-in-fails-forever loop it was rebooting out of was still a loop, just
+now with working WiFi at every iteration.
+
+### Bug fix: forgetting the network wasn't the missing piece - forgetting the secret was
+
+Found live, same incident as directly above, same afternoon: with the WiFi
+fix in place, a device whose secret had been reset server-side reconnected
+fine, checked in, got rejected again, and rebooted right back into the same
+state - "Cannot verify this device" recurring every `checkInIntervalMs`
+forever, network working the whole time.
+
+The cause: `CAL.ino` only ever attempts re-enrollment
+(`awaitKeyAssignment()` → `Enrollment::requestKey()` →
+`RegisterViaMacAddress`) when `!Identity::hasSecret()`. A device whose secret
+was rejected still has that exact secret sitting in NVS -
+`returnToLoaderForReprovisioning()` never touched it, only WiFi and the
+update-requested flag. So CAL boots, sees `hasSecret()` is true, skips
+enrollment entirely, fetches a manifest that says the installed version is
+already current, and hands straight back to the same App - which presents
+the same already-rejected secret on its next check-in and lands right back
+in `returnToLoaderForReprovisioning()`. Nothing in that cycle ever gives the
+device a reason to ask for a new one.
+
+The fix: a new `Identity::clearSecret()` (`prefs.remove` on the `"secret"`
+key, the read side of the same NVS entry `saveSecret()`/`deviceSecret()`
+already manage - added to both `App/Identity.h/.cpp` and the root copy,
+keeping the two byte-identical as this file's own comment requires), called
+from `returnToLoaderForReprovisioning()` right before the reboot. The next
+CAL boot now genuinely finds `!hasSecret()`, takes the enrollment path, and
+calls `RegisterViaMacAddress` - which succeeds for a device an admin
+actually reset for re-registration, because that server-side reset already
+cleared `SecretRetrievedAtUtc` (see the server's `DeviceRegistryService`),
+the field `RegisterViaMacAddress` checks before it will ever issue a second
+secret to a MAC it already issued one to. The two resets - the server
+forgetting it trusted this secret, and the device forgetting it has one -
+were always meant to happen together; only the second one was missing.
+
+No automated test covers either of these last two fixes, same reasoning as
+the fix above them.
+
+### Sun, moon and tide icons, extending the forecast card's icon set
+
+`showSunMoonCard()` and `showTidesCard()` were two-row stat cards with no
+graphic of any kind - a muted label, a right-justified value, nothing in
+between. Brought in line with the forecast card's own condition icons (see
+"The weather card retired, folded into Forecast" above) by drawing one small
+icon per row in the gap that already existed between the label and the value
+column, rather than resizing either.
+
+The forecast card's sun-drawing code (filled disc plus eight rays) is now
+`drawSunIcon()`, pulled out of `drawWeatherIcon()`'s `Sunny` case so
+`showSunMoonCard()`'s sunrise row can call the identical routine instead of
+a second copy. Sunset gets `drawMoonIcon()` - a crescent, cut from a filled
+disc by overlaying a second circle in `bg()`, the same "one shape carves a
+bite out of another" idea `showMoonPhaseCard()`'s own terminator ellipse
+already uses, simplified to a fixed crescent because this icon only means
+"it is night now," not tonight's actual phase - that specific claim stays
+the dedicated moonphase card's job alone. Sun for sunrise, moon for sunset
+was the direct reading of this card's own id (`sunmoon`) once it was getting
+icons at all, rather than a sun on both rows and "moon" going unrepresented
+anywhere on the card.
+
+`showTidesCard()` gets `drawTideIcon()` - a zigzag wave under an arrow,
+pointing up for "Next high" and down for "Next low." That direction is
+worth drawing because it is the one thing neither row's own label states:
+"Next high" says a high tide is coming, not whether the water is presently
+rising toward it or still falling from the last one - the arrow answers the
+question a household actually has ("is it coming in or going out") that the
+text alone leaves for someone to work out from a tide table.
+
+Same verification and no-automated-test caveat as every other `App/` change
+in this file: a clean compile, CAL's CI, and confirmation on real hardware.
+
+### A drawn degree symbol, because the font has none
+
+LovyanGFX's built-in font used here is ASCII-only — no Unicode glyphs, no
+extended-ASCII either — so a degree sign has nothing to look up, whether it's
+attempted as a UTF-8 sequence or a raw `0xB0` byte. A real device showed
+exactly the failure mode this predicts: a missing-glyph box where the degree
+mark should be. `Display.cpp`'s `drawTemperature()` (formerly
+`centeredTemperature`) works around this by composing the temperature display
+by hand rather than as one string: `lcd.drawString` for the number and the
+unit, and a small ring from `lcd.drawCircle()` — positioned near the
+cap-height, like a real superscript degree mark — standing in for the
+character the font can't render. `showWeatherCard()` calls this instead of
+building `String(temperature) + "°" + unit`; putting a literal degree
+character back into that string reintroduces the missing-glyph box.
+
+The ring's radius is a **parameter**, not a constant, because it has to track
+whatever font the caller selected: the fixed 5px ring that read as a degree
+mark beside a 12pt numeral reads as a stray speck beside the 24pt one the
+weather card now uses. At radii of 7 and above it draws two concentric
+circles, so the ring carries a stroke weight in the same family as the bold
+digits standing next to it — a one-pixel ring beside a 24pt bold numeral reads
+as a rendering artefact, which is the one thing a hand-drawn glyph substitute
+must never look like. The doubling is skipped at small radii, where a 2px
+stroke would close the ring into a dot.
+
+### WifiJoin, not Network
+
+`App/WifiJoin.h`/`.cpp` is named that on purpose, not `Network.h`. A
+sketch-local `Network.h` shadows the ESP32 Arduino core's own system header
+of the same name, which `WiFi.h` depends on internally, and takes the build
+down with missing-type errors (`network_event_handle_t`, `NetworkInterface`,
+and similar) that have nothing to do with the file's own contents and nothing
+obviously pointing at the real cause. Don't rename this file back, and don't
+add a new sketch-local `Network.h` anywhere else in this project.
+
+### Watching a device live: `Log.h`/`.cpp` and remote debug streaming
+
+Forcing an update onto a device and then wanting to *watch it land* — without
+finding the unit and plugging in a USB cable — is what `App/Log.h`/`.cpp`
+exists for. Every module in `App/` (`App.ino`, `CheckIn.cpp`, `Weather.cpp`,
+`Aircraft.cpp`, `WifiJoin.cpp`, `AppUpdater.cpp`, `AppService.cpp`,
+`Loader.cpp`) calls `Log::line()`/`Log::printf()` instead of `Serial` directly,
+so the same narrative — WiFi joining, check-in results, card refreshes, update
+decisions — is available two ways at once rather than two logging paths
+silently drifting apart. This is scoped to `App/` only; CAL's own root-level
+logging (`CAL.ino` and its modules) is untouched by this pass; a
+bootloader-side counterpart, if ever wanted, is a separate piece of work.
+
+**Serial first, always.** Every `Log::line()`/`Log::printf()` call writes to
+USB `Serial` unconditionally, before anything else happens. If the remote
+stream is ever broken, disabled, or the server unreachable, someone with a
+cable in hand still sees exactly what they would have seen before this module
+existed — that is the fallback of last resort this was built not to regress,
+not a nice-to-have. (`Log::line()` is now two overloads, `const String&` and
+`const char*`, so that unconditional serial write costs no heap allocation on
+the ordinary streaming-off path — see "Three allocation-churn fixes" at the end
+of this file.)
+
+**Discovery is check-in-driven, and deliberately not one-shot.** `/api/checkin`'s
+response now carries `debugStreamRequested` alongside `acknowledged` /
+`updateAvailable` / `checkInIntervalSeconds`, parsed into a new
+`CheckIn::Result::debugStreamRequested` field the same way as the others.
+Unlike the forced-update flag, `performCheckIn()` calls
+`Log::setStreamingEnabled(result.debugStreamRequested)` on *every* successful
+check-in, not just once — so streaming tracks an admin's toggle live, turning
+on or off within one `checkInIntervalMs`, and there is no flag of its own
+persisted to NVS. After a reboot, streaming is simply off until the next
+check-in tells it otherwise (up to one interval away) — recovering the right
+state automatically rather than needing to survive the reboot itself.
+
+**Transport reuses the proven pattern, on a timer.** While streaming is on,
+`Log::line()` also appends the same formatted line to an in-RAM buffer;
+`Log::poll()`, called once per `loop()` iteration, batches it into a
+`POST /api/debuglog` body (`{"lines": ["...", "..."]}`) using the identical
+`NetworkClientSecure` / `HTTPClient` / `Tls::configure()` /
+`X-Device-Secret` pattern `CheckIn.cpp` already established — no new HTTP
+client, no WebSocket. `Log::flushNow()` forces an immediate, synchronous send
+bypassing the timer; `Loader.cpp`'s `bootFactoryAndRestart()` — the single
+choke point every reboot path (`requestUpdate()`,
+`returnToLoaderForReprovisioning()`) already goes through — calls it right
+before `esp_restart()`, so the line explaining *why* the device is about to go
+dark actually reaches the server instead of being lost with the rest of RAM.
+
+**The concrete numbers, and why:**
+
+| Constant | Value | Reasoning |
+|---|---|---|
+| `kBatchIntervalMs` | 1000 ms | `loop()` already runs on roughly a 1-second cadence of its own (its closing `delay(1000)`), with no hardware timer or second task driving anything faster. A shorter timer would only be aspirational — `poll()` cannot be called any more often than `loop()` actually calls it. |
+| `kMaxBatchLines` / `kMaxBatchBytes` | 40 lines / 4 KB | Caps a single `POST` body so one flush can't spike request latency or hold up `loop()` for longer than necessary; whatever doesn't fit waits for the next `poll()`. |
+| `kMaxBufferedLines` / `kMaxBufferedBytes` | 200 lines / 16 KB | The buffer's ceiling when the heap can carry it — independent of and larger than the per-batch cap, and what protects against unbounded growth if the network is down for a while. Generous for several minutes of this firmware's real log volume (roughly one line every few seconds, brief bursts during WiFi join/check-in/update), and only ever paid while an admin has actually turned streaming on. **This is no longer the only thing bounding the buffer — see `kMinLargestBlockBytes` below.** |
+| `kMinLargestBlockBytes` | 33,434 bytes (`2 × Http::kTlsRecordBufferBytes`) | The heap floor the buffer refuses to encroach on. While the largest free 8-bit block is under it, the buffer's ceiling drops to **one batch** (40 lines / 4 KB) instead of 200 lines / 16 KB. Same figure `CheckIn.cpp` already uses for "this device could not have held a fresh TLS session", deliberately rather than a second threshold that could drift from it. |
+
+Once any buffer cap is hit, the oldest line is dropped to make room for the
+newest — oldest-first, never growing unbounded and never crashing — and the
+next successful flush is prefixed with a `[N lines dropped]` marker line
+summarizing exactly how many were lost. A failed `POST` leaves the buffer
+untouched for a retry on the next `poll()`; only what the server actually
+accepted (`HTTP 200`) is removed.
+
+**The heap cap, and the loop it exists to break.** Until 2026-09-27 the two
+caps above were the whole story, and neither of them asked whether the device
+could afford 16 KB across 200 separate Arduino `String` allocations. On device
+23 ("Test2") with streaming on, per boot:
+
+| uptime | free8 total | largest free block |
+|---|---|---|
+| 12 s | 31,100 | 18,420 |
+| 104 s | 19,480 | 8,692 |
+| 160 s | 15,060 | 4,596 → restart |
+
+A 16,040-byte fall in 160 seconds against a `kMaxBufferedBytes` of 16,384, with
+the largest block's share of the total dropping from 59% to 35% — the
+fragmentation signature of 200 separate allocations, not one 16 KB block.
+`HeapRatchet.h` had already named this module "the dominant consumer" on those
+grounds; this is that sentence becoming a restart loop.
+
+**It could not recover on its own, and that is what made it a defect rather
+than a known cost.** Draining the buffer means a `POST`, a `POST` needs a TLS
+session, and a new TLS session needs a contiguous
+`Http::kTlsRecordBufferBytes` that the buffer has just eaten — so the buffer
+pinned the memory required to empty the buffer. Check-ins failed for the same
+reason, `App.ino`'s unreachable watchdog restarted the device, streaming came
+back on at the next check-in, and it happened again. Devices 17 and 23 booted
+six times in 62 minutes this way and never got out. Devices 12, 18 and 30 have
+streaming off and stayed healthy throughout.
+
+**Why not `Http::canOpenNewSession()` directly**, which is the obvious
+candidate. It is documented as a *proof of impossibility* — the line past which
+recovery is already gone, a fact to act on by restarting — and a proof of
+impossibility is not a budget to spend down to. By the time it reads false the
+device is already in the state the cap exists to prevent. Retreating from that
+line does not undo it either: freeing 200 scattered `String`s returns bytes
+without necessarily returning one contiguous 16,717-byte block. So the buffer
+stays clear of the floor rather than falling back from it, which is what makes
+the threshold a *derived headroom* (`2 ×`) rather than the predicate itself.
+
+**Why the low-heap ceiling is one batch and not zero.** A device short of heap
+is precisely the device someone has a stream open on. A buffer that refused to
+hold anything would answer a memory problem by destroying the only diagnostic
+channel a deployed device has, handing the reader a silence indistinguishable
+from a healthy quiet device. One batch is the smallest size at which `poll()`
+still has a full `POST` to send, so the stream keeps running at its ordinary
+rate and gives up only its depth-on-outage — the part that was never affordable
+on this board anyway.
+
+**It says so when it happens**, per the standing rule that CAL and App log
+their decisions *and* the branches they skipped. The flush carries a second
+marker naming the count, the measured largest block and the requirement. That
+marker is composed straight into the outgoing JSON array rather than logged,
+and it has to be: routing it through `Log::printf()` would call
+`pushToBuffer()` — the function that produced the drop — appending a line about
+the buffer being over its ceiling to the buffer, evicting another line and
+counting another drop. **Serial is untouched by all of this.** `line()` writes
+`Serial` unconditionally and first, before the buffer is ever consulted, so
+every dropped line was already printed in full over the cable; the drop is a
+property of the remote stream alone.
+
+**Formatting.** `Log::printf()` renders into a fixed 256-byte stack scratch
+buffer — deterministic, and consistent with this module running from
+stack-tight retry loops throughout `App/` — rather than growing a heap buffer
+on every call; output that would overflow it is kept and marked
+`...(truncated)` rather than silently cut off mid-word.
+
+**Log on change, not on every pass.** The 200-line buffer above is the reason
+this is a rule rather than a preference: anything logged unconditionally from
+a timer or a draw path emits the same line forever and pushes out exactly the
+context someone opened the stream to find. `Graphic.cpp`'s `noteState()` and
+`SunMoon.cpp`'s `gLastLoggedSunrise`/`gLastLoggedSunset` established the
+pattern — say something the first time a condition becomes true and the first
+time it stops, and nothing in between.
+
+`Weather.cpp` now follows it throughout, and the cases it covers are worth
+listing because every one of them used to be a **silent** degradation on a
+device in someone's kitchen, with no on-screen tell and nothing in the stream:
+
+- **A missing `temperature` field** defaulted to `0` and drew as a real
+  reading of zero degrees — indistinguishable from a genuine freezing morning.
+  It still draws that way (inventing a substitute reading would be worse), but
+  it now says so, in those words.
+- **A missing `shortForecast`** drew as an empty gap; **an unresolvable
+  city/state/postal code** drew as no location line at all. Both are now
+  reported when they start and when they recover.
+- **Which address the reading is for.** `preferredForecast()` picks the
+  owner's Target over their Home when one is set, and both render as an
+  ordinary city name — so a device showing the "wrong" city has no visible
+  tell whatsoever. The log line is the only place that distinction is ever
+  recoverable from a deployed device.
+- **A failed refresh discards a good forecast.** `cardFetch()` replaces the
+  reading that was on the card with an error message, so one network blip
+  turns a working weather card into "Could not load weather" until the next
+  refresh ten minutes later. That is deliberate existing behaviour, not a bug
+  fixed here — but it now logs the *age of what it threw away*, which is the
+  kind of thing that is impossible to reconstruct after the fact.
+- **What the card actually drew**, gated so it fires only when the content
+  changed. Deliberately *excluding* the "Updated N min ago" string from the
+  change comparison even though it is on screen: freshness ticks over on its
+  own every minute, so folding it in would make every summary differ from the
+  last and turn a change-gated line straight back into a per-draw one.
+
+### CAL-side (bootloader) logging is explicitly out of scope here
+
+> **Superseded, and the reasoning below is the part that was wrong.** CAL now
+> has a logger — see *CAL can say why now: a boot journal in raw flash, read
+> over USB* at the end of this file. The scoping decision recorded here held up
+> in one respect and failed in another. It was right that CAL should get no new
+> *remote-facing* surface: the journal has no network code, no secret, no TLS
+> and no `/api/debuglog` POST, exactly as this section argued. It was wrong
+> that CAL "already has no equivalent watch-it-happen need of its own", on the
+> grounds that it "either gets a device onto the network and hands over, or
+> fails loudly on-screen at the point of failure". On 2026-09-11 a device did
+> fail loudly on-screen, and the screen said `Update failed` — which named
+> neither which of TLS, download, hash or flash write had failed, nor that the
+> App partition had already been invalidated. The screen is a message for a
+> household; it was never evidence. Everything below is kept as written,
+> because the half of it that is still true is still the rule.
+
+This pass touches `App/` only. CAL's own root-level modules (`CAL.ino`,
+`Provisioning.cpp`, `Updater.cpp`, and the rest) keep their existing `Serial`
+calls untouched, and there is no `debugStreamRequested` handling, streaming
+buffer, or `/api/debuglog` POST anywhere in CAL's own code. This is a
+deliberate scoping decision, not an oversight: the motivating use case —
+watching an *App* OTA update land and run — lives entirely in `App/`, and CAL
+itself already has no equivalent "watch it happen" need of its own (it either
+gets a device onto the network and hands over, or fails loudly on-screen at
+the point of failure). A bootloader-side counterpart, should CAL ever want
+one, is a separate piece of work — not a natural extension of this one, since
+CAL's constraints (never updated over the air, must stay minimal) argue
+against giving it any new remote-facing surface lightly.
+
+### Telemetry: a heartbeat riding check-in's own clock
+
+`App/Telemetry.h`/`.cpp` reports device health — uptime, WiFi RSSI, three
+separate heap figures (see below), CAL's own boot-attempt counter, and this
+device's own last check-in
+outcome — to the server's `POST /api/telemetry` (see the DiscoverAroundMe
+repo's README, "Telemetry: device health/diagnostics," for the canonical
+wire contract this firmware implements; this section only covers the
+device's own side of it). `Telemetry::report()` is called once per
+successful check-in, from `performCheckIn()` in `App.ino`, right before the
+`updateAvailable` reboot branch — a device about to reboot for an update
+still leaves a fresh snapshot behind first. Deliberately has no timer of
+its own: the server's own `/diag/telemetry` page flags a report stale past
+three times the check-in gateway's default interval, a threshold that only
+stays meaningful if a healthy device's telemetry refreshes close to every
+check-in rather than on some slower, independent schedule that would trip
+that alarm on its own. Best-effort and fire-and-forget — a failed report is
+logged and dropped, not retried before the next check-in comes around; this
+is diagnostics, not a control channel, and nothing downstream depends on it
+succeeding.
+
+**Three heap fields, not one, and that is not redundancy.** `freeHeapBytes` is
+`ESP.getFreeHeap()`, which was measured overstating the memory an allocation can
+actually reach by roughly 4x on this board; `free8BitBytes` and
+`largestFreeBlock8BitBytes` are `heap_caps_get_free_size()` and
+`heap_caps_get_largest_free_block()` against `MALLOC_CAP_8BIT`, the pool a byte
+buffer genuinely comes from. The old field deliberately keeps its old meaning
+and its old source, both because the server must keep working with firmware up
+to six months old and because two columns side by side are what make the
+discrepancy checkable in the fleet's own history. See "The fleet's whole heap
+history was ~4x too kind" near the end of this file for the measurements and the
+full argument.
+
+### The ISS flyover card: a live position, and now a next-pass prediction
+
+`App/IssFlyover.h`/`.cpp` is one interstitial card (`issflyover`) with two
+display modes, both fed by check-in and neither fetching anything of its
+own — see the DiscoverAroundMe repo's README, its own ISS section, for the
+canonical wire contract and the server-side orbital mechanics behind both.
+
+**Live position**, the original half: `issLatitude`/`issLongitude`/
+`issDistanceMiles`/`issBearingDegrees` off the check-in response are the
+station's current sub-satellite point and this device's distance/bearing to
+it. `issDistanceMiles` negative means "nothing to show" — open-notify
+unreachable, a too-stale cached position, or this device's own position
+never resolved — and the card reports zero items and drops out of rotation,
+same as MoonPhase's and Tides' own cards.
+
+**Next-pass prediction, found live tonight**: the server side of this — a
+real CelesTrak element set and a vendored SGP4 propagator answering "when
+does the ISS next clear this device's horizon" — shipped earlier this same
+session, adding seven `issNextPass*` fields to the check-in response. Nobody
+ever taught this firmware to read them, and it took a household actually
+noticing — "space station is not reporting when it will fly over" — for that
+gap to surface. `CheckIn.cpp` now parses the four `issNextPass*Utc` fields
+(ISO-8601 UTC instants, unlike every other check-in-driven time field this
+firmware had before, which are minutes-into-today) into epoch seconds with
+its own `parseIso8601Utc()` — a hand-rolled `days_from_civil` calculation
+rather than `timegm()`/`mktime()`, since every field here is already UTC and
+this avoids depending on libc/TZ behavior that varies by platform. 0 is the
+"absent" sentinel for those four (an epoch of 0 is 1970, as obviously wrong
+for a predicted future pass as `issLatitude`'s -999.0 is for a coordinate);
+-1.0 is the sentinel for the three azimuth/elevation fields, matching
+`issBearingDegrees`'s own convention.
+
+`IssFlyover::setNextPass()` is called from `App.ino` right alongside
+`setPosition()`. As shipped, the pass was the *fallback*: when there was no
+live position but a pass was upcoming, the card drew it instead of showing
+nothing. **That preference has since been reversed — the pass now leads and the
+live position is the fallback**; see "The ISS card now leads with the next
+visible pass" at the end of this file for the reasoning and for the server-side
+visibility filtering that made it safe. Everything below about *how* a pass is
+drawn is unchanged: "Next pass"/"Direction"
+rows for the local rise time and compass direction (converted from the
+absolute UTC instant with the same `time(nullptr) + utcOffsetMinutes * 60`
+then `gmtime_r` idiom `ClockDate.cpp` already uses for the current time, just
+applied to an arbitrary future instant), and a detail line giving the peak
+elevation, its compass direction, and the local set time — the single best
+"is this one worth going outside for" signal that would not otherwise fit in
+two stat rows. A pass stops counting as present once its own predicted set
+time is already behind `time(nullptr)`, so this card never keeps advertising
+a pass that has already happened just because the device has not checked in
+again since. Absent is a real answer here too, for the same three reasons
+the live position already has (no CelesTrak element set ever fetched, no
+resolved position, or no qualifying pass in the server's search window), and
+both a fresh pass arriving and a previously-known pass disappearing are
+logged to the remote debug stream on change, the same "state-change only"
+convention `Tides.cpp`'s tide logging already uses. (That convention has since
+been supplemented rather than replaced: this card, like every other card with
+data of its own, now also re-asserts its current status once per check-in —
+see "Re-asserting every provider's status once per check-in" at the end of this
+file for why change-only logging leaves a live stream blind.)
+
+## SelfTest: a diagnostic firmware for screen and SD isolation
+
+`SelfTest/` is a third sketch, sibling to `App/`, built the night of
+2026-09-06/07 after hours spent correlating scattered telemetry and debug-log
+lines across two real firmware bugs — the PNG-decode read-buffer heap
+fragmentation issue and the `Sd::begin()`-with-no-retry issue, both already
+fixed on `main` (see *Reading the whole file before decoding it* and *Bug
+fix: the RAM read buffer needed the same treatment* below, and `SdStorage.cpp`'s
+own remarks) — with no dedicated way to ask "does the screen work, does the
+SD card work" independent of the App's own incidental logging. In the user's
+own words: *"I want full instrumentation so that we can format and reformat
+as well as do file access and memory load tests with full telemetry. This is
+not acceptable behavior for the application. If it cannot do Graphics, it
+does not exist."*
+
+**Delivered exactly the way `App/` is.** CAL's own control flow needs zero
+changes: `Updater::installApplication()` already just installs whatever the
+manifest says, into `ota_0`. A per-device override on the server side (built
+concurrently, in the `DiscoverAroundMe` repo) is what points one specific
+unit at this build instead of the fleet's normal App version — SelfTest has
+no idea that override exists and doesn't need to. It reuses `App/`'s
+infrastructure rather than reinventing it: `Identity.h`/`.cpp` and
+`Tls.h`/`.cpp` are the same NVS-namespace-compatible copies App already
+carries, `WifiJoin.cpp` is the same stored-network join, `Log.h`/`.cpp` is
+the same remote debug-stream, and `Display.cpp` brings up the same
+`LGFX_AUTODETECT` panel and the same read-whole-file-into-RAM PNG decode
+technique `App/Display.cpp` uses post-fix — so a screen test here actually
+exercises the real driver stack a normal App run does, not a reimplementation
+of it.
+
+### The four test categories
+
+1. **Screen** (`ScreenTest.cpp`) — solid fills across a few colors, text
+   rendering at a few sizes, and, if any picture is already cached under
+   `/assets` on the card (the same directory `App/Assets.cpp` caches into —
+   this sketch shares the physical SD card and device with whatever App ran
+   here before), a real PNG decode through the exact RAM-buffer path that
+   broke tonight. **Honesty limit:** none of this can verify a human would
+   see the right picture — there is no camera on this device. A pass here
+   means every draw call completed and reported success where LovyanGFX's
+   API reports anything at all, not that the picture is correct.
+
+2. **SD format/reformat** (`SdTest.cpp`) — deliberately *not*
+   `App/Assets.cpp`'s `wipeCache()`, which the user directly criticized
+   tonight for silently reporting "0 files removed" success even when the
+   card was never mounted at all. This reports `SD.begin()`'s result
+   honestly, first, before anything else — a failed mount is a **failed**
+   test, not a silent no-op. If mounted, it reports card size/used bytes,
+   creates a test directory, writes three files sized to match real assets
+   from tonight's incident (2 KB, 34 KB, 80 KB) with a known deterministic
+   pattern, reads each back and verifies it byte-for-byte via a running
+   SHA-256 (the same technique `Assets.cpp`'s `fetchToCard()` uses), deletes
+   them, and confirms `SD.exists()` actually returns false afterward. Every
+   step reports its own pass/fail rather than one aggregate "reformat
+   complete." (There is no low-level format call in the Arduino `SD`
+   library — this is the honest substitute: a full create/write/verify/
+   delete round trip, which is what a "the card can be wiped and reused"
+   claim actually depends on.)
+
+3. **File I/O stress** (`SdTest.cpp`, `runFileIoTest`) — write/read/verify
+   at 2 KB, 34 KB, 80 KB and 150 KB, timing each write and read and verifying
+   content byte-for-byte via the same running-SHA-256 technique, so a
+   "network fine, storage corrupted the bytes" failure is caught the same
+   way `Assets.cpp`'s asset fetch already catches it.
+
+4. **Memory load** (`MemoryTest.cpp`) — allocates at 2 KB, 34 KB, 80 KB (the
+   exact sizes from the fixed read-buffer bug), then 100 KB and 150 KB to
+   find where this specific unit's heap actually gives out, reporting
+   `ESP.getFreeHeap()`/`ESP.getMaxAllocHeap()` before and after each
+   attempt and whether the allocation itself succeeded — directly answering
+   "how much contiguous memory does this specific unit actually have right
+   now," the exact question hours of manual log correlation were trying to
+   answer.
+
+### Reporting
+
+`Report.cpp` builds one JSON object per run, logs it in full to the remote
+debug stream unconditionally (so results are visible immediately even if the
+POST below fails or the endpoint isn't live yet), and makes a best-effort
+`POST /api/selftest/report` with the same `X-Device-Secret` header every
+other authenticated request uses. A non-200 response (or no route to the
+server at all) is logged clearly and never blocks or crashes the run — this
+sketch's server-side ingestion endpoint was being built concurrently by a
+separate session at the time this shipped, and a shape or path mismatch is
+expected to surface as a logged non-200 status, reconciled once both sides
+can compare notes, not as a crash.
+
+The shape, as implemented:
+
+```json
+{
+  "firmwareVersion": "selftest-1.0.0",
+  "screenTest": { "attempted": true, "passed": true, "detail": "fills=12ms text=8ms png=none-cached" },
+  "sdFormat": {
+    "attempted": true, "mountedBefore": true, "mountedAfter": true,
+    "formatSucceeded": true, "errorDetail": ""
+  },
+  "fileIo": [
+    { "sizeBytes": 2048, "writeSucceeded": true, "writeMs": 9, "readSucceeded": true, "readMs": 6, "verifySucceeded": true, "errorDetail": "" }
+  ],
+  "memoryLoad": [
+    { "requestedBytes": 2048, "allocationSucceeded": true, "freeHeapBefore": 210000, "freeHeapAfter": 207900, "maxAllocHeapBefore": 110000, "maxAllocHeapAfter": 108000 }
+  ],
+  "overallSummary": { "totalTestsRun": 11, "totalPassed": 11, "totalFailed": 0 }
+}
+```
+
+`memoryLoad`'s `freeHeap*`/`maxAllocHeap*` keys are named after
+`ESP.getFreeHeap()`/`ESP.getMaxAllocHeap()` but no longer come from them. They
+now carry `heap_caps_get_free_size(MALLOC_CAP_8BIT)` and
+`heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)` — the wrappers were measured
+on this board reporting 49,960 free and 32,756 largest while `MALLOC_CAP_8BIT`
+actually held 11,340 free with a 6,132-byte largest block, so a self-test using
+them would have called a unit healthy on the same night its 5,686-byte decode
+could not allocate. The **keys** keep the old names deliberately: they are a wire
+contract with the server's `SelfTestReportRequest`, and the server has to keep
+accepting reports from firmware up to six months old, so renaming the field to
+match the better source would break precisely that guarantee. Read them as
+"8-bit free" and "8-bit largest block". The example values above are
+illustrative and predate the change — a real ESP32 in this fleet reports figures
+an order of magnitude smaller.
+
+The example's `png=none-cached` is also worth noting: `screenTest` still decodes
+a PNG by reading the whole file into RAM, which is **no longer what App does**
+(App streams from SD via `drawImageFromSd()`). That divergence is intentional —
+the buffered read is the worst-case contiguous-allocation probe, so it fails
+first and loudest on a fragmented heap, which is what a self-test is for. See
+`SelfTest/Display.h`'s remarks on `drawPngFromSdTest()`.
+
+### After the report
+
+The full pass/fail summary is drawn on screen — one line per category with
+pass/fail/detail, matching the standing "if it cannot do Graphics, it does
+not exist" complaint this sketch exists to answer. The suite then re-runs
+automatically every `Config::kRerunIntervalMs` (30s) or immediately on a
+BOOT-button press, so a marginal SD card's intermittent behaviour has a
+chance to actually show up on a device someone is standing over, without
+needing a fresh flash between runs.
+
+## Provisioning: how a device gets its secret
+
+The Device Client Specification's §13 lists "the factory provisioning process by
+which a device receives its first secret" as unspecified. This is the design
+that fills that gap; it is designed, not yet built.
+
+The one-time wired load is done from a **browser-based flasher** built on
+esptool-js / WebSerial — not a native application. A browser page needs no
+install, no code signing, no per-platform build and no update mechanism of its
+own, which matters when the people running it are real-estate agents preparing a
+handful of devices rather than a manufacturing line.
+
+The sequence: the operator signs in to the flasher page, which authenticates to
+the server; the server mints the device record and generates an **NVS partition
+image containing that device's secret**; the flasher writes that image alongside
+the CAL binary over USB. The secret therefore never lands in a file on the
+provisioning PC — it goes from the server, through the page, onto the flash.
+
+Two things about this are worth knowing before anyone tries it:
+
+- **WebSerial requires a secure context** (HTTPS, or `localhost`). This was
+  blocked on the server's own TLS work, which has since gone live
+  (`api.discoveraroundme.com` serves a valid Let's Encrypt certificate) - so
+  this specific blocker is resolved. It is still a hard browser rule, not a
+  configuration, for whatever flasher runs where.
+- **The CH340C USB-serial driver is the most likely first-contact failure.** On
+  Windows the board frequently enumerates as an unknown device until the driver
+  is installed, and the symptom a non-technical operator sees is simply that no
+  port appears in the browser's picker. Whatever documentation ships with the
+  flasher needs to lead with this rather than mention it at the end.
+
+**What exists today is narrower than what this section describes.** The server
+now has a public, unauthenticated `/cal` page for the simplest case - a fresh
+unit that only needs generic CAL firmware, no server-issued secret involved,
+CH340 driver links leading the page as called for above, and a link out to
+Espressif's own `esptool-js` for the actual WebSerial flash. It does not sign
+anyone in, mint a device record, or generate an NVS secret image - the
+operator-authenticated, secret-injecting flasher this section actually
+describes for bulk provisioning is still designed, not built.
+
+## Discovery: a name, and nothing else
+
+Only two things about the outside world are compiled into CAL (`Config.h`): a
+**DNS hostname** and a **well-known discovery path**. Endpoint paths, the QR
+target, timeouts and branding all come from the discovery document fetched at
+runtime, following §9 of the Device Client Specification.
+
+The reason is that CAL cannot be changed. An IP address compiled into a factory
+partition strands every unit in the field the day the service moves; a name can
+be repointed. For the same reason, discovery returns *paths* rather than full
+URLs — the host is already known, and accepting a host from the document would
+be a way to redirect an entire fleet somewhere unintended. TLS uses the root
+bundle rather than a pinned leaf certificate, because a pinned leaf turns a
+routine ninety-day rotation into the simultaneous bricking of every device, and
+CAL cannot be updated to trust a new one.
+
+## Branding and the QR target
+
+CAL is flashed **before** a device is assigned to a brand. The normal resting
+state of a device is unassigned in an agent's pool, so there is no branding to
+compile in and no way to know at flash time what it would be.
+
+So CAL shows a neutral splash on first boot, and after it has authenticated it
+caches server-supplied brand assets into LittleFS and shows those on subsequent
+boots. Assets are stored as raw RGB565 at a fixed 240×120 — the server prepares
+them for this exact panel, so the device carries no image decoder and no scaler,
+and a wrong-sized file is discarded rather than rendered as noise. The splash is
+streamed a row at a time (480 bytes) because a full-screen buffer would be
+150 KB on a board with no PSRAM.
+
+The QR code's target URL is server-supplied for the same reason. It may point at
+an agent's own vanity address that redirects onward to the service, or at the
+service directly. **The server decides; CAL renders what it is given** — and
+always prints the URL as text underneath the code as well, because cameras fail
+and a code nobody can type is a support call.
+
+## WiFi
+
+The device is enrolled at an agent's office and then carried to a household, so
+it moves between networks as a matter of course. CAL remembers **the last three
+networks it successfully joined**, most recent first, rather than only the
+current one as the older CYD-Dickey firmware did — which required a by-hand
+re-provision on every move. Three covers office, home and one spare without
+turning NVS into a database.
+
+Remembering is not enough on its own, because more than one of them may be in
+range and the most recently used is not necessarily the one with usable signal.
+So `joinStoredNetwork()` **scans first**, matches the remembered list against
+what it can actually see, and tries them **strongest signal first** — taking the
+strongest sighting where a mesh advertises the same name more than once. A
+successful join promotes that network to the front of the list, so the ordering
+reflects where the device lives rather than where it was last provisioned. If
+nothing remembered turns up in the scan at all, CAL falls back to trying the
+stored entries blind, which covers a network that is present but was missed.
+
+Each entry lives in its own pair of NVS keys (`ssid0`..`ssid2`, `pass0`..`pass2`)
+with a separate count, and `rememberNetwork` rebuilds all three slots rather
+than shuffling in place — cheap at this size, and it avoids the class of
+off-by-one bug an in-place move invites. Slots past the current count are left
+behind in NVS but are unreachable, since every read is bounded by the count.
+
+The provisioning portal itself offers **networks the device itself scanned**
+rather than a free-text field, and says so on the page. ESP32 is 2.4 GHz only,
+and a band-steering router advertises one SSID across both bands, so a network
+plainly visible on the phone can be genuinely invisible to the device. Showing
+the device's own view makes that legible instead of presenting as a wrong
+password on a correct one. The captive-portal probe URLs for Android, iOS/macOS
+and Windows are answered explicitly, because wildcard DNS alone lets a handset
+declare the network dead and drop back to cellular partway through setup.
+
+## Building
+
+```bash
+ci/build-firmware.sh
+```
+
+This is the entire build procedure - install the pinned toolchain, compile,
+checksum - kept in one script rather than only in CI config so it runs
+identically by hand or inside any CI provider. See **Shipping** below for how
+a push to `main` turns this into a published release with no further action.
+
+**A clean compile is not a test, and `TEST_PLAN.md` is where that is dealt
+with.** Nothing in this repository can be exercised by an automated test - there
+is no host-runnable target, and the behaviour that matters is a function of a
+real heap, a real TLS stack, a real NVS partition and a real server on the other
+end. `TEST_PLAN.md` carries the bench procedure for every behaviour a compile
+cannot reach, and is explicit about which of them cost hours of wall-clock time.
+Two practical notes from it, worth repeating here: report sizes against the
+**real** ceilings from `partitions.csv` - `ota_0` is 2,359,296 bytes since
+`callog` was added, and CAL's own `factory` is 1,441,792 - never
+`arduino-cli`'s generic 1,966,080; and compiles on this project routinely look
+hung when they are not - check the OS process list rather than the console. On
+the machine this was last built on, a cold CAL compile took roughly 35 minutes
+and produced no console output at all until the final two lines, so an empty log
+is not a stalled build.
+
+Toolchain, pinned in that script and matching what this has been measured
+against:
+
+| | Version |
+|---|---|
+| arduino-cli | 1.5.1 |
+| `esp32:esp32` core | 3.3.11 |
+| LovyanGFX | 1.2.28 |
+| QRCode (ricmoo) | 0.0.1 — **vendored**, see below |
+| ArduinoJson | 7.4.3 |
+
+The QR generator is **vendored into the sketch** as `CalQr.c` / `CalQr.h` rather
+than used as an installed library, and the rename is the point of the exercise.
+A plain `#include <qrcode.h>` resolves to the ESP32 core's own `esp_qrcode`
+header instead of ricmoo's library, and fails at compile time suggesting the
+core's differently-named API. Renaming both the file and its include guard is
+what makes the local copy win. The functions inside are untouched, are MIT
+licensed, and do not clash with `esp_qrcode_*`. Keeping the copy in-tree also
+means the QR code CAL renders is fixed for the service life of the factory
+partition, which is the right property for a component that cannot be updated.
+
+**The custom `partitions.csv` at the repo root is what actually gets built.**
+Naming a `PartitionScheme` on the `arduino-cli compile` command line (the
+build script still passes `min_spiffs`, for no effect) does not matter: the
+ESP32 Arduino core detects a `partitions.csv` sitting in the sketch root and
+uses it in preference to any named scheme, silently. This was verified, not
+assumed - by decoding the actual compiled `CAL.ino.partitions.bin` output
+byte-for-byte (the `0xAA50`-magic partition-table binary format) rather than
+trusting `arduino-cli`'s own build summary, which reports "% of X bytes"
+against the *named* scheme's static memory map regardless of which table was
+actually used, and will happily report against the wrong one.
+
+## Shipping
+
+Push to `main` and CI does the rest - no manual build, no manual release, no
+version number to choose. See `VERSIONING.md` for the exact scheme
+(`vYYYY.MM.DD.NNNN`, entirely date- and counter-derived) and
+`.github/workflows/build-and-release.yml` for the pipeline, which is a thin
+wrapper around `ci/build-firmware.sh` plus the two steps that are genuinely
+GitHub-specific (finding the next same-day release number, publishing to a
+GitHub Release) - so moving to a different CI provider later means replacing
+a few lines of YAML, not re-deriving the build.
+
+Every push publishes to the rolling **`latest`** release (same tag, same
+download URLs, every time - this is what a device-setup page should link to)
+and to a new, **permanent** `vYYYY.MM.DD.NNNN` release that is never reused.
+
+**That second half silently did not happen at least once.** The two publish
+steps run in sequence, and a failed step aborts the rest of the job by
+default. `latest` replaces every asset on a tag that never changes name, and
+that replace-in-place dance occasionally races against GitHub's own API - a
+"delete this asset" call returning 404 for one already gone, observed live -
+which failed the `latest` step and silently skipped the permanent, dated
+release after it. The push still showed green-adjacent in the sense that
+every binary really did build and upload to `latest` correctly; what never
+happened was the numbered release nothing else can recreate after the fact,
+and the server's own "Load from GitHub" picker only lists numbered releases,
+not `latest` - so the fix for that exact push was reachable only by loading
+`latest` by name, not by picking the newest number in the list. The `latest`
+publish step now has `continue-on-error: true`, so a cosmetic race on the
+disposable tag can no longer cost the permanent one.
+
+## Open questions
+
+- **`Provisioning::run()`'s abandonment timeout is untested on hardware.** The
+  code now gives up and returns `false` after 15 minutes with nobody
+  submitting credentials (`Config::kProvisioningAbandonTimeoutMs`), matching
+  its documented contract - but "nothing has run on hardware" below applies
+  to this exactly as much as everything else.
+- **The cannot-draw watchdog's restart has fired on devices that no restart
+  could help, and that is now confirmed rather than suspected.** This entry read
+  "has never fired", then "probably should not have". Device 39 settled it: 31
+  restarts at roughly 21-minute intervals, `RestartLargestFreeBlockBytes` of
+  34,804 at essentially every one of them, and a single image-bearing card whose
+  airline-logo PNG needs 45,056 contiguous bytes against an all-time maximum
+  largest block of 36,852. The decode cannot succeed, there is no second picture
+  card to produce the successful draw that would clear the counter, and the
+  restart is therefore a loop by construction. Two things changed: the cause is
+  recorded as `CANNOT_DRAW` rather than `LOW_HEAP`, and the restarts are capped
+  at three in a row. The counter itself is sound - it is
+  `Display::consecutiveDrawFailures()`, and the `[health]` line's wording was
+  corrected earlier. See "What the watchdog restarts on now" near the end of
+  this file for the cap and for the argument each way on counting an allocation
+  refusal at all.
+- **The unreachability watchdog has never fired, and it self-restarts.** New
+  tonight, and the most dangerous shape of thing in this firmware: it reboots
+  the device on its own judgement. Its three guards are verified by reading
+  them. The one to watch is the 20-minute floor, because half of it lives in
+  `setup()` seeding the clock from `BootDiag::lastRestartCause()` and a device
+  that restarts every five minutes forever is what a failure of that half looks
+  like. `SOFTWARE_RESET + UNREACHABLE` in the boot log is the observable.
+- **No automated test covers any of this, and one specific consequence is
+  worth naming.** Six builds went out tonight on reading and reasoning alone
+  (see the last section of this file); the measurements behind them are real
+  and the responses to them are unproven. **Superseded in part on 2026-09-14:**
+  this bullet said "there is no TEST_PLAN in this repository", and there now is
+  one. It changes nothing about the builds described here, which went out before
+  it existed and remain unproven; what it changes is that the procedures which
+  *would* have proven them are now written down instead of being rediscovered.
+  `TEST_PLAN.md` is still a manual bench plan, not an automated suite - see the
+  bullet below, which is unchanged.
+- **No automated tests, at all.** There is no test harness in this repository
+  and no obvious one to reach for: the code is inseparable from ESP32
+  peripherals, NVS, WiFi and TLS, none of which have a usable stub here. The
+  testing story for this firmware is genuinely unsolved. This is a real gap,
+  not a deferred chore — the server side treats a test project as shipping
+  alongside the logic it covers, and nothing equivalent exists here.
+- **Nothing has run on hardware.** Every behaviour described in this document
+  is designed and written and, as of the build-to-ship pipeline above,
+  mechanically reproducible - none of it is proven on a device.
+- **Touch input (`App/Touch.h`/`.cpp`) is compiled but unverified.** The
+  panel/screen on this exact ELEGOO board was separately confirmed working
+  earlier, but that confirmation never exercised the XPT2046 touch
+  controller, and nobody has put a finger on this glass yet. This is the one
+  piece of firmware in this repository with literally zero possible
+  automated coverage even in principle - a clean compile proves the code
+  builds against LovyanGFX's touch API, nothing more. See "Touch input: the
+  XPT2046 controller, used for the first time" above. Now that taps are
+  classified into zones rather than meaning one single thing, a miscalibrated
+  or inverted axis would send a "forward" tap backwards instead of going
+  unnoticed - the unverified assumption became load-bearing.
+- **The SD card slot does have a card in it, confirmed from a real device's
+  own telemetry** (`sdTotalMB=7450`, a real capacity, not the zero a missing
+  card reports) — narrower than previously written here. What is still
+  unconfirmed: whether a PNG actually decodes off it, since no asset fetch
+  has yet reached that stage (see "Partially run now, on real hardware"
+  above) - the card mounts and reports real numbers, but nothing has been
+  written to it or read back as an image yet.
+- **The asset fetch endpoint does not exist yet.** `App/Assets.cpp` expects
+  `GET /api/assets/{id}` with the usual `X-Device-Secret`, matching the shape
+  of every other device route, but the server's `Assets` domain is still a
+  stub. Nothing has ever answered that request, and no registered card
+  consumes an asset yet - the only caller is the boot splash.
+- **Card buttons and the pending-action queue are compiled, not exercised.**
+  Nothing has pressed a button, written a press to NVS, carried one on a
+  check-in, or watched `acceptedActionIds` clear one. The server-side
+  `DeviceSimulator` (`/diag/devicesimulator`) is the only repeatable way to
+  exercise the wire half of this without hardware; the firmware half has no
+  equivalent and cannot get one.
+- **The scheduler has no test, and the nearest substitute lives on the
+  server.** `App/CardManager.cpp`'s interleaving, history ring and dwell
+  logic are verified by a clean compile and by reading them against the
+  CYD-Dickey code they were ported from. The closest thing to a test for the
+  intended *behaviour* is the `DeviceSimulator`'s rendered preview of a
+  policy's resulting rotation, which at least lets a policy change be
+  sanity-checked before a device sees it.
+- **The operator-authenticated, secret-injecting flasher is still just
+  designed.** See *Provisioning: how a device gets its secret*, above - what
+  exists today (the server's public `/cal` page) covers a fresh unit that
+  only needs generic firmware, not bulk provisioning with per-device secrets.
+- **Banner announcements have never been drawn on a panel.** The whole path -
+  parsing `announcements` off a check-in, matching one against an
+  `allowBanner` card, drawing the strip, cycling between two of them, a
+  press clearing one, and a tap on the middle of the glass clearing one with
+  no button - is compile-verified only; the test devices were powered
+  off when it was written. See *Banners: a per-card theme replaced by the
+  announcement queue the server actually speaks* at the end of this file. It
+  also rides the pending-action queue listed above, which nothing has
+  exercised either, so its press half cannot be more verified than that
+  is, and the tap half adds a `dismissedAnnouncementIds` array that no device
+  has yet put on a real request.
+
+## A decode failure now retries and self-heals, instead of being a life sentence
+
+Found live: `Graphic.cpp`'s picture cards used to treat any decode failure as
+permanent - one failed `Assets::drawCached()` call set `gReady = false` for
+good and left the cached file on the SD card untouched forever, on the
+stated assumption that "a PNG that will not decode will not decode next
+time either." That assumption turned out to be wrong at least some of the
+time: pulling the exact bytes of two assets that had failed to decode on
+real devices straight out of the server's database and decoding them
+independently (`file`'s PNG parser and .NET's GDI+ decoder both) showed
+perfectly well-formed images - not truncated, not bit-corrupted, nothing a
+standard decoder objects to. `App/lgfx_pngle.c` (LovyanGFX's actual PNG
+decoder, vendored under `LovyanGFX/src/lgfx/utility/`) uses a full,
+standard miniz/tinfl DEFLATE implementation and explicitly supports this
+exact PNG shape (8-bit, RGBA, non-interlaced, no exotic ancillary chunks),
+so this was not a decoder-incompatibility either. The leading explanation
+is an intermittent SD *read* glitch at draw time - separate from, and later
+than, the SHA-256 readback-verify `fetchToCard()` already does once, right
+after writing (see *Verified once ...* elsewhere in this file) - which a
+permanent blacklist can never recover from on its own.
+
+`Assets::drawFullScreen()`/`drawCachedInRect()`/`drawCached()` themselves
+now retry a failed decode up to three times (a short `delay(75)` between
+attempts) before giving up - centralised in `Assets.cpp` rather than
+duplicated per card module, so every current and future caller gets this
+for free. That mattered live: the first version of this fix put the retry
+loop only in `Graphic.cpp`, and the very next occurrence failed instead on
+the aircraft card's airline-logo overlay (`Assets::drawCachedInRect()`, a
+different call site `Graphic.cpp`'s own retry never touched) - moving the
+retry into `Assets.cpp` itself was the actual fix, not a stylistic
+cleanup. If every attempt still fails, the cached file is deleted via
+`Assets::invalidate(id)` rather than kept and blacklisted: that forces the
+very next `fetch()`/draw to re-download and re-verify a fresh copy from
+the server, which is what actually recovers from a bad read instead of
+just giving up on it once.
+
+**Also found live, and this is consistent with genuine hardware flakiness
+rather than against it:** the same picture has been observed to display
+successfully, then fail to decode on a *later* draw of the exact same
+already-cached file - no re-fetch, no write, nothing changed between the
+two attempts. Separately, an SD reformat (`Assets::wipeCache()`, previous
+section) on the same device did not fix a subsequent failure either - a
+freshly re-downloaded, freshly re-verified replacement failed to decode
+almost immediately. Neither observation is proof on its own, but together
+they point at an intermittent SD *read* problem on this specific device -
+sometimes a read comes back wrong, sometimes it doesn't, independent of how
+recently the file was written - rather than either a deterministic decoder
+bug (which would fail the same bytes every time) or storage corrupted once
+and permanently (which a reformat would have fixed). That is exactly the
+failure shape retry-and-invalidate is built for: a plain retry catches the
+"succeeded before, glitched this time" case live in the moment, and
+invalidating on total failure means a persistently bad file at least gets
+re-verified fresh each time rather than blacklisted forever. Not a
+confirmed root cause - nobody can attach a debugger to the device itself -
+but the strongest lead so far, and the mitigation that fits it. A
+genuinely corrupt source image still ends up back here on the next refresh
+and gets invalidated again - loud, not silent, and now visible past the
+debug stream too (see the next section) - but no longer stuck until an
+operator happens to notice and reassigns a different `assetId`.
+
+## Decode failures reach `/diag/audit`, not just the debug stream
+
+A second gap the same investigation exposed: `CardManager.cpp`'s existing
+"N of M policy entries known" reporting (`lastPolicyKnownCount()` etc.,
+ridden along on the next check-in and recorded server-side as a failed
+`CardPolicyMismatch` audit event) only ever covers a card id the server's
+policy and this firmware's registry disagree about. A card whose id matched
+fine but whose *picture* would not decode never touched that count at all -
+it only ever showed up in `Graphic.cpp`'s own `Log::printf` line, visible
+only for however long someone happened to be watching the live debug
+stream.
+
+`Assets.cpp` now tracks up to four distinct asset ids that failed to decode
+since the last successful check-in (`decodeFailureCount()`/
+`decodeFailureIds()`, deduplicated per reporting cycle so one repeatedly-
+failing overlay - an aircraft card's airline logo redraws, and can refail,
+every time that card is shown - cannot fill the whole cap with copies of
+itself before anything else gets a slot). `CheckIn.cpp` reports these on
+the outgoing check-in request (`assetDecodeFailureCount`/
+`assetDecodeFailureIds`, additive and omitted entirely when nothing has
+failed) and clears the pending report only once that exact check-in
+actually succeeds - so a failure is reported once per occurrence, not
+resent on every subsequent check-in forever. Recorded inside
+`drawCached()`/`drawCachedInRect()`/`drawFullScreen()` themselves (the three
+choke points that already know both the asset id and whether
+`Display::drawPngFromSd*()` returned false for a file that was genuinely
+present), so this covers every current and future caller automatically,
+not just `Graphic.cpp`.
+
+Server-side, `CheckInGatewayService.ProcessCheckInAsync` records a failed
+`AssetDecodeFailure` audit event when this is non-empty - same "audited,
+not merely logged" treatment `CardPolicyMismatch` already gets on
+`/diag/audit`, for the different silent failure this one is.
+
+## The likely root cause: the SD card's SPI lines are shared with the display's, by hardware design
+
+**SUPERSEDED - this premise was measured and is false.** The panel is on
+HSPI_HOST at 14/12/13, SD is on VSPI at 18/19/23 with CS 5, `pin_tfcard_cs` is
+`-1`, and the two buses never contend. Kept in full, per this file's convention,
+because the sources it cites are real, the reasoning is careful, and exactly one
+inferential step in it is wrong - and because it is the reason the entire
+read-whole-file-into-RAM detour in the next section existed. See "The shared SPI
+bus was never there" near the end of this file for the correction, the pin table
+and the two things this section is owed, and `docs/rgb565-feasibility.md` §1 for
+the full chain of evidence.
+
+Found while chasing the decode failures above, and confirmed against this
+board's own manufacturer documentation rather than generic "Cheap Yellow
+Display" community pages - this board (an LCDWIKI E32R28T, see *The
+hardware* above) is a different manufacturer from the Sunton boards most
+CYD writeups describe, and this project's own notes already warned "the
+E32R28T's HSPI-style pinout differs from them." LCDWIKI's own manual for
+this exact board states directly:
+
+> "SPI_CLK, SPI_MISO, and SPI_MOSI pins are shared with the MicroSD card
+> SPI pins."
+>
+> — [LCDWIKI E32R28T & E32N28T User Manual (PDF)](https://www.lcdwiki.com/res/E32R28T/2.8inch_ESP32-32E_E32R28T_E32N28T_User_Manual.pdf),
+> also summarised at [manuals.plus's transcription](https://manuals.plus/lcd-wiki/e32r28t-2-8inch-esp32-32e-display-module-manual-2).
+> See also [LCDWIKI's E32R28T & E32N28T Specification (PDF)](https://www.lcdwiki.com/res/E32R28T/E32R28T_E32N28T_Specification_V1.0.pdf)
+> for the board's full pin reference (image-scanned; a PDF viewer that can
+> render scanned pages is needed to read it directly - text extraction
+> alone does not pull anything from it).
+
+That is the manufacturer stating, in its own words, that the SD card does
+not have its own independent SPI wiring on this board - it shares SCLK/
+MISO/MOSI with another on-board SPI device. The only other real hardware
+SPI peripheral in this build is the display itself: LovyanGFX's own
+board-autodetect source (`LGFX_AutoDetect_ESP32_all.hpp`, the CYD-family
+`_detector_Sunton_ESP32_2432S028_t` profile autodetect matches this board
+against) configures the XPT2046 touch controller with `cfg.spi_host = -1`
+(bit-banged software SPI on its own dedicated pins, not a hardware
+peripheral at all), which rules touch out as the other end of the shared
+bus - leaving the display as the only plausible co-tenant.
+
+That same LovyanGFX profile sets `cfg.bus_shared = false` on the display
+panel - telling the library it may assume *exclusive* ownership of that
+SPI bus, with no arbitration for a co-tenant. This firmware's own
+`SdStorage.cpp` brings the SD card up completely independently
+(`SD.begin(kChipSelectPin)`, Arduino's default `SPIClass`, zero
+coordination with LovyanGFX's own bus management). Two drivers, each
+assuming it alone owns a bus that the hardware itself does not give either
+one exclusively, is a textbook recipe for exactly the failure pattern
+observed live: intermittent (depends on whether the other driver happens
+to be mid-transaction at that instant), not specific to any one file,
+survives a full SD reformat (nothing wrong with the storage bytes - the
+contention is in the wire, not the flash), and concentrated on the one
+operation (`Assets::drawFullScreen()`/`drawCachedInRect()`/`drawCached()`,
+via `Display::drawPngFromSd*()`) that reads from SD and writes to the
+display in the same tight decode loop.
+
+**Rewiring the bus itself is still out of scope.** If the SD card's SCLK/
+MOSI/MISO are the literal same electrical wires as the display's - which
+is what the manual says, not merely the same *kind* of peripheral
+selectable in software - no software change can move the SD card onto a
+separate, uncontended bus; there is no second physical path to it on this
+board. Properly serializing access to that one shared bus (a lock held
+around every SD operation and every display draw, on both sides) would
+mean either patching the vendored LovyanGFX library to expose a hook
+around its own SPI transactions, or wrapping every call site project-wide
+with a shared mutex - real surgery, and not something to attempt correctly
+without a physical device in hand to verify against.
+
+## Reading the whole file before decoding it, instead of streaming and decoding at once
+
+**SUPERSEDED, and by two separate findings.** This section is built on the
+shared-bus premise corrected above, which was false - so the interleaving it
+sets out to avoid was never happening. And the buffer it introduces is the
+10-24KB contiguous allocation that later turned out to be *the* allocation
+failing in the field. `Display` streams from SD again (`drawImageFromSd()`) and
+holds no file copy at all. Kept because the measurements in it are real and
+because the mistake is instructive: the fix worked well enough to look right,
+which is what kept the premise unexamined for weeks. `SelfTest/` still keeps a
+buffered read on purpose, as a worst-case contiguous-allocation probe - see
+`SelfTest/Display.h`.
+
+The retry-and-invalidate mitigation above shipped first and helped, but
+live testing after it (`v2026.09.07.0005`) still showed occasional decode
+failures getting through the retry window - three attempts 75ms apart was
+not always enough. Rather than simply lengthening that window by trial and
+error, `Display::drawPngFromSd()`/`drawPngFromSdInRect()` were changed to
+attack the actual mechanism instead: LovyanGFX's `drawPngFile()` streams
+the image, interleaving an SD read with a display write for every chunk of
+the decode - on a board whose SD card and display share SPI wiring by
+design, that interleaving puts an SD transaction and a display transaction
+right next to each other in time, over and over, for the entire length of
+one decode. Both functions now call a new `readFileToBuffer()` first
+(`Display.cpp`), which reads the entire cached file into a heap buffer in
+one pass - the SD card is not touched again after this returns - and then
+hand that buffer to LovyanGFX's `drawPng(const uint8_t*, uint32_t, ...)`
+overload, which decodes and draws entirely from RAM with no further SD
+access at all. The SD read and every display write that follows are now
+separated in time as two clean, non-overlapping phases, even though they
+still share the same physical wire - this doesn't require knowing whether
+the true mechanism is genuine electrical contention or SPI peripheral
+configuration (clock speed/mode) not being re-asserted between two
+uncoordinated drivers; it removes the opportunity for either to matter
+during a decode.
+
+This works on this device's memory budget without a second thought: the
+largest asset in the catalog today is under 34KB, against roughly 250KB of
+free heap in ordinary operation, and the buffer is a one-shot allocation
+freed (`std::unique_ptr`, RAII) the instant the caller returns - there is
+no standing cost, and it does not grow with the size of the asset catalog
+(a hundred assets on SD costs nothing extra in RAM; only whichever *one*
+file is being drawn *right now* is ever buffered). Every failure path
+(file would not open, file is empty, out of memory, a short read) is
+logged to the remote debug stream by name, matching the standing
+verbose-logging mandate, and a successful read logs the byte count too -
+"SD access done, decoding from RAM now" - so the moment a card's SD
+activity ends and its display activity begins is directly visible live,
+not inferred.
+
+**Whether this needed prefetching multiple files ahead of time was
+considered and set aside for now.** Reading one file into RAM immediately
+before its own draw is not the same as eliminating SD activity from the
+device's timeline entirely - a prefetch-several-cards-ahead scheme would
+reduce how often an SD read happens at all, which helps *latency* (no
+stall waiting on SD right as a card comes up). But it would not by itself
+prevent contention any better than the single-file read above does: this
+firmware is single-threaded (`setup()`/`loop()`, no FreeRTOS tasks), and
+`fetch()` (which is the only thing that ever *writes* to SD) already runs
+on its own periodic refresh timer, separate in time from `draw()` - so
+there was never a second, concurrent SD user for a prefetch scheme to
+avoid contending with here that this fix does not already avoid. Worth
+revisiting as a pure latency optimization later; not needed for the
+contention problem this section addresses.
+
+## Memory management approach
+
+`readFileToBuffer()` above is this codebase's first real use of dynamic
+(heap) allocation for anything sized at runtime, so the rule it follows is
+worth stating plainly rather than leaving implicit:
+
+**Static by default.** Everything that persists for the device's whole
+run - a card's retained state, an asset id, an announcement's text - lives
+in a fixed-size buffer sized at compile time (`Cards::CardSpec`'s
+`assetId`/`text`/`qrData`/`location` char arrays are the clearest example:
+sized to the exact server-side limit, never a `String` that could grow
+unpredictably, and constant-initialisable so the registry exists before
+any card module's own static initialiser runs - see `Cards.h`'s own
+remarks). This is the ordinary case, and nothing above changes it.
+
+**Heap allocation only for a large, transient, one-shot need a fixed
+buffer cannot reasonably size in advance.** A cached PNG's byte size is
+neither fixed nor small enough to reserve a permanent buffer for it - the
+catalog already ranges from 2KB to 34KB and has no firmware-enforced
+ceiling - so `readFileToBuffer()` allocates exactly `fileSize` bytes,
+never a guess or a round-number ceiling, and only for the duration of one
+draw call.
+
+**Every heap allocation is RAII-owned, no exceptions.** `std::unique_ptr<
+uint8_t[]>` frees the buffer the instant `FileBuffer` goes out of scope,
+on *every* return path - success, a short read, an out-of-memory check
+failing outright - so a failure partway through can never leak. Plain
+`new`/`delete` pairs that rely on remembering every return statement are
+exactly the bug class this avoids, on a device with no heap fragmentation
+tooling to catch the leak later. (No longer literally true of *this* buffer,
+as the two sections below record: the read buffer is now the file-static
+`gFileBuffer`, grown and released by an explicit `free()`/`malloc()` pair.
+The exception is defensible only because that buffer has exactly one owner,
+one growth path and one release point, all inside `Display.cpp` - the rule
+above still stands for everything else.)
+
+**The budget is the largest plausible single item, not the fleet or the
+catalog.** A hundred assets in the catalog costs nothing extra in RAM,
+because only the one file currently being drawn is ever buffered at once
+- this is the same reasoning `Assets.h`'s own remarks give for treating SD
+storage as "unlimited but accountable": the cost that actually matters
+scales with one draw, not with how large the library grows. `new (
+std::nothrow)` is checked explicitly rather than left to a crash, and a
+failure is logged by name and byte count (`"[display] out of memory
+reading %s (%u bytes)"`) rather than silently returning a blank screen -
+the same "loud, not silent" standard every other failure path in this
+codebase already holds to.
+
+**A later exception worth naming here rather than leaving buried.** The three
+`static const JsonDocument` filters described in "Three allocation-churn fixes"
+at the end of this file are small, heap-backed and permanent — which is none of
+the three things the rule above allows. They are allowed anyway, on the ground
+the rule was actually written to serve: the point was never "minimise resident
+bytes", it was "do not hand large blocks back and forth on an allocator with no
+compaction". ~1KB per site, taken once on first fetch and never returned, is a
+smaller claim on this heap than the same 1KB taken and released every ten
+minutes for the life of the device. Same reasoning as `gFileBuffer` and the PNG
+decoder's scratch, applied to something small enough that the size is not what
+makes it interesting.
+
+**Headroom is checked against real telemetry, not assumed.** The 34KB-
+against-~250KB comparison above is not a guess - both numbers come from
+this fleet's own `/diag/telemetry` (asset sizes) and live check-in reports
+(`freeHeapBytes`), the same standing preference this project has for
+reading real device state over estimating it (see `SdStorage.h`'s "measured,
+not assumed" framing for SD capacity, which this mirrors for heap).
+
+**And measuring the wrong thing is not the same as measuring.** That last
+paragraph is the single most instructive mistake in this document, so it is
+corrected rather than quietly rewritten: `freeHeapBytes` is
+`ESP.getFreeHeap()`, which was later measured overstating the reachable heap by
+roughly 4x, so the "~250KB" it is compared against was never available and the
+headroom this rule believed it had verified did not exist. The preference for
+reading real device state over estimating it is right and stands. What it
+needed, and did not have, was any check that the thing being read means what it
+says - which is what "Both of these numbers were wrong" and "The fleet's whole
+heap history was ~4x too kind", near the end of this file, are about.
+`free8BitBytes` and `largestFreeBlock8BitBytes` are the figures to use for this
+comparison now.
+
+## Why the PNG decoder's scratch buffer is never released
+
+The RAM-buffer approach above shipped, and then a live device found a
+failure the streaming approach never surfaced: one specific asset - a
+completely unremarkable 320x127, 8-bit truecolor PNG, no alpha, no
+interlacing - failed to decode every single time it was drawn, three
+attempts in a row, `kMaxDrawAttempts` apart. The remote debug log showed
+the SD read completing cleanly and matching the server's own recorded
+`SizeBytes` for that asset (`"read ... into memory (33865 bytes) - SD
+access done, decoding from RAM now"`), so this was not the SD-card-torn-
+mid-read failure the retry loop in `Assets.cpp` exists to paper over. The
+file itself checked out too - IHDR gave up nothing unusual.
+
+Both suspects that come with a RAM-buffer decode were traced by hand and
+cleared. First, `png_file_decoder_t::begin()` (LGFXBase.cpp) - the box-fit
+math that turns `maxWidth=0, maxHeight=0, zoom_x=zoom_y=0.0f` into an
+actual clip rect - was walked through for this exact call against a
+320x240 screen and a 320x127 source image: it lands on `zoom_x=zoom_y=1.0`
+and a `320x127` clip, both dimensions positive, which makes it return
+`true` (proceed to decode) rather than bail out early. Second,
+`PointerWrapper` (`lgfx/v1/misc/DataWrapper.hpp`) - the RAM-buffer
+stand-in for the SD-file `DataWrapper` the streaming path used - was
+compared read-for-read against it. Its `read()` clamps to
+`_length - _index` and never over-reads; its `skip()`/`seek()` just move
+`_index`; `memcpy_P` is a plain `memcpy` on this target (ESP32's own
+`pgmspace.h` `#define`s it that way, this is not a PROGMEM/flash pointer
+trick that could misbehave on a heap buffer). Working through
+`lgfx_pngle_decomp()`'s own chunk loop (`lgfx/utility/lgfx_pngle.c`)
+confirms it consumes exactly the file's total byte count no matter how
+many `IDAT` chunks the encoder split the pixel data into - it folds each
+chunk's trailing CRC into the next chunk's 12-byte header read, and the
+arithmetic cancels out exactly, with or without that fold, for one `IDAT`
+chunk or many. Neither piece of code is the bug.
+
+The actual bug was not in what got read, but in what got freed in between
+reads. `LGFXBase::draw_png()` keeps a single `pngle_t` around in a file-
+static pointer and only allocates a fresh one when it is null; the
+library's own comment on that pointer says why in Japanese - paraphrased,
+"repeated PNG decoding can fail to allocate pngle's memory, so it's been
+changed to not free it after use and be reusable; call `releasePngMemory()`
+explicitly if you want the memory back." That struct is not small: a
+32768-byte inflate window plus an ~11000-byte `tinfl` decompressor state
+plus assorted smaller buffers, comfortably over 40KB, allocated as one
+contiguous `malloc()`. `Display.cpp` was calling `lcd.releasePngMemory()`
+unconditionally after *every* `drawPngFromSd()`/`drawPngFromSdInRect()`
+call, success or failure alike - ported verbatim from CYD-Dickey, including
+its justification in the ported comment: CYD-Dickey frees it because a
+Bluetooth stack init runs immediately after its own splash-screen draw and
+needs that ~44KB back. Nobody checked whether that justification actually
+applied to CAL before copying the call along with it. It doesn't - this
+firmware has no Bluetooth code anywhere in it - so the unconditional
+release was paying a real cost for a benefit that could never be cashed
+in here.
+
+The cost: a ~44KB malloc-then-free on every single PNG draw is close to
+the textbook case for fragmenting a long-running ESP32 heap. Free bytes
+stay plentiful in total - nothing here leaks - but the single largest
+*contiguous* block available to satisfy the next big `malloc()` shrinks
+over time as smaller, unrelated allocations (JSON parsing, TLS buffers for
+a check-in, `String` churn) get interleaved into the gaps the 44KB
+alloc/free cycle leaves behind. `malloc()` for a 40KB+ struct has nowhere
+to fall back to smaller than the whole struct - it either finds a
+contiguous block that big or it returns `NULL`, and `lgfx_pngle_new()`'s
+caller checks exactly that (`LGFXBase.cpp`: `if (pngle == nullptr) return
+false;`) - which is why this failed cleanly, logged as "failed to draw",
+never a crash.
+
+Why this one asset and not the others: at 33865 bytes it is the closest
+any file in the catalog gets to the ~34KB ceiling `readFileToBuffer()`'s
+own remarks describe above, which means drawing it is also the one moment
+`readFileToBuffer()`'s own ~34KB read buffer and `lgfx_pngle_new()`'s
+~44KB decoder scratch buffer both have to be resident on the heap at the
+same time - a combined demand around 78KB that no smaller asset in the
+catalog comes close to. Every smaller asset kept finding a large-enough
+fragment; this was the first one that didn't. And the `freeHeapBytes=
+121544` this device reported around the failure looked "healthy" only
+because *total* free heap and the *largest single allocatable block* are
+different numbers - this file's own "roughly 250-274KB of free heap"
+figures, used earlier as evidence of headroom, are exactly that same
+total-free number, which is why the original diagnosis of "severe heap
+exhaustion seems unlikely" was true and beside the point at the same time.
+
+The fix (`Display.cpp`): stop calling `releasePngMemory()` after an
+ordinary draw, in both `drawPngFromSd()` and `drawPngFromSdInRect()`.
+Left alone, LovyanGFX's own default is exactly what this device wants -
+allocate the `pngle_t` scratch buffer once, on the first PNG draw of the
+process, and keep reusing it for every draw after that, success or
+failure. This is safe to reuse across completely unrelated images because
+`lgfx_pngle_prepare()` already resets every piece of per-image state at
+the top of every call - palette, scanline buffer, inflator, filter type -
+before the new image's `IHDR` is even read; the struct's *contents* are
+per-decode, only its *memory* is kept. That turns a ~44KB fragmentation
+gamble paid on every single card into a one-time, bounded cost paid once
+per boot. Both failure logs (`"[display] failed to draw ..."`) now also
+report `freeHeap` and `ESP.getMaxAllocHeap()` alongside the path - the
+second figure is the one that would have pointed straight at this the
+first time, and total free heap alone cannot tell the two apart if it
+happens again for a different reason.
+
+## Bug fix: the RAM read buffer needed the same treatment the decoder's scratch buffer got
+
+Found live, the same night, on two separate physical devices: the fix
+directly above stopped one specific asset from failing to decode, but after
+several more hours of uptime both units started failing to even *read* two
+assets into memory at all - `"[display] out of memory reading
+/assets/f4d06f98-....png (80853 bytes)"` - three times per draw attempt,
+`Assets.cpp`'s retry-and-invalidate logic giving up and dropping the card
+each time, then the next fetch cycle failing a different way
+(`"[assets] could not open .../.png.part for writing"`) because the
+now-invalidated cache file's replacement had nowhere to write either. Two
+different devices, two different physical SD cards, hitting the identical
+pair of asset ids ruled out a bad card fairly quickly - this needed to be
+about the assets or the code, not the hardware.
+
+The section above ("Reading the whole file before decoding it") sized
+`readFileToBuffer()`'s reasoning against "the largest asset in the catalog
+today is under 34KB" - true when it was written, false again within the
+same session once an 80KB splash (`JIM-Face`) was uploaded, the same kind
+of stale-ceiling mistake `Assets.h`'s own "measured, not assumed" framing
+exists to catch. But the real defect was never the *size* of that one
+allocation - it was doing a fresh one at all, every single draw, for
+whichever asset happened to be showing. A 34KB graphic and an 80KB splash
+interleaved over hours, on an allocator with no compaction, is close to a
+textbook fragmentation generator by itself - and it got measurably worse
+the same night the fix above started leaving `lgfx_pngle_new()`'s own ~44KB
+scratch buffer permanently resident too. Two large, *differently-sized*
+blocks - one now permanent, one churning every few seconds - competing for
+the same fragmenting heap is a harder problem than either fix alone
+anticipated: the pngle fix assumed the read buffer was the transient one
+and only pngle's buffer needed to stop churning; it turned out both needed
+to.
+
+The fix (`Display.cpp`): `readFileToBuffer()` no longer allocates
+`fileSize` bytes fresh on every call and frees them (`std::unique_ptr`)
+the instant the caller returns. A single static `gFileBuffer`, grown with
+`realloc()` only when an asset larger than anything seen so far needs to be
+read, is reused as-is by every draw after that - in the ordinary case (a
+fleet running the same asset catalog for weeks without a bigger upload)
+this means at most one allocation per distinct file size ever encountered,
+for the rest of the device's uptime, rather than one every few seconds.
+`realloc()` rather than free-then-new deliberately: on the overwhelmingly
+common path where the buffer is already big enough, it is a no-op, not a
+allocation at all. The buffer is never shrunk or freed - handing back a
+smaller allocation later would just reintroduce the same churn this exists
+to stop, for a memory saving that only matters on a device already too
+tight for it to help. The "Memory management approach" section above's
+"heap allocation only for a large, transient, one-shot need" principle is
+now only half true of this buffer - it is still heap-allocated because its
+size is not knowable at compile time, but it is no longer transient or
+one-shot by design, the same static-once-grown shape `gFileBuffer` shares
+with `lgfx_pngle_new()`'s own scratch buffer one section up.
+
+**Correction, measured later on device 17: the `realloc()` half of that
+paragraph was wrong, and `ensureFileBufferCapacity()` now frees before it
+allocates.** The reasoning above is kept because its first half still holds -
+a buffer that is already big enough should cost nothing, and
+`ensureFileBufferCapacity()` still returns immediately in that case without
+touching the allocator at all. What it missed is what `realloc()` does on the
+path where the buffer is *not* big enough: `realloc()` preserves contents, so
+any grow it cannot satisfy in place holds the old block and the new one
+simultaneously and copies between them. The sole caller,
+`readFileToBuffer()`, then overwrites every one of those bytes immediately
+from SD. The preservation was pure cost, paid in the one currency this device
+has none of - simultaneous contiguous blocks. Measured live, rotating two
+picture cards through the server's re-encoded assets:
+
+```
+[display] read /assets/758b....png into memory (5686 bytes)          <- ok
+[display] out of memory growing the shared read buffer to 11676 bytes
+          (freeHeap=51944 maxAllocHeap=32756)                        <- fails
+```
+
+An 11,676-byte request failing against a 32,756-byte hole is impossible as a
+single allocation, and it never was one: it was 5,686 bytes still held, plus
+11,676 wanted, plus the allocator's own bookkeeping, in a heap already carved
+up by mbedTLS - which is why the failures cluster in the seconds right after a
+check-in while the draws between check-ins succeed. Freeing first makes the
+peak requirement `needed` alone, which the numbers do allow.
+`SelfTest/Display.cpp` carries its own copy of this buffer and got the same
+change, for the obvious reason: a diagnostic sketch must not reproduce the
+very failure mode it exists to detect.
+
+## Contiguity, not free bytes: the one number behind nearly all of this
+
+Everything in the three sections above, and everything in the sections below
+through to the watchdog, is the same distinction seen from a different angle,
+so it is worth stating once on its own. `ESP.getFreeHeap()` on this board stays healthy all day - 50-58KB
+in ordinary operation, and this document's earlier "roughly 250-274KB" figures
+are the same measurement taken earlier in a boot. `ESP.getMaxAllocHeap()` -
+described here as the largest block still *contiguous*, and therefore the
+largest single `malloc()` that can possibly succeed, **which it turned out not
+to be at all**; see "Both of these numbers were wrong" below, and read that
+before deriving anything from the figures in this section - is a completely
+different story. Measured on hardware:
+
+- **110,580 bytes** early in `setup()`, before Display, WiFi and TLS have
+  allocated anything.
+- **exactly 32,756 bytes** for the rest of every boot, once they have. Not
+  drifting downwards over an uptime, which is the fragmentation story this
+  project told itself for weeks - pinned, at that same figure, from the first
+  card draw onward, on every boot.
+
+That is not decay, it is a shape: a handful of large, long-lived blocks (TLS
+state, the display's own buffers, the PNG decoder's deliberately-retained
+scratch) split the heap into pieces, and 32,756 is simply the biggest piece
+left over. Which means the honest question about any allocation on this device
+is never "is there enough memory free" - there almost always is - but "does a
+single hole this big exist right now, given what else is being held". Total
+free heap cannot answer that, and every diagnosis in this project that read
+`freeHeap`, saw plenty, and concluded memory was not the problem was reading
+the wrong number. The failures were real and memory-caused every time.
+
+Two consequences run through the sections below. Anything that needs a large
+contiguous block should take it *early*, while 110,580 is still available, and
+keep it if it will need it again (the decoder's scratch). Anything that needs
+one *repeatedly* must hold it for as little time as possible and must never
+overlap two of them (the file copy). Both of those still hold. The third
+consequence this section drew - "any threshold, budget or watchdog written
+against this device has to be derived from the 32,756 steady state rather than
+from a number that looked comfortable in total-free terms" - is the one that
+does not, and it is left standing here because it is *nearly* right in a way
+that cost this project a third wrong threshold before anybody caught it. The
+correction is the next section.
+
+## Both of these numbers were wrong: Arduino's heap wrappers overstate free memory by ~4x
+
+Every figure in the section above, and in the watchdog section below, came out
+of `ESP.getFreeHeap()` and `ESP.getMaxAllocHeap()`. Neither reports the pool
+`malloc()` actually draws from. Measured on device 17 at a single instant,
+while a 10,568-byte allocation was failing:
+
+```
+ESP.getFreeHeap()                             = 49,960
+ESP.getMaxAllocHeap()                         = 32,756
+heap_caps_get_free_size(MALLOC_CAP_8BIT)      = 11,340
+heap_caps_get_largest_free_block(8BIT)        =  6,132
+heap_caps_get_minimum_free_size               =  5,156
+heap_caps_check_integrity_all                 = OK
+```
+
+That is roughly **4x** on the free-size figure - 49,960 claimed against 11,340
+real - and the largest-block figure is worse than wrong, it is inverted: 32,756
+claimed against a real 6,132, i.e. the number this project had been treating as
+"the largest `malloc()` that can succeed" was five times larger than the
+largest `malloc()` that could actually succeed. The 10,568-byte request failing
+is not the paradox this document spent several sections trying to explain. It
+was simply a shortage nobody had measured.
+
+Three things that had been live hypotheses died in the same measurement, and
+all three are worth recording as closed:
+
+- **DMA starvation.** All four capability classes queried (`8BIT`,
+  `INTERNAL|8BIT`, `DMA`, `DEFAULT`) reported *identical* figures. The SPI
+  panel driver is not eating the DMA-capable subset out from under plain
+  `malloc()`.
+- **Memory stranded in word-addressable-only regions.** Also no: there is no
+  32-bit-only pool of "free" memory sitting beside a starved `8BIT` one, which
+  is what a large `32BIT` largest block against a small `8BIT` one would have
+  meant. `logHeapSnapshot()` reports `32BIT`'s largest block for exactly this
+  comparison and no other reason.
+- **Heap corruption.** `heap_caps_check_integrity_all` walks every region and
+  returns OK. A trashed free list would have explained an impossible failure
+  completely, and it is not what is happening.
+
+The tell on `ESP.getMaxAllocHeap()` was in plain sight the whole time and was
+read as a finding instead of as a bug: it reports **exactly** 32,756 on every
+device, on every boot, in every log line, while `freeHeap` moves around it. A
+real largest-free-block measurement does not sit that still. 32,756 is `0x7FF4`
+- twelve bytes short of 32KiB - which is the shape of a cap or a region
+boundary, not of a measurement. The section above built a whole theory of heap
+*shape* on that constancy ("that is not decay, it is a shape"), and the theory
+was reasonable given the number; the number was not a measurement of the shape
+of anything.
+
+A later evening of paired readings settles what is left of the charitable
+reading of that wrapper. Across many `[health]` lines the real largest 8-bit
+block ranges **7,668 to 36,852** while `ESP.getMaxAllocHeap()` reads 32,756
+throughout — so it is not merely inflated, and it is not conservative either:
+the real figure sometimes *exceeds* it. It is a ceiling, unrelated to the
+quantity it appears to report. See "The numbers tonight rests on, and the one
+wrapper that caused several wrong diagnoses" at the end of this file.
+
+`heap_caps_get_free_size()` and `heap_caps_get_largest_free_block()`, against
+`MALLOC_CAP_8BIT` specifically - 8BIT because that is the pool a byte buffer
+comes from - are what this firmware measures with now. `Display.cpp`'s
+`logHeapSnapshot()` puts `8BIT`, `INTERNAL|8BIT` and `DMA` (free size *and*
+largest block for each), `32BIT`'s largest block, and `ESP.maxAlloc` on one line
+for comparison. Reporting the free size and the largest block together is the
+deliberate part, because a free total on its own cannot tell "plenty of room"
+from "plenty of room in fragments too small to use" - and 11,340 free with a
+6,132 largest block is exactly the second case. That single ambiguity is why
+this went unnoticed for as long as it did.
+
+One thing the corrected numbers immediately explained, rather than deepened.
+`Http::releaseTlsSession()` hands mbedTLS's per-session memory back between
+requests, and it logs the real figures either side of the release. On device 7:
+
+```
+[http] released TLS session: 8BIT free 97224 -> 138492 (+41268), largest block 77812 -> 110580 (+32768)
+```
+
+`+32,768` exactly - mbedTLS's 16KB inbound plus 16KB outbound content buffers,
+to the byte - and the largest block goes back to **110,580**, which is precisely
+the pre-network boot figure the contiguity section above already documents from
+the other direction (and which `releaseBluetoothMemory()` in `App.ino` has been
+logging all along). Two measurements taken from different calls, on different
+devices, several wrong theories apart, landing on the same number is the
+strongest confirmation in this investigation that the corrected metric is
+measuring something real: the release gives back exactly the buffers mbedTLS is
+documented to take, and what is left is exactly the heap a boot has before the
+network touches it.
+
+Worth being precise about what that does *not* say, since precision is the whole
+subject of this section. It does not vindicate `ESP.getMaxAllocHeap()`. That
+call agrees at 110,580 early in a boot, before anything has carved the heap, and
+then reports 32,756 against a real 6,132 once things have. Whatever it is
+computing, the two readings coincide only while the heap is untouched, and no
+mechanism for that has been established here - "region boundary or a cap" is a
+guess about `0x7FF4`, flagged as one in `App.ino` too, and nothing in this
+firmware needs the answer now that nothing reads the value for a decision.
+
+## The fleet's whole heap history was ~4x too kind, and both numbers are now reported
+
+`App/Telemetry.cpp` sent `ESP.getFreeHeap()` as `freeHeapBytes`, and that field
+is what populates the server's `device_telemetry` table and its
+`/diag/telemetry` page. So the correction above is not confined to one
+investigation on two devices: every heap figure this fleet has ever recorded is
+inflated by roughly 4x, and every judgement made from that history - "this
+device has plenty of headroom", "memory is not the problem here" - was made
+from a too-kind number.
+
+Two fields are added to the telemetry request body:
+
+| Field | Source |
+| --- | --- |
+| `free8BitBytes` | `heap_caps_get_free_size(MALLOC_CAP_8BIT)` |
+| `largestFreeBlock8BitBytes` | `heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)` |
+
+**`freeHeapBytes` is unchanged and still sends `ESP.getFreeHeap()`.** It is
+neither repurposed nor removed, for two reasons that are both in the code:
+
+- This project has a standing mandate that the server keeps working with device
+  firmware up to six months old. A server that has not been updated yet still
+  reads `freeHeapBytes` and still stores it; changing what it *means* underneath
+  that server would have it silently recording a different quantity in a column
+  labelled for the old one, which is a worse failure than an inflated number
+  because it is undetectable from the data afterwards. Giving a new quantity a
+  new field name is backward compatible. Redefining an existing field never is.
+- Keeping both visible side by side is what makes the discrepancy **auditable**
+  rather than a story told in a commit message. Once `/diag/telemetry` shows
+  49,960 next to 11,340 for the same device at the same instant, the 4x gap is
+  a fact anyone can check against the fleet's own history - and the rows
+  recorded before this change stay interpretable, because the field they were
+  recorded in still means exactly what it meant when they were written.
+
+Both new figures are reported, not just the free size, for the reason the
+section above gives: a free-size column alone would show a device with 11,340
+free and a 6,132 largest block as merely low on memory, rather than as a device
+that cannot read the largest asset the server is permitted to send it. The
+`[telemetry] ok (...)` log line prints `freeHeap`, `free8BIT` and
+`largest8BIT` together for the same reason - a line quoting only one of them is
+how this stayed hidden the first time.
+
+The server side of this (a migration, and the `/diag/telemetry` columns) is not
+in this repo and is tracked separately; a server that has not caught up yet
+simply ignores two fields it does not know, which is the same
+missing-field-means-firmware-does-not-report-it convention `firmwareVersion`
+already relies on.
+
+## Reversing "never released" — halfway, and the split is the load-bearing part
+
+"Why the PNG decoder's scratch buffer is never released" above, and the read-
+buffer section after it, argued that this device should stop handing large
+blocks back: a ~44KB malloc/free cycle on every draw, plus a second 31-54KB
+one for the file copy, is textbook large-block churn on an allocator with no
+compaction, and holding both instead turns a per-draw gamble into a one-time
+bounded cost. `Display.cpp`'s new `releaseDecodeMemory()` reverses that - but
+for only one of the two blocks, and that split is not a compromise between the
+two positions, it is the whole finding. Get it backwards and one subsystem or
+the other stops working entirely.
+
+**The decoder's ~44KB scratch is still deliberately kept.** It is allocated
+once, by the boot splash, at a point in `setup()` where `maxAllocHeap` is
+still 110,580 bytes, and because LovyanGFX keeps it unless asked not to, every
+later card draw reuses it and never needs a large contiguous block to decode
+again. (The "~44KB" is now measured exactly: **45,056 bytes**, as largest
+110,580 -> 65,524 across the first draw of a boot, with per-draw `largest8`
+flat after that. Both halves of this paragraph's claim therefore hold on
+hardware — and that one held block is now the *remaining* argument for JPEG,
+which is not the argument JPEG was originally justified on. See the end of this
+file.) Releasing it was tried, and it broke every graphic card on the device
+while fixing nothing:
+
+```
+[display] read ...4342155a.png into memory (54693 bytes)
+[display] failed to draw ... (freeHeap=46548 maxAllocHeap=32756)
+```
+
+A post-WiFi heap has no 44KB hole in it - that 32,756 is what was *left* after
+the 54,693-byte file copy - so a decoder that has to re-acquire its scratch on
+each draw simply never draws again. The earlier section's conclusion was
+right; it was right for a reason it had not identified, which is that the
+first decode happens while memory is still plentiful.
+
+**`gFileBuffer` is now freed after every draw.** This is the block the read-
+buffer section above made grow-only for the whole uptime, and holding it is
+what took the network down. mbedTLS needs roughly 16KB in plus 16KB out plus
+certificate-parsing workspace to complete a handshake, and it could not get
+that out of what was left. Every HTTPS request on device 17 failed - check-in
+*and* the firmware manifest alike, which is the part that made it serious: a
+device in this state cannot be updated out of it remotely, because the
+mechanism for updating it is one of the things that has stopped working. What
+isolated it was a second device on the same account, the same firmware and the
+same server, but with no SD card and therefore no picture cards and none of
+these buffers, checking in perfectly throughout the same window.
+
+**So the trade was never "churn vs. no churn", it is "churn vs. no
+network".** Fragmentation over a long uptime is a real risk and the earlier
+sections were not wrong to weigh it; a device that cannot complete a TLS
+handshake at all is a present, total, not-fixable-in-the-field failure, and it
+wins that comparison without much argument. Releasing after each draw also
+means the file copy is only resident *during* a draw, and check-ins happen
+between draws, so a handshake sees an uncarved heap. `releaseDecodeMemory()`
+is called on every draw path, including after a *failed* decode - a decode
+that ran out of memory still leaves LovyanGFX's partial allocation behind, and
+that is precisely the moment the memory is most needed back. The in-rect draw
+(the aircraft card's airline logo) releases too: a smaller image, the same two
+blocks.
+
+Worth recording how this was cracked, because it was not by reading the code.
+CYD-Dickey releases the decoder unconditionally on every draw, and this
+project had already decided that was a mistake ported from a Bluetooth
+requirement CAL does not have. Its author's plain observation that CYD-
+Dickey's graphics never had any of these problems is what forced a second look
+at a decision this document had spent a whole section defending. The reference
+project had been doing the right thing for a reason that did not apply here,
+and CAL had stopped doing it for a well-argued reason that was measuring the
+wrong number.
+
+## Where the boot splash has to happen, and why it now stays on screen
+
+The splash is not a cosmetic concern that happens to sit near the memory
+story - it is the same finding again, and it had been failing silently on
+every single boot. `Assets::showBootSplash()` used to run after
+`Http::begin()` and the WiFi join, which is to say it asked for the decoder's
+~44KB out of a `maxAllocHeap` of 32,756 and got nothing, every time. Nobody
+saw it because `showBootSplash()` ignored its own result and because boot-time
+logs never reach the remote debug stream at all: streaming is only enabled by
+a check-in response, long afterwards. A feature can be broken on every device
+in the fleet for as long as it is only observable somewhere nothing is
+looking.
+
+`Sd::begin()`, `Assets::begin()` and `Assets::showBootSplash()` therefore now
+run *ahead* of `Http::begin()` in `App.ino`'s `setup()`, where 110,580 bytes
+are still contiguous and a 44KB decoder scratch is unremarkable. That also
+puts the one allocation the rest of the uptime depends on at the only point in
+a boot where it is cheap, which is what makes the "keep the decoder's scratch"
+half of the section above work at all.
+
+The second half is `showBootSplash()` returning `bool` rather than `void`
+(`Assets.h`/`Assets.cpp`), which `setup()` uses to decide what happens next.
+When the logo actually reached the screen, the boot's progress screens are
+skipped, so it stays up through the WiFi join, the SNTP sync, and right until
+the first real card replaces it - `CardManager::poll()` holds whatever is on
+screen until a real policy arrives, so nothing has to be redrawn to keep it
+there. That is what a branded boot was always supposed to look like: the logo
+first, the network connecting underneath it, rather than the brand flashing
+once and being painted over a moment later. When there is no splash - no card,
+nothing configured, or a decode that failed anyway - `false` comes back and the
+status screens appear exactly as before, because silence on a blank panel while
+WiFi retries is a worse boot than a plain status line. Failure screens are never
+suppressed either way: a household that has to hold BOOT to fix its WiFi has to
+be told so.
+
+### Correction: the paragraph above described an intention, not the binary
+
+Kept rather than quietly reworded, because the gap between the two is the
+finding. Until 2026-09-15 the sentence above read "the *'Checking the time'* and
+*'Loading'* status screens are skipped, so it stays up through the WiFi join" —
+and the logo had **never** stayed up through the WiFi join, on any device, in
+any shipped build, for the whole life of the feature.
+
+The hold was implemented as exactly two `if (!splashOnScreen)` guards, around
+`App.ino`'s *own* two status calls. `WifiJoin::joinStoredNetwork()` draws two
+status screens of its own from a different translation unit, unconditionally,
+and neither guard could ever reach them. They land a few hundred milliseconds
+after the splash appears. So the real sequence on every boot was: logo for one
+frame, then "Looking for known networks". Precisely the household report — "the
+splash is on screen for a split second" — and the reason it took a while to
+believe was that the documentation said otherwise and nobody re-derived it from
+the code.
+
+Two changes make the paragraph above true as written. The skip is now one
+decision (`decideBootNarration()`) pushed into every module that draws during
+boot via `WifiJoin::setProgressVisible()`, so it actually reaches WifiJoin; and
+`kMinSplashOnScreenMs` guarantees the logo three seconds regardless, because
+with the join silenced the splash's lifetime was otherwise whatever the network
+happened to cost, which is a race the brand keeps losing on a fast boot.
+
+Two lessons worth more than the fix. A documented claim about what reaches the
+screen is not evidence of what reaches the screen — a compiler checks neither
+`if` guard against a draw call in another translation unit. And a suppression
+expressed as N local guards will be wrong the moment there are N+1 places that
+draw; expressing it as one decision that modules *ask* is the shape that does
+not rot. The same reasoning is why CAL's side of the handoff is one function
+with one journal line rather than a guard at each of its own draw sites — see
+[`BOOT_SCREEN_OWNERSHIP.md`](BOOT_SCREEN_OWNERSHIP.md).
+
+## The heap-fragmentation watchdog had become the reboot loop it was written to prevent
+
+(Historical, and kept because the arc matters more than any one of its states -
+`checkHeapHealth()` no longer works this way at all; see "What the watchdog
+restarts on now" below for what it does today.)
+
+`App.ino`'s `checkHeapHealth()` read `ESP.getMaxAllocHeap()` once a minute
+after a three-minute grace period and restarted the device deliberately if it
+had fallen below `kMinMaxAllocHeapBytes`, on the theory that a controlled
+restart - with an on-screen message and a flushed log line saying why - beats
+a card silently vanishing when an allocation fails somewhere less recoverable.
+The mechanism is sound. The threshold was not: `kMinMaxAllocHeapBytes` was
+60000, and device 17 - healthy, drawing cards, doing nothing wrong - killed
+itself at 180 seconds of uptime on every single boot:
+
+```
+[health] maxAllocHeap=32756 below 60000 byte threshold after 180011 ms uptime - restarting to clear fragmentation
+```
+
+Twelve times in the 49 minutes before it was found (00:52 to 01:40 UTC on
+2026-09-10, counted in `device_debug_log_entries`) - a restart roughly every
+four minutes: the three-minute grace period, plus the minute or so a boot
+spends mounting SD, joining WiFi, syncing time and checking in before the
+grace expires again. The `180011 ms` is the tell. The grace period ends at
+180,000 ms and `lastHeapCheckMs` starts at zero, so the very first check a
+boot ever makes fires eleven milliseconds later and finds the steady state
+already below the threshold. It was never going to find anything else.
+
+60000 was picked from the range this was first observed failing in
+(34804-42996) plus headroom, at a time when nobody knew what a healthy
+device's steady state actually was. Now that it is measured, the number turns
+out to be unreachable **by design**: `maxAllocHeap` sits pinned at 32,756 from
+the first card draw onward precisely *because* `Display.cpp` deliberately
+holds the decoder's ~44KB scratch for the whole uptime, and a permanently-held
+block that size necessarily splits the heap. The watchdog was firing on the
+intended steady state of a correctly working device. A threshold above the
+steady state is not a safety margin, it is an unconditional restart timer -
+and it is what produced the symptom picture that sent this investigation off
+in the wrong direction for a while, because a device restarting every three
+minutes with the word "fragmentation" in its log reads as a memory leak rather
+than as a misconfigured constant.
+
+The replacement value was 28000, derived from what a draw actually has to
+allocate instead of from one bad night's observations. The DiscoverAroundMe
+server normalizes every asset down to at most 24KB for exactly this device's
+contiguity ceiling - its `AssetSizeTarget.MaxBytes` documents the same 32,756
+figure from the server side - and a draw needs one contiguous block that size
+for the file copy. Below 28KB the largest asset the server is permitted to
+send genuinely cannot be read into memory and a card really would drop out
+silently, which is the condition worth spending a restart on. Above it, the
+device is doing precisely what it is supposed to be doing. That argument was
+also declared, here, to make `kMinMaxAllocHeapBytes` half of a maintained pair
+with the server's `AssetSizeTarget.MaxBytes`.
+
+**Every word of that was sound arithmetic on a bad input, and the constant is
+now gone.** It was derived from `ESP.getMaxAllocHeap()` - the same discredited
+metric as the 60000 before it, just used more carefully. `kMinMaxAllocHeapBytes`
+is deleted rather than left in place unused, and there is no server-side pair to
+maintain any more; `AssetSizeTarget.MaxBytes` still matters to the server for
+its own reasons, but nothing in this firmware is keyed to it. What the watchdog
+does instead is the next section.
+
+## What the watchdog restarts on now: a run of real failures, not a number
+
+Three thresholds stood in `checkHeapHealth()`, and all three were the same
+mistake in different clothing:
+
+| Value | Derived from | Outcome |
+| --- | --- | --- |
+| 60000 | the range the device was first seen failing in (34804-42996), before anyone knew a healthy steady state | unreachable, since the reading it tested never moves off 32,756; rebooted healthy devices every ~4 minutes |
+| 28000 | what a draw must allocate, via `ESP.getMaxAllocHeap()` | right arithmetic, discredited input |
+| 28000, observe-only | the same, with the restart suspended | honest, but a watchdog that does not act |
+
+The observe-only state was the correct interim position - restarting a
+household's display on a number nobody can explain is worse than not
+restarting it - and it said what should replace it: something keyed to observed
+harm rather than to a proxy. That is now implemented.
+
+`Display::consecutiveDrawFailures()` counts how many card draws have failed
+**in a row**, incremented by `Display.cpp`'s `noteDrawOutcome()` for every draw
+where an image was in front of the decoder and no picture came out. Any
+successful draw clears it. A draw that never reached a decoder because there was
+no image to give one is neither counted nor cleared - `noteNoImageAvailable()`
+handles that case, and the distinction is load-bearing rather than pedantic.
+`checkHeapHealth()` restarts when that run exceeds
+`kMaxConsecutiveDrawFailures`, which is **6**.
+
+Two earlier descriptions of this counter are gone from this document because
+both were false. It never counted file-buffer allocations - streaming draws
+removed that buffer - and the constant was `kMaxConsecutiveBufferAllocFailures`
+for long enough that a reading of `6/6` was taken for memory exhaustion for an
+entire evening, on a device whose largest 8-bit block was 21,492 at the time.
+
+**The restart records `CANNOT_DRAW`, and it used to record `LOW_HEAP`.** Nothing
+about the heap decides this trigger. The figure on the `[health]` line is context
+printed beside the count, and the count is failed draws. Reported under a memory
+name it sent a day of investigation into the wrong subsystem on device 39, whose
+`RestartLargestFreeBlockBytes` read 34,804 at essentially every one of its 31
+restarts - above the 33,434 two-buffer TLS requirement and double the 16,717
+single-buffer floor. That device was never out of heap. `RestartCause::LowHeap`
+(1, `LOW_HEAP`) is kept: stored rows and NVS values written by older firmware
+still decode to it, and a genuine heap restart can still claim it.
+`RestartCause::CannotDraw` (11, `CANNOT_DRAW`) is a new value in an existing
+field, which is what the six-month compatibility mandate allows.
+
+The server needs one line for the new token to sort correctly:
+`RebootHeatmap.Classify()` matches `UNREACHABLE` and `LOW_HEAP` as
+`RebootKind.Recovery`, and `SOFTWARE_RESET+CANNOT_DRAW` falls through to
+`Deliberate` until `CANNOT_DRAW` joins that branch. Stored rows are unaffected -
+they still read `SOFTWARE_RESET+LOW_HEAP` and still classify as they always did.
+`LOW_HEAP_RESPONSE` took the other route and embedded `LOW_HEAP` in its own token
+to inherit the classification for free; that trick is not reused here, because
+the whole point of this change is that the word does not belong on a draw fault.
+
+6 is chosen against `Assets.cpp`'s own retry behaviour, not picked for feel.
+`kMaxDrawAttempts` there is 3: a failed decode is retried three times before the
+asset is given up on, its cache entry invalidated and the bytes re-fetched, and
+each attempt runs the full read path. So one genuinely unlucky asset produces a
+run of 3, and any limit at or below that would let a single bad file reboot the
+device - the wrong response (invalidate-and-refetch is the right one) and a
+reboot loop waiting to happen if that asset is the one every rotation reaches.
+6 is two full cards' worth; exceeding it means every attempt on more than two
+assets failed with no success anywhere in between. Draws are seconds apart while
+the check runs once a minute, so a device in that state passes 6 well inside one
+interval and restarts on the very next check.
+
+Why failure-counting beats any threshold, stated plainly because this project
+paid for the lesson three times:
+
+- **It measures the harm itself.** "This device can no longer draw its cards" is
+  the condition worth restarting for. The counter counts exactly that, rather
+  than a quantity believed to correlate with it.
+- **It needs no theory about which pool is short**, which capability class
+  matters, or how much overhead the allocator adds. Those questions produced
+  three wrong thresholds and several device-nights.
+- **It cannot be fooled by a metric that means something other than it appears
+  to.** A wrapper reporting four times the truth changes nothing about whether
+  `malloc()` returned null.
+
+The price is giving up the original ambition of acting *before* the first
+failure, and that is deliberate. Prediction needs a trustworthy predictor, this
+board offers none, and three attempts at one produced a watchdog that rebooted
+working devices. Acting on the first few real failures instead costs a handful
+of missed card draws - which `Assets.cpp` already retries and recovers from -
+and in exchange the trigger cannot fire on a device that is working.
+
+Everything the old restart path did is preserved: `Log::flushNow()` so the line
+explaining why actually reaches the server rather than dying in RAM,
+`AppService::stashTimeForFastReboot()` so the next boot skips the blocking SNTP
+wait (which is where most of the visible outage went), the on-screen
+"Refreshing / Reclaiming memory - back in a moment", and a 1500ms delay before
+`esp_restart()` so both the message and the flushed log line get out. The
+largest-8BIT-block figure is logged on **every** check, whether or not anything
+is wrong, beside `ESP.getMaxAllocHeap()` - neither number decides anything now,
+and printing them together is what keeps the gap between the two (6,132 against
+32,756 at the one instant both were captured) an observable fact in the field
+rather than a finding that has to be taken on trust.
+
+`kHeapCheckGraceMs` stays at 3 minutes, for a new reason. Its original
+justification - boot-time allocations legitimately dip `maxAllocHeap` before a
+device reaches steady state - is moot now, since a transient dip that no draw
+ever tripped over produces no failures to count. It stays because together with
+the once-a-minute interval it bounds restarts to roughly one per four minutes,
+which is the only protection against a device that cannot draw even on a fresh
+heap turning into a tight reboot loop, and because it guarantees every boot a
+full three minutes in which to produce a success and clear whatever its first
+draws failed at.
+
+The risk this section used to accept, said out loud at the time: if a restart
+does not fix it, this becomes a restart every few minutes, which is exactly what
+60000 did. That risk arrived. Device 39 restarted 31 times at roughly 21-minute
+intervals - the interval is how long its rotation took to fail seven draws, not
+a memory curve - and no restart could ever have helped it. Its only
+image-bearing card is `aircraft`, whose picture is an airline-logo PNG; a PNG
+needs 45,056 bytes in one contiguous block and that device's all-time maximum
+largest block is 36,852. The decode cannot succeed on any heap it will ever
+have. With no second picture card there is never a successful draw to clear the
+counter, so it climbs past 6 and the device restarts, forever.
+
+### Should a draw refused for want of memory count toward this watchdog?
+
+There is a real argument each way, and the answer implemented is a compromise
+rather than a victory for either side.
+
+**For counting it:** a restart defragments the heap, and a draw refused because
+no single block was large enough is exactly the failure a fresh heap can cure.
+Device 17's measurement is the evidence - releasing the TLS session moved the
+largest block from 6,132 to 36,852 and an identical 10,568-byte allocation that
+had just failed then succeeded. Refusing to count allocation refusals would
+blind the watchdog to the one case where its remedy works.
+
+**Against counting it:** a device whose ceiling is below what the picture needs
+cannot be given the bytes by any restart, so counting the refusal guarantees an
+endless loop. Device 39 is that device, and 31 restarts bought it nothing.
+
+**What is implemented: a cap.** An allocation refusal still counts, so the first
+restart is still made and the defragmentation case is still served. What changed
+is that the restarts stop. `BootDiag` keeps a cannot-draw restart streak in NVS;
+after `kMaxCannotDrawRestarts` (**3**) consecutive restarts the watchdog logs the
+run and declines to restart again, and the device stays up reporting telemetry
+instead of rebooting every twenty minutes. Three successive fresh heaps that each
+failed to produce one successful draw is enough to call the ceiling structural.
+The streak clears at the first check past `kCannotDrawBudgetResetMs` (**30
+minutes** of uptime) where the failure count is zero - a device drawing again
+gets its budget back, and a device still failing cannot reach that condition,
+because its count is above the limit at every check. A power cycle does not
+refill the budget either: the ceiling did not change because somebody pulled the
+plug.
+
+**The alternative not taken, and the owner may want it instead:** a separate
+counter, so an allocation refusal feeds something other than the draw-failure
+run and the watchdog restarts only for decodes that failed with memory to spare.
+That is the cleaner separation and it is a change to `Display.cpp`'s
+`noteDrawOutcome()`, which decides what a draw failure is. The cap was chosen
+over it because the cap bounds the harm wherever the refusal is counted, and
+because it keeps the defragmentation case working. Not counting refusals at all
+was rejected outright: it discards the one case a restart fixes.
+
+A capped device is still showing a household every card it *can* draw - a card
+whose picture will not decode is dropped from the rotation after its first
+failure - so staying up is strictly better for the household than a reboot
+every twenty minutes that cannot change the outcome.
+
+## Locating an HTTPS failure by layer instead of arguing about it
+
+`HTTPClient` collapses every pre-response failure into a single negative
+status - a DNS failure, a refused TCP connect and a rejected TLS handshake all
+surface as `-1` - which is not enough to act on, and "the device cannot reach
+the server" is a symptom broad enough to support whichever hypothesis somebody
+already prefers. `Http::diagnoseFailure(const char* tag)` (`Http.h`/`.cpp`)
+exists to turn that one symptom into a specific one. It is called from
+`CheckIn.cpp` and `AppUpdater.cpp` only when `status < 0` - a real HTTP status
+(401, 500, ...) means the server was reached and answered, which needs no
+archaeology - and it walks the stack in order: WiFi association state, then
+name resolution via `WiFi.hostByName()`, then a plain `NetworkClient` TCP
+connect to port 443 with no TLS at all, logging RSSI, `freeHeap` and
+`maxAllocHeap` at each step and stopping at the first layer that fails. The
+`tag` is the caller's own name ("checkin", "manifest", ...) so a device with
+several failing subsystems stays readable in one stream.
+
+On the failure it was written for, it produced the answer in two lines:
+
+```
+[http] checkin: DNS ok, api.discoveraroundme.com -> 32.192.231.29
+[http] checkin: plain TCP to :443 SUCCEEDED - the failure is the TLS handshake itself
+```
+
+The name resolves, a socket opens, the handshake does not complete - which is
+what sent the investigation to mbedTLS's buffer requirements, and from there to
+the file-copy buffer being held across check-ins. It costs one DNS lookup and
+one TCP connect, only ever on a path that has already failed, which is free
+compared with continuing not to know.
+
+**Two things about this facility were wrong and are fixed.** The heap figures it
+logged at each step were `freeHeap`/`maxAllocHeap` - the discredited wrappers -
+and a captured failure printed `maxAlloc=32756` beside a real largest block of
+22,516, which is how a reader gets handed "memory is not the problem" as the
+first line of a memory problem. It prints `free8`/`largest8` now. And it stopped
+at "the failure is in the TLS handshake itself", which is a category rather than
+a cause: `NetworkClientSecure::lastError()` had mbedTLS's own answer all along
+and was never read. Every mbedTLS error code recorded in this file came from
+adding that one line. See "A diagnostic that ruled out the actual cause" at the
+end of this file.
+
+The habit is worth recording alongside the facility, because it is what this
+episode actually demonstrated. Three plausible hypotheses were live at once -
+a Bluetooth controller memory reservation, a phone hotspot's MTU, and weak
+WiFi signal - and each was killed cheaply by instrumentation rather than
+argued about. The Bluetooth one is the cleanest example: giving the unused
+controller's DRAM back measured `maxAllocHeap 110580 -> 110580`, no change at
+all, which ended that line of enquiry in a single boot. Signal strength became
+a number in every failure log rather than a suspicion. None of the three was
+the cause, none of them cost more than a build to eliminate, and the actual
+cause was found by the one measurement that could distinguish between layers.
+
+## Known gap: the splash cache notices a new splash asset, never new bytes for the same one
+
+`Assets.cpp`'s `ensureSplashCached()` skips the fetch when the fixed `"splash"`
+slot already exists on SD *and* the `splash.id` sidecar records the same asset
+id. That sidecar exists because the cached filename is always `"splash"` and so
+cannot, by itself, tell two accounts' splash assets apart. The guard is right
+about the case it was written for and blind to the other one: the splash
+refreshes when *which asset is the splash* changes, and never when *that
+asset's bytes* change.
+
+Observed after the server re-encoded its whole catalog on 2026-09-10. Device
+17 re-fetched all three of its graphic cards (`sha256 verified`), because
+those are cached under their own asset ids and the re-encode changed their
+content - but it kept booting the stale pre-re-encode 51,751-byte splash
+indefinitely, because the configured splash asset *id* had not changed. Not
+currently fatal: the splash now draws before WiFi, where ~110,580 bytes are
+still contiguous, so even an oversized pre-re-encode file decodes there
+without complaint. That is why this is a documented gap rather than one of
+tonight's bugs.
+
+The fix is to carry the splash asset's content hash in `CheckInResponse`
+beside `SplashAssetId`, record it in the `splash.id` sidecar next to the id,
+and make the skip condition "same id **and** same hash". That is how every
+other cached asset already behaves, via the `X-Asset-Sha256` header
+`fetchToCard()` verifies against; the splash is the one asset whose cache key
+is a slot name rather than its own id, so it is the one asset that had to have
+this checked separately - and did not.
+
+## Three allocation-churn fixes, and the motivation for them that turned out to be wrong
+
+These came out of an audit of `App/` read against the built ELF rather than
+against anybody's recollection of the code, and they are grouped here because
+they share a shape: none of them is a bug fix, all three remove repeated
+allocate-and-free cycles from paths that run constantly, and none of them
+changes what the device puts on screen.
+
+**Say the motivation problem first, because it is the more useful part of the
+record.** The audit framed all three as targeting "the heap fragmentation that
+trips the health watchdog at ~180s". That framing was wrong. The watchdog was
+not detecting fragmentation at all - it was firing on a threshold set above the
+steady state of a correctly working device, as "The heap-fragmentation watchdog
+had become the reboot loop it was written to prevent" above sets out in full,
+and `ESP.getMaxAllocHeap()` on this board reports 32,756 bytes from the first
+card draw onward rather than drifting downwards over an uptime. (Later
+correction, since this paragraph is about not teaching the wrong lesson: that
+constancy is not evidence about heap shape either - the wrapper is not measuring
+the pool `malloc()` draws from, and the watchdog no longer reads it or any other
+threshold. See "Both of these numbers were wrong" and "What the watchdog
+restarts on now" above.) So nothing below
+fixed the 180-second restarts; a constant did. The three changes were kept
+anyway, on their own smaller merits: an allocator with no compaction is better
+off doing less allocating, and the churn each of them removes was paid for
+nothing in particular. That is a real but modest claim, and it is deliberately
+not dressed up as the one it was originally written to make. Repeating a
+motivation that has since been disproved is how a design document starts
+teaching the wrong lesson to whoever reads it next.
+
+**(a) `Log::line` gained a `const char*` overload (`Log.h`/`Log.cpp`).** Both
+`Log::printf()` and `Log::verbose()` used to end with `line(String(scratch))`,
+where `scratch` is the 256-byte stack buffer `vsnprintf()` just wrote into.
+That constructed an Arduino `String` - a heap allocation and an immediate free
+- on every log line the firmware emitted, whether or not anybody was listening,
+because `Log::line()` only pushes into the stream buffer when streaming is on
+and streaming is off on every device almost all of the time. This is the
+highest-frequency allocation site in the image: every fetch, every check-in
+field, every asset operation, and every card draw pass through it - the draw
+case being a genuine choke point, since `CardManager::poll()` logs
+`"[cards] showing '%s' (item %u/%u)"` once for every card that comes up in the
+rotation, forever.
+
+The new overload takes the C string it was always being handed, calls
+`Serial.println(const char*)` directly - which was never the part that needed a
+`String` - and constructs one only inside the `if (streaming)` branch, where
+`pushToBuffer()` genuinely stores a `String` and there is no way around it. The
+`const String&` overload stays, because plenty of call sites legitimately hold
+a `String` already and pushing them through `.c_str()` would move the same
+question somewhere less obvious rather than answer it. The pleasant part is
+that overload resolution does the rest for free: the 56 `Log::line("literal")`
+call sites scattered through `App/` now bind to the new overload without any of
+them being touched.
+
+Worth connecting this to the standing verbose-logging mandate this project
+holds to (see `readFileToBuffer()`'s own logging above, and "Watching a device
+live"). That mandate is normally in tension with cost - a deployed device's
+only diagnostic channel is the remote stream, so the instruction is to log
+generously, and generous logging is exactly what makes a per-line allocation
+expensive. This change resolves the tension in the direction that does not
+require choosing: logging more is now cheaper per line rather than something
+to be traded against.
+
+**(b) `Forecast.cpp` memoizes its two possible responses.** `Forecast::fetch(
+bool useTarget)` has exactly two URLs it can ever ask for - `kPathHome` and
+`kPathTarget` - so the five card instances "Multi-instance, generalized beyond
+the graphic card" above describes can between them produce at most two distinct
+responses. Before this, each instance did its own full HTTPS request and stood
+up its own `JsonDocument` pools to parse the answer, which makes three of the
+five provably redundant on every refresh. They also fire together rather than
+spread out: `CardManager` treats a card that has never fetched as immediately
+due, and `CardSpec::active` defaults `true` until the first policy arrives, so
+every fetch-capable card fetches back to back in the post-boot burst - the
+single worst moment to be doing three unnecessary TLS handshakes.
+
+The fix is a namespace-scope `SharedSlot gShared[2]`, indexed by the
+`useTarget` bool itself, and a `sharedFetch(bool)` that refetches only when the
+slot's existing entry is older than `Config::kContentRefreshIntervalMs` (10
+minutes). Using that specific constant is the load-bearing choice: it is the
+same interval the scheduler uses to decide a card is due, which makes this a
+de-duplicator for fetches that were going to happen anyway rather than a second
+cache policy competing with the first one. Instances asking for the same URL
+inside one refresh window share one answer; once the window passes, the next
+asker refetches on everyone's behalf.
+
+Two properties were preserved on purpose. `wantsTarget()` is still re-read per
+instance on every fetch, because which of the two URLs *this* card wants is
+genuinely per-instance state that an admin can change under it between
+refreshes - only the response to a given URL is shared, never the decision
+about which URL to ask for. And a *failed* fetch is memoized exactly like a
+successful one, which looks wrong at a glance and is the whole point: five
+instances retrying a service that is down, five times over, in the same second,
+is precisely the storm this exists to prevent, and the retry still happens on
+the next window like any other refresh.
+
+`Cards.h` had already argued for this fix before it existed - the reason
+aircraft and listings were denied multi-instance treatment is that a second
+instance would issue an identical request and draw an identical card for the
+price of a second round trip. Forecast got multi-instance treatment anyway
+because `location` is a real per-instance axis, and this is the piece that
+makes that exception affordable instead of merely defensible.
+
+**What was deliberately not done, and why.** The audit's second half suggested
+also making each instance's `gLast` a pointer into the shared slot, saving the
+duplicated copies of a `Forecast::Result` - roughly 4 x 600 bytes of `.bss` on
+the audit's own estimate. That was skipped. It would mean rewriting every
+`gLast.` in the draw path to `gLast->` (19 occurrences in the file today),
+turning a change contained to one new function into a refactor that touches
+everything the card draws, and the saving it buys is `.bss` on a device with no
+`.bss` pressure and something like 950KB of `ota_0` still spare (see the
+measured build sizes near the top of this file). The audit labelled it a bonus.
+It is being treated as one.
+
+**(c) The per-fetch `JsonDocument` filters became function-local `static
+const`** in `Aircraft.cpp`, `Listings.cpp` and `Forecast.cpp`. A
+`JsonDocument` takes a pool block from the heap the moment it holds anything -
+1KB on this 32-bit target, ArduinoJson's pool capacity being 128 slots - and
+each of these three filters was being built, allocated and freed on every
+single fetch in order to hold nothing but a handful of `true`s. The keys are
+string literals, so ArduinoJson links to them rather than copying them, and the
+shape never varies between calls: these documents have no per-fetch input at
+all. Making them resident trades ~1KB per site, 3KB in total, for zero
+allocation churn - the same direction of trade `gFileBuffer` and the PNG
+decoder's scratch buffer already make, and for the same reason, that the scarce
+resource on this device is contiguous blocks rather than total bytes
+("Contiguity, not free bytes" above).
+
+Function-local `static` rather than a namespace-scope global, deliberately:
+construction then happens on first use, inside a fetch, rather than during
+static init where this codebase has already learned not to rely on the heap
+being in any particular state (`Cards.h`'s constant-initialisable registry
+exists for that same reason). Forecast's is the one that benefits most of the
+three - five instances means what used to be five allocate/free pairs per
+refresh burst is now one resident document all five share.
+
+## Re-asserting every provider's status once per check-in, instead of only when it changes
+
+Every fetch-driven card already logs how its fetch went. The problem is *when*.
+The check-in-driven cards (`Tides.cpp`, `IssFlyover.cpp`, `HomeValue.cpp`, and
+`Graphic.cpp` for its own readiness) log strictly on a state *change*, via the
+`gLastLogged*` dedup statics, so a device sitting in one steady state emits
+nothing at all about it; the genuinely fetching cards state their outcome at
+the moment of a fetch, which is up to a whole `kContentRefreshIntervalMs` - ten
+minutes - apart. Both behaviours are right for the serial console, where
+somebody with a cable has the whole session's history in the scrollback.
+
+They are wrong for the live debug stream, and the difference is that a stream
+is joined *mid-flight*. An admin who turns streaming on twenty minutes into a
+device sitting in a steady refused state sees cards cycling through the
+rotation and has no way at all to tell a working fetch from a refused one,
+because the line that would have told them was emitted before they connected
+and is not coming again. Diagnosing two devices live cost real time to exactly
+this - not to a hard problem, to the absence of a sentence that the firmware
+already knew how to write and had simply decided not to repeat.
+
+**The fix is a new optional `StatusFn` on `CardSpec`** (`Cards.h`): a
+`String (*)()` a card can supply to answer "how did your last fetch go, right
+now", with `nullptr` meaning "nothing to report" - the correct answer for every
+card that fetches nothing at all, which is clockdate, announcement and qrtext.
+`Aircraft`, `Listings`, `Forecast` (per instance), `Tides`, `HomeValue` and
+`IssFlyover` each implement one. `Cards::logProviderStatuses()`
+(`CardManager.cpp`) walks the registry and emits **one consolidated line**
+naming each active card and its current status, rather than re-firing each
+module's own scattered logging - which leaves the existing change-only dedup
+intact for what it is actually good at, namely marking the moment something
+changed.
+
+**Where it is called from is a deliberate choice, not an incidental one.**
+`App.ino`'s `performCheckIn()` calls it once per successful check-in,
+positioned *after* `Log::setStreamingEnabled(result.debugStreamRequested)` and
+*after* the card policy has been applied. After the first, so an admin who has
+just this second switched streaming on gets the full picture on that very
+check-in instead of waiting a whole interval for the next one - which matters
+because the person watching is usually watching because something is already
+wrong. After the second, so that the statuses reported are the ones belonging
+to the policy now in force rather than to the one that was in force a
+millisecond ago.
+
+The details that keep it from becoming noise:
+
+- **It costs nothing when nobody is streaming.** `logProviderStatuses()` checks
+  `Log::streamingEnabled()` before it even begins walking the registry, which
+  matters here more than at an ordinary `Log::verbose` call site because every
+  `status()` implementation builds a `String` from live values. `Log::verbose`
+  would have discarded the finished line, but only after the statuses had all
+  been built to hand to it.
+- **Inactive cards are skipped.** A card the policy turned off has no current
+  provider state worth asserting, and a household with a dozen switched-off
+  cards would otherwise bury the two or three that matter under them every
+  check-in.
+- **If nothing qualifies, it says so out loud**
+  (`"[providers] no active fetch-driven cards to report"`) rather than staying
+  quiet. "No active fetch-driven cards" is itself a diagnosis, and a silent
+  check-in is indistinguishable from this whole feature being broken - which is
+  the same failure mode "Where the boot splash has to happen" above records for
+  a `showBootSplash()` that ignored its own return value.
+- **The strings name the specific refusal**, not just "not ok": "refused:
+  device not activated", "refused: provider disabled", "refused: device secret
+  rejected", "network error: ..." are four different problems with four
+  different owners, and "which of the six ways is this one failing" is the
+  entire question being asked. Forecast's names which of the two locations the
+  instance is configured for as well, because with five instances "forecast3 is
+  refused" is only half an answer.
+- **`Listings` distinguishes its resting state from its failures.**
+  `NotConfigured` - nobody has put a listings provider key on file - reports as
+  "resting: no listings provider key on file" rather than as a refusal, because
+  reading an unconfigured provider as a failure sends whoever is watching after
+  a bug that is not there.
+
+`Tides` and `HomeValue` implement `StatusFn` too, even though neither fetches
+anything of its own: their values ride in on the check-in response, so their
+only real states are "the server has told us" and "it has not", and
+distinguishing those two live is exactly what a silent stream could not do
+before.
+
+## The ISS card now leads with the next visible pass, not the live position
+
+`IssFlyover.cpp`'s `cardDraw()` and `cardItemCount()` reversed their
+preference: when both a next pass and a live position are available, the card
+now draws the pass, and the live position became the fallback for when there is
+no pass. This is the direct reverse of how the card shipped a few sections
+above ("The ISS flyover card"), where the pass was the fallback.
+
+The instruction was the product owner's: "change the display to when the next
+time the space station is visible, and the details". The reasoning behind it is
+worth writing down because it is a point about what a wall display is for
+rather than about the ISS. The live position is real, correct, freshly-fetched
+data, and it is almost never actionable - the station spends most of its orbit
+over open ocean thousands of miles from any given household, and "11,545 mi,
+212 deg SW, over 49.5S 114.1E" invites the person reading it to do precisely
+nothing. "Rises 22:10 to the NW, highest 16 deg, sets 22:14" gets somebody to
+put their coat on and go outside, which is the entire reason the ISS is worth a
+card on a wall in the first place. Accuracy was never the axis these two
+options differed on; both are accurate. Only one of them is a reason to look
+up.
+
+**The live position stays, underneath, because it is the honest answer for the
+gap.** Passes are not evenly distributed: some latitudes go days at a time with
+none at all while the orbital plane precesses back overhead, and during that
+stretch "where is it right now" beats an empty card, on the same
+report-nothing-rather-than-invent-wording tolerance `Tides.cpp` and
+`MoonPhase.cpp` already hold to. So `cardItemCount()` still reports one item
+when *either* half has data; only the order of preference inside `cardDraw()`
+changed.
+
+**A pass that reaches this card is one that can actually be seen, and that
+determination is not made here.** The server now filters candidate passes for
+visibility before sending them - the observer has to be in darkness *and* the
+station has to be in sunlight, both, because the ISS is nothing but reflected
+sunlight and roughly half of all geometrically-valid passes happen in daylight
+where there is nothing to see (see the DiscoverAroundMe server's
+`IssPassVisibility`). That is what makes leading with the pass defensible: if
+the card led with a pass that turned out to be an invisible daylight one, it
+would be sending people outside for nothing, which is worse than showing them
+an ocean coordinate.
+
+**This firmware does no visibility reasoning of its own and must not start.**
+It has neither the solar geometry nor - in the general case - a resolved
+observer position to do it with; both live on the server, which is also where
+the CelesTrak element set and the SGP4 propagator already are. The contract to
+hold onto is that a `issNextPass*` field arriving on a check-in response means
+"visible pass", full stop, and the correct place to fix a wrong answer is the
+server's filter rather than a second opinion added here.
+
+## Banners: a per-card theme replaced by the announcement queue the server actually speaks
+
+A banner is a header strip across the top of the panel. `Display::showBannerCard()`
+fills `kBannerStripHeight` (100px) with a loud amber-red - `kBannerStripFill`,
+0xC2410C, deliberately louder than every `drawCardBanner()` label colour, because
+those are a small corner tag on an otherwise ordinary card where this strip *is* the
+card's entire reason for existing - and wraps up to three lines of the strip's own
+12pt bold into it. Everything below the strip stays empty apart from the ordinary
+chrome, the button row and the corner clock, and the emptiness is the whole visual
+point: 100px against a `kButtonRowY` of 160 leaves a deliberate band of nothing, so
+the strip reads as a notice stuck onto the glass rather than as one more card. That
+band of nothing later became the tap target that clears a notice with no button, which
+*A notice with no button is cleared by touching it* below covers. None
+of that drawing code changed in this pass and none of it is what this section is
+about. What changed is everything upstream of it: *who* decides a banner should be
+showing, and *what* it says.
+
+**The first draft put both of those decisions on the card, and that is what has now
+been taken out.** `Cards::CardSpec` carried a `Theme` enum -
+`FullScreen`/`Banner`/`BannerButton` - which `CardManager::applyPolicy()` set from a
+`theme` string on the card-policy entry ("banner", "bannerbutton", anything else
+including absent meaning full screen, the same tolerant default `kind` already gets).
+A `Banner` card drew that same policy entry's own `text` field in the strip instead of
+calling its `draw()`; there was no second content field, `text` was reused as-is, and
+a card with the theme set but no text fell through to its ordinary `draw()` so that
+Full Screen needed no code path of its own. A `BannerButton` card did all of that and
+additionally let its own button press - drawn and wired through `Actions.h` exactly
+like any other card's - set a RAM-only `dismissedByButton` flag on the descriptor,
+which `showable()` read as "take this card out of the rotation entirely". In that
+model the reminder's schedule *was* the card's schedule: the
+`effectiveFromUtc`/`effectiveToUtc` pair on the policy entry gated the whole card
+through `isEffectiveNow()`, because "the reminder" and "the card" were the same
+object.
+
+**The hardest part of that design was knowing when a dismissal had gone stale, and it
+was never better than a guess.** The server re-sends the entire `cardPolicy` on every
+check-in, so `applyPolicy()` could not simply clear `dismissedByButton` when a policy
+arrived - that would have made a press clear the reminder for exactly one check-in
+interval and no longer. So it saved the descriptor's *old* `text` and *old*
+`effectiveFromUtc` before overwriting them, compared both against what had just
+arrived, and un-dismissed the card if either had changed, logging
+`"[cards] '%s' un-dismissed - the server sent a new reminder for this entry"`. The
+inference being drawn there is "different words, therefore a different reminder", and
+it is wrong in both directions: an admin fixing a typo in a reminder somebody had
+already acknowledged silently put it back on their wall, and a genuinely new reminder
+that happened to read identically to the old one stayed suppressed forever. There was
+no third option available, because nothing in the payload identified a reminder
+except the words it was made of.
+
+**The deeper problem is that the shape can hold exactly one fixed message per card.**
+There is nowhere in a `Theme` enum plus a reused `text` field to put a *queue* of
+announcements, nothing to say about which of several currently-effective messages a
+card should show, and no way to dismiss one of them independently of the others. The
+request this feature exists to serve - a household seeing short-lived messages, some
+of which have to be pressed before they stop appearing, overlaid on cards that are
+already in rotation - is a queue-shaped request, and the draft was a single-slot
+answer to it.
+
+**And there was a conceptual error sitting underneath, which is the more interesting
+half.** `BannerButton` made "does this need acknowledging?" a property of the *card*.
+It is not. Whether a reminder wants a press belongs to the reminder: the same message
+may want acknowledging whichever card it happens to land on, and a card has no
+opinion about it at all. Everything a card can honestly say on this subject is
+"banners are allowed here". Getting that boundary in the right place is what most of
+the rest of this section is downstream of.
+
+**The two halves had also stopped meeting.** The server side was redesigned around
+this - `CheckInResponse.Announcements`, a plain `CardPolicyEntry.AllowBanner`, and a
+whole `DiscoverAroundMe.Announcements` module with `CardAnnouncement` and
+`CardAnnouncementDismissal` entities behind it - while this firmware was still
+implementing the draft. Checked against the server's `CheckInModels.cs` as this was
+written: `CardPolicyEntry` today ends at `AllowBanner` and carries neither a `Theme`
+string nor an `EffectiveFromUtc`/`EffectiveToUtc` pair. So `CheckIn.cpp` was parsing
+three wire fields nothing has ever sent, and `Display.h`'s `showBannerCard()` was
+documented against a `CardPolicyEntry.Text` that no longer feeds it. A clean compile
+proved none of that, because none of it is a type error - it is two codebases quietly
+describing different features.
+
+### What replaced it
+
+- **`CardSpec::allowBanner`, a bool, replaces `Theme`.** Set from the policy's
+  `allowBanner`, absent meaning false - which is every policy saved before the field
+  existed. It is **eligibility, not a promise**: true only means this card is a
+  candidate to carry whichever announcements are currently effective and targeting
+  it. A card with it set and nothing due draws exactly as it would with it false, its
+  own ordinary full-screen content - never a blank space, never a stuck "waiting for a
+  banner" state. `drawCurrent()` asks for an announcement and falls straight through
+  to `card.draw()` when there is not one, so there is no separate "nothing to show"
+  branch to get wrong.
+- **Banner versus Banner Button is now a property of the announcement**,
+  `Cards::Announcement::isAction`, not of the card. This is the conceptual correction
+  above, expressed in one field. It also decides how the notice gets cleared: a Banner
+  Button is pressed, a plain banner is tapped in the middle of the glass.
+- **A new `Cards::Announcement` struct holds what arrives on the wire**: `id`, `text`,
+  `isAction`, `actionId`, `targetCardIds[8]` with a `targetCount`, and
+  `dismissedLocally`. Fixed char buffers rather than `String`s, for exactly the reason
+  `assetId`/`text`/`qrData` on `CardSpec` already are: the registry has to stay
+  constant-initialisable, and a `String` member would make it dynamically initialised
+  instead, racing the guarantee that the registry exists before any card module's
+  static initialiser runs. `id` is 37 bytes because the server's `AnnouncementEntry.Id`
+  is a `Guid`. `text` is bounded at 160 rather than `kMaxTextLength`'s 280, and the
+  reason is the panel: this is a header strip with room for about three wrapped lines,
+  not a full-screen card, so the extra capacity would only ever hold characters that
+  cannot be drawn. `kMaxAnnouncements` and `kMaxAnnouncementTargets` are both 8.
+
+### Effectivity is deliberately absent from this firmware
+
+The server sends only the announcements that are effective *right now* for this
+device and not already dismissed by whoever owns it -
+`AnnouncementsService.GetEffectiveForDeviceAsync` filters on the
+`EffectiveFromUtc`/`EffectiveToUtc` window and on the `CardAnnouncementDismissal`
+rows for the device's resolved owner key before anything is serialised. So this
+device does no date arithmetic, makes no clock comparison, and keeps no dismissal
+history beyond the current session. **An announcement's presence in the array is
+itself the statement that it should be showing**, and there is no second opinion to
+form.
+
+That is worth drawing out, because the rule "is this message live?" is the one rule in
+this feature that two separate codebases would otherwise both have to implement and
+keep in agreement - and it now lives in exactly one of them. It is the same shape as
+the ISS section immediately above: an `issNextPass*` field on a response means
+"visible pass, full stop", and a `issFlyover`-side second guess would only ever be a
+way for the two answers to diverge. A firmware that re-checked an announcement's dates
+would need the dates on the wire, would need a trustworthy clock to compare them
+against, and would need the dismissal table too - three dependencies bought in
+exchange for the ability to disagree with the server.
+
+**The card's own `effectiveFromUtc`/`effectiveToUtc` survive this change untouched,
+and are a different thing.** They answer "should this card appear in the rotation at
+all", evaluated by `isEffectiveNow()` inside `showable()` on every scheduling decision
+rather than once when a policy lands, with 0 meaning no bound and a half-open
+`[from, to)` window. That is card scheduling, not message scheduling, and the two were
+only ever confused because the draft used one pair of fields for both jobs.
+
+**A gap to record honestly while these fields are being described:** the server's
+`CardPolicyEntry` dropped `EffectiveFromUtc`/`EffectiveToUtc` when effectivity moved
+onto the announcement, so nothing currently sends the card's pair either.
+`CheckIn.cpp` still parses them and `isEffectiveNow()` still honours them, and the
+absent-means-0-means-always-effective tolerance makes that harmless rather than
+broken - but per-card scheduling windows are, as of this change, firmware machinery
+with no server-side way to reach them. That is a server-side gap, not a reason to
+remove working firmware.
+
+### The store is replaced wholesale, not merged
+
+`Cards::setAnnouncements()` is called from `performCheckIn()` on every successful
+check-in and rewrites the whole array. Unlike `cardPolicy`, where an empty policy
+explicitly means "keep the one you have" so a server that cannot resolve a policy can
+never blank a working screen, **an empty announcement array is meaningful and is
+applied** - it is what most check-ins carry.
+
+The reasoning is that the response is a complete statement rather than a delta.
+Anything absent from it has stopped being effective, been dismissed by someone else
+under the same owner key, or been deleted outright, and all three of those mean the
+same thing to a device: stop drawing it. A merge would have no way to distinguish
+those from "not mentioned this time" and would leave a withdrawn announcement on the
+wall forever - the exact failure the draft's dismissal guessing was also trying, and
+failing, to avoid.
+
+**Exactly one thing is carried across the replacement: a local clearance, matched on
+`id`.** The server cannot know a notice was cleared until the press or the tap reaches
+it on the next check-in, so it will legitimately still be listing an announcement this
+device has already dealt with. Without the carry-across, the very next response would
+put the banner straight back up and the gesture would read as having done nothing. With
+it, the flag survives until the server stops sending the announcement of its own
+accord. Note that this is a match on identity, not on content - which is the whole thing
+the draft could not do.
+
+The carry-across is also what makes `dismissedAnnouncementIds` repeatable rather than
+needing an acknowledgement of its own: the flag stays set for exactly as long as the
+server keeps listing the announcement, which is exactly as long as the id needs to keep
+appearing on the request.
+
+`setAnnouncements()` emits `"[banner] %u announcement(s) in force"` on every check-in
+that has any, not only when the number changes - the same reasoning as *Re-asserting
+every provider's status once per check-in* above, since a debug stream is joined
+mid-flight and an admin who connects during a steady state would otherwise see no
+evidence this feature exists at all. A steady state of zero stays silent, because zero
+is the ordinary case and would otherwise be the most-repeated line in the stream.
+
+**One bound is stated twice and only enforced once, which is worth flagging rather
+than admiring.** `setAnnouncements()` clamps its `count` to `kMaxAnnouncements` and
+logs `"[banner] server sent %u announcements, holding the first %u"` when it has to.
+But `parseAnnouncements()` has already stopped filling `Result::announcements` at the
+eighth, so the count reaching `setAnnouncements()` from its only caller can never
+exceed the bound and that line can never fire. The practical consequence is the
+opposite of what the pair of guards looks like it does: a server sending nine
+announcements loses the ninth **silently**, in the parser, and the log line written to
+announce exactly that is unreachable. Whichever half is meant to own the bound, only
+one of them should be claiming to report it - and this firmware's whole convention is
+that a silent drop is the failure mode worth spending a line of output to avoid.
+
+### Which announcement a card shows, and why it cycles
+
+`Cards::announcementFor(card)` answers that, and it **cycles** rather than picking:
+when several effective announcements target the same card, successive draws hand back
+successive ones instead of the first pinning the slot. That was the explicit product
+decision for overlapping announcements - cycle through them the way a list card's items
+cycle - and it matters because the alternative starves every announcement after the
+first for as long as the first stays effective. The server sends them in one stable
+order (`CreatedAtUtc` ascending) and the array's own order is the cycle order; there is
+no priority field to interpret.
+
+**One device-wide cursor, `gAnnouncementCursor`, rather than one per card.** A
+household reads one screen at a time, so what should be advancing is "which
+announcement has been seen most recently", not "where in its own private list is each
+of twenty-eight cards". A per-card cursor would mean a card revisited after twenty
+others resumes mid-list and shows something older than what the card before it just
+showed. The lookup walks the whole array starting at the cursor and advances past
+whatever it hands out, which keeps cycling fair across however many happen to match
+this particular card without needing a per-card index at all. Skipping happens inside
+that walk: a locally-dismissed announcement, one with empty text, and one whose target
+list does not name this card are all passed over, and the cursor only moves when
+something is actually handed out - so draws of banner-ineligible cards do not burn
+positions in the cycle.
+
+**An empty `targetCardIds` is a wildcard, not an empty set** - every card whose policy
+allows banners, matching the server's own contract, where a calendar-sourced
+announcement never authors a specific card list. `targetsCard()` returns true
+immediately on `targetCount == 0`, which is the one place in this firmware where
+"absent" means "all" rather than "none"; everywhere else absent means unrestricted in
+the sense of *no additional restriction*, so the two are consistent even though this
+one reads differently at the call site.
+
+**A sharp edge worth stating rather than discovering:** the cursor advances per
+*draw*, and `drawCurrent()` runs on more than a rotation advance - an in-place refresh
+of the card on screen, the redraw after a non-dismissing button press, and the redraw
+at the end of `applyPolicy()` all call it. With two or more announcements matching the
+card on screen, any of those can swap the strip's contents under somebody who is
+mid-sentence. With one match, and with none, nothing observable happens, so this only
+bites on the overlapping case. It has not been seen on hardware (see below) and no
+attempt has been made to suppress it.
+
+### Clearing a notice keys on the announcement, and there are two ways to do it
+
+Clearing a banner clears **the announcement**, not the card:
+`Cards::dismissAnnouncement()` takes an id and sets `dismissedLocally` on whichever
+held announcement matches. The reason to key it that way is that the same reminder can
+be showing on several banner-eligible cards, and clearing it once means it is done
+everywhere - which keying on the announcement gets for free and keying on the card
+could not express at all.
+
+**An action announcement is cleared by pressing its button. One with no button is
+cleared by tapping the middle of the glass.** `isAction` is what decides, and the two
+gestures reach the server by different routes: a press rides `pendingActions`, a tap
+rides a `dismissedAnnouncementIds` array on the check-in request. Both end at the same
+`CardAnnouncementDismissal` row on the server. The tap is described under *A notice
+with no button is cleared by touching it*, below; the rest of this section is common to
+both.
+
+`CardManager` records which announcement the current draw actually put up, in
+`gBannerOnScreen`, because the press arrives from the touch handler long after the
+draw decided. It holds a pointer into the announcement store rather than a copy, which
+is safe for one specific reason worth writing down rather than leaving to be
+rediscovered: the store is only ever rewritten by `setAnnouncements()` on a check-in, a
+check-in cannot interleave with a draw on this single-threaded firmware, and
+`drawCurrent()` re-reads it on every draw regardless, so a stale pointer cannot survive
+one.
+
+**The press itself needed no new route.** It rides the existing
+`Actions::recordPress()`/`pendingActions` path exactly like any other card button - a
+press recorded in NVS, carried on the next ordinary `/api/checkin`, dropped only when
+`acceptedActionIds` names its `instanceId` - and the server maps it back to its
+announcement and writes the durable `CardAnnouncementDismissal` row. That is why the
+`isAction` half of this feature cost no new endpoint, no new handshake, and no new
+retry logic: the one already in place was already the right shape. The
+`dismissedLocally` flag only covers the gap until the press arrives, and it is RAM-only
+on purpose - a press a reboot erases is the plain limit of a fire-and-forget button on
+firmware with no automated hardware tests, not a guarantee this firmware claims to
+make. The durable record is the server's, and after that record exists the server
+simply stops sending the announcement.
+
+`applyPolicy()`'s entire stale-dismissal comparison is gone with it - the saved
+previous `text`, the saved previous `effectiveFromUtc`, the diff, and the
+un-dismissal log line. Announcements have ids, so "is this a new reminder or the old
+one still being shown?" is no longer a question anybody has to answer by inspecting
+display text. A new announcement is a different id. That is the whole answer, and it
+is the clearest single measure of what moving this off the card bought.
+
+**Clearing a banner moves the rotation on, and that is a choice rather than a
+consequence.** `handleTap()` shows the centre-screen confirmation, then advances to the
+next card instead of redrawing the one on screen, and holds off the auto-advance so the
+next card gets its full dwell. A card whose banner has just gone is still perfectly
+showable - the announcement was only overlaying it - so redrawing it would put its
+ordinary content up in the same instant, a half-second after the checkmark, which reads
+as the gesture having done something confusing rather than as the notice being dealt
+with. Both routes take this path for the same reason: the press branch calls
+`resetHistory()`/`show(computeNext())`, the tap branch calls `advance()`.
+
+### A notice with no button is cleared by touching it
+
+An action announcement arrives with a Banner Button, and pressing that button is how a
+household says it is handled. An announcement with no button had no gesture at all
+before this - it stayed on the strip until `EffectiveToUtc` passed or somebody cleared
+it from the server. Now a tap anywhere in the middle of the glass clears it while the
+banner is up.
+
+**The middle of a banner card is empty chrome, which is what makes the gesture
+available.** The strip claims the top `kBannerStripHeight` (100px), the button row
+claims the bottom from `kButtonRowY`, and nothing is drawn between them. The ~108px
+inner column that *The coordinate is no longer thrown away* above calls "what a card has
+left to itself" is, on a banner card, a band a household is already looking at and
+already inclined to touch. So the gesture reads as "touch the notice to say you have read it",
+which is the thing a finger reaches for anyway.
+
+**No new touch region was added.** `Touch::poll()` already classified a tap there as
+`Hit::None` rather than consuming it, and `handleTap()`'s `Hit::None` case already
+existed and returned without doing anything. The whole gesture is that case now asking
+whether `gBannerOnScreen` is set and `isAction` is false, calling
+`Cards::dismissAnnouncement()` on that id, and logging
+`"[banner] announcement %s cleared by tap"`. On every card that is not showing a banner,
+and on every action banner, `Hit::None` still does nothing.
+
+**An action banner is excluded on purpose.** Its button is how it is satisfied, and a
+stray tap clearing it would skip whatever that press was bound to do - an email to a
+carer, a command in the server's `Commands` domain - while telling the household it was
+handled. The press is the only route that carries a decision; the tap only carries "I
+have read this".
+
+**The tap needed a wire field, because the press's route cannot carry it.** A press has
+an `actionId` and an `instanceId` and the server maps those back to the announcement; a
+tap has neither. So `Cards::clearedAnnouncementIds()` reports the ids of held
+announcements with `dismissedLocally` set and `isAction` false, and `CheckIn.cpp`'s
+`addClearedAnnouncements()` writes them as a `dismissedAnnouncementIds` array on the
+request, immediately after `addPendingActions()`. Action announcements are filtered out
+inside `clearedAnnouncementIds()` rather than at the call site, so the rule lives beside
+the flag it reads: sending one press down both routes would be two records of one
+gesture.
+
+**The array is omitted entirely when nothing has been cleared**, so an ordinary
+check-in body is byte-identical to what firmware predating this sent. That matters
+because the 6-month backward-compatibility mandate is in force - a field that only
+appears when it has something to say cannot change how any existing server or any
+existing device reads a check-in.
+
+**The ids are re-sent on every check-in while they are still held, not sent once.**
+There is no acknowledgement to wait for, the way `acceptedActionIds` acknowledges a
+press, and the list is RAM only. Repeating it is what makes a lost request cost nothing:
+the server stops listing the announcement once it has heard, `setAnnouncements()` stops
+holding it, and the id stops appearing. A reboot before the first successful check-in
+loses the clearance, the server lists the announcement again, and the household taps
+again - that is the whole cost, and it is the same trade the press route already makes.
+
+**The server side was already there.** `CheckInRequest.DismissedAnnouncementIds` is an
+`IReadOnlyList<Guid>?` and `CheckInGatewayService` calls `RecordDeviceDismissalsAsync`
+on it. That half is deployed. This firmware change is the producer that was missing, so
+nothing on the server needs touching for it.
+
+**UNVERIFIED ON HARDWARE.** Nothing in this gesture has run on a device. The firmware
+has no automated tests, and a clean compile proves that the JSON writes and the id
+copies type-check - not that a finger on the glass clears a notice, not that the id
+reaches the server, and not that the band between the strip and the button row is where
+a household actually touches. See *9. Clearing a notice with no button by tapping the middle of the glass* in
+`TEST_PLAN.md` for what would say it works.
+
+### One word, two meanings
+
+`announcement` is now the name of two unrelated things in this firmware, and both are
+staying. `Announcement.h`/`.cpp` is a **card** - one of five instances of an
+admin-typed text card that takes its turn in the rotation and draws through
+`Display::showAnnouncementCard()`, described in *An announcement card* far above.
+`Cards::Announcement` is a **banner message** from the server's Announcements domain,
+which overlays some *other* card and draws through `Display::showBannerCard()`. They
+share a word because both are "words an admin typed that a household should read", and
+nothing else. An announcement card is itself banner-eligible if its policy says so, at
+which point it can be overlaid by a banner announcement, which is confusing to read
+about and entirely ordinary to run.
+
+## Parsing an announcement: truncate the text, drop the nameless, and what a clean compile does not prove
+
+`CheckIn.cpp` gained `parseAnnouncements()`, walking `responseDoc["announcements"]`
+alongside the existing `cardPolicy`/`cardActions`/`acceptedActionIds` parsers, plus a
+small `copyBounded()` helper that copies a JSON string into a fixed char buffer and
+**truncates rather than drops** what does not fit.
+
+**That truncation is the opposite of the rule `assetId` follows, deliberately.** An
+over-long asset id is dropped rather than cut short because a truncated id is a
+perfectly valid id for some *other* asset - the failure mode is drawing the wrong
+picture, silently and convincingly. Display text has no equivalent: a truncated
+reminder is a shorter reminder, visibly so, and most of a reminder beats none of one
+on a strip whose job is to make somebody look. Worth noting that `CardSpec::text` -
+the announcement *card*'s content, a different field - drops instead, on the grounds
+that a notice cut off mid-sentence is worse than one that does not appear. The two
+rules genuinely differ, and the difference is defensible in each direction rather than
+being a single principle applied consistently: a 280-character full-screen notice
+losing its ending loses its meaning, while a 160-character strip is a nudge toward
+something else. If either rule should change it is this pair of paragraphs that should
+be argued with, not one of the two call sites quietly aligned to the other.
+
+**Two fields are load-bearing enough that an announcement missing either is dropped
+outright**, with `"[banner] dropped an announcement with no id or no text"`. Without an
+`id`, an announcement cannot be told apart from any other across check-ins, which
+breaks the dismissal carry-across that the whole design rests on. Without `text` there
+is nothing to draw. Neither is repairable from this end - a device cannot invent
+either field - and both would otherwise occupy one of only eight slots that a usable
+announcement could have had. `dismissedLocally` is never read from the wire at all: the
+server has no idea what this device has shown, so it starts false on every parse and is
+re-applied afterwards by `setAnnouncements()` matching on id.
+
+Targets are parsed into the fixed `targetCardIds` array up to
+`kMaxAnnouncementTargets`, with null and empty entries skipped rather than stored -
+an empty string could never match a card id, so keeping one would only consume a slot
+a real target could have used. An absent or empty array stays empty, which is the
+wildcard - see the section above. `kMaxAnnouncementCardIdLength` is 32, generous
+headroom rather than a derived number: card ids here are short, fixed,
+firmware-defined strings (`issflyover` is the longest today at 10), and an id too long
+to fit is one this firmware does not implement, so the target simply never matches.
+
+One edge follows from combining the skip rule with the wildcard rule: a target list
+consisting *entirely* of empty strings parses to a `targetCount` of 0 and is therefore
+treated as a wildcard rather than as a list matching nothing. Nothing on the server can
+currently author such a list, and inventing a "had targets, all of them junk" state
+would be more machinery than the case is worth - but it is the one input where this
+parser's answer is arguably the reverse of what was meant.
+
+**`CheckIn::Result::announcements` is a pointer into a file-static buffer, not an
+inline array, and that is a stack measurement rather than a style preference.**
+`Result` is a stack local twice over - once as `Result result;` inside
+`CheckIn::perform()` and again as the `const CheckIn::Result` that receives it in
+`performCheckIn()` - and it is already roughly 4KB, dominated by `cardPolicy`'s 28
+`PolicyEntry` slots at six `String`s apiece, against an 8KB Arduino loop-task stack.
+Eight inline `Announcement`s are another ~4KB (each slot is just under 500 bytes,
+most of it the 8x33 target-id matrix), which puts the total past that ceiling. A stack
+overflow on this chip is a reboot with a corrupted backtrace, not a diagnosable error
+- the least debuggable failure this firmware has, and the one *Contiguity, not free
+bytes* and the heap-watchdog sections above were both written in the aftermath of. So
+the buffer lives in `CheckIn.cpp` and `Result` points at it, valid until the next
+`perform()` call, which is the only writer, with the only consumer reading it
+immediately. A shared buffer needs one habit that an inline array would not:
+`parseAnnouncements()` zeroes every slot on entry, before it has even looked at
+whether the response *has* an `announcements` array, so a stale set from the previous
+check-in cannot survive into this one. The count already keeps those slots from being
+read, so today this is belt-and-braces; it stops being belt-and-braces the moment
+anything else reads that buffer.
+
+**Worth flagging in the same breath, because it is the same 4KB:**
+`CardManager::setAnnouncements()` builds its merged set in a local
+`Cards::Announcement next[kMaxAnnouncements]` before committing it, which is that same
+~4KB temporary on that same loop-task stack, taken while `performCheckIn()`'s own
+`Result` is still live. The measurement above argues that 4KB of announcements is what
+does not fit there; a copy of it appears a few lines later anyway. Neither has been
+observed to overflow anything - nothing has run on hardware - and the honest reading is
+that one of the two rationales is not yet as measured as it sounds.
+
+**UNVERIFIED ON HARDWARE, and more pointedly than the standing caveat usually means.**
+This change is compile-verified only - a clean build, nothing more. The test devices
+were powered off when it was written, so no banner has yet been drawn on a real panel
+from a real announcement: not the strip's three-line wrap against a 160-character
+message, not the cycle advancing between two announcements on one card, not a press
+clearing a banner and the dismissal reaching the server, not a tap on that empty band
+clearing a notice with no button and its id arriving on a check-in, not the empty band
+below the strip reading the way it is supposed to. A clean compile proves the new logic
+type-checks. It proves nothing about behaviour on glass, and this codebase's habit of
+saying so in the header of every unverified file (`IssFlyover.h`, `Actions.h`,
+`Touch.h`, and a dozen others) exists precisely so that nobody later mistakes "it
+built" for "it worked".
+
+## JPEG, because streaming was not enough: the decoder itself was the allocation
+
+"Reading the whole file before decoding it", "Contiguity, not free bytes" and
+"Three allocation-churn fixes" above are all one argument seen from different
+sides: this device has plenty of free heap and almost no large contiguous
+holes, so the thing to fix is anything that asks for a big block. Streaming the
+file off SD instead of copying it into RAM took the per-draw file copy from
+10,568-24,576 bytes to zero, which was the largest single win available and is
+still the right change.
+
+**It was not enough, and the numbers that say so were measured after it
+shipped.** At draw time the largest contiguous 8BIT block fell to **5,876
+bytes**, and a **10,568-byte** allocation failed outright against a **6,132-byte**
+block. The figure that settles the argument is what one small draw costs: a
+single **5,686-byte** draw took the largest block from **12,276 down to 5,876**.
+Set that beside what mbedTLS needs for a handshake - roughly 16KB in plus 16KB
+out - and the failure mode follows arithmetically rather than as a theory.
+After one graphic draw, the device could no longer check in *or* report why it
+could not, while still drawing its clock perfectly well from local state.
+Silence, presenting to a household as a freeze. And the control was already in
+the fleet: device 7 has no SD card, no picture cards and never enters this path
+at all, and it stayed stable throughout on the same builds.
+
+So the remaining cost is not the file, it is the PNG decoder. `pngle` is kept
+deliberately rather than released - "Reversing 'never released' - halfway, and
+the split is the load-bearing part" above is the whole argument for that, and
+it still holds - but keeping it is what makes it one of the large long-lived
+blocks that carve the heap into pieces, and standing it up in the first place
+wants far more room than what is left by the time a card is being drawn.
+
+### The arithmetic that made this an easy decision
+
+LovyanGFX's JPEG decoder is not a marginal improvement over its PNG decoder on
+this device; it is a different order of thing. `draw_jpg`'s entire workspace is
+**one 3,900-byte `malloc`**, and it is freed on every exit path the function
+has - `LGFXBase.cpp:3051` allocates, `:3063`, `:3079` and `:3106` free, one per
+way out. Inside that 3,900 lives a 512-byte stream buffer, which is how it
+reads a file it never holds a copy of. Nothing is retained between draws.
+
+| | Peak *new* contiguous heap per draw |
+| --- | --- |
+| Whole-file copy + retained `pngle` (before streaming) | 10,568-24,576 bytes, against a measured 6,132-byte largest block |
+| `drawPngFile(SD, ...)`, retained `pngle` | 0 per draw, but the retained scratch is one of the blocks fragmenting the heap, and setting it up wants ~44KB |
+| `drawJpgFile(SD, ...)` | **3,900 bytes, freed before the function returns** |
+
+**3,900 fits under 5,876** - the worst contiguous figure this project has ever
+measured on hardware - with room left over. It also fits under 6,132, the block
+that could not serve the 10,568-byte request. There is no retained scratch to
+account for, and there is no `releaseJpgMemory()` for some future change to
+forget to call, which matters more than it sounds: this codebase has already
+spent two sections above getting the release/retain split right for PNG and one
+of the failure modes was forgetting a path.
+
+### What is changing, and what deliberately is not
+
+Settled with the product owner, and narrower than "switch to JPEG":
+
+- **Photographs become JPEG.** They are the assets that fill the panel, they
+  are the ones being drawn when the numbers above were taken, and they lose
+  nothing that matters to a lossy encode at 320x240.
+- **Logos that genuinely need transparency stay PNG.** The in-rect draw exists
+  for airline logos layered onto a composed card; alpha is the entire reason
+  that path is different from the others, and JPEG has none.
+- **Fixed screens become RGB565 later, and are not part of this change.** See
+  `docs/rgb565-feasibility.md` for the plan and the experiment it depends on.
+- **PNG support does not go anywhere.** It stops being the *default*. Every
+  PNG already on every card in the fleet still draws, on this firmware, with no
+  migration and no re-fetch.
+
+That last point is the one that shaped the implementation.
+
+### The format is sniffed from the file, never carried on the wire
+
+`Display.cpp` gained `sniffImageFormat()`: it opens the cached file, reads the
+first eight bytes, closes it, and answers Png, Jpeg or Unknown. The two draw
+functions dispatch on that answer - `lcd.drawJpgFile(SD, ...)` or
+`lcd.drawPngFile(SD, ...)`, whose parameter lists are identical because
+LovyanGFX generates both from the same macro (`LGFXBase.hpp:922`).
+
+**Nothing in the check-in response says what format an asset is, and nothing
+should.** The obvious alternative is a `format` field beside the asset id, and
+it fails on this project's own six-month firmware compatibility rule (see
+"Shipping" above): a field only new firmware reads is a field the server cannot
+depend on, and a field old firmware ignores cannot change what an old device
+does with bytes it already has on its card.
+
+But the deeper reason is that the wire field answers the wrong question. What
+matters at draw time is not "what does the catalog say this asset is" but "what
+is in the file on this card, right now" - and during any rollout those two
+diverge by design. `/assets` holds whatever each entry happened to be when it
+was fetched, so a single device's cache will carry PNGs pulled last month
+beside JPEGs pulled this morning, and re-fetching the lot to make the cache
+uniform is precisely the network traffic the cache exists to avoid. A
+self-describing file needs no wire field, no new device state, and no agreement
+between a server version and a firmware version. Its answer also cannot be
+stale, because the thing being asked is the thing about to be decoded.
+
+Eight bytes are read rather than the four that would settle PNG-vs-JPEG on
+their own. The read costs the same either way - the card hands up a whole
+sector to answer any of this - and the four bytes past `\x89PNG` are the ones
+the PNG specification put there on purpose: `0D 0A 1A 0A` is a tripwire for a
+transport that mangled CR/LF or stopped at an EOF byte. These files arrive over
+HTTPS and are written to a FAT card by this firmware, which is exactly the class
+of path that can damage a file while leaving its first four bytes intact, so
+keeping the cheap half of the signature and discarding the diagnostic half
+would be giving up the only part that says something we could not already
+guess. JPEG is matched on `FF D8 FF`.
+
+**An unrecognised header draws nothing and counts a failure.** It does not
+guess. Guessing cannot succeed - neither decoder will find a header it
+understands - and it costs the one useful thing in the log, because the failure
+would then be reported against a decoder rather than against the file. Instead
+the header bytes themselves go into the log, all eight of them, because they
+name the cause where "unrecognised" would not: a cached HTML error page starts
+`3C 21`, a truncated write shows a short read, and a PNG mangled in transport
+shows the first four bytes right and the tail wrong. Three different bugs in
+three different subsystems, told apart by one line.
+
+A file in that state is not a life sentence, and un-sticking it needed no new
+machinery: `Assets.cpp`'s existing retry-then-`giveUpOnDecodeFailure()` path
+already treats "would not decode" as grounds to delete the cache entry and
+re-fetch it on the next pass (see "A decode failure now retries and
+self-heals, instead of being a life sentence" above), and an unrecognised
+signature is simply another way of not decoding.
+
+Counting it as a draw failure is deliberate and consistent with "What the
+watchdog restarts on now: a run of real failures, not a number" above.
+`consecutiveDrawFailures()` has always meant "this device could not put its
+card on the glass", not "a decoder returned false", and a device whose cache
+has filled with unreadable files is exactly the state that watchdog exists to
+end.
+
+### Three smaller decisions, each of which had an obvious wrong answer
+
+**The functions were renamed.** `drawPngFromSd`, `drawPngFromSdInRect` and
+`drawPngFromBuffer` are now `drawImageFromSd`, `drawImageFromSdInRect` and
+`drawImageFromBuffer`, with every call site in `Assets.cpp` updated and the
+comment references in `Assets.h`, `Graphic.cpp` and `App.ino` along with them.
+Nothing about the parameters or the contract changed. The alternative -
+leaving the names and noting that they are historical - was rejected because
+the next person debugging a JPEG failure will grep for the JPEG path, and a
+function called `drawPngFromSd` is where they will not look. (`Http.h:99`
+still refers to the old name in a comment. That file was settled minutes before
+this change and deliberately not touched; the reference is stale prose, not
+code. `SelfTest/` has its own separate `drawPngFromSdTest()`, which is a
+different sketch and a different function.)
+
+**The cache extension stays `.png`, and a cached `.png` may now hold a JPEG.**
+This looks like a bug and is a considered choice, so `Assets.cpp`'s
+`kExtension` now carries the reasoning. `pathFor()` is a cache-key function:
+it turns an asset id into the one place that asset's bytes live, and nothing
+reads the extension - `isCached()`, `invalidate()`, `ensureCached()`,
+`wipeCache()` and the splash slot all address a file built from the id, and the
+draw path identifies the format by reading the file. Making the name truthful
+would mean choosing it from the response's content type at download time, at
+which point `isCached()` becomes two `SD.exists()` calls because the caller
+asking "do I have asset X" no longer knows which name to look under - and a
+fleet mid-rollout would hold both names for the same id, so every one of those
+paths would have to handle finding both. The prize is a filename that reads
+correctly to a person with the card in a reader. That is a real benefit and a
+small one, and a comment serves it.
+
+**`drawImageFromBuffer` was brought into both changes, though it was not part
+of the brief.** A device with no usable card never writes to `/assets` at all -
+it fetches straight to RAM (`Assets::fetchToRam()`) - so leaving that path
+PNG-only would have blanked the picture cards on precisely the devices with no
+cache to fall back on, the moment the server started serving JPEG. It now
+classifies the front of the buffer through the same shared `classifyHeader()`
+the SD path uses, so the two cannot drift apart on what a JPEG looks like.
+
+While in there: **that path never fed `noteDrawOutcome()`**, which was a gap
+rather than a decision - it was the only one of the three draw entry points
+invisible to the heap watchdog, and a no-SD device whose RAM draws all fail is
+as unable to show a card as one whose SD draws all fail. It does now. This
+cannot make the watchdog fire on a network problem: `Assets.cpp` does not reach
+that function unless the fetch produced bytes, so getting there and failing is
+a decode failure and nothing else.
+
+### Instrumentation
+
+The `logHeapSnapshot("before ...")` / `("after ...")` pair still brackets the
+decode, and the label now names the decoder that ran - `before drawJpgFile` or
+`before drawPngFile` - because which decoder ran is the first thing anyone
+reading a draw failure needs to know and the last thing they can infer from a
+heap figure. The PNG strings are byte-identical to what they were before this
+change, so a grep over previously captured logs still lines up. The failure
+lines in all three draw functions gained the detected format for the same
+reason.
+
+There is deliberately no snapshot pair around a decode that did not happen. Two
+identical heap lines with nothing between them would read as a decode that
+consumed nothing, which is a much more interesting and completely different
+finding from "the file was not an image".
+
+### UNVERIFIED ON HARDWARE
+
+Nothing here has been compiled, let alone run. No JPEG has been drawn on a real
+panel by this firmware, the 3,900-byte figure is read out of the library source
+rather than measured through `logHeapSnapshot()` on a device, and the claim that
+a JPEG draw leaves the largest contiguous block roughly where it found it is a
+prediction from that source reading and not an observation. The measured numbers
+in this section are all from the PNG path, before the change - they are why the
+change exists, not evidence that it worked.
+
+The first thing worth checking on hardware is the pair of heap lines around a
+JPEG draw, against the same pair around a PNG draw of the same picture. If the
+before/after delta for JPEG is not dramatically smaller than PNG's, the reading
+of the decoder source above is wrong somewhere and everything in this section
+follows from it. The second is a check-in immediately after a graphic card
+draws, which is the failure this whole section exists to remove.
+
+## Six builds in one evening, and the one subject they nearly all turned out to be about
+
+Everything from here to the end of this file was written on 2026-09-10 and went
+out as six builds, in this order:
+
+| Build | Commit | Subject |
+| --- | --- | --- |
+| `0011` | `b1d1626` | SelfTest's heap figures, and a shared bus that was never there |
+| `0012` | `c445836` | The restart cause moved from RTC memory to NVS |
+| `0013` | `5922f48` | An update check that lied, a diagnostic that misled, and a log that buried both |
+| `0014` | `745b623` | Two ISRG roots pinned instead of the core's ~150-certificate bundle |
+| `0015` | `303e234` | A 15-second cap on the TLS handshake |
+| `0016` | `888225b` | A restart when the server has become unreachable |
+
+`v2026.09.10.0016` is fleet-current and installed on devices 7, 12 and 17.
+
+They were not planned as a set and they are one story in retrospect. Five of the
+six are about HTTPS - a subject this document had barely touched before tonight,
+because until the graphics work above stopped consuming contiguous heap it was
+never the thing that broke first. The sixth (`0012`) is about being able to tell
+afterwards why a device restarted, and it is described second rather than last
+because without it the other five could not have been diagnosed at all: every
+software reset in the evening's captures reported its cause as `NONE`, so a
+device that restarted itself was indistinguishable from a device somebody
+unplugged.
+
+**None of the six has been compiled.** `arduino-cli` was not run in this
+session, so every claim below about behaviour is a claim about code that has
+been read and reasoned about, not code that has been built - the same standing
+caveat the JPEG section above carries. The *measurements* are a different
+matter: they come off real devices, and they are the part of tonight worth
+keeping even if some of the code below needs another pass.
+
+## The numbers tonight rests on, and the one wrapper that caused several wrong diagnoses
+
+"Both of these numbers were wrong" above established that Arduino's heap
+wrappers overstate this board by roughly 4x. Tonight added the detail that makes
+one of them worse than merely inaccurate, and it deserves saying as bluntly as
+the evidence allows.
+
+**`ESP.getMaxAllocHeap()` is a ceiling, not a measurement.** It reads a constant
+**32,756** on this board while the true largest free 8-bit block, measured at
+the same instants, ranges from **7,668 to 36,852**. The `[health]` line in
+`App.ino` now captures both at the same instant precisely so nobody has to take
+that on trust:
+
+```
+[health] largest 8BIT block=13812 (ESP.getMaxAllocHeap says 32756 at the same instant)
+```
+
+Note that the real figure *exceeds* the wrapper's in part of that range, which
+is the detail that kills the last charitable reading of it. It is not a
+conservative estimate and it is not a lagging one; it is unrelated. This single
+wrapper is directly responsible for several wrong diagnoses in this project -
+two watchdog thresholds derived from it (60000, then 28000), the "that is not
+decay, it is a shape" theory built on its constancy, and at least one
+investigation that ruled memory out of a TLS failure because 32,756 looked like
+ample room for a handshake. Nothing in this firmware reads it for a decision any
+more, and it is still printed everywhere, beside the real figure, for exactly
+one reason: a fleet whose whole recorded history was taken through it needs the
+gap to stay visible rather than become a claim in a commit message.
+
+> **WRONG FIGURE, KEPT ON PURPOSE.** Everything below this line that says
+> "~32KB" is the misreading corrected under "Instrumenting the ordinary
+> rotation". The real requirement is **16,717 bytes contiguous, twice over, in
+> two separate flat allocations** - total 33,434, largest single demand 16,717,
+> and it is the largest single demand a fragmented heap has to meet. This
+> section is the record of an evening's reasoning and is left standing as it was
+> written, because several of its conclusions were reached *through* the wrong
+> figure and deleting it would hide that. Read every "~32KB" below as "16,717
+> twice", and re-derive any margin judgement it led to. Nothing in the firmware
+> reads this number: `Http::kTlsRecordBufferBytes` is the single definition.
+
+**mbedTLS needs roughly 32KB contiguous to stand up a new TLS session.** That is
+the figure the rest of tonight orbits. Set it against what this device's largest
+8-bit block actually does over a boot:
+
+| | Largest free 8BIT block |
+| --- | --- |
+| Early in `setup()`, before Display, WiFi and TLS | 110,580 |
+| Once WiFi is up | hard-capped near **34,804** |
+| Settled, while cards are rendering | as low as **4,596** |
+
+So a new handshake is comfortable in the first window, marginal in the second
+and impossible in the third. **That margin is the whole explanation for why TLS
+on this device works in some windows and not others**, and it is why the first
+check-in after a boot almost always succeeds: a *reused* session needs no new
+buffers at all, so once one is established the device keeps working on it
+indefinitely - right up until something makes it establish another.
+
+**There are two different shortages inside one handshake, and reading either one
+alone sends you the wrong way.** Untangling that took most of the evening:
+
+- Standing up the session's buffers needs one **contiguous** ~32KB block. That
+  is `largest8`, and it is what fails with `MBEDTLS_ERR_SSL_ALLOC_FAILED`.
+- Verifying a four-level ECDSA P-384 certificate chain needs a great many
+  *small* MPI allocations, so what decides it is **total** free 8-bit heap. That
+  is `free8`, and it is what failed with `MBEDTLS_ERR_MPI_ALLOC_FAILED` in the
+  certificate section below - on the device with the *larger* contiguous block.
+
+Every mbedTLS failure observed tonight, with the real heap figures beside it,
+since a mbedTLS code without them is what made the first two ambiguous:
+
+| Error | Meaning | Heap at failure | Reading |
+| --- | --- | --- | --- |
+| `-32512` | `MBEDTLS_ERR_SSL_ALLOC_FAILED` | `largest8` well below 32KB (13,812 repeatedly on device 17) | Session buffers. Fails fast, and this is the common case. |
+| `-1` | generic error | `free8=45,236` `largest8=34,804` | Arrived only after the 120-second handshake timeout below. Memory is definitively ruled out; the cause is still open. |
+| `-9984` | `MBEDTLS_ERR_X509_CERT_VERIFY_FAILED` | `free8=47,200` `largest8=34,804` | **Unexplained.** Ample memory of both kinds, so not the allocation story, and the chain verifies against the pinned roots off-device. Nothing here accounts for it. |
+
+That last row is recorded rather than resolved on purpose. It is the one
+handshake failure tonight that the memory account cannot absorb, and the honest
+position is that a fourth explanation is missing rather than that three
+explanations covered everything.
+
+**One measurement that partly settles the JPEG argument above and partly revises
+it.** `drawPngFile` retains approximately 44KB - **45,056 bytes exactly,
+measured as largest 110,580 -> 65,524 across the first draw of a boot** - and
+then reuses it. Per-draw `largest8` after that is **flat**. So the streaming
+change did what it was supposed to: the per-draw collapse that build `0006`
+showed, where a single 5,686-byte draw took the largest block from 12,276 down
+to 5,876, is gone, and picture cards no longer carve the heap on every rotation.
+
+The case for JPEG is therefore narrower than the section above argues, and it
+still stands. What remains is not per-draw churn but that one-time 45,056-byte
+block, held for the whole uptime, which is one of the long-lived allocations
+dividing the heap that a new TLS session then cannot find 32KB in. `draw_jpg`'s
+entire workspace is one ~3,900-byte `malloc` freed on every exit path, so
+converting assets removes that block rather than shrinking it. That makes asset
+conversion a **pending lever on the TLS problem**, which is not how it was
+originally justified - it was justified on per-draw contiguity, and per-draw
+contiguity has since been fixed by other means. Worth being explicit that the
+two figures in this section which invite a connection - the post-WiFi cap on
+`largest8` at 34,804, and a 45,056-byte block sitting just under 44KB - are
+suggestive of each other and that nothing here establishes any relationship
+between them.
+
+## The shared SPI bus was never there: "The likely root cause" above is superseded
+
+`b1d1626` went into `SelfTest/` to correct its heap figures, found the same stale
+premise asserted in three of its headers, and that makes this the right place to
+say plainly that the section titled **"The likely root cause: the SD card's SPI
+lines are shared with the display's, by hardware design"** is wrong - and to
+leave it standing.
+
+The pins, checked against LovyanGFX's own board profile and against this
+firmware's own runtime log:
+
+| | SPI host | SCLK | MISO | MOSI | CS |
+| --- | --- | --- | --- | --- | --- |
+| Panel (ILI9341) | SPI2 / HSPI | 14 | 12 | 13 | 15 |
+| SD card | SPI3 / VSPI | 18 | 19 | 23 | 5 |
+
+They do not contend. There is a second, independent statement of it inside the
+library: the detector base has a slot for a TF card on the panel's own host
+(`pin_tfcard_cs`) and calls `_set_sd_spimode()` to bring such a card up when it
+is set - and the Sunton 2432S028 profiles this board matches pass `-1` for it.
+That is the library's own data asserting there is no card on the panel's bus.
+
+What that section got wrong is one inferential step, and only one: "the only
+other real hardware SPI peripheral in this build is the display itself [...]
+leaving the display as the only plausible co-tenant." The co-tenant is the
+board's general-purpose SPI expansion header, with nothing plugged into it. That
+reading is also the more literal one - the manual names three *board pins* and
+says the card is on them; it does not mention the display - and it is the only
+one consistent with both subsystems having worked all along.
+`CYD-Dickey/SdCard.h` had said exactly this, independently, the whole time, and
+CYD-Dickey streaming from SD without ever hitting this problem was a curiosity
+sitting in this codebase's own comments for weeks.
+`docs/rgb565-feasibility.md` §1 carries the full chain of reasoning including
+the corroboration above, and it is also where the second correction owed to that
+section lives: the arbitration it describes as needing "real surgery" - patching
+LovyanGFX, or a project-wide mutex - already exists in the library, unpatched, as
+one config line.
+
+The section is marked superseded rather than deleted because its sources are
+real, its reasoning was careful, and it is the reason the whole
+read-whole-file-into-RAM detour existed. That detour cost a 10-24KB contiguous
+allocation on every draw and was the allocation failing in the field, which is a
+useful thing to be able to trace back to its actual origin.
+
+Rather than restate the argument, `SdStorage.cpp` now logs the runtime truth on
+every boot - the bus pins actually in force - and says what would put the premise
+back on the table:
+
+```
+[sd] bus pins in force: sclk=18 miso=19 mosi=23 cs=5 (panel is on HSPI at 14/12/13 - if these match, the shared-bus premise is back on the table)
+```
+
+That is deliberately a measurement rather than a comment, because the inference
+it replaces ("`SD.begin()` with no `SPIClass` takes Arduino's default SPI object,
+which is VSPI") is still an inference, and a future reader should not have to
+trust anyone's reading of a datasheet - including this file's.
+
+**The SelfTest half of the same commit** is documented up in the SelfTest
+reporting section: `MemoryTest` and `Display`'s failure logs now read
+`heap_caps_get_free_size`/`heap_caps_get_largest_free_block` instead of the
+wrappers, while `AllocResult`'s field names and their JSON keys keep the old
+wrapper names because they are a wire contract with the server's
+`SelfTestReportRequest` under the six-month firmware compatibility mandate. A
+memory test off by 4x in the *optimistic* direction would have passed this unit
+on the same night its 5,686-byte decode could not allocate, which is the whole
+reason a diagnostic's own instrumentation is worth auditing before trusting what
+it says about anything else. And `drawPngFromSdTest()` keeps its buffered
+whole-file read now that App streams: it is deliberately the divergent worst
+case, the one path still demanding a single contiguous file-sized block, so it
+fails first and loudest on a fragmented heap. That is what a self-test wants,
+and it is now labelled not-to-be-fixed, because it had started to read as an
+oversight.
+
+## Why a device restarted, in two parts - and why that answer had to leave RTC memory
+
+`BootDiag` (`App/BootDiag.h`/`.cpp`) answers "why did this device restart" as a
+pair, because neither half is enough alone. `esp_reset_reason()` answers *how* -
+power-on, software, panic, brownout - which already separates four diagnoses that
+were previously indistinguishable from the server, where the only evidence was
+`totalBoots` going up. But it flattens every deliberate restart into one
+`SOFTWARE_RESET`, and this firmware has several of those for unrelated reasons.
+So the reason reads as a pair:
+
+```
+POWERON_RESET   + NONE               power was applied; nothing to explain
+SOFTWARE_RESET  + CANNOT_DRAW        the cannot-draw watchdog restarted us
+SOFTWARE_RESET  + LOW_HEAP           kept for a genuine heap restart; what the cannot-draw watchdog used to record
+SOFTWARE_RESET  + LOW_HEAP_RESPONSE  check-in responses arrived intact and would not parse for lack of heap
+SOFTWARE_RESET  + OTA                restarting to install an update
+SOFTWARE_RESET  + REPROVISION        returning to CAL for new WiFi or a new owner
+SOFTWARE_RESET  + UNREACHABLE        the connection watchdog restarted us (new tonight)
+PANIC_RESET     + NONE               we crashed; no intent was recorded, by definition
+BROWNOUT_RESET  + NONE               the supply sagged; not a software fault
+```
+
+`LOW_HEAP_RESPONSE` exists because this used to be reported as `UNREACHABLE`. A
+`deserializeJson()` failure of any kind fed the same consecutive-failure counter
+that drives the connection watchdog, so a device short of heap was walked toward
+a restart by a mechanism built for a server it could not reach. The restart
+clears the heap, so it worked - which is exactly why it went unnoticed - but the
+round trip had *completed* every time: TLS up, secret accepted, a whole response
+returned, and ArduinoJson then unable to find roughly the response size again in
+heap to parse it into. Right action, wrong cause, recorded permanently on every
+boot and every telemetry report afterwards. It now has its own counter
+(`gConsecutiveResponseOom`, threshold 3 against the connection watchdog's 5,
+because there is no ambiguity here to wait out), its own watchdog
+(`checkResponseOomWatchdog()`, sharing the connection watchdog's twenty-minute
+anti-loop floor), and its own cause. The token contains `LOW_HEAP` deliberately,
+so the server's existing `RebootHeatmap.Classify()` already sorts it as a
+recovery restart with no server change needed. It is distinct from
+`CANNOT_DRAW` too: that one is the cannot-draw watchdog, and a device can hit
+this one while drawing every card perfectly.
+
+`CANNOT_DRAW` exists for the mirror-image reason, one subsystem over. The
+cannot-draw watchdog recorded `LOW_HEAP`, so a run of failed card draws reached
+the server under a memory name and a day of investigation went into the heap of
+a device that had 34,804 contiguous bytes at every restart. See "What the
+watchdog restarts on now" for the trigger, the cap on how many times it may
+restart, and the one line the server needs for the new token to sort as a
+recovery restart rather than a deliberate one.
+
+The obvious cheaper design - "read the log line the firmware printed just before
+it restarted" - was the first version of this and is exactly wrong: the remote
+stream is flushed on a timer, so a restart is precisely the moment a log line is
+most likely to be lost, and a crash-adjacent one certainly is. The intent has to
+be *recorded* somewhere that survives the reboot, not narrated into a buffer
+that may not survive it.
+
+A `NONE` beside a `SOFTWARE_RESET` is itself a finding worth acting on: it means
+something restarted the device deliberately without recording why, which is a
+gap in this instrumentation rather than a property of the device.
+
+**That finding fired against this file's own first implementation, and it is why
+the storage changed tonight.** The intent was held in RTC memory
+(`RTC_NOINIT_ATTR`), on reasoning that is true in every part and still did not
+work: it survives a software reset and a panic, costs no flash write, and
+correctly does not survive a power cycle. What it missed is this device's boot
+architecture, which is the thing that makes this project unlike an ordinary
+ESP32 sketch. **The App never restarts into itself.** Every restart is
+App -> CAL -> App, because CAL is the permanent factory-partition loader and runs
+on every boot - two software resets, with a different binary executing in
+between. The recorded value did not come out the other side. Measured on device
+17: the check-in update branch calls `recordRestartIntent(Ota)`, and the very
+next App boot reports `SOFTWARE_RESET + NONE` - twice consecutively in one
+serial capture.
+
+NVS replaced it for one specific reason rather than as the obvious alternative:
+it is the one mechanism already *proven* across that exact hop, because it is how
+CAL's own `Identity::updateRequested` flag gets from the App to CAL in the first
+place. Reaching for the storage the boot ladder already depends on is a smaller
+bet than reasoning again from first principles about which memory survives what.
+
+The flash write this costs is bounded rather than free. A write happens only on a
+deliberate restart, and the clear on the read side happens only when something
+was actually recorded, so an ordinary power-on boot writes nothing at all.
+
+**NVS does outlive a power cycle, which RTC did not, and that is now handled on
+the read side rather than left to the storage.** A `POWERON_RESET` reports `NONE`
+whatever is stored, because a recorded intent that a power cut interrupted is not
+the reason the device came back up - and it says separately that it discarded a
+pending intent, because an interrupted deliberate restart is worth knowing about
+even though it explains nothing about this boot. The clear itself is correctness
+and not tidying: without it a deliberate OTA restart would leave `OTA` sitting in
+storage, and the next unrelated panic would report `PANIC_RESET + OTA`, inventing
+a causal link that does not exist and sending whoever reads it after the wrong
+bug. With NVS that matters *more* than it did with RTC, because nothing else
+would ever remove the value.
+
+One smaller correction rode along, and it is the kind worth noticing. While the
+cause lived in RTC, the stale-diagnosis warning read "some restart path is not
+calling `recordRestartIntent()`" - which accused call sites of a fault that was
+actually in `BootDiag` itself. With the cause in NVS the storage is no longer a
+suspect, and the message now means what it says.
+
+The enum's values are explicit and are never renumbered, for a reason specific to
+what this is: they are written to NVS by one boot and read by the next, so a
+build that renumbered them mid-upgrade would misreport the reason for exactly the
+restart that installed it. `Unreachable` is appended as `5` accordingly.
+
+## Three fixes out of one serial capture
+
+One capture of devices 7 and 17 produced three unrelated problems, which is worth
+recording as a pattern rather than three items: none of them was what anyone sat
+down to look for, and all three were visible in the same few hundred lines.
+
+### An update check that could not happen, reported as "already up to date"
+
+`AppUpdater::newerVersionAvailable()` returned a `bool`, and **every** failure
+path returned `false`: TLS setup, a request that would not begin, a non-200, a
+response that would not parse. `App.ino`'s BOOT-button handler renders `false` as
+"Already up to date" on screen and in the log. So a device that could not reach
+the server at all told whoever walked over and pressed the button that everything
+was fine. Device 7 did exactly that - reported up to date while running a build
+four versions behind the fleet, having last reached the server four hours
+earlier.
+
+That is the worst available answer at the worst possible moment. The button
+exists for a person standing at the device who wants an update, and a confident
+"all good" sends them away believing the opposite of the truth - and because the
+device looks like it answered, it removes the one signal that would have made
+them try something else.
+
+The return is now a three-state `AppUpdater::UpdateCheck` - `Newer`, `UpToDate`,
+`CheckFailed` - the function is renamed `checkForUpdate()` to match, and the
+button path shows "Could not check / The service could not be reached", held on
+screen for 2.5 seconds rather than the up-to-date case's 1.5 because this is the
+one that asks to be read. Every failing return also says "update state UNKNOWN"
+in the log, so a capture reads as an unanswered question rather than a clean bill
+of health.
+
+**The unattended hourly fallback timer deliberately still does nothing on
+`CheckFailed`**, and the asymmetry is the point. No person is standing there, so
+a transient network failure should wait quietly for the next tick rather than put
+an error on a wall display nobody asked. The BOOT-button path is the opposite
+case: somebody is waiting for an answer, and silence is the wrong response. Same
+three states, two different right answers.
+
+### A diagnostic that ruled out the actual cause
+
+`Http::diagnoseFailure()` logged `ESP.getFreeHeap()`/`ESP.getMaxAllocHeap()`, and
+misled because of it. A captured check-in failure reported `maxAlloc=32756` while
+the `[heapdiag]` line beside it measured the true largest 8-bit block at
+**22,516**. A reader who sees 32,756 concludes there is ample room for a TLS
+handshake and rules memory out - which is precisely the wrong conclusion to hand
+someone in the first line of an investigation. It now prints `free8`/`largest8`
+from `heap_caps`, both of them, because they answer different questions: `free8`
+is "how much is there" and `largest8` is "how much can be handed to one
+allocation", and a new session needs the second.
+
+The same diagnostic narrowed a real failure to "the TLS handshake itself" and
+stopped there, which is a category and not a cause - a certificate that will not
+validate, a clock outside the validity window, an out-of-memory on the two
+16,717-byte session buffers (33,434 in total, but never demanded as one block -
+see `Http::kTlsRecordBufferBytes`), and a peer that hung up are all "the
+handshake" and want four different fixes. `NetworkClientSecure::lastError()` carries mbedTLS's own answer,
+already rendered to text by the library. **It was available all along and was
+never read.** It is now logged, deliberately *after* the DNS and TCP probes
+rather than before them, because those touch only a separate plain client and
+never `gClient`, so its error state is still the one from the request that
+actually failed.
+
+The negative case is logged too rather than passed over in silence: a handshake
+that failed while mbedTLS holds no error usually means the failure was *above*
+it - a reused session the peer dropped, or HTTPClient giving up on its own timeout
+before TLS ever reported anything. Every mbedTLS code in the table further up
+this file exists because this one line started being read.
+
+### A log that buried both of them
+
+`StackWatch::logHighWaterMark()`'s after-render call site runs every loop
+iteration and logged unconditionally, producing **several hundred consecutive
+identical lines** in the capture and burying the `[heapdiag]` and `[checkin]`
+lines someone was reading. On a device with streaming on, that spends the only
+diagnostic channel a deployed device has on saying nothing changed.
+
+It now logs on change, plus a five-minute heartbeat. What makes that lossless is
+a property of the underlying call rather than a judgement about how much detail
+is enough: `uxTaskGetStackHighWaterMark()` returns the *minimum* free the task has
+ever seen, so it is monotonically non-increasing and can only move one way. Every
+distinct value it will ever take is still printed exactly once, at the moment it
+first happens. The heartbeat exists because "the stack has been fine for an hour"
+and "this stopped being called an hour ago" would otherwise produce identical
+logs, and those are not the same fact. Its interval arithmetic is subtraction
+rather than addition so it stays correct across `millis()`' 49-day rollover - the
+comparison form would go quiet for 49 days the first time it wrapped.
+
+## Pinning two roots instead of a hundred and fifty, because verification was running out of heap
+
+Devices were intermittently unable to reach the server at all - check-in,
+telemetry, debug streaming and the OTA path all ride the same HTTPS - with:
+
+```
+E esp-x509-crt-bundle: PK verify failed with error 0x10
+E esp-x509-crt-bundle: Certificate matched but signature verification failed
+E esp-x509-crt-bundle: Failed to verify certificate
+```
+
+`0x10` is `MBEDTLS_ERR_MPI_ALLOC_FAILED` (`-0x0010`, `bignum.h`), so **this was
+never a trust problem.** Verification ran out of heap part way through the bignum
+arithmetic, and the bundle layer reported that as a signature that would not
+verify - which reads as the certificate being wrong, and sent the investigation
+at the certificate rather than at the memory. The service's chain is
+`api.discoveraroundme.com <- YE2 <- Root YE <- ISRG Root X2`: four levels,
+ECDSA P-384 at every link, which in software on this chip means a great many
+small MPI allocations.
+
+**The deciding figure is total free 8-bit heap, not the largest contiguous
+block**, and the two devices measured at the same moment make that unambiguous in
+the most useful possible way - by disagreeing with the intuition this project had
+spent weeks building:
+
+```
+device 7:  free8=10,948  largest8=34,804  -> verification FAILS
+device 17: free8=20,764  largest8=14,324  -> verification SUCCEEDS
+```
+
+The device with the far *larger* contiguous block is the one that fails. That is
+what identifies this as a working-set problem rather than a fragmentation one,
+and it is why the symptom is intermittent: `free8` is plentiful just after boot
+and falls as cards render, so the first check-in after a restart succeeds and
+later ones stop. It also cost three wrong diagnoses on the way, each of them from
+reading `largest8` - the contiguity figure the graphics bug above had trained
+everyone to watch - instead of `free8`. Having been right about which number
+mattered for one problem turns out not to be a qualification for the next one.
+
+`Tls.cpp` now calls `setCACert()` with the two ISRG roots from the new
+`App/TlsRoots.h` instead of `setCACertBundle()` with the core's ~150-certificate
+Mozilla snapshot. Two certificates cost dramatically less to hold and search than
+a hundred and fifty, so verification stops depending on how fragmented the heap
+happens to be when a check-in lands.
+
+**The certificate bytes were not transcribed by hand**, and how they were checked
+is the part worth copying next time anything gets embedded in this firmware. They
+were exported from the host's own trust store, and the chain the server actually
+sends - captured with `openssl s_client -showcerts` - was then proven to validate
+against exactly those two anchors and nothing else:
+
+```
+openssl verify -CAfile isrg_roots.pem -untrusted inter.pem leaf.pem
+leaf.pem: OK
+```
+
+Then the C string literal as it appears in `TlsRoots.h` was expanded the same way
+the compiler will - `printf '%b'` over the concatenated payloads - and
+re-verified, so what was checked is the bytes the firmware will hand mbedTLS
+rather than the bytes someone intended to paste. Both parse as the expected
+self-signed roots, and `leaf.pem: OK` again. Fingerprints are recorded in the
+header for anyone comparing them against ISRG's published values.
+
+X1 is included alongside X2 although only X2 is on the current chain. X2 is the
+ECDSA root the live chain terminates at; X1 is the older RSA root, and it is there
+so a reissue onto Let's Encrypt's RSA hierarchy - which needs no device change and
+could happen without warning - still validates.
+
+**The trade is real and is accepted rather than argued away.** The core bundle
+trusts essentially every public CA, so the service could move to any issuer and
+devices would follow. This does not: if the service ever stops chaining to an ISRG
+root, every pinned device loses its connection to the server, *including the OTA
+path that would deliver the fix*. That is the same shape of failure as the
+watchdog section below - a device unable to receive the update that repairs it -
+and it is accepted because the measured alternative is a fleet that intermittently
+cannot talk to the server at all. X1 and X2 expire in 2035 and 2040, so neither is
+a near-term maintenance concern, but both are now dates this firmware has an
+opinion about and the bundle version never did.
+
+`Tls.h`'s reasoning about validating against roots rather than pinning the leaf is
+untouched by this, and now says why: **roots are not the thing that rotates every
+ninety days.** Leaf certificates are, CAL cannot be updated over the air, and a
+device trusting exactly one leaf would stop working the day it was replaced -
+taking every unit in the field with it simultaneously. Narrowing the trust store
+from 150 roots to two leaves that argument completely intact, which is the
+distinction worth keeping straight: this change is about how much trust material
+the device holds, not about how specific the trust is.
+
+One thing genuinely disappeared. `Tls::configure()` no longer has a failure path,
+and that is worth noticing rather than glossing: the bundle version could really
+fail, because it computed a size from two linker symbols and `setCACertBundle()`
+treats a null pointer or a zero size as "detach the bundle" - **disabling
+certificate validation outright instead of erroring**, which made it the most
+dangerous call in this codebase to get wrong and the one most worth checking. A
+string literal in `.rodata` can be neither absent nor zero-length, so a
+conditional there would be unreachable code implying a risk that no longer
+exists. The `bool` return and `Http::ready()` stay anyway, so a future trust
+source that *can* fail - a certificate loaded from SD or NVS - does not require
+rebuilding that contract and every call site's error handling with it.
+
+## A failed handshake froze the whole device for two minutes, and it was a default nobody had set
+
+A device was measured blocking its entire loop for **121,019 ms** on one failed
+check-in handshake. The core defaults `NetworkClientSecure`'s `handshake_timeout`
+to 120,000 ms (`NetworkClientSecure.cpp:41`), so that is the default firing
+almost to the millisecond.
+
+`http.setTimeout(Config::kHttpTimeoutMs)` does not cover this and never did -
+that is HTTPClient's *read* timeout, a separate clock. Nothing bounded the
+handshake, and nothing in this document had noticed that the two timeouts are
+different things.
+
+For those two minutes the App renders nothing, samples no touches and sends no
+telemetry. **That is the "frozen on the clock" report from the field**, and the
+missed telemetry cycles visible in the fleet table are the same event seen from
+the server. Both had been filed as separate mysteries; they were this. A device
+whose panel is showing a clock drawn from local state, while its single thread
+sits inside a TLS handshake, is indistinguishable to a household from a device
+that has crashed.
+
+`Http::begin()` now calls `gClient.setHandshakeTimeout(15)`. Fifteen seconds
+because it has to sit above the worst *successful* handshake and below anything a
+person would call frozen: good handshakes complete inside a second on this
+hardware, per the `[assets]` fetch traces at 241-787 ms including connection
+setup, and the slowest full loop iteration containing a successful check-in was
+about 8 s. Fifteen clears that with room and turns a two-minute freeze into a
+hiccup.
+
+**Note the unit trap, documented at the call site because it is exactly the kind
+of thing that looks like a change that did nothing:** `setHandshakeTimeout()`
+takes **seconds** and multiplies by 1000 internally
+(`NetworkClientSecure.cpp:450`). Passing a millisecond figure asks for a timeout a
+thousand times too long, and the symptom is a device that still freezes for two
+minutes underneath a line of code that says it should not.
+
+This bounds the damage rather than fixing the cause, and the cause is still open.
+Why a handshake stalls for the full two minutes at all is unexplained: the newly
+added diagnostic reports only `mbedTLS error -1: ERROR - Generic error`, with
+`free8=45,236` and `largest8=34,804` at the moment of failure - so memory is
+definitively ruled out **for this failure mode**, which is a separate finding
+worth having on its own and one that exists only because the diagnostic above
+started reading `lastError()`.
+
+## Restarting a device that can draw but cannot be reached
+
+A device that loses its TLS session cannot get it back. `mbedtls_ssl_setup()`
+makes two separate flat allocations of **16,717 bytes each** (13 + 320 + 16,384;
+`Http::kTlsRecordBufferBytes`), so what a fragmented heap has to satisfy is
+16,717 bytes *contiguous* - twice over, but never 33,434 at once. This paragraph
+said "roughly 32KB" until 2026-09-14; see "One correction to this document, made
+where it does damage" under "Instrumenting the ordinary rotation" below, and
+`.github/workflows/rebuild-mbedtls-libs.yml`, which was the last file still
+quoting the wrong framing. Once cards have been rendering the largest 8-bit
+block settles well below even the real figure - 13,812 bytes, measured
+repeatedly on device 17 - and every handshake then fails with
+`MBEDTLS_ERR_SSL_ALLOC_FAILED` (`-32512`).
+**`gClient` is a process-lifetime global and nothing in this firmware resets it,
+so the first failure is permanent for the life of the process.**
+
+The state that produces is the worst one available, and worth describing
+carefully because it is invisible from every direction someone would normally
+look. The device draws its cards perfectly. It is simultaneously invisible: no
+telemetry, no check-in, no debug stream, and no way to receive a card policy or a
+firmware update. It looks healthy on the wall and cannot be managed by anything -
+including the update that would fix it. A card-policy edit saved at 21:11:39 sat
+undelivered for **18 minutes** for exactly this reason, and was delivered only by
+a power cycle.
+
+Across an evening of this on two devices, a restart recovered it every single time
+and nothing else ever did. So `checkUnreachableWatchdog()` in `App.ino` now does
+deliberately what a person was otherwise doing by hand: **five consecutive failed
+check-ins with WiFi associated, and the App restarts itself.** Five is about five
+minutes at the default 60-second cadence - long enough to sit under any ordinary
+blip, short enough that a stuck device is back inside the window where a policy or
+firmware change can reach it.
+
+Three guards, because a self-restarting device is dangerous if it is wrong about
+the cause:
+
+- **WiFi must be associated.** If it is not, the server being unreachable is a
+  network fact rather than a TLS one, a restart fixes nothing, and the device
+  would simply reboot repeatedly through an outage that has nothing to do with
+  this firmware. It declines and logs that it declined, which matters: a guard
+  that silently does nothing is indistinguishable from a guard that is broken.
+- **Twenty minutes minimum between restarts, and this needs two halves to work at
+  all.** *Superseded 2026-09-14: twenty minutes is now only the FIRST gap, and it
+  doubles to a four-hour ceiling on each further restart that does not reach the
+  server. See "The unreachable watchdog rebooted on the same cadence forever"
+  below; everything in this bullet still describes the machinery the backoff is
+  built on.* The in-boot variable is the obvious half. The half that makes it real is
+  `setup()` seeding it from the new `BootDiag::lastRestartCause()` when the
+  previous restart was `Unreachable`. Without that, a restart clears the variable
+  and the device is eligible again five minutes later, forever - so the guard
+  would be decoration. **Backing off across the very reboot it guards is the
+  entire point**, because a service that is genuinely down cannot be fixed by
+  rebooting, and three reboots an hour is a far better wrong answer than twelve.
+  This is the first thing in this firmware to use `lastRestartCause()` for a
+  decision rather than for a log line, and it is why `0012` had to land before
+  `0016` could mean anything.
+- **The counter clears on the first success**, so a server deploy, a Kestrel
+  restart or a brief AP glitch passes underneath it and never triggers anything.
+
+`RestartCause::Unreachable` is kept distinct from `LowHeap` on purpose, and not
+merely for tidiness: "cannot draw" and "cannot be reached" want opposite
+investigations, and a device can be in either state while perfectly healthy in the
+other. Merging them would put one threshold in front of two unrelated diagnoses,
+which is the mistake the three watchdog thresholds above already demonstrated in
+another form.
+
+The watchdog is checked from `loop()` rather than from inside `performCheckIn()`,
+so the decision to restart is never taken while a request is part way through, and
+so it sits in the same place as the heap watchdog it is a sibling of. The restart
+path itself reuses everything the cannot-draw watchdog established -
+`Log::flushNow()`, `AppService::stashTimeForFastReboot()` so the next boot skips
+the blocking SNTP wait, an on-screen "Reconnecting / Restoring the connection -
+back in a moment", and a 1500 ms delay before `esp_restart()`. The flush is close
+to futile here and is done anyway: this is the one restart where the channel that
+would carry the explanation is exactly what is broken, so it costs nothing on a
+device that cannot send, and on a device whose failure was asset fetches rather
+than the log stream it is the whole explanation.
+
+**This does not stop the handshakes failing. It stops a failure being
+permanent**, which is what made OTA unreliable. The real fix is a short-lived
+per-request TLS client, and it is still open.
+
+## Still open after tonight
+
+Three things are unresolved, and two of them matter more than anything that
+shipped.
+
+**The real TLS fix is a short-lived per-request client, and nothing has been
+built.** `Http.h` already documents why the obvious version of this is not it: an
+earlier `releaseTlsSession()` did exactly `gHttp.end(); gClient.stop();`, and it
+*worked* as a measurement - on device 17 it returned 41,312 bytes and moved the
+largest contiguous 8-bit block from 6,132 to 36,852, after which an identical
+10,568-byte allocation that had just failed succeeded. That is what established
+peak concurrent use rather than fragmentation as the constraint. It was removed in
+`b49a93e` for a reason that still holds: `gClient` is shared with telemetry and
+the debug log stream, and a client left unusable after `stop()` takes the device's
+own diagnostic channel down with it, so the failure hides its own evidence -
+which is precisely what happened to two devices. What went unnoticed at the time
+is that **removing it also removed the only recovery path this firmware had**, and
+tonight's unreachability watchdog works around that absence rather than filling
+it. A per-request client for content fetches, leaving the shared one to telemetry
+and logging, is the change that would let a failed request be discarded without
+taking the diagnostics with it.
+
+**Device 7 appears to be rebooting on a false positive, and the log line that
+would say so is misnamed.** It has **no SD card**, and it was observed rebooting
+every ~11 minutes all evening - at 620-660 s uptime each time - with the health
+line reading `consecutive file-buffer alloc failures=6/6`. The suspicion is that
+this is not a memory problem at all: its graphic cards can never cache an image,
+so their draws fail, the cannot-draw watchdog reads a run of failed draws as the
+device having lost the ability to draw, and **a reboot cannot fix a missing SD
+card.** If that is right, it is the failure mode the watchdog section above
+explicitly worried about - "if a restart does not fix it, this becomes a restart
+every four minutes" - arriving by a route nobody predicted, on a device that is
+not short of memory at all. **This is not confirmed.**
+
+Two things make it hard to be sure, and both are worth having in place before the
+next capture:
+
+- **`BootDiag` on build `0010` reported `NONE` for every software reset**, which
+  is exactly the blindness `c445836` fixes. On `0012` and later, a device
+  rebooting for this reason will say `SOFTWARE_RESET + LOW_HEAP` and one rebooting
+  for any other reason will say something else. That single distinction is what
+  turns this from a suspicion into a finding, and it is the first thing to look
+  for. **The token changed on 2026-10-25**: this restart now records
+  `CANNOT_DRAW`, and `LOW_HEAP` in a stored row is a device that restarted for
+  this reason on firmware older than that build.
+- **The log line was misdescribing its own subject, and so was the cause.** The
+  `[health]` line printed "consecutive file-buffer alloc failures" and the
+  constant was `kMaxConsecutiveBufferAllocFailures`, over a reading of
+  `Display::consecutiveDrawFailures()` - which `noteDrawOutcome()` increments on
+  any failed draw, not on a file-buffer allocation that streaming had already
+  removed. The line and the constant were corrected first; the cause the restart
+  recorded stayed `LOW_HEAP` for another week and cost a day of investigation
+  aimed at the heap of a device that had 34,804 contiguous bytes. Both halves now
+  name the draw: the line reads "consecutive failed draws" and the cause reads
+  `CANNOT_DRAW`.
+
+  Worth noting alongside it: `a10c686` deliberately closed the gap where
+  `drawImageFromBuffer` - the RAM path a device with no usable card uses - never
+  fed `noteDrawOutcome()` at all. That was the right change on its own terms, and
+  it also means a no-SD device's failing draws became visible to this watchdog for
+  the first time. Whether device 7's loop begins at that build is the obvious
+  thing to check and has not been checked.
+
+**One mbedTLS failure is unexplained.** `-9984`
+(`MBEDTLS_ERR_X509_CERT_VERIFY_FAILED`) was observed at `free8=47,200` and
+`largest8=34,804` - ample memory of both kinds - so it is not the allocation story
+that accounts for the other two, and the chain verifies against the pinned roots
+off-device. It is recorded in the table above with no explanation attached rather
+than folded into an account it does not fit.
+
+And, so that tonight's six builds are not mistaken for verification: **none of
+this has been compiled or run.** The measurements are real; the code written in
+response to them has been read, not built.
+
+## Instrumenting the ordinary rotation, because everything else has been ruled out
+
+The contiguous-heap ratchet is **not** the asset path. That was instrumented at
+eight transitions (`HeapTrace`) and ruled out; RGB565 draws were then measured
+five times with the largest free block *identical* before and after each one. So
+whatever degrades the heap is in the ordinary card rotation - drawing, fetching,
+checking in, the housekeeping POSTs - and nobody had ever instrumented that.
+
+`App/HeapRatchet.{h,cpp}` does, and its header carries the full reasoning. What
+is worth having outside the source:
+
+**One correction to this document, made where it does damage.** The section
+"The numbers tonight rests on" above says mbedTLS "needs roughly 32KB
+contiguous". That is a misreading and it cost an evening. The requirement is
+**16,717 contiguous bytes, twice over, in two separate flat allocations**
+(`Http::kTlsRecordBufferBytes`). A device at 20,000 contiguous can still stand up
+a session; a device at 30,000 whose space is two 15,000-byte holes cannot.
+"Roughly 32KB" describes neither case correctly, and it made a whole class of
+measurements look like comfortable margin when they were not. The older text is
+left in place - this project keeps superseded reasoning rather than deleting it -
+but read it through this correction.
+
+**The figure that matters** is `heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)`.
+Not free total. Not `ESP.getMaxAllocHeap()`, for every reason the section above
+gives.
+
+**What was measured, twice, to the minute**, on device 17
+(`v2026.09.11.0017-customlibs`, debug stream on): 65,524 bytes at boot,
+`SOFTWARE_RESET+UNREACHABLE` 34 minutes later. Steps down are multiples of 2,048
+with plateaus between them; free total falls more slowly and does not plateau in
+step. That is fragmentation carving the largest block, not a steady leak. The
+waypoints recur across boots (65,524 -> ... -> 42,996 -> 36,852 ...) but their
+*order* differs between runs while the total time to failure matches - a small
+set of repeated allocation sizes reached in a varying order.
+
+**Five buckets, signed, on telemetry rather than the debug stream.** The stream
+is itself the dominant consumer (200 `String` slots, a 16KB ceiling, a
+`JsonDocument` and a body `String` per batch), device 19 has never streamed and
+has never decayed, and every stream on the fleet is off right now deliberately,
+so that real-world reboots can be measured. An instrument that needed the stream
+would describe a device in a state nobody is trying to fix. So the deliverable is
+nine flat fields on the telemetry POST:
+
+| Field | What it discriminates |
+| --- | --- |
+| `heapPhaseBootBytes` | all of `setup()`: the splash decode, the display, the SD mount, WiFi, TLS, the boot check-in. Finished the moment `setup()` returns, so every other bucket reads as "since that" |
+| `heapPhaseDrawBytes` | LovyanGFX, the RGB565 band buffer, per-card draw `String`s, and `drawChrome()`'s dozen small `String` allocate/free pairs per draw |
+| `heapPhaseFetchBytes` | provider HTTPS fetches: ArduinoJson pools, HTTP body `String`s, the long-lived `Result` `String`s |
+| `heapPhaseCheckInBytes` | the ~4KB `CheckIn::Result`, the largest JSON parse this firmware does, the policy and announcement `String`s |
+| `heapPhaseServiceBytes` | telemetry, the debug-stream flush, the fallback update check |
+| `heapPhaseIdleBytes` | WiFi/LWIP, touch, the timers - **and anything this instrumentation forgot** |
+| `heapRatchetSteps` | how many downward moves were still unrecovered at the following observation; total decay over this is the mean step, which is what checks the "multiples of 2,048" claim across a fleet with every stream off |
+| `heapWorstStepBytes` | one big carve versus fifty small ones - same decay rate, completely different fixes |
+| `heapWorstStepPhase` | which phase took that worst step |
+
+**Two of these are corrections made after the first real reading**, which is
+recorded here because both changed what the earlier numbers meant. Device 17,
+stream off, 17 minutes: draw 0, fetch 0, checkin -12,288, service +12,288, idle
+47,104, sum 47,104 = boot 110,580 - live 63,476. The identity held to the byte,
+and neither correction changes the conclusion - the rotation costs nothing and
+the debug stream was the ratchet. Both stop the next reader misreading the
+buckets.
+
+`heapPhaseBootBytes` is new because `setup()` runs before any scope exists, so
+the whole boot was landing in Idle - including the splash PNG decode, one step of
+45,056 bytes and the largest of that entire session. Idle's job is to isolate the
+LWIP and WiFi background that nothing else covers, and a bucket reading 47,104
+that is 96% a known one-time cost does not overstate the background so much as
+make it unreadable. The remaining ~2KB was the actual answer and could not be
+seen. **A reader summing the buckets for the identity check must now include
+this field**, or it will come up short by whatever `setup()` cost.
+
+`heapRatchetSteps` counts *confirmed* steps. It used to count every downward move
+at the instant it was seen, so the check-in/service pair above - one transient
+observed from both sides of a nested scope, credited down and credited back -
+contributed two steps that cost the device nothing, on every single check-in
+(telemetry rides inside check-in's scope deliberately). A qualifying drop is now
+held for one observation: recovered, and it never happened; still down, and it
+counts at the size actually retained. Observing only at outermost scope
+boundaries would have fixed it too, and was rejected - it buys the fix by giving
+up the nesting, and separating a Draw inside a Fetch is most of the point of
+having scopes at all. `heapWorstStepBytes` follows the same rule, where it
+matters more: a 12,288-byte transient handed straight back was previously
+eligible to be reported as the worst step of a whole session.
+
+They are **signed net** figures, not a tally of drops, and that is the design.
+A phase that allocates 44KB and hands all of it back nets ~0 and is visibly not
+the culprit; a phase that carves 2,048 and keeps it reads `+2048`. Telling those
+two apart is the entire question, and gross allocation volume cannot.
+
+**The instrument can be caught being wrong from its own output.** By
+construction the six buckets sum to
+`bootLargestFreeBlockBytes - largestFreeBlock8BitBytes`. If that identity does
+not hold on a real device, a phase is missing a scope or the carving happens
+somewhere all six buckets miss. Given how many confident wrong figures this
+investigation has already been sent down blind alleys by, an instrument with a
+built-in check on itself was worth the extra field. Six, not five - see
+`heapPhaseBootBytes` above, and check the reading end first if the sum starts
+coming up short by roughly a boot's worth.
+
+**A large `heapPhaseIdleBytes` is the most useful result, not the boring one.**
+It rules out drawing, fetching, check-in and the housekeeping POSTs in a single
+figure and sends the next person somewhere else entirely - which is the one
+outcome a set of buckets covering only the suspects could never produce.
+
+**What it costs**, said plainly, because adding instrumentation to a memory
+investigation that changes the memory is worse than adding nothing:
+
+- **Heap: zero.** No `String`, no `JsonDocument`, no `malloc`, on any path.
+  Every label is a `const char*` into flash - phase names, `CardSpec::id`, four
+  fixed subject literals. Pointers are copied, never characters.
+- **Static RAM: about 70 bytes** (six `int32_t` buckets, a floor, a step count, a
+  worst-step triple, the current phase and subject, and the held-step quintuple
+  the deferred counter needs), 72 with alignment. Up from 46: the Boot bucket is
+  4 bytes of that and the deferral the rest.
+- **Stack: 12 bytes per live scope**, maximum nesting three - Boot, the boot
+  check-in inside it, and telemetry's Service inside that.
+- **Wire: ~210 bytes** of body text and nine more ArduinoJson slots at 8 bytes
+  each - inside the pool the telemetry document already holds, since
+  `ARDUINOJSON_POOL_CAPACITY` is 128 slots on this 32-bit target and that
+  document uses roughly twenty. **No new pool is allocated.** The body `String`
+  may cross one realloc boundary; that lands in the Service bucket, which is the
+  correct self-consistent answer rather than an unmeasured cost.
+- **CPU:** two `heap_caps_get_largest_free_block()` walks per scope plus one per
+  `loop()` iteration, against a loop paced at 50ms.
+
+**Where the scopes are, and why only there.** A Boot scope opened immediately
+after `HeapRatchet::begin()` in `setup()` and living to that function's closing
+brace (a named local, so RAII covers every exit); `CardManager::drawCurrent()` (the
+one choke point every card's draw passes through, so one scope covers every card
+module including ones added later), `CardManager::fetchCard()` around
+`card.fetch()` alone (one scope for all the providers, which are the same code
+written several times), `performCheckIn()`, `Telemetry::report()`, the
+`Log::poll()` call site in `loop()`, and the fallback `AppUpdater` call site.
+Scoped at the *call sites* for the last two on purpose: wrapping
+`Log::sendOneBatch()` would put an observation inside the window where it is
+staging and consuming its own ring buffer, and wrapping
+`AppUpdater::checkForUpdate()` would mix the once-an-hour background timer with
+the human pressing BOOT.
+
+The nesting is load-bearing. A refresh of the card currently on screen redraws
+it, so without a Draw scope nested inside the Fetch scope the two leading
+candidates would be permanently inseparable. Telemetry nests inside check-in for
+the same reason - it rides check-in's cadence deliberately, so the bucket would
+otherwise read "the thing that happens every few minutes" and name neither.
+
+**No wire-compatibility liberty was taken, although one was available.** The
+six-month rule is currently suspended (`DeploymentStage.IsProduction` is false;
+nothing has shipped to a household), so a breaking change was permitted. It was
+not needed: every field here is a new flat name added alongside the existing
+ones, which a server that has not been updated ignores and a server that has
+reads without coordination. Redefining an existing field would have bought
+nothing and cost the one property that makes a fleet's history interpretable.
+
+**None of this has been compiled or run.** There is no host C++ compiler on the
+machine it was written on and `arduino-cli` hangs there; CI is the first real
+compile. The measurements it was written against are real. The code is read, not
+built. Devices were all offline when it was written, so the first boot after they
+return is what produces the answer.
+
+## The cached files are named `.png` and are not PNGs, and the log said so out loud
+
+Observed on device 17:
+
+```
+[display] drew 320x240 rgb565 from /assets/89003ca7-....png in 30 bands of 5120 bytes (no decoder)
+```
+
+The file holds a `DAM5` container of raw 16-bit pixels. This is **by design** -
+`Assets.cpp`'s `kExtension` sets out at length why the filename is a cache *key*
+rather than a type declaration, and why making it truthful turns one
+`SD.exists()` into a directory search. The filename does not change.
+
+What changed is the reporting, in the cheapest place that fixes every format at
+once. `Display::sniffImageFormat()` - which every SD draw already passes through
+before it draws - now names the format it read out of the file's own header, so
+the path stops being allowed to imply one. One line, covering PNG, JPEG and
+RGB565 together and any format added later for free, rather than three
+per-decoder lines that would have to be kept in agreement.
+
+The other half of the cost was never in the log. Somebody who pulls the card out
+and double-clicks a `.png` gets a broken-image icon and no comment in front of
+them to explain it - what they have instead is evidence that the device writes
+corrupt files. `Assets::begin()` now writes `/assets/README.txt` once, if absent,
+saying what the files are and how to tell the three formats apart from their
+first four bytes. It is excluded from `cachedCount()` (which rides telemetry, and
+a firmware that quietly reported one extra asset per device would look like a
+caching change) and survives `wipeCache()` - a reformat discards stale pictures,
+and the moment right after somebody has been told to try one is exactly when the
+card is most likely to be in a reader.
+
+## A declared maintenance window now reaches the cards, not just the watchdog
+
+The planned-downtime feature was built from the server inward and stopped one
+step short. The server declares a window as the `maintenance_until_utc` config
+value, `CheckInGatewayService` resolves it per device and sends it as
+`maintenanceUntilUtc` on the ordinary check-in response, `CheckIn.cpp` parses it
+into `CheckIn::Result::maintenanceUntilUtc`, and App.ino carried it forward for
+the rest of the boot. Exactly one thing read it: the unreachable watchdog, which
+stopped counting failed check-ins as evidence that the device's own connection
+was broken. That was the half the fleet needed - without it, taking the server
+down gracefully guarantees a fleet-wide restart, because MaintenanceMode answers
+every request with a 503 including `/api/checkin` and five consecutive failures
+reboot the unit.
+
+**No card read it.** So a device inside a declared window drew exactly what a
+device with a genuinely broken connection drew: "Could not load the forecast /
+Cannot reach the forecast service." A photograph of device 17 doing that during a
+deploy is what surfaced this. The screen was saying the one thing the firmware
+knew for certain was not the explanation.
+
+### One helper, not a conditional in every card
+
+`Maintenance.h`/`Maintenance.cpp` now own the deadline - `App.ino`'s old
+`gMaintenanceUntilUtc` global moved there unchanged. Two reasons it had to move
+rather than be pushed out to each card the way `SunMoon::setTimes()` and
+`Tides::setNext()` are pushed: a separately-compiled card cannot see a global in
+the `.ino` at all, and four copies of a deadline updated on four code paths is
+precisely the failure worth designing against - two cards on the same rotation
+disagreeing about whether maintenance is currently in force.
+
+Every card's failure line goes through one function:
+
+```cpp
+String detail = Maintenance::failureText(gLast.message, gLast.serviceUnreachable);
+```
+
+It returns `gLast.message` completely unchanged - byte for byte - unless both
+halves hold: the failure was the specific kind the words "cannot reach the
+service" were being used for, and a window is in force right now. A device with
+no window held renders exactly the strings it rendered before this change, at
+every site, which is the property the whole change is answerable for.
+
+`serviceUnreachable` is a new `bool` on `Forecast::Result`,
+`Listings::Result` and `Aircraft::Result`, set true at exactly the three sites in
+each that hard-coded `"Cannot reach the ... service."` and nowhere else. It is
+deliberately narrower than `status == NetworkError`, which also covers a TLS
+layer that never came up ("Cannot verify the service's identity.") - a fault on
+this device's own side of the wire that a planned server outage does not explain,
+and one that relabelling as maintenance would send a reader after the wrong
+problem. `AuthError` and the resting states are untouched for the same reason.
+
+`Calendar.cpp` sets the same string and is deliberately left alone: that card
+draws nothing at all on failure (see Calendar.h's three reasons), so its copy of
+the message only ever reaches `cardStatus()` and the debug stream, where the
+precise fault is what an operator actually wants.
+
+### Expiry is enforced here, on this device's own clock, at draw time
+
+This is the part that decides whether the feature is worth having. A device told
+about a ten-minute window that then walks into a genuine three-hour outage must
+not spend three hours claiming maintenance. That is a confident lie, and it is
+strictly worse than the vague truth it replaced - the vague truth at least
+prompts somebody to check. Same for a device that never comes back at all: the
+message has to decay to the truth with no server involvement, because by
+definition there is no server left to involve.
+
+So `failureText()` is called at **draw** time, not fetch time, and recomputes
+`inWindow()` against `time(nullptr)` every single call. The cards keep the honest
+text in their own retained state and never store a decided string. The moment the
+deadline passes, the next repaint says "Cannot reach the forecast service." again
+- no refetch, no check-in, no network of any kind. Deciding it at fetch time
+instead would have left a stale maintenance claim on screen for up to a full
+refresh interval after expiry, during an outage where refreshes are exactly what
+is failing.
+
+Two smaller guards fall out of the same principle. A deadline more than twelve
+hours out gets no clock time at all ("Server maintenance in progress."), because
+"back by 2:30" is useless to someone who cannot tell which 2:30 is meant, and a
+window that long is a migration rather than a deploy. And a device whose clock is
+not yet set reads `time(nullptr)` as near zero, fails the `nowUtc > 0` test, and
+gets the honest message - every ambiguous case resolves to "no window".
+
+Inside twelve hours the card names the time, through
+`Display::formatTimeOfDay()` so it honours the household's 12-or-24-hour
+preference like every other time this device prints, rounded up to the next
+minute so "back by" is never earlier than the real deadline:
+
+> Could not load the forecast
+> Server maintenance. Back by 2:30 PM.
+
+The headline is unchanged. "Could not load the forecast" is still true during a
+window, and it is the detail line underneath that was making the false claim.
+
+### Not covered
+
+Nothing persists the window to NVS, exactly as before: a device that reboots
+mid-window comes back with the watchdog armed and its cards honest, and is simply
+told about the window again on its next successful check-in. **Unverified on
+hardware**, like every other card change in this build - checked by a clean
+compile and by reading.
+
+## The unreachable watchdog rebooted on the same cadence forever
+
+`checkUnreachableWatchdog()` restarts a device that has failed five check-ins in
+a row, and a twenty-minute floor stopped that becoming a reboot loop. The floor
+was a constant, and that is the defect: **a device that cannot reach the server
+rebooted every twenty minutes for as long as the condition lasted, indefinitely,
+at a cadence that carried no information about whether rebooting was helping.**
+
+The case it is worst for is the case it is most often in. When the server is
+genuinely down - a deploy that overran, a host that moved, a certificate that
+expired - a restart on this device cannot fix anything, and the fleet pays for
+the attempt every twenty minutes per device: several seconds of blank screen in
+a household, a fresh heap-fragmentation cycle on a board whose fragmentation is
+the subject of half this document, and two NVS writes on the way out. An
+eight-hour overnight outage cost 24 of those per device, all of them futile, for
+a fault that was never on the device.
+
+### The shape: 20 minutes doubling to a four-hour ceiling
+
+`selfRestartFloorMs()` returns 20 minutes doubled once per restart already spent
+in this run, clamped at four hours: **20, 40, 80, 160, 240, 240, ...** The first
+hold-off of a run is the unchanged twenty minutes, deliberately - everything the
+original constant's reasoning said about a single wrong diagnosis is still true,
+and a device whose second restart would have worked must not be made to wait
+longer than it used to. What changed is only what happens after the evidence has
+come in that restarting is not working.
+
+A device therefore gets four attempts inside its first five hours and then
+settles at six a day, against 72 a day before.
+
+**Why four hours can be this generous**, which is the single property the whole
+design rests on: *backing off delays restarts and nothing else*. Check-ins keep
+running at the server's own cadence throughout, and the first one that succeeds
+clears the run. A device sitting on a four-hour floor is not four hours away
+from rejoining the fleet when the server comes back - it is one check-in
+interval away, exactly as it would be on a twenty-minute floor. The only thing a
+long floor costs is the case where a restart *would* have fixed a local fault,
+and that case is excluded by construction: to be on the fourth doubling a device
+must have tried a restart four times and been wrong every time.
+
+**Why it is a ceiling rather than a surrender.** A device that stopped
+restarting altogether could never recover from a fault that a restart *would*
+fix but that its own check-ins cannot detect, and this fleet has exactly one of
+those - the poisoned TLS client, where the session is unrecoverable but DNS and
+TCP keep working perfectly. Retrying a few times a day is cheap insurance
+against being permanently wrong in that direction.
+
+### What resets it: a completed check-in, and nothing weaker
+
+The run is cleared on the first check-in that completes - TLS up, secret
+accepted, whole response parsed - which is the same observation that already
+clears `gConsecutiveCheckInFailures` and `gConsecutiveResponseOom`.
+
+**A successful DNS lookup or TCP connect deliberately does not count**, and this
+is the one place the obvious generosity is actively harmful.
+`Http::diagnoseFailure()` exists precisely because those three layers had to be
+told apart, and what it established is that the fault this watchdog was built
+for *passes the first two*: a device whose largest contiguous block has decayed
+below `Http::kTlsRecordBufferBytes` resolves the hostname fine, connects to port
+443 fine, and fails only inside `mbedtls_ssl_setup()`. Crediting a reachable
+socket would therefore reset the backoff hardest on the devices that need it
+most, and pin the worst-affected units at twenty minutes forever. A near-miss is
+not partial credit when the near-miss is the signature of the disease.
+
+**Uptime does not count either**, and the reason is worth recording because the
+obvious implementation gets it wrong. `Identity::consecutiveSelfRestarts()`
+already exists and looks like the natural exponent - but it answers a different
+question ("should this boot narrate itself on the glass") and is cleared by an
+hour of uptime with no further restart. Both halves are wrong here. An hour of
+uptime is not evidence that anything was fixed on a device whose entire
+complaint is that it cannot be reached; and worse, once the backoff grew past
+that hour the narration rule would clear the exponent moments before every
+restart it was meant to delay, silently capping the backoff at 60 minutes by
+accident. So the backoff gets its own persistent counter,
+`Identity::selfRestartBackoffSteps()` (NVS key `rstbackoff`, App-only,
+saturating at 255), stepped only by the two watchdogs that share the restart
+floor and cleared only by a completed check-in.
+
+It has to be persistent for the same reason `BootDiag`'s restart cause does: the
+restart is the event being counted, and nothing in RAM survives it. `setup()`
+seeds a RAM mirror from NVS, which is the line that makes the whole thing work -
+without it every boot would believe it was the first attempt of the run and the
+floor would be twenty minutes forever, which is the fixed-interval defect
+reintroduced by omission.
+
+### Both watchdogs, one schedule
+
+`checkResponseOomWatchdog()` (added in `92cc034`) already shared the connection
+watchdog's floor *and its actual timestamp*, on the grounds that the hazard
+being guarded is one hazard - this device rebooting in a loop - and it does not
+care which watchdog pulled the trigger. It inherits the backoff for the same
+reason, and it also **steps** it. That second half would be easy to leave out
+and would quietly undo the first: a device whose restarts all came through the
+OOM path would otherwise sit at the twenty-minute base forever while reporting
+that it was backing off. A device alternating between the two failures now backs
+off on the sum of its restarts, which closes the same loophole sharing the
+timestamp already closed one level up.
+
+The draw-failure watchdog, `checkHeapHealth()`, is untouched. It has never had a
+floor of its own (its own comment accepts a roughly four-minute restart cycle as
+the price of a device that has stopped drawing entirely), it is not part of this
+hazard's accounting, and folding it in would have meant inventing a floor for it
+in the same change - a second decision smuggled into the first.
+
+### The maintenance window keeps its veto, and this is not the same question
+
+`Maintenance::inWindow()` still exempts the connection watchdog entirely, before
+everything else including the provably-cannot-reconnect fast path. `92cc034`
+deliberately did *not* extend that exemption to the OOM watchdog, on the grounds
+that a declared window explains a silent server and explains nothing about this
+device's heap. The connection watchdog keeps its exemption - but the argument for
+it is **not** simply the mirror image of `92cc034`'s, and the first draft of this
+section was written as though it were.
+
+For the **ordinary** trigger the mirror-image argument does hold. Five failed
+check-ins is precisely the fact a window announces, so the window is not an
+excuse being stretched over an unrelated symptom; it is the answer to the only
+question the counter asks.
+
+The **provably-cannot-reconnect** trigger is the awkward one, and it is
+`92cc034`'s case in miniature: `!Http::canOpenNewSession()` is a locally proven
+fact about *this device's heap*, and a declared window explains none of it. On
+the category argument alone that path should be exempt from the exemption. It is
+not, and the reason is a consequence argument rather than a category one: **a
+restart is only worth taking if it could plausibly end the condition, and inside
+a declared window it cannot.** The restart would buy a clean heap, the device
+would come back, and the next check-in would still fail - the server is down,
+which is the one thing we have been told for certain. That costs a blank screen,
+a fresh fragmentation cycle, two NVS writes and now a backoff step as well, all
+spent on an attempt doomed before it began. Nothing is lost by waiting: the
+failure counter keeps climbing, and the moment the window closes the watchdog
+reaches the same conclusion with its budget intact.
+
+So the real distinction between the two watchdogs is not "network fault versus
+heap fault". It is that **an OOM restart during a window can work** - the server
+is reachable in that scenario by definition, and only this device's heap is
+broken - **and a connection restart during a window cannot.**
+
+The backoff does not change either judgement, because suppression and backing off
+answer different questions. **Suppression is the response to an explained
+silence. Backing off is the response to an unexplained one that this device has
+already failed to fix.** So:
+
+- **A window does not step the schedule *from this watchdog*.** The exponent
+  counts restarts, not failures, and the connection watchdog cannot restart
+  inside a window - so however many check-ins a three-hour deploy costs, none of
+  them steps the ladder. That falls out of tying the exponent to restarts rather
+  than to the failure counters.
+- **"A window does not step the backoff" is false as a blanket claim**, and it is
+  the tempting one-line summary. `checkResponseOomWatchdog()` is not suppressed
+  by a window and *does* step the counter, so a device that runs out of heap
+  parsing responses during a deploy restarts and steps, exactly as it would
+  outside one. That is consistent rather than an oversight - the step follows the
+  restart, and that restart was never the window's business - but an operator who
+  believed the stronger claim and then watched the ladder move would be right to
+  think one of the two was lying. The suppression log line is worded to say
+  "nothing *here* steps the backoff" for that reason.
+- **A window does not reset the schedule**, for the mirror image of the same
+  reason. An operator declaring maintenance says nothing about a device that had
+  already restarted itself four times before the announcement, and resetting
+  there would hand every device in a reboot loop a fresh twenty-minute budget
+  every time somebody deployed.
+- **Window time counts toward the elapsed floor**, because the floor is measured
+  from the last restart and is about how often this device reboots, full stop.
+
+The suppression log line now names the current floor even though nothing is
+about to use it: an operator reading the stream during a deploy is entitled to
+know what each device will do the moment the window closes, and the answer is
+different for a device on its first hold-off and one on its fifth.
+
+### A power cycle gets one free attempt, and the run survives it
+
+`setup()` seeds the hold-off clock only when `BootDiag::lastRestartCause()` was
+`Unreachable` or `LowHeapResponse`. After a power cut, an OTA or a reprovision it
+does not - so the next watchdog trigger fires at once, at its ordinary threshold.
+That is deliberate: somebody or something intervened, and this run's history is
+not good enough evidence to spend that intervention's one attempt. The *count* is
+kept rather than cleared, so if that attempt also fails the device resumes its
+schedule instead of walking up from twenty minutes again. Both branches log,
+including the one that does nothing, because a guard that is silent when it
+declines is indistinguishable from a guard that is broken.
+
+### What the stream says
+
+The remote debug stream is the only diagnostic channel a deployed device has, so
+every decision and every declined branch names its numbers:
+
+```
+[health] last restart was for unreachability - the self-restart watchdogs will hold off for
+         4800000 ms rather than restart again immediately (3 self-restart(s) in this run with no
+         successful check-in between them, so the 1200000 ms base has been doubled toward its
+         14400000 ms cap)
+[health] 7 check-ins have failed, but this device already restarted for that 132000 ms ago -
+         holding off (minimum gap 4800000 ms) rather than entering a reboot loop. That gap is the
+         backoff, not a constant: 3 self-restart(s) in this run with no successful check-in
+         between them, so the 1200000 ms base is doubled 2 time(s), capped at 14400000 ms. Silent
+         from here until this clears.
+[checkin] a complete round trip after 3 self-restart(s) in this run - the backoff is reset to its
+         1200000 ms base, and the next run starts over from there
+```
+
+The hold-off line is still logged once per episode rather than once per loop
+iteration - `gHoldOffLogged` - for the reason it was latched in the first place:
+an unlatched version put hundreds of identical entries into the stream in two
+minutes on a real device and buried everything else.
+
+### Not covered
+
+**Unverified on hardware.** The backoff schedule is a function of a persistent
+counter and `millis()`, and the events that drive it are a restart and an
+outage; nothing about it can be exercised by a compile. `TEST_PLAN.md` section 1,
+"The self-restart backoff", is the substitute, and it is honest about which steps
+cost hours of bench time - 1a's long form is a single overnight run and is the
+only procedure that proves the shipped constants rather than the shape.
+
+One thing is knowingly imperfect. The RAM mirror and the NVS counter are written
+a few lines apart, both before `esp_restart()`; power lost between them costs
+one shorter floor and nothing else. Making that atomic would mean a transaction
+for a value whose worst-case error is twenty minutes.
+
+## An empty listings array is two different facts, and two more cards still cannot tell them apart
+
+Observed live on 2026-09-13: a device with a rejected RentCast key drew "No
+listings nearby right now" to a household in a market that has houses in it.
+Not a stale reading and not a hedge - a confident claim about somebody's local
+property market, made by a device that had been told nothing at all about that
+market.
+
+The server had said so. `lastRefreshError` had been on the wire since the
+endpoint existed and in the card's ArduinoJson filter since the card was
+written, and exactly one branch read it. So a 200 carrying `listings: []` went
+to `Status::Empty` whether the server had asked RentCast and heard "none" or had
+never got an answer out of it.
+
+The split below is the fix for that. The signal it reads is no longer that
+field - see "The signal moved to `status`" further down, which is the part to
+read if you are looking at `Listings.cpp` today rather than at this history.
+
+### `Status::RefreshFailed` splits the two
+
+`Empty` now means what it always claimed to mean and is the only status licensed
+to say anything about the market. `RefreshFailed` means the list is empty
+because the question failed:
+
+> Could not check for listings
+> The listings near Annapolis, MD could not be refreshed just now
+
+which says what did not happen and pointedly names nothing as absent.
+
+**Deliberately not `serviceUnreachable`**, and this is where it composes with the
+maintenance work rather than fighting it. That flag means "this device could not
+reach OUR server", which is the one thing a declared window explains. This is
+our server answering perfectly well about a third party *it* could not reach. A
+window and a refresh error are different conditions, so `failureText()` passes
+this message through untouched and the flag stays false as a decision rather
+than an omission.
+
+**Resting rather than amber**, also a decision. Amber says "something is wrong
+with this device" and nothing is: the panel, the network and our server are all
+fine. What broke is a feed only an administrator can restore, which is exactly
+`ProviderDisabled`'s and `NotConfigured`'s situation and they are already muted.
+Amber in a kitchen for a fault nobody in that kitchen can fix teaches its reader
+to ignore amber.
+
+### The signal moved to `status`, because the old one was a sentence
+
+The split above was right and the thing it read was not. Telling the two facts
+apart by the *presence* of `lastRefreshError` made a field written for an
+operator into a protocol element - and that field is the one whose contents
+reached a kitchen wall (next section). The server now marks it
+`[OperatorDiagnostic]` and strips every marked property from device-facing
+payloads at `DeviceJsonResult`, which put the strip and this split on a
+collision course: remove the field and every empty list looks like an answered
+question again, which is precisely the claim this section exists to have
+deleted.
+
+So the card reads `status` instead - `ProviderStatus` on the server, four values
+(`Ok`, `NotConfigured`, `Stale`, `Unavailable`), serialized by name, derived on
+the record from state it already has rather than authored at each failure site.
+`Unavailable` is what reaches `RefreshFailed`; `Stale` is the
+cached-rows-behind-a-failed-refresh case, which drew the rows before and still
+does. The device phrases each value in its own words, which is the whole point:
+four codes cannot leak a vendor's name.
+
+**The ArduinoJson filter was the actual work.** The filter whitelisted
+`isConfigured` and `lastRefreshError` and nothing else, and an un-whitelisted
+key is dropped during deserialization - it never reaches the parsed document at
+all. Reading `doc["status"]` without adding `f["status"] = true` in the same
+edit would have compiled, shipped, and fallen back to the old inference forever,
+silently, with nothing anywhere able to tell that apart from a server that never
+sent the field. There is an observation point now: the stream names the parsed
+value, so `status='(absent)'` against a server known to send it is a filter bug
+and reads as one. This is the same trap the two open gaps at the end of this
+section are sitting in, and it is now a demonstrated one rather than a predicted
+one.
+
+**Both wire shapes, deliberately.** `status` wins when present; the old
+presence-inference survives as a fallback for a server that predates the strip,
+reached only when the field is genuinely absent. One boolean reconciles them and
+every branch reads that boolean, so the fallback is one arm of one switch to
+delete once no reachable server predates the strip - `Listings.cpp` names what
+goes with it. An *unrecognized* status is deliberately not treated as an absent
+one: a newer server saying something specific is not an older server saying
+nothing, and its payload has no `lastRefreshError` to fall back to anyway, so a
+future fifth value degrades to "could not check for listings" rather than to a
+claim about the market.
+
+`isConfigured` is untouched. It is a boolean rather than operator prose, it is
+not marked, and the server asserts it present on the device payload - so the
+calm "not set up yet" branch needed no change and got none.
+
+None of this may raise `serviceUnreachable`. Every one of the four values
+arrives on a well-formed 200 from a server that answered; the distinction the
+previous subsection makes is exactly the one a status field could most easily
+have destroyed, and it did not.
+
+### The leak that was already there: a vendor's error message on a kitchen wall
+
+Fixing the empty-array case meant fixing something worse next to it. The
+`NotConfigured` branch was assigning `lastRefreshError` straight to
+`result.message`, so a household with no key on file had been reading
+
+> RentCast API key is not configured. Sign up at rentcast.io and set
+> MyListings:ApiKey.
+
+off their kitchen wall - a third-party vendor's name, a sign-up URL and an
+internal configuration key, drawn on a picture frame in somebody's home.
+
+That path now draws a fixed sentence. **Every value of `Result::message` is a
+literal in `Listings.cpp`**, which is the invariant to preserve rather than the
+particular fix: the server's own words go to a new `Result::refreshError`, which
+reaches the debug stream and the `/diag` status line - the readers who can act
+on "401" or "budget exhausted" - and is never drawn. Truncated to 120
+characters, because the column is `varchar(1000)`, this lives in the retained
+`gLast` for as long as the state does, and every error the server actually
+produces identifies itself in its first clause.
+
+> `Result::refreshError` no longer exists. The invariant above is unchanged and
+> the paragraph is left as the history of how it was first met; see "The
+> operator's sentence stopped being kept here at all" below for where those
+> words went and why the device stopped holding a copy.
+
+Listings present alongside an error are left alone on purpose: the server is
+serving last-known-good rows behind a failing refresh, real rows beat a warning,
+and "Updated N min ago" already understates their age rather than overstating
+it. Only the stream is told.
+
+### The operator's sentence stopped being kept here at all
+
+Moving the signal to `status` left `Result::refreshError` holding nothing the
+card's behaviour depended on. It was a 120-character copy of `lastRefreshError`,
+retained in `gLast` for as long as a failure lasted, feeding two readers: three
+lines of the debug stream, and the `/diag` status line. It is now deleted.
+
+The reader was never wrong to want it - an admin at `/diag` does want "401" or
+"budget exhausted" rather than the softened sentence the card draws. The point
+is that **the device was the wrong place to keep it.** The sentence is an
+operator diagnostic; the server marks it `[OperatorDiagnostic]`, strips it at
+`DeviceJsonResult`, and serves the untruncated original on `/diag/providers`, to
+that same admin, from the record it was written on. The device's copy was
+shorter, harder to reach, and cost contiguous heap on the machine that has the
+least of it - and on the wire shape the fleet is moving to, that field is never
+sent, so the copy would soon have been of nothing.
+
+**The presence test is not the copy, and only the copy went.** The fallback for
+pre-strip servers needs to know *whether* a sentence arrived, never what it
+said: that is `hasRefreshError`, a `bool`, read once and retained nowhere. It
+stays, along with its filter entry, for exactly as long as a reachable server
+predates the strip - which is still, as of this change, all of them, since the
+server half has not merged. Deleting the presence test along with the copy would
+have put the original defect straight back for every un-upgraded server: no
+`status` to read, no `lastRefreshError` to fall back on, and every empty list
+drawn as an answered question again.
+
+The three stream lines survive and now print straight from the parsed document
+via `%.*s`, bounded by `kLoggedRefreshErrorChars`. Same 120 characters, same
+reasoning (an error identifies itself in its first clause), no allocation and
+nothing retained past the call - and the bound keeps a long sentence from
+pushing the line past `Log`'s 256-byte scratch buffer, which would take the
+line's own tail, the part naming which branch was taken, rather than the prose's.
+
+`cardStatus()`'s two readers lose their words and keep their no-words form,
+which already existed for the post-strip payload: "upstream refresh failed
+(reason is on the server, not the device)" says where the reason went, rather
+than reading as a value that went missing.
+
+### Known gap: Aircraft has the same leak, and Forecast has it in softer form
+
+The pattern is not local, and the survey that established that is recorded here
+rather than left in a commit message, because **neither of these was fixed** and
+the next person to read `Listings.cpp` should not have to rediscover them.
+
+- **Aircraft has it, identically, and arguably worse.** `AircraftResult` carries
+  `LastRefreshError` on the wire, `Aircraft.cpp`'s ArduinoJson filter does not
+  whitelist the field, and the empty path draws **"No aircraft within 10 mi
+  right now"** - a flat claim about the sky, made by a device that may have been
+  told nothing about the sky. Worse than the listings case in one respect: an
+  empty sky is *plausible* far more often than an empty housing market, so the
+  false version of this claim is much less likely to be questioned by the person
+  reading it.
+- **Forecast has it in softer form.** `WeatherResult` carries the field, the
+  filter does not, and the empty path says "No forecast is available yet" -
+  which at least asserts nothing about the weather. The leak half still applies
+  if a refresh error ever reaches a drawn string.
+- **Tides and HomeValue cannot have it.** Neither fetches; both arrive flattened
+  on the check-in response with no error field on the wire, and HomeValue drops
+  its card entirely (`cardItemCount` 0) rather than drawing a claim.
+
+Neither open case is a trivially identical fix - both need a filter entry added
+before the field is readable at all, and the filter is what decides how much
+heap the parse takes on a board where that is the whole subject of this
+document. So both are left for their own change rather than smuggled into the
+listings one.
+
+**What changed since that survey: the field to read is `status`, not
+`LastRefreshError`.** The two bullets above still describe the defect correctly,
+but the fix they imply is now the wrong one - reading an operator's sentence is
+the mistake the listings card had to be moved off, and nothing should be moved
+*onto* it. Both should read `ProviderStatus` instead, for the reasons in "The
+signal moved to `status`" above.
+
+**Aircraft is now closed; Forecast is still open.** `AircraftResult` carries
+`status` on the wire, so that card was unblocked and is done - see the next
+section. Forecast is not: the weather device routes hand-project their payload
+and do not include `status` in the projection, so there is nothing to whitelist
+yet. It needs roughly twenty bytes added server-side first, which is recorded as
+open in the server's own README. **Until that lands, `Forecast.cpp` draws "No
+forecast is available yet" over what may be a failed refresh** - softer than the
+other two, because it asserts nothing about the weather itself, but still a card
+that cannot tell "nothing to report" from "never found out".
+
+The filter trap is the part to carry over verbatim. An un-whitelisted key never
+reaches the parsed document, so adding that read without adding the filter entry
+in the *same* edit compiles, ships, and silently does nothing - which is no
+longer a predicted failure mode but a demonstrated one, and the reason Forecast
+will need the stream to name the parsed value the way the other two now do.
+
+### Aircraft reads `status`, and does not get a fallback
+
+Same defect, same fix, one deliberate difference.
+
+The card now whitelists `status`, derives one `refreshFailed` boolean from it,
+and splits the empty path: `Aircraft::Status::Empty` keeps "No aircraft within N
+mi right now" and is now reachable **only** when the server reports its own
+refresh succeeded, while `RefreshFailed` draws "Couldn't check overhead just
+now" over "The flight data service is not answering right now." and states
+nothing about the sky. The headline names the outcome and the detail names the
+cause. `Stale` leaves the cached sightings on
+screen and tells only the stream, exactly as the listings card does. A new
+`NotConfigured` rests muted rather than claiming an empty sky - this payload has
+no `isConfigured` of its own, so `status` is the only thing that can say so.
+
+**The difference: no `lastRefreshError` fallback.** The listings card reads that
+field's presence when `status` is absent, because it had correct behaviour built
+on the inference and deleting it would regress a shipped card. Aircraft never
+read the field at all - it was on the wire and was never whitelisted - so there
+is nothing to preserve, and adding the read now would newly teach a card to
+treat an operator's prose as a protocol element in the very change that exists
+to stop doing that. It would also pull that prose into the parsed document on a
+card that has never had it there.
+
+The cost is stated rather than hidden: **against a pre-strip server this card
+behaves exactly as it did before, empty-sky claim included.** It becomes correct
+when the server sends `status` and draws nothing worse in the meantime. That is
+the whole of the trade - a transitional benefit declined to avoid adopting the
+pattern being retired.
+
+`RefreshFailed` reads muted, not amber, for the reason the listings card's
+equivalent does: the panel, the network and our server are all fine, and amber
+in a kitchen for a fault nobody in that kitchen can fix teaches its reader to
+ignore amber. And as everywhere else, none of this raises `serviceUnreachable` -
+every `ProviderStatus` value arrives on a well-formed 200 from a server that
+answered.
+
+### One parser, not one per card
+
+`WireStatus` started as an anonymous-namespace enum plus two functions inside
+`Listings.cpp`. Aircraft needed the identical thing and Forecast will be third,
+so it moved to `ProviderStatus.h` instead of being copied.
+
+This is the opposite of what `describeFreshness()` does in three of these same
+files, and the difference is the point. That helper is duplicated because each
+copy reads a different card's unrelated `Result`, and sharing it would mean a
+new file to hold one function. This one touches no `Result` at all - it parses a
+wire vocabulary into a wire vocabulary - and three cards need the *same* answer.
+Copies of a parser are how one card learns about a fifth status value while
+another silently keeps calling it `Unrecognized`, and this is a closed
+vocabulary specifically so that cannot happen. The precedent is
+`Maintenance::failureText()`: one helper, not a conditional in every card.
+
+What deliberately did **not** move is the policy for `Absent`. That is per-card,
+not a property of the vocabulary, and the two callers answer it differently on
+purpose - each at its own call site, each saying why.
+
+## The sixth heap bucket is a wire change, and the reading end is where it breaks
+
+`02d696c` added `Phase::Boot` to `HeapRatchet` and `heapPhaseBootBytes` to the
+telemetry POST. The buckets are still exact and the identity still holds - Boot
+did not create bytes, it took them out of Idle - but this is a **firmware-to-
+server contract change** and it is filed here as one, because the symptom will
+appear on the server and the cause is in the firmware.
+
+`HeapRatchet`'s value is an identity that can catch the instrument being wrong:
+
+```
+sum(buckets) == bootLargestFreeBlockBytes - largestFreeBlock8BitBytes
+```
+
+A reader still summing the five buckets it knows about will now come up short by
+whatever `setup()` cost - which on device 17 was 45,056 bytes of splash decode
+alone, most of the session total. **The identity check will fail, and the
+firmware will be right.** The fix is on the server: the bucket set is six, and
+`heapPhaseBootBytes` is sent first on the wire because it is the one bucket that
+finishes, so everything after it reads as "since the boot cost".
+
+That work is the server's and is tracked there; nothing in this repository can
+or should do it. What this section exists for is the fifteen minutes somebody
+would otherwise spend looking for a firmware bug when the check first goes red.
+
+Old firmware keeps working against a server that knows about six buckets - the
+field is simply absent and the sum comes up short in the other direction, which
+is why the server-side check has to tolerate its absence rather than require it.
+Breaking wire changes are currently permitted on this project (the fleet is not
+in production as of 2026-09-11), so this is recorded as a fact rather than
+negotiated as a compatibility problem.
+
+## CAL can say why now: a boot journal in raw flash, read over USB
+
+**The incident this exists for.** On 2026-09-11 a device was found showing CAL's
+`Update failed / Restart the device to try again.` The only record of it is a
+photograph an operator took. Devices 7 and 19 had installed the identical
+artifact through the identical CAL path minutes earlier, so the binary was
+sound; devices 12 and 17 - the two with SD cards, and the two with badly
+fragmented heaps - did not.
+
+That screen is worse than it looks. `CAL.ino` reaches `haltWithFailure("Update
+failed", ...)` only after `Updater::haveBootableApplication()` has already
+returned false, so the device is not merely failing to update: the install got
+far enough to invalidate the App partition and then failed, leaving nothing to
+fall back to. The unit is inoperable until a human power-cycles it, and if the
+retry fails the same way it stays inoperable. CAL is USB-only. In a household
+that is a site visit.
+
+And **nothing about it is diagnosable.** Every other failure that week was
+diagnosed off `App/Log.cpp`'s stream to `/api/debuglog`. That stream belongs to
+the App, and the App is precisely what CAL failed to reach. The component that
+erases and rewrites the App partition over TLS, and that can leave a unit
+unbootable, was the one component in the system that reported nothing at all.
+No evidence exists for any of: whether the TLS handshake, the download or the
+flash write failed; whether it ran out of contiguous heap the way the App does;
+whether the SHA-256 mismatched; how far it got; or whether the partition was
+erased before or after the failure. Each of those implies a different fix.
+
+**Why CAL cannot simply reuse `App/Log.h`.** The App's logger needs a device
+secret, a synchronised clock, a TLS session and a reachable server. Every one
+of those is a rung on the ladder CAL might have fallen off - a logger whose
+first dependency is the thing that just broke is not a diagnostic. CAL's log
+has to work with no network, no clock, no secret and no heap, and it has to
+still be readable after the boot that wrote it is over. That rules out anything
+remote, and it rules out RAM.
+
+### Where a log survives a brick
+
+Five candidates, and the reasoning matters more than the answer because four of
+them are individually plausible.
+
+**RAM.** Gone on reset, which is the event we are trying to explain. Named only
+so the list is complete.
+
+**RTC slow memory (`RTC_NOINIT_ATTR`).** Survives a software reset and a panic,
+costs no flash write, and correctly does not survive a power cycle. It is also
+already known not to work here: `App/BootDiag.h` records the measurement that
+forced its own restart-cause field out of RTC memory and into NVS. Every restart
+on this device goes App -> CAL -> App, two different binaries with two different
+RTC segment layouts, and device 17 reported `SOFTWARE_RESET + NONE` twice in one
+serial capture because of it. Beyond that, a device found bricked gets unplugged
+and carried to a bench, and a power cycle is the first thing anyone does to it -
+so the one storage that a power cycle erases is the wrong one for this job.
+
+**NVS.** Proven to survive - it is how `updreq` gets from the App to CAL in the
+first place - already open in `Identity.cpp`, and needs no partition change.
+Rejected for the journal on two independent grounds:
+
+- **It shares a 20,480-byte partition with the device secret.** NVS never writes
+  in place: every `putBytes` appends new entries and marks the old ones erased,
+  and a page is reclaimed only by compaction. A 2 KB blob is 65 of the 126
+  entries a 4,096-byte page holds, so rewriting it twice fills a page and forces
+  a compaction. Appending a line per boot stage - twenty-odd writes a boot -
+  would be roughly ten sector erases per boot, and at 100,000 erases per sector
+  that is ~10,000 boots. **The failure mode being instrumented is a device that
+  keeps restarting.** A logger that wears out the partition holding the device
+  secret, fastest in exactly the scenario it was written for, is the logger that
+  bricks the device. That is the one thing this must never do.
+- **The alternative - buffer the boot in RAM and write it to NVS once at the
+  end - throws away the part that matters.** A checkpoint write covers the
+  deliberate terminal states (`haltWithFailure`, the restart in
+  `bootApplication`) and loses everything on a panic, a watchdog reset or a
+  brownout mid-download. The tail of the log is the diagnosis.
+
+**LittleFS (the `spiffs` partition).** Four reasons, any one of which is
+disqualifying:
+
+- It is mounted by `Display::begin()`, which is itself the first rung of the
+  ladder. A journal that needs the display module to have succeeded cannot
+  record the display module failing.
+- That mount is `LittleFS.begin(true)` - format on failure. The journal would be
+  erased precisely when the filesystem is what broke.
+- LittleFS writes allocate. Devices 12 and 17 had badly fragmented heaps, which
+  is a live hypothesis for the incident itself; a logger that needs heap fails in
+  the case it was built for.
+- The partition is not as empty as it looks. `brand.565` is 240x120 RGB565 =
+  57,600 bytes, and `Updater::cacheBrandAssets()` holds `/brand.tmp` and
+  `/brand.565` simultaneously during a refresh - 115,200 bytes of a 196,608-byte
+  partition, before LittleFS metadata.
+
+**The `coredump` partition.** Tempting: 65,536 bytes, and nothing in this
+repository writes it. But something does. The core's own `sdkconfig` for the
+pinned 3.3.11 build carries `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` and
+`CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y`, so panic backtraces are already being
+written there. Those cover the one case the journal structurally cannot - a
+crash that never reaches a log call - so the two diagnostics are complements,
+not competitors, and taking that partition would trade the better evidence for
+the worse.
+
+### What was built: a dedicated 64 KB `callog` partition
+
+Raw flash through `esp_partition_read/write/erase_range`. No filesystem, no
+mount, no heap, no locks, nothing initialised beforehand. It is available on the
+first instruction of `setup()`, before the display, before NVS, before WiFi.
+
+Three properties earn it the partition-table change:
+
+1. **It works when nothing else does.** No allocation on any path, so heap
+   exhaustion cannot stop it; no mount, so a corrupt filesystem cannot stop it;
+   no clock, secret or network, so the whole upper ladder can be broken.
+2. **`esp_partition_write` is bounds-checked against the partition handle.** A
+   cursor bug in the logger physically cannot reach NVS, `factory` or `ota_0`.
+   The containment is enforced by the API, not by the logger being careful.
+3. **The journal is plain ASCII at a fixed flash offset, so it is readable with
+   no firmware cooperation at all.** If CAL will not run - if the panel is dead,
+   if it hangs in `lcd.init()`, if the image is corrupt - the log still comes
+   off the chip with one `esptool read_flash`. That is what "survives a brick"
+   has to mean for a component whose failure *is* the brick.
+
+### The partition table change, and why it is cheaper than it sounds
+
+`partitions.csv` filled 4 MB exactly, so the 64 KB has to come from somewhere.
+It comes from `ota_0`, which has the only real slack in the table.
+
+| Name | Offset | Old size | New size | Change |
+|---|---|---:|---:|---|
+| `nvs` | `0x9000` | 20,480 | 20,480 | - |
+| `otadata` | `0xE000` | 8,192 | 8,192 | - |
+| `factory` | `0x10000` | 1,441,792 | 1,441,792 | **untouched** |
+| `ota_0` | `0x170000` | 2,424,832 | 2,359,296 | -65,536 |
+| `callog` | `0x3B0000` | - | 65,536 | **new** |
+| `spiffs` | `0x3C0000` | 196,608 | 196,608 | - |
+| `coredump` | `0x3F0000` | 65,536 | 65,536 | - |
+
+`factory` is not touched, which is the warning `partitions.csv` has always
+carried and the one that cannot be walked back. `ota_0` keeps 884,336 bytes
+spare against the App's last measured 1,474,960, and 192,512 spare (8.2%) even
+against the 2,166,784-byte application that forced the asymmetric split in the
+first place. Every existing offset is unchanged and the table still fills 4 MB
+exactly.
+
+**No partition's offset moves, and that is the migration story.** A unit already
+in the field is running CAL from `0x10000` and the App from `0x170000`, and both
+stay exactly where they are. Bringing an existing unit onto the new table is
+therefore a table-only write - `esptool write_flash 0x8000
+CAL.ino.partitions.bin` - which leaves `factory`, `ota_0`, `nvs`, `otadata` and
+`spiffs` byte-for-byte intact. The device keeps its secret, its remembered
+networks and its installed App, and gains a journal.
+
+**And a unit that is never reflashed is not broken by this.** `Journal::begin()`
+looks the partition up by name; on an old table it is simply absent, the journal
+disables itself, prints one line saying so, and every subsequent call is a
+Serial-only no-op. New CAL on an old table behaves exactly like old CAL plus
+better serial output. There is no flag day.
+
+### The ring: one sector per boot, oldest overwritten
+
+65,536 bytes is sixteen 4,096-byte flash sectors - the erase unit - and **one
+boot writes exactly one sector.** The sector opens with a 32-byte header,
+`CALJRNL1 boot=%010lu`; the remaining 4,064 bytes are the boot's log lines, of
+which the last 64 are held back for the truncation marker below, leaving 4,000
+bytes of ordinary logging. At a typical 70 bytes a line that is a little under
+sixty lines, which comfortably covers a verbose boot including a full download.
+At boot, `Journal::begin()` reads the 32-byte header of all sixteen sectors,
+takes the highest sequence number it finds, erases the sector after it, and
+writes the next header. Sixteen boots of history, and finding the write cursor
+costs 512 bytes of flash reads.
+
+One sector per boot is not the densest possible layout - a short healthy boot
+spends a whole sector on four lines - and that is a deliberate trade for having
+no partial-sector resume logic, no cross-sector records, and exactly one erase
+per boot at a known moment. In the module that has to work when nothing else
+does, simplicity is the feature.
+
+**It overwrites the oldest, and the argument is worth making because the
+opposite intuition is a good one.** "The first failure is the interesting one"
+is true *within an incident*, and false *across a device's life*. A
+stop-when-full journal on a unit that boots in a lab in September and bricks in
+a household the following May would have stopped recording in September: sixteen
+successful factory boots, and nothing whatsoever about May. The device arrives
+at the bench with a log that went stale before it left the building. The most
+recent boot is the one whose halt screen is on the panel, and that is the one
+that has to be there.
+
+The within-an-incident case is covered by the ring being deeper than one boot.
+A unit that bricks and gets power-cycled five times by a frustrated operator has
+consumed five of sixteen slots; the boot that first failed is still on the chip.
+It is genuinely possible to lose it - seventeen restarts would - and the honest
+mitigation is that **CAL halts rather than reboot-loops** (a deliberate,
+long-standing decision: `haltWithFailure()` sits in a `delay(1000)` loop and
+never restarts itself), so CAL does not generate restarts on its own. The
+sixteen slots are consumed by human power cycles, not by a loop.
+
+The per-boot cap falls out of the same layout for free: a boot cannot write more
+than its own sector, so no single pathological boot can evict the history. On
+hitting the cap the journal writes one `[journal] sector full - the rest of this
+boot is on serial only` line and stops writing for the rest of that boot,
+counting what it dropped so a later dump can say how much is missing. The 64
+bytes that line needs are **reserved up front**, which is the reason the write
+limit is 4,032 rather than the full 4,096: a log that simply stops mid-boot
+reads as though CAL stopped there too, and that is a worse failure than losing
+the tail. Serial output continues unaffected. It never wraps within a sector,
+never spills into the next, and never erases a second sector.
+
+### How it is read, exactly
+
+**At the bench, with the device still able to run CAL.** Plug in USB, open a
+serial monitor at 115200, press the RST button:
+
+```
+arduino-cli monitor -p COM5 -c baudrate=115200
+```
+
+The first thing CAL prints, before the display is even initialised, is the
+**whole of the previous boot** - the one that failed. Then the current boot
+narrates itself live. Nothing is typed.
+
+**To see all sixteen boots**, press `d` in the monitor at any point where CAL is
+sitting still - the `haltWithFailure()` screen, the enrollment wait, or the
+post-handover `loop()`. `?` prints the one-line key. This is also the path for
+an operator who attached the cable *after* the failure: it avoids a power cycle,
+which would both consume a ring slot and possibly disturb the state being
+examined.
+
+**If CAL will not run at all**, the journal comes off the chip directly, with no
+firmware involvement:
+
+```
+esptool --chip esp32 --port COM5 --baud 921600 read_flash 0x3B0000 0x10000 callog.bin
+```
+
+`callog.bin` is plain ASCII padded with `0xFF`; open it in any text editor, or
+`strings callog.bin`. The sectors are in ring order rather than time order - the
+`boot=` numbers in the headers sort them.
+
+**Why the auto-dump is one boot and not sixteen.** The boot ladder's first
+documented requirement is that something appears on the panel within about two
+seconds of power, or the device reads as dead and gets unplugged. 115200 8N1 is
+11,520 bytes a second, so sixteen full sectors is up to 5.7 seconds and would
+break that outright. One sector is at most 4,096 bytes - 356 ms worst case, and
+nearer 180 ms for a typical boot - which fits the budget with room to spare, and
+the boot that just failed is the one worth spending it on. Everything else is
+one keypress away.
+
+It runs *before* `Display::begin()` deliberately, so that a hang inside
+`lcd.init()` or a `LittleFS` format still yields the previous boot's complete
+record. Adding `Journal::begin()`'s own cost - 512 bytes of header reads, one
+sector erase (~25-45 ms) and a 32-byte write - the whole pre-display journal
+budget is under 400 ms worst case.
+
+### What is logged
+
+The real ladder in `CAL.ino`'s `setup()`, rung by rung, with the branches that
+were *not* taken - this project's standing verbose-logging rule, and the reason
+"did not contact the server because an App is installed and no update was
+requested" is a line rather than a silence.
+
+| Stage | Logged |
+|---|---|
+| Boot banner | `esp_reset_reason()`, free heap, largest free 8-bit block, journal sector and sequence |
+| `Display::begin()` | Brand splash used or neutral fallback, and which |
+| `Identity::begin()` | Whether a secret is held, remembered network count, installed App version, update-requested and boot-attempt counters |
+| `bootHoldRequested()` | Not held / released early / WiFi tier / identity tier, and what each tier then did |
+| `mustContactServer()` | The decision **and both inputs**, plus `haveBootableApplication()`'s own three (partition present, installed version non-empty, boot attempts vs. the cap) |
+| Handover | Boot-attempt counter before and after, `esp_ota_set_boot_partition()` result, then the restart |
+| `joinStoredNetwork()` | Scan count, which remembered SSIDs were seen and at what RSSI, which were not, each join attempt and its outcome, the blind-retry fallback and why it did or did not run |
+| `Provisioning::run()` | Portal raised, AP name, credentials accepted or abandoned at the 15-minute timeout |
+| `synchroniseTime()` | The epoch obtained, or the timeout, and the plausibility check that rejected it |
+| `fetchDiscovery()` | Heap before TLS, `Tls::configure()` result, HTTP status (negative values are `HTTPC_ERROR_*`), JSON parse result, every path the document resolved to |
+| `awaitKeyAssignment()` | Enrollment state **on change only**, plus the backoff interval |
+| `cacheBrandAssets()` | Skipped-because-no-path, or the byte count written |
+| `fetchManifest()` | `ok` / `isConfigured` / version / size / SHA prefix |
+| The install decision | All three inputs, so "already current" is distinguishable from "server said nothing is configured" |
+| `installApplication()` | See below |
+| `haltWithFailure()` | The headline and detail actually put on the panel |
+
+`installApplication()` is the whole point, so it is instrumented against the
+specific questions the incident could not answer:
+
+- Target partition offset and size, and the manifest size checked against it.
+- **Free heap and largest free 8-bit block before TLS, after the response
+  arrives, and immediately before `Update.begin()`** - the contiguous-block
+  figure, not just free bytes, because `App/HeapRatchet` established that the
+  free figure is the misleading one.
+- A line stating, in those words, that the installed application **is about to
+  be invalidated**, written immediately before `Update.begin()` erases the
+  target. That single line converts the incident's central unknown - was the
+  partition erased before or after the failure - into a recorded fact.
+- `Update.begin()` / `Update.write()` / `Update.end()` failures each carry
+  `Update.errorString()`.
+- Download progress every 10%, with bytes written, total expected, and free heap
+  at that moment - so "download aborted at 812 KB of 1445 KB" is a thing the log
+  can say.
+- Both SHA-256 digests on a mismatch, and the byte count on a short read.
+
+### Cost
+
+Flash and static RAM, measured on the pinned toolchain rather than estimated -
+`arduino-cli`'s own percentage is against the generic `min_spiffs` scheme and is
+the wrong ceiling, so these are against `factory`'s real 1,441,792 bytes from
+`partitions.csv`.
+
+Both figures below were measured the same way on the same machine: a clean
+compile of `94cd5ae` for the before column, and a compile of this change for the
+after column, `arduino-cli 1.5.1` / `esp32:esp32@3.3.11`.
+
+| | Before (`94cd5ae`) | After | Delta |
+|---|---:|---:|---:|
+| `arduino-cli` "Sketch uses" | 1,323,599 | 1,337,207 | **+13,608** |
+| flashable `CAL.ino.bin` on disk | 1,323,744 | 1,337,360 | +13,616 |
+| against `factory`'s real 1,441,792 | 91.8% | **92.8%** | +1.0 pt |
+| headroom remaining in `factory` | 118,048 | **104,432** | -13,616 |
+| static RAM (`.data` + `.bss`) | 51,524 | 52,116 | **+592** |
+
+`arduino-cli`'s own line reports 68% against 1,966,080 bytes. That is the
+generic `min_spiffs` scheme and it is the wrong ceiling; the figures above are
+against `factory` from `partitions.csv`, which is the one that can actually
+strand hardware.
+
+**Thirteen and a half KB of flash for the whole pass**, of which `Journal.cpp`
+itself is the smaller half — most of it is the roughly eighty new call sites'
+format strings and their arguments, which is the cost of the verbose-logging
+rule rather than of the mechanism. `factory` keeps 104,432 bytes spare, 7.2% of
+the partition. That is tighter than the 8.2% it had and it is worth saying
+plainly: `factory` is the partition that cannot be resized on a unit already
+flashed, and this pass spent an eighth of its remaining headroom.
+
+**592 bytes of static RAM**, against the ~610 the design predicted. It is the
+module's own buffers and nothing else: a 160-byte format scratch, a 168-byte
+flash record buffer (the line plus its padding to a 4-byte write boundary), a
+256-byte read buffer for the dump, and about two dozen bytes of cursor state.
+Nothing is allocated at any point, on any path, which is the property that makes
+the module usable on a device whose heap is the problem — and the reason the
+free-heap figure at runtime is unchanged rather than merely nearly unchanged.
+
+Flash storage cost is the 65,536-byte partition, taken from `ota_0`'s slack as
+set out above.
+
+**Verified against the binary, not inferred.** The partition table decoded out
+of the compiled `CAL.ino.partitions.bin` — the same byte-for-byte check the
+*Building* section describes, rather than trusting the CSV — reads:
+
+```
+factory,app,factory,0x10000,1408K
+ota_0,app,ota_0,0x170000,2304K
+callog,data,153,0x3b0000,64K
+spiffs,data,spiffs,0x3c0000,192K
+coredump,data,coredump,0x3f0000,64K
+```
+
+`153` is `0x99`. `1408K` is `factory` unchanged, `2304K` is `ota_0` after
+shrinking. `grep` on the image finds `CALJRNL1` and the journal's own literals,
+so the module is linked in and not discarded.
+
+### What a failure inside the logger does
+
+A logger that can brick the device is worse than no logger, so the containment
+is spelled out rather than implied:
+
+- **Serial is written first, unconditionally, on every call**, before any flash
+  work and regardless of whether the journal is enabled. This is the same rule
+  `App/Log.h` states for the same reason: a broken journal must never cost
+  anyone the USB view they had before it existed.
+- **One error disables it for the rest of the boot.** Every
+  `esp_partition_*` return is checked; the first non-`ESP_OK` sets the module
+  disabled, prints one line on Serial saying which call failed, and every later
+  call is a Serial-only no-op. It never retries, never loops, never escalates.
+- **Absent, undersized or misaligned partition is a normal state, not an
+  error.** Old table, no journal, boot continues.
+- **No allocation, anywhere.** No `String`, no `malloc`, no `new`. Fixed static
+  buffers only.
+- **No reentrancy.** Nothing the journal calls logs, so there is no path back
+  into it. It is called only from `setup()` and `loop()` on the Arduino task -
+  never from an ISR, never from a second task.
+- **Bounded work per boot**: exactly one sector erase, at most 4,064 bytes
+  written, at most one write per log line, every line length-capped.
+- **It touches nothing else.** No NVS, no LittleFS, no network, no display. It
+  cannot corrupt a resource another module depends on, and
+  `esp_partition_write`'s bounds check means a cursor bug cannot escape its own
+  65,536 bytes.
+- **It never halts, never restarts, and never changes control flow.** Every
+  entry point returns `void` and no caller branches on it.
+
+### Deliberately not built here
+
+The suggestion-box item lists four pieces of work. This is the second one, and
+naming the other three as *not done* is more useful than leaving them implied:
+
+1. **Persisting a failure reason in NVS for the App to report on the next
+   boot.** Genuinely complementary - it is the only one of the four that gets a
+   diagnosis off the device without anyone driving out to it - but it is a
+   firmware-to-server change spanning CAL, `App/Telemetry` and the server's
+   ingestion, not part of a CAL logging pass. The journal makes it *easier*: the
+   text the App would report already exists on flash.
+2. **Not invalidating the running App until the new image is verified.** This
+   prevents the brick rather than explaining it, and is the better fix. It needs
+   a second OTA slot, and `partitions.csv` cannot give one: the App is 1,474,960
+   bytes and two equal app slots on 4 MB is the exact constraint the asymmetric
+   layout exists to escape. It is a real piece of design work, not an
+   adjustment.
+3. **A bounded automatic retry before the halt screen.** Independently sensible
+   and small. Left out on purpose: it changes CAL's behaviour, and this pass
+   deliberately changes only what CAL *says*. Instrumenting a component and
+   altering it in the same unverified change would make the first hardware
+   session unable to tell which change caused what.
+
+### UNVERIFIED ON HARDWARE
+
+Nothing in `Journal.cpp` has run on a device. The owner chose to build this
+ahead of a bench session knowing that; it is recorded here because "it compiles"
+is not "it works", and this is the subsystem whose entire job is to function
+after everything else has failed.
+
+**What the compile did establish**, and it is a short list: the code builds
+against the pinned toolchain; the sizes above are real; `gen_esp32part` accepts
+the `0x99` subtype and the new offsets, and the table decoded back out of
+`CAL.ino.partitions.bin` is byte-for-byte the intended one; and `CALJRNL1` plus
+the journal's literals are present in the image, so the module is linked in
+rather than discarded. That is the whole of it.
+
+**Specifically unverified**, all of it runtime:
+
+- That `esp_partition_find_first` locates the partition **by name** with
+  `ESP_PARTITION_SUBTYPE_ANY` at run time. The table being correct on disk and
+  the lookup succeeding on the chip are two different claims, and only the first
+  has been checked.
+- That `esp_partition_erase_range` and the 4-byte-aligned
+  `esp_partition_write`s behave as documented from the Arduino task, especially
+  with the display's SPI activity in the same boot. Every write in this module
+  is padded to a 4-byte multiple specifically to stay inside the strictest
+  documented contract, but that is a precaution, not a measurement.
+- That the header scan picks the right sector after an unclean shutdown, and
+  that the ring wraps at sixteen without a gap or a repeat.
+- That the auto-dump genuinely fits inside the two-second splash budget on the
+  real panel. The 356 ms is arithmetic from the baud rate, not a stopwatch.
+- That `d` is readable at 115200 while LovyanGFX is driving the bus, and that
+  `Journal::poll()` is reached often enough to feel responsive.
+- Every single log line's content. A format specifier mismatch that
+  `__attribute__((format))` does not catch, a `c_str()` on a `String` that was
+  never populated, an `%s` fed a null - none of that shows up in a compile.
+
+`TEST_PLAN.md` section 6 carries the bench procedure for each of these, and it
+is the procedure - not this section - that decides whether any of it is true.

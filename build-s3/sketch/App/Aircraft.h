@@ -1,0 +1,231 @@
+#line 1 "C:\\Users\\Administrator\\Documents\\CAL\\App\\Aircraft.h"
+#pragma once
+
+#include <Arduino.h>
+
+/// Live aircraft overhead - the second content type this build renders,
+/// sitting beside Weather.h as its own module per Weather.h's own remarks on
+/// why cards get sibling files rather than growing into one another. Like
+/// Weather, the .cpp registers its own card descriptor with the scheduler
+/// (see Cards.h) rather than being named anywhere above it. It registers as
+/// a *list* card - see the block at the bottom of Aircraft.cpp for why that
+/// is the honest description even while the server hands over only the
+/// nearest sighting.
+///
+/// CYD-Dickey's Aircraft.cpp/Aircraft.h talk to api.adsb.lol directly from
+/// the device and additionally resolve, per callsign, an airline name/logo
+/// (Airlines.h, user-managed on LittleFS) and a departure/arrival route
+/// (Route.h, via hexdb.io). That used to have no equivalent here; the server
+/// now does the same resolution fleet-wide instead of per-device (see
+/// DiscoverAroundMe's "Give the aircraft card its airline, logo and route
+/// back" - the airline directory, hexdb.io route/airport cache, and seven new
+/// AircraftSighting fields), so this module and Display::showAircraftCard()
+/// consume them the same way this card already consumed the original five.
+///
+/// All seven new fields are optional on the wire and are read that way here -
+/// see Sighting's own remarks below for what an absent value of each one
+/// means and what this card does about it. None of them are ever required
+/// for the original five-field card to keep working exactly as it always
+/// has: a server old enough to predate this enrichment simply never sends
+/// them, ArduinoJson's `| ""` idiom reads that as empty, and every draw path
+/// below already treats empty as "fall back to the old behaviour".
+namespace Aircraft {
+
+enum class Status {
+  Ok,
+  /// The fetch succeeded, the server's own refresh succeeded, and nothing is
+  /// within radius right now - not an error, and a real statement about the
+  /// sky. Reachable ONLY when `status` says the refresh worked; see
+  /// fetchMine(). An empty list on its own does not license this value.
+  Empty,
+  /// The fetch succeeded and the server's own refresh from the upstream feed
+  /// did not, with nothing cached behind it - so the list is empty because the
+  /// question failed, not because the sky is. Distinct from `Empty` because
+  /// those are two different facts and this card used to tell them apart by
+  /// nothing at all: "No aircraft within 10 mi right now" was drawn over a
+  /// question that was never answered. Mirrors Listings::Status::RefreshFailed
+  /// exactly, for the reasons in that card's own remarks - the sky is the
+  /// harder case, because an empty one is plausible far more often than an
+  /// empty housing market and so the false claim is far less likely to be
+  /// questioned by whoever reads it.
+  RefreshFailed,
+  /// No provider credential on file, so nothing was ever attempted - a
+  /// first-class resting state, not a failure, and NOT an empty sky. Read from
+  /// `status == "NotConfigured"`; this card has no `isConfigured` field of its
+  /// own the way the listings payload does. Drawn muted, alongside the two
+  /// refusals below rather than as an error - the panel, the network and our
+  /// server are all fine, and what is missing is something only an
+  /// administrator can restore.
+  NotConfigured,
+  /// The server has no position for this display: nobody owns it, or whoever
+  /// does has no home address on file, and the connecting address resolved to
+  /// nothing either. A resting state, not a fault - every part of the chain is
+  /// working and what is missing is an address only the account holder can add.
+  NoPosition,
+  NotActivated,      // ContentGateRefusal.DeviceNotActivated
+  ProviderDisabled,  // ContentGateRefusal.ProviderDisabled
+  AuthError,         // the device's own secret was rejected
+  NetworkError,      // couldn't reach the service, or the response made no sense
+};
+
+/// One aircraft, trimmed to what Display::showAircraftCard() actually draws -
+/// mirrors AircraftSighting on the server (DiscoverAroundMe.Providers.Data).
+struct Sighting {
+  String callsign;
+  int altitudeFeet = 0;
+  double speedKnots = 0;
+  double headingDegrees = 0;
+  double distanceMiles = 0;
+
+  /// The matched directory row's code - a real ICAO prefix, or the
+  /// server's two non-ICAO catch-alls "PVT" (general aviation, a tail
+  /// number rather than an airline prefix) and "OTH" (a real airline
+  /// prefix the directory doesn't have a row for). Not drawn directly by
+  /// this card; airlineName below is what appears on screen; this exists so
+  /// firmware logic could branch on it later without needing to add a wire
+  /// field for that. Empty only against firmware old enough to predate this
+  /// field entirely - a server that has it always sends one of the three.
+  /// Since 2026-10-23 that is the reason this field earns its place: the
+  /// server withholds airlineName for an "OTH" match, so this code is the
+  /// only thing separating "a real carrier the directory lacks" from "a
+  /// server that sends no airline at all".
+  String airlineCode;
+  /// The directory row's display name, already chosen to be card-width by
+  /// whoever maintains the directory server-side - drawn verbatim, never
+  /// wrapped or re-derived here.
+  ///
+  /// Empty means one of two things, and this comment said "exactly one"
+  /// until 2026-10-23. Either the server predates the field, or it matched
+  /// the "OTH" catch-all and deliberately withheld the name, because "Other"
+  /// describes a gap in the directory rather than anything about the flight.
+  /// Both draw the callsign as the headline, which is why that server change
+  /// needed no firmware release. It still does NOT mean "general aviation":
+  /// PVT keeps its name and sends it.
+  ///
+  /// airlineCode separates the two - "OTH" for the withheld case, empty for
+  /// the old-server case.
+  String airlineName;
+  /// An Assets catalog id, fetched the same way Graphic.cpp fetches its own
+  /// configured picture - see Aircraft.cpp's cardFetch(). Empty means no
+  /// logo is on file for this row, which is the ordinary case for any
+  /// airline nobody has uploaded one for yet, not a fetch failure.
+  String airlineLogoAssetId;
+  /// ICAO airport codes ("KRDU"). Either code can be empty independently:
+  /// originCode set with destinationCode empty is a filed departure with no
+  /// filed arrival (common for general aviation and some regional traffic);
+  /// both empty is "hexdb has nothing on file for this callsign", itself the
+  /// common case for GA and short-hop regional flights, not a lookup
+  /// failure.
+  String originCode;
+  String destinationCode;
+  /// Display names ("Raleigh-Durham Intl, NC") for the same two airports,
+  /// already shortened and suffixed server-side (AirportNameFormatter) so
+  /// this firmware never has to know a state abbreviation or trim
+  /// "International Airport" itself. Empty independently of its own code
+  /// field for two different reasons: a server old enough to predate these
+  /// two fields entirely never sends them (the 6-month compatibility case,
+  /// same as every other optional aircraft field), or hexdb has a route but
+  /// no name on file for that particular airport even though it has the
+  /// code (see AircraftSighting.cs's own remarks). Display::showAircraftCard()
+  /// prefers the name and falls back to the code per side, independently -
+  /// not as an all-or-nothing pair - so a route with one resolved name and
+  /// one bare code still shows the resolved half as a name.
+  String originName;
+  String destinationName;
+
+  /// Whether the provider classifies this as a military aircraft.
+  ///
+  /// False covers two things and the card treats them the same: an aircraft reported as
+  /// civil, and one the provider has no entry for. It is also what a server older than
+  /// this field gives, since an absent key reads as false - so a device talking to one
+  /// draws exactly the card it drew before, which is the compatibility case every other
+  /// optional field here is written for.
+  bool isMilitary = false;
+
+  /// The service it belongs to ("U.S. Navy"), or "Military" when the callsign says only
+  /// that it is one. Resolved server-side from the provider's own classification bit, the
+  /// airframe's hex id and a curated callsign-prefix table - see MilitaryAircraftDirectory.
+  /// Empty on every civil aircraft, so this field alone is enough for the card to decide
+  /// which heading to draw.
+  String militaryBranch;
+
+  /// The airframe in words ("MH-60 Seahawk"), or the bare ICAO type designator for a type
+  /// the directory does not spell out. Empty when the provider reported no type, which is
+  /// ordinary: the branch is still worth drawing without it.
+  String aircraftType;
+
+  /// The tail number ("166562"), where the provider has one. Military sightings only - a
+  /// civil aircraft is named by its airline, which this card already draws.
+  String registration;
+};
+
+struct Result {
+  Status status = Status::NetworkError;
+  /// The nearest aircraft in range - valid only when status == Ok. The
+  /// server already returns its Aircraft list sorted by distance ascending
+  /// (MyAircraftService.RefreshCoreAsync's OrderBy), so this is simply
+  /// element 0; CAL shows one featured aircraft per card the same way it
+  /// shows one featured forecast period, rather than cycling through the
+  /// full list CYD-Dickey's touch-driven card carousel does (this board has
+  /// no touch input wired up at all - see App.ino).
+  Sighting nearest;
+  /// The owner's configured tracking radius, echoed back by the server on
+  /// every response. Kept because "how interesting is this sighting" only
+  /// means anything relative to it - a plane 2 miles out is practically
+  /// overhead when the radius is 10 and unremarkable when it is 30. Same
+  /// reasoning as CYD-Dickey scaling its own overhead threshold off
+  /// aircraftRadiusMiles rather than hardcoding a mile count.
+  double radiusMiles = 10.0;
+  /// How close the server considers worth the longer dwell, in statute miles.
+  /// Zero when the server does not send it, which is the signal to fall back
+  /// to the old rule - a fifth of radiusMiles - in cardIsNotable().
+  ///
+  /// It exists because that derivation made one number answer two questions.
+  /// The server widened its search radius on 2026-10-23 and this threshold
+  /// moved with it, so the card took the long dwell far more often and the
+  /// whole rotation lengthened, which nobody chose.
+  double notableDistanceMiles = 0.0;
+  /// Set on every non-Ok status, including Empty - what to put on screen.
+  ///
+  /// Always the plain, honest text, even during a declared maintenance window -
+  /// the window is applied on the way to the screen by
+  /// Maintenance::failureText() at draw time, never baked in here. Identical
+  /// contract, for identical reasons, to Forecast::Result::message; see that
+  /// field's own remarks and Maintenance.h.
+  String message;
+
+  /// Whether this failure is one the words "cannot reach the service" were being
+  /// used for. True at exactly the three sites that set `message` to "Cannot
+  /// reach the aircraft service." and nowhere else - notably NOT at the TLS-setup
+  /// failure, which is a fault on this device's own side of the wire that a
+  /// planned server outage does not explain. Identical contract, for identical
+  /// reasons, to Forecast::Result::serviceUnreachable; see that field's own
+  /// remarks. Read only by Maintenance::failureText(); when no window is in force
+  /// it changes nothing at all.
+  bool serviceUnreachable = false;
+};
+
+/// GETs /api/myaircraft/mine with the device's own secret and no id anywhere
+/// in the request - identical authentication to Listings::fetchMine() and
+/// every other request the App makes (see MyAircraftEndpoints.cs's remarks,
+/// which mirror MyWeatherEndpoints.cs's own for why "mine" replaced an
+/// id-bearing route).
+Result fetchMine();
+
+/// Hands back the airline logo's RAM buffer, for the same trade
+/// Graphic::releaseRamBuffers() makes and on the same call path.
+///
+/// A device with no SD card holds its logo in a heap buffer for as long as the
+/// airline overhead stays the same, because there is nowhere else to keep it.
+/// That is a few thousand bytes against a graphic's ten to twenty, and it is
+/// still worth reclaiming on the check-in failure path: a new TLS session needs
+/// 16,717 bytes contiguous for each of two record buffers, and what denies it
+/// is not the size of a block but where the block sits. A small allocation in
+/// the middle of a large hole costs the whole hole.
+///
+/// Costs nothing on a device with a working SD card, which never fills the
+/// buffer - one null check and no log output. The logo comes back on the next
+/// successful fetch, exactly as a graphic's picture does.
+void releaseRamBuffer();
+
+}  // namespace Aircraft

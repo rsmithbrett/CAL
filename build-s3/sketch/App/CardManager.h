@@ -1,0 +1,134 @@
+#line 1 "C:\\Users\\Administrator\\Documents\\CAL\\App\\CardManager.h"
+#pragma once
+
+#include <Arduino.h>
+
+#include "Cards.h"
+
+/// The scheduler: which card is on screen, for how long, and what a tap does.
+///
+/// Ported from CYD-Dickey's Screen::Ready rotation (see its computeNextCard(),
+/// advanceCard(), rewindCard() and the long design comment above them at
+/// ~line 795), with its hardcoded four-slot enum replaced by the data-driven
+/// registry in Cards.h. Everything else about the design is carried over
+/// deliberately, including the two mistakes that project records having
+/// corrected:
+///
+/// - **Interstitials interleave, they do not take a slot.** A singleton card
+///   shows "after every N other cards", not as one fixed position in a
+///   rotation. With a fixed slot, a device tracking a dozen list items showed
+///   its singletons proportionally less often - once every couple of minutes,
+///   easy to miss entirely. That is a recorded observation from a running
+///   device, not a hypothetical.
+/// - **Interstitial counters are independent.** An earlier CYD-Dickey version
+///   forced its QR card to always follow its splash as a fixed pair; that was
+///   corrected to two separate schedules. Here every card carries its own
+///   `cardsSince` counter (a struct field, not a named global), all of them
+///   tick on every computed card, and the first to exceed its own
+///   `interleaveEvery` wins - ties broken by `order`, lowest first.
+/// - **Forward and reverse share one history, not two code paths.** Every
+///   genuinely-new card is recorded in a 24-entry ring as it is first shown.
+///   Rewinding walks the cursor back and replays recorded entries exactly.
+///   Advancing after a rewind replays *forward* through that same recorded
+///   stretch rather than recomputing - recomputing could put a different card
+///   in a position the user just stepped past, which makes "which card is
+///   where" depend on which direction you are travelling. Only at the
+///   frontier does advancing compute something new.
+///
+/// Navigation never fetches. A rewind is a pure redraw of state the card
+/// already holds; refetching would mean stepping back could show you
+/// something you never saw going forward. Fetching happens only on this
+/// module's own refresh timer.
+///
+/// **UNVERIFIED ON HARDWARE, and unverifiable by test.** This firmware has
+/// zero automated tests and no way to get them. Everything below is verified
+/// by a clean compile and by reading it against the prior art it was ported
+/// from - nothing more. The nearest thing to a test for the intended
+/// behaviour is the server-side DeviceSimulator's rendered preview of a
+/// policy's rotation.
+namespace CardManager {
+
+/// Fetches the first card that has anything to fetch and draws it. Call once
+/// from setup(), after every card module has registered itself.
+void begin();
+
+/// Call once per loop() iteration. Runs the dwell timer (subject to the
+/// manual-nav hold), services touch, and refreshes at most one due card per
+/// call - so a sweep never spends several HTTP round trips inside a single
+/// call with touch and the dwell timer unserviced for the whole stretch.
+void poll();
+
+/// Samples the touch panel once and handles a tap if there was one - the touch
+/// half of poll() above, on its own.
+///
+/// **Why this is separately callable.** Touch used to be sampled exactly once
+/// per loop() iteration, and loop() does not run at a steady rate: a check-in
+/// is a synchronous TLS handshake plus request and response, and a card
+/// refresh is a synchronous HTTPS fetch, so the gap between two touch samples
+/// is occasionally seconds rather than the 50ms the loop's own pacing
+/// suggests. A finger is on the glass for a fraction of that, so a tap landing
+/// in one of those stretches was simply never seen - which is the reported
+/// symptom of advance/rewind feeling unresponsive and presses going missing.
+///
+/// Calling this from inside loop()'s pacing wait raises the sample rate
+/// BETWEEN blocking operations from once per 50ms to once per 5ms. It does
+/// nothing for sampling DURING one - that needs the network work off this path
+/// entirely, which is a much larger change - so loop() also measures how long
+/// its blocking phases actually take, to establish how much of the problem
+/// each half really is before anyone rewrites the request path over a guess.
+///
+/// Safe to call as often as you like: Touch::poll() does its own debouncing
+/// and returns false when there is nothing new.
+void pollTouch();
+
+/// Reads the physical button on GPIO27 and, on a debounced press, puts the
+/// clock card up.
+///
+/// GPIO27 is the one free pin on this board - GPIO0 carries CAL's WiFi-reset
+/// gesture, GPIO34 is the onboard LDR and GPIO35 is the PIR - and PowerProbe.h
+/// names it free and deliberately does not probe it. Wired to ground through
+/// the button and read with INPUT_PULLUP, so idle is HIGH.
+///
+/// Safe to call as often as you like, the same as pollTouch(): it debounces
+/// internally and is edge-triggered, so a held or stuck button is one press
+/// rather than one per loop iteration.
+void pollActionButton();
+
+/// Applies a cardPolicy received on check-in. A policy with `present == false`
+/// changes nothing - "the server sent no policy" means keep using whatever is
+/// already in force, never "blank the screen".
+///
+/// A policy entry naming a card this firmware does not have is ignored rather
+/// than treated as an error: that is what lets the server add a card type
+/// before firmware supports it, and what lets firmware up to six months old
+/// keep working against a newer server. A registered card the policy does
+/// *not* mention is taken out of the rotation - omitting a card is how the
+/// server turns one off.
+void applyPolicy(const Cards::Policy& policy);
+
+/// How many of the last-applied policy's entries named a card id this
+/// firmware actually registers - the same number applyPolicy() already logs
+/// as "[cards] policy applied (N of M entries known...)", kept here so
+/// App.ino's check-in path can report it back to the server instead of it
+/// only ever existing in the remote debug stream. Zero before the first
+/// policy this device has ever applied.
+uint8_t lastPolicyKnownCount();
+
+/// The total entry count the last-applied policy carried - the "M" half of
+/// the same log line lastPolicyKnownCount() reports the "N" half of. Zero
+/// before the first policy this device has ever applied.
+uint8_t lastPolicyTotalCount();
+
+/// Up to four of the last-applied policy's unrecognised card ids, comma-
+/// separated - empty if every entry matched, or if no policy has been
+/// applied yet. Capped rather than exhaustive: this rides the check-in
+/// request body, and naming a handful is enough for an operator to
+/// recognise the mistake without this becoming an unbounded field.
+String lastPolicyUnknownIds();
+
+/// Redraws whatever is currently showing, without advancing. Used when
+/// something outside the rotation changed what the screen should look like
+/// (the day/night theme, a new set of action buttons).
+void redraw();
+
+}  // namespace CardManager

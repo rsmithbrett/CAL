@@ -1,0 +1,1104 @@
+#line 1 "C:\\Users\\Administrator\\Documents\\CAL\\App\\Display.h"
+#pragma once
+
+#include <Arduino.h>
+#include <time.h>  // time_t, for describeAnswerAge() below - the same explicit
+                   // include Sports.h already carries rather than relying on
+                   // Arduino.h to drag it in.
+
+/// Everything the App draws.
+///
+/// Unlike CAL's Display, this one renders actual product content (the weather
+/// card) alongside the same boot-ladder status/failure screens CAL uses -
+/// WifiJoin::joinStoredNetwork() calls showStatus exactly as CAL's own
+/// Provisioning module does, so the two modules' expectations of Display's
+/// surface deliberately match.
+namespace Display {
+
+/// Which way round this display's panel is mounted.
+///
+/// <para>Landscape is the default and means it for two different reasons: it is
+/// what every fielded display does, and it is what an absent or unrecognised
+/// setting resolves to. There is no third state - see
+/// CheckInResponse.DisplayOrientation, which carries no value at all for a
+/// landscape display rather than carrying the word.</para>
+enum class Orientation : uint8_t {
+  Landscape,
+  Portrait,
+};
+
+/// Brings the panel up the way round this display is mounted.
+///
+/// <para>The orientation is settled here and not revisited: every layout in
+/// Display.cpp reads a viewport written during this call, and a panel cannot
+/// re-lay out the card it is in the middle of drawing. Changing the setting
+/// restarts the display, which takes a few seconds and is what the editor tells
+/// the person changing it.</para>
+///
+/// <para>Called before any orientation has been received from the server, on
+/// the first boot of a new display and on every boot before the first check-in,
+/// so the default has to be the safe one.</para>
+void begin(Orientation orientation = Orientation::Landscape);
+
+/// Says which way round this panel came up and what viewport the layouts are
+/// working against, on the debug stream.
+///
+/// <para>Exists because Log::line() only reaches the ring when streaming is
+/// on, and streaming is only turned on by a check-in response - so anything
+/// begin() says is Serial-only and needs a cable to read. The caller is
+/// App.ino, immediately after Log::setStreamingEnabled().</para>
+/// The panel this display is drawing on, after any rotation begin() applied.
+///
+/// <para>Read rather than assumed: a caller that needs to know the shape of the
+/// glass - Touch, sizing its navigation strips - must not carry its own copy of
+/// 320. That duplicate is what would make a rotated display draw correctly and
+/// navigate wrongly.</para>
+int screenWidth();
+int screenHeight();
+
+/// The orientation this display came up in last time it was told one, from NVS.
+///
+/// <para>Read at boot, before any check-in has happened, because a display that
+/// cannot reach the server still has to come up the right way round. Landscape
+/// when nothing has ever been stored, which is every display until somebody
+/// turns one.</para>
+Orientation storedOrientation();
+
+/// Stores the orientation the server resolved, and says whether it changed.
+///
+/// <para>True means a restart is needed to apply it - the panel cannot re-lay
+/// out the card it is drawing, and every layout in this file read its viewport
+/// at begin(). The caller decides when to act on that; this only records it.</para>
+///
+/// <para>Writes nothing when the value is unchanged, which is the ordinary case
+/// on every check-in a display ever makes.</para>
+bool rememberOrientation(Orientation orientation);
+
+void logViewport();
+
+/// Updates the day/night theme and the corner-clock's UTC offset that every
+/// screen below reads when it next draws - not retroactive to whatever is
+/// already on screen. Called once from App.ino's performCheckIn() whenever
+/// a check-in succeeds (see CheckIn::Result::utcOffsetMinutes/isDaytime),
+/// so this file has exactly one place tracking "what does the App currently
+/// believe about local time and daylight" rather than every draw call
+/// taking both as parameters. Defaults (0 minutes, daytime) match App.ino's
+/// own pre-first-check-in defaults, so the very first boot screens render
+/// sensibly before any check-in has ever completed.
+void setEnvironment(int utcOffsetMinutes, bool isDaytime);
+
+/// Sets panel brightness as a percentage, 0-100.
+///
+/// GOES THROUGH LovyanGFX, NOT GPIO21 DIRECTLY. The requirements name GPIO21 as
+/// the backlight pin, and it is - but LGFX_AUTODETECT already claims and
+/// configures it for this board, which is how begin()'s setBrightness(255) works
+/// at all. Driving the pin with our own ledc channel would give it two owners
+/// with different duty registers, and whichever wrote last would win
+/// unpredictably. So this wraps what already works rather than competing with it.
+///
+/// Zero means the backlight only. Nothing about the ESP32, WiFi, check-in or
+/// content refresh is affected - see BL 05. A dark panel here is still a working
+/// device, and that distinction is the whole reason this is a brightness call and
+/// not a sleep call.
+void setBrightness(uint8_t percent);
+
+/// The percentage last given to setBrightness(), or 100 before anything has.
+/// Read for telemetry and for deciding whether a fade is needed at all.
+uint8_t brightness();
+
+/// Reads back the UTC offset most recently given to setEnvironment() - the
+/// same value drawClock()'s corner clock already uses on every card. A read
+/// accessor rather than a second pushed copy (the way SunMoon::setTimes()
+/// receives its own) because this file is already the one place tracking
+/// "what does the App currently believe about local time right now"; a card
+/// that wants that same belief (see ClockDate.cpp) should read it from here
+/// rather than keep a third copy that could drift from the two that already
+/// exist - App.ino's own lastUtcOffsetMinutes and this file's internal
+/// gUtcOffsetMinutes. Defaults to 0 (UTC), matching setEnvironment()'s own
+/// pre-first-check-in default.
+int utcOffsetMinutes();
+
+/// Whether this household reads clocks as "2:30 PM" or "14:30". Pushed on every
+/// check-in from a per-device config value, the same way the UTC offset is - a
+/// preference, not a firmware build. False (24-hour) until a check-in says
+/// otherwise, which is how every device behaved before this existed.
+void setUse12HourClock(bool use12Hour);
+
+bool use12HourClock();
+
+/// **The one place a time of day becomes text on this device.** Every card that
+/// shows a clock time goes through here: the corner clock, the clock/date card,
+/// tides, sun/moon, the ISS pass, and the calendar's own "Today 14:30".
+///
+/// It exists because that list was eight separate `snprintf("%02d:%02d")` calls
+/// in seven files, which is why "show all times in 12-hour" was a change to
+/// seven files rather than to one setting. Anything new that prints a time calls
+/// this rather than adding a ninth.
+///
+/// Takes a 24-hour hour and a minute, because that is what every caller already
+/// has - either from a `struct tm` or from dividing a minutes-of-day figure the
+/// server sent. Returns "--:--" for an out-of-range value rather than formatting
+/// nonsense confidently.
+String formatTimeOfDay(int hour24, int minute);
+
+/// **The one place the age of an ANSWER becomes text on this device**, for the
+/// same reason formatTimeOfDay() above is the one place a clock time does: two
+/// cards now say how old the thing they are showing is, and two cards saying it
+/// in two idioms is exactly the drift that function exists to prevent.
+///
+/// `observedAtUtc` is epoch seconds for the moment the SERVER read the upstream
+/// provider - `fetchedAtUtc` on the listings payload, `staleSinceUtc` on a
+/// sports card. It is emphatically NOT the moment this device asked: see
+/// CARD_ABSENCE_AND_AGE_DESIGN.md section 2a for the incident where those two
+/// were a day and a half apart and the card printed the shorter one.
+///
+/// **Returns an empty string when it cannot honestly say**, which the caller
+/// must handle rather than print: a zero timestamp (absent, null or unparseable
+/// on the wire), a clock this device has not yet synchronised, or an instant in
+/// the future. An age computed against a 1970 clock would read "Updated 20819
+/// days ago" on a card that is perfectly current, which is a worse failure than
+/// saying nothing at all.
+///
+/// **THE UNITS, AND WHY THEY CHANGE TWICE.** The cards that measure their own
+/// fetch time only ever needed minutes, because the servers behind them cache
+/// for 30 minutes. This helper is for the answers that can be genuinely old -
+/// the listings cache is 24 hours - and "Updated 1,847 min ago" is a number,
+/// not a sentence. So:
+///
+///   under a minute      "Updated just now"
+///   under an hour       "Updated 7 min ago"      (minutes, as before)
+///   under two days      "Updated 31 hours ago"   (hours, NOT rounded to days)
+///   beyond that         "Updated 3 days ago"
+///
+/// The switch to days is at 48 hours rather than 24 on purpose. The listings
+/// cache lifetime is 24 hours, so the whole interesting range of that card -
+/// including the day-and-a-half-old answer from the incident - sits below two
+/// days, and collapsing it to "Updated 1 day ago" would throw away the six
+/// hours that made that answer wrong. Past two days a refresh is plainly broken
+/// rather than merely late, the extra precision buys nothing, and days take
+/// over where they stop costing anything.
+///
+/// US spelling and plain words - "Updated", "min", "hours", "days". This is
+/// read by a household from across a room, not by an operator.
+String describeAnswerAge(time_t observedAtUtc);
+
+/// The raw touch read beneath Touch.h/.cpp's debounced, event-style API.
+/// Lives here, not in Touch.cpp, because this file already owns the one
+/// LGFX instance for this panel (see `lcd` and begin() below) - a second
+/// LGFX_AUTODETECT instance addressing the same physical SPI bus would risk
+/// re-initialising hardware this file already brought up. Returns false
+/// (x/y untouched) when nothing is currently touching the panel.
+bool readTouchRaw(int32_t& x, int32_t& y);
+
+/// A single line of status with an optional detail line beneath it.
+void showStatus(const String& headline, const String& detail = "");
+
+/// A failure the household can act on.
+void showFailure(const String& headline, const String& whatToDo);
+
+/// The aircraft-overhead card. Originally modeled on CYD-Dickey's
+/// drawFeaturedAircraft() minus the parts that assumed data the server didn't
+/// provide; the server now does (airline name, logo, route - see Aircraft.h's
+/// updated remarks), so this draws them, with callsign staying on screen as a
+/// secondary line rather than being displaced entirely.
+///
+/// airlineName empty means the server has no name for this callsign (older
+/// firmware talking to a newer server never happens the other way, but the
+/// reverse - this firmware against a server old enough to send nothing - is
+/// exactly the 6-month compatibility case) - callsign is promoted back to the
+/// headline in that case, which is this card's entire original behaviour.
+///
+/// originCode/destinationCode/originName/destinationName: each side prefers
+/// its name and falls back to its own code independently - not as an
+/// all-or-nothing pair - because hexdb can resolve a route's code without a
+/// name for one particular airport (see AircraftSighting.cs's own remarks),
+/// and a server old enough to predate the two name fields sends codes alone.
+/// Empty destination (name and code both) with a non-empty origin draws a
+/// one-sided "from X" line (a filed departure with no filed arrival, or a
+/// route lookup partial); everything empty draws no route line at all rather
+/// than an empty one - the honest rendering of "no route data", same
+/// reasoning as the card drawing nothing when there is no picture configured
+/// (see Graphic.h). Unlike the code-only line this replaces, a full name on
+/// either or both sides can run past one line at this card's width - see the
+/// README on why that wrap grows the route line down into the stat rows'
+/// starting position instead of truncating or shrinking the font, and why a
+/// pure-code route (the common case today, and the only case a 6-month-old
+/// server can produce) still lands on exactly the one line it always has.
+///
+/// **Both names are shortened again here, on the device**, before they are
+/// laid out - see shortenAirportName() in Display.cpp. The server's
+/// AirportNameFormatter.Shorten only strips a TRAILING " International
+/// Airport", which fires on none of the names that are actually too long,
+/// because those end in "(Wold-Chamberlain Field)" or
+/// "/ Charleston Air Force Base" instead. Measured over the 948 distinct
+/// origin/destination pairs the route cache can currently produce, the
+/// widest route line drops from 1,077px to 710px and the number overrunning
+/// the two-line box from 110 to 54. This is the server's job done in the one
+/// place that could be changed today; the wire is unchanged and needs to be,
+/// and the upstream fix is still worth making.
+///
+/// This function draws no logo. The image lives in the Assets cache under a
+/// server-given id this file has no reason to know about (see aircraftLogoZone()
+/// below and Aircraft.cpp's cardDraw()) - the same module boundary Graphic.cpp
+/// already keeps: whoever owns the asset id draws the picture, Display.cpp
+/// only ever decides where things go.
+void showAircraftCard(const String& callsign, const String& airlineName, int altitudeFeet,
+                      double speedKnots, double headingDegrees, double distanceMiles,
+                      const String& originCode, const String& destinationCode,
+                      const String& originName, const String& destinationName,
+                      const String& updatedAt,
+
+                      /// A line drawn where a filed route would go, for a sighting that
+                      /// has none. The military card puts the service here once the
+                      /// airframe has taken the headline, so "U.S. Navy" is not lost to
+                      /// make room for "P-8 Poseidon". Empty for anything with a route,
+                      /// which keeps its route.
+                      const String& noRouteLine = String(),
+
+                      /// Whether the caller is going to draw a logo into
+                      /// aircraftLogoZone() after this returns, which decides the card's
+                      /// whole top. False lays the card out as it always has at any width.
+                      /// True reserves the logo's column beside the headline on a panel
+                      /// wide enough for both, and on one that is not, drops every line
+                      /// below the logo instead so the headline keeps the full band - see
+                      /// aircraftLogoZone() for the measurement that chooses.
+                      ///
+                      /// This function cannot tell: the asset id belongs to Aircraft.cpp,
+                      /// which is also the only thing that knows whether the bytes are in
+                      /// hand, on the card or in RAM.
+                      bool hasLogo = false);
+
+/// The rectangle a small airline logo may be drawn into, alongside
+/// showAircraftCard()'s own text - geometry decided here for the same reason
+/// every other piece of card chrome is (see this file's own remarks on why),
+/// even though this file never draws into it itself. Positioned at the
+/// right-hand end of the content band: clear of the banner above it, clear of
+/// the headline text's left-aligned start, and above the distance/route line so
+/// a wide logo cannot run into either.
+///
+/// **Placed from the panel, not from four literals.** Written as x220 y26
+/// 90x34 it ran from x220 to x310 on a panel 240 wide. What that showed
+/// depended on the logo's shape, because the draw centres what it fits: a
+/// 34x34 square mark was placed at x248 and reached the glass not at all,
+/// while a 90x15 wordmark showed the leftmost 20 of its 90 columns against the
+/// border.
+///
+/// The x is now measured back from kContentRight(), so the zone answers x220
+/// on 320x240 and x140 on 240x320 - the same 90x34 box, moved inboard.
+///
+/// **The width stays 90 on every panel and must.** Scaling it to the band
+/// would be right for text and is wrong here: an airline logo is RGB565, that
+/// format cannot be resampled on the way to the panel, and the server sizes
+/// every logo to fit 90x34 precisely because the device cannot. A 66px zone
+/// would take 12 columns off each side of a wordmark rather than shrinking it.
+/// See drawImageFromBufferInRect() for the format side of the same rule.
+///
+/// **On a turned panel the headline does not sit beside it.** 90 of a 220px
+/// band leaves the headline 120px, which is under what an ordinary carrier
+/// name needs at any size the fitting ladder offers - "Southwest Airlines"
+/// drew as "Southwe...", broken mid-word, with the bottom half of the card
+/// empty. So showAircraftCard() puts the logo on a row of its own there and
+/// drops its text below it, which is room a turned panel has: it is 80px
+/// narrower and 80px taller than a landscape one, so the width the logo needs
+/// beside the text is the height there is underneath it. The zone itself does
+/// not move either way - only the text does.
+void aircraftLogoZone(int16_t& x, int16_t& y, int16_t& w, int16_t& h);
+
+/// The aircraft card's non-Ok states, including "fetch succeeded, nothing is
+/// currently overhead" (not an error - see Aircraft::Status::Empty) - same
+/// white/bannered card family as showAircraftCard(), mirroring
+/// showWeatherStatus()'s split from the boot-ladder screens.
+void showAircraftStatus(const String& headline, const String& detail, bool isProblem);
+
+/// The sunrise/sunset card. Both time strings are already-formatted local
+/// wall-clock ("06:32") - this draws, it does not compute, so the
+/// minutes-to-local arithmetic lives in exactly one place (SunMoon.cpp)
+/// rather than half of it here. Same white/bannered card family as weather
+/// and aircraft.
+///
+/// `detail` is the single line under the two times: day length on an ordinary
+/// day, and on a polar day or night the reason there is no time to show.
+void showSunMoonCard(const String& sunriseText, const String& sunsetText, const String& detail);
+
+/// The tides card: next high and next low tide, as already-formatted local
+/// wall-clock times ("06:32") or "--:--" for whichever one the server had
+/// nothing to report - same split, same reasoning as showSunMoonCard()
+/// immediately above, and the same white/bannered card family. Unlike
+/// showSunMoonCard() there is no third `detail` line: a tide has no
+/// polar-style story worth telling in words (see Tides.h), so this card is
+/// just the two rows and nothing else. This draws, it does not compute - the
+/// minutes-to-local arithmetic lives in Tides.cpp, not here.
+void showTidesCard(const String& nextHighTideText, const String& nextLowTideText);
+
+/// The home value card: an automated valuation model (AVM) estimate for the
+/// household's home address, same white/bannered card family and
+/// two-stat-rows-plus-detail layout as showIssFlyoverCard() below.
+/// `estimateText`/`rangeText` arrive already formatted ("$425,000",
+/// "$400K - $450K") or "--" for whichever the server had nothing to report;
+/// `detail` is the price-per-square-foot figure and the date RentCast was
+/// last actually asked, or empty if neither is available. This draws, it
+/// does not compute - the dollar grouping, range rounding and date
+/// arithmetic all live in HomeValue.cpp, not here, the same split every
+/// other check-in-driven card in this family uses.
+///
+/// **Always draws the "automated estimate, not an appraisal" qualifier**,
+/// fixed and unconditional, below `detail` regardless of what any of the
+/// three parameters say. This is not optional wording: a RentCast AVM figure
+/// is an estimate, not a valuation a household could rely on as a guaranteed
+/// sale price, and the server-side HomeValueResult this card's data rides on
+/// documents that this qualifier must survive onto every surface the record
+/// reaches. Drawing it here, unconditionally, rather than leaving it to
+/// HomeValue.cpp's own `detail` string to remember on every call site is the
+/// point - a future edit to that string can shorten or reword the
+/// price-per-square-foot line without ever being able to silently drop the
+/// one line compliance actually requires.
+///
+/// **Over two lines, because the sentence does not fit one.** "Automated
+/// estimate, not an appraisal." measures 323px at 9pt in a 300px box, so
+/// until now it drew as "Automated estimate, not an..." - present, reserved,
+/// unconditional, and missing the word it exists to say. Two 22px lines is
+/// the reservation; a shorter sentence was measured and rejected because
+/// nothing keeping both halves of the claim fits with real margin.
+///
+/// `address` is the property the estimate is of, drawn as the headline the
+/// same way showListingsCard() draws its own - a dollar figure that names no
+/// house is the one fact on this card a reader cannot check. Empty is a real
+/// case rather than a fault (a valuation resolved from a GPS fix has no
+/// address to print) and the headline row is then not drawn at all, with the
+/// rows below moving back up. **Wrapped over two 9pt lines, not truncated on
+/// one 12pt line**, which is showListingsCard()'s own measured answer to the
+/// same problem reused rather than re-derived: both live addresses overflow a
+/// single 300px line at 12pt (518px and 449px) and at 9pt (384px and 332px),
+/// so the headline was ellipsizing on every draw of every device. Two 9pt
+/// lines cost 7px over the single 12pt line they replace, and the whole block
+/// below moves down by exactly that.
+///
+/// **Dropped entirely when a button is bound**, which is this card's own
+/// long-standing statement that the address is the one element here a reader
+/// can do without, finally acted on rather than only written down: the
+/// compliance line now reserves two lines rather than one, and a 154px floor
+/// has no room for a headline as well. The card then reads exactly as it does
+/// for a household with no stored address, which is a shape it already draws
+/// correctly - and the tight path loses the refresh date for the same reason,
+/// which is an acceptable trade against a legal line that cannot be cut.
+void showHomeValueCard(const String& address, const String& estimateText, const String& rangeText,
+                       const String& detail);
+
+/// A sports card: two team names with their scores, and a status line that is a
+/// clock time before the game, the provider's own progress text during it
+/// ("T7", "78'"), and FINAL or PPD after.
+///
+/// Scores arrive as strings and are EMPTY rather than "0" before play starts -
+/// null and zero are different facts and a nil-nil draw is real, so this draws
+/// the gap rather than a number nobody scored. The same "draw the gap honestly
+/// rather than fabricate" rule showHomeValueCard() applies to a missing range.
+///
+/// status may be empty, which happens when the server sent a state this
+/// firmware does not recognise. The row is then left blank rather than filled
+/// with a guess: that a game has not started is exactly the claim that cannot
+/// be made about an unknown state.
+///
+/// itemNumber and itemCount drive a small "2 of 4" marker, drawn only when the
+/// card holds more than one game, so a scoreboard reads as a list rather than
+/// as one result that keeps changing.
+///
+/// ageText is the "Updated 31 hours ago" line, and is EMPTY nearly always -
+/// the server flags a sports card as old only when a refresh was attempted,
+/// came back empty and left a previous answer standing, so an empty string
+/// here is the ordinary case and means "draw the card exactly as before, with
+/// no line and no gap where one would have gone". Already worded by
+/// Sports.cpp through Display::describeAnswerAge(), which the listings card
+/// uses too so the two cards cannot describe an age differently.
+///
+/// **It takes the "2 of 4" counter's slot rather than a row of its own**, so
+/// the counter is not drawn on a draw that shows an age. There is no fourth
+/// row to be had: a bound action drops the content floor to y=154 and
+/// drawChrome() paints the button row over y=160..220, and this card is one of
+/// the thirteen that never consults contentBottom() - a line at y=198 would be
+/// covered with nothing in the stream saying so. Keeping the age inside an
+/// existing slot means this function draws no pixel lower than it did before
+/// the age existed, and the scores and status word do not move at all.
+///
+/// The two cannot both have the slot. On a card the server has called old, how
+/// old the answer is beats which of four fixtures is on screen - the rotation
+/// shows the others anyway. The age is right-aligned into whatever the status
+/// word actually leaves, measured on each draw, and is **dropped entirely
+/// rather than ellipsized** when that is not enough: a truncated age states
+/// nothing while still costing the slot that could have stated something.
+///
+/// This draws, it does not compute - every value arrives already chosen,
+/// ordered and capped by the server. See Sports.h.
+/// <para><b>One renderer for every sport, with no branch on which one.</b>
+/// SPORTS_CARDS_V2_GENERIC_DESIGN.md makes that an acceptance test: a sport
+/// added later needs an adapter and a content mapping, not a case in here. The
+/// sport and the competition are content - strings this draws - exactly like
+/// the team names beside them.</para>
+///
+/// <para>The last five are optional and every one may be absent. A device
+/// whose server has not yet been taught to send a sport code draws no chip; a
+/// provider that names no competition draws none; a sport with no verified
+/// clock draws its period alone. The design forbids substituting a placeholder
+/// for any of them, and a fabricated clock is the costliest of the lot - it
+/// has somebody watching a game that is not running.</para>
+void showSportsCard(const char* homeName, const String& homeScore, const char* awayName,
+                    const String& awayScore, const String& status, uint16_t itemNumber,
+                    uint16_t itemCount, const String& ageText,
+                    const char* sportLabel = "", const char* competitionLabel = "",
+                    const char* progressLabel = "", const char* clockLabel = "",
+                    bool isLive = false);
+
+/// One row of the multi-game scoreboard: two sides, their scores where play has
+/// started, and whatever the server says about the state.
+///
+/// <para>FIXED BUFFERS, NOT Strings, and the four of these live on the caller's
+/// stack. Five Strings a row, four rows, each assigned from a char buffer or a
+/// returned temporary, is twenty to thirty heap allocations every time this
+/// card draws. That is the shape that put the fleet into a restart loop on
+/// v2026.10.10.0004: small repeated allocations carve the one large free region
+/// that a TLS handshake needs whole, and what is lost is the half on the wrong
+/// side of the split rather than the bytes asked for. Sports::Game already
+/// stores its teams this way for the same reason. See HeapRatchet.h and
+/// SPORTS_CARDS_V2_GENERIC_DESIGN.md section 13.</para>
+struct SportsBoardRow {
+  /// Twenty characters plus a terminator, matching Sports::kMaxTeamNameLength.
+  /// Stated as its own number rather than including Sports.h, which would make
+  /// the renderer depend on the one card that feeds it.
+  static constexpr size_t kMaxName = 21;
+
+  /// A score is three digits at the very outside, and empty before play starts.
+  static constexpr size_t kMaxScore = 8;
+
+  /// A period ("6TH INN"), a state word ("FINAL", "PPD"), or a start time
+  /// ("7:30 PM"). The longest of those sets the size.
+  static constexpr size_t kMaxStatus = 16;
+
+  char awayName[kMaxName] = "";
+  char awayScore[kMaxScore] = "";
+  char homeName[kMaxName] = "";
+  char homeScore[kMaxScore] = "";
+
+  /// A progress label or the state word, whichever the server supplied. Drawn
+  /// in the live colour only when isLive says so.
+  char status[kMaxStatus] = "";
+  bool isLive = false;
+};
+
+/// The scoreboard: up to four games of one competition on screen together, for
+/// one dwell, instead of a quarter of the league at a time.
+///
+/// <para>SPORTS_CARDS_V2_GENERIC_DESIGN.md section 12 is the layout, written
+/// before this was. Four rows of 38 pixels between the heading and the clock,
+/// nothing past y=220, and the five fields of a row at fixed x positions.</para>
+///
+/// <para><b>The same heading as the single-game card</b>, so the two read as one
+/// family - sport chip left, competition right, both optional and both absent
+/// rather than substituted when the server says nothing.</para>
+///
+/// <para>More than four rows cannot arrive: Sports.h stores four and the server
+/// caps at four. Anything beyond is dropped with a log line rather than drawn
+/// over the clock.</para>
+void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ageText,
+                     const char* sportLabel = "", const char* competitionLabel = "");
+
+/// The ISS flyover card: distance and compass direction to the International
+/// Space Station's current sub-satellite point, plus a one-line detail
+/// giving the actual coordinates - same two-stat-rows-plus-detail layout as
+/// showSunMoonCard() above, and the same white/bannered card family.
+/// distanceText and directionText arrive already formatted ("6,102 mi",
+/// "042 deg NE"); detail is the lat/lon line, or wording explaining why
+/// there is nothing to show. This draws, it does not compute - the
+/// distance/bearing/compass-point arithmetic lives in IssFlyover.cpp, not
+/// here, the same split every other check-in-driven card in this family
+/// uses.
+void showIssFlyoverCard(const String& distanceText, const String& directionText,
+                        const String& detail);
+
+/// The ISS card's second display mode: the station's next predicted pass,
+/// shown instead of showIssFlyoverCard() above whenever there is no live
+/// position to draw but a future pass is known - see IssFlyover.h's own
+/// remarks on why this is the same registered card falling back rather than
+/// a separate one. Same white/bannered card family and two-stat-rows-plus-
+/// detail layout as showIssFlyoverCard(): riseTimeText/riseDirectionText are
+/// already-formatted local values ("21:42", "312 deg NW") for the "Next
+/// pass"/"Direction" rows, and detail is the highest-point-and-set-time
+/// line, or empty if somehow there is nothing to add. This draws, it does
+/// not compute - the local-time and compass arithmetic lives in
+/// IssFlyover.cpp, not here, the same split every other check-in-driven
+/// card in this family uses.
+void showIssNextPassCard(const String& riseTimeText, const String& riseDirectionText,
+                          const String& detail);
+
+/// The Moon-phase card - the first of a new "graphical style" card family:
+/// an actual drawn disc rather than a text description, labeled with
+/// phaseName underneath. phase (0-1 elongation fraction) and
+/// illuminatedFraction (0-1) drive the drawing itself; phaseName is text,
+/// shown as a caption rather than being the point of the card. Negative
+/// phase/illuminatedFraction are not expected here - MoonPhase.cpp's
+/// cardItemCount() keeps the scheduler from calling this at all when the
+/// device has no answer to draw, the same tolerance showAnnouncementCard()
+/// gets from Announcement.cpp's own cardItemCount(). See this function's
+/// body in Display.cpp for the rendering technique and the Northern-
+/// Hemisphere waxing/waning convention it uses.
+///
+/// nextEventMinutesUtc and nextEventKind are the next moonrise or moonset off
+/// the check-in response, drawn as one line: the local time for a kind of
+/// "rise" or "set", the words "No moonrise or set" for "none", and no line
+/// at all for an empty or unrecognised kind, so a device the server cannot
+/// answer for gets the card exactly as it was before these two existed.
+void showMoonPhaseCard(const String& phaseName, double phase, double illuminatedFraction,
+                       int nextEventMinutesUtc, const String& nextEventKind);
+
+/// The clock/date card: a large, room-readable HH:MM and today's date filling
+/// most of the panel - "a moment where the display is just a big clock",
+/// distinct from the small corner clock every card (this one included)
+/// carries regardless. Both strings arrive already formatted - ClockDate.cpp
+/// owns the time_t arithmetic and the strftime() call, the same split
+/// showSunMoonCard() above already uses for its own already-formatted
+/// sunrise/sunset strings - so this function only lays them out. No banner:
+/// unlike weather/aircraft/sun, this card names no data source of its own to
+/// label, and the space a banner would take is better spent on the numbers.
+void showClockDate(const String& timeText, const String& dateText);
+
+/// The announcement card: an admin-typed notice, drawn as plain wrapped
+/// prose rather than the label/value layout weather, aircraft and sunmoon
+/// each use - this card has exactly one field, so a stat-row layout would
+/// have nothing to lay out beside it. Sized to the whole text at the largest
+/// of two tiers it actually fits at, the same technique showWeatherCard()
+/// uses for its own free-text forecast phrase - see that function's remarks.
+/// Same white/bannered card family as every other content card. Drawing
+/// nothing (an empty `text`) is the caller's job to avoid - see
+/// Announcement.cpp's cardItemCount(), which is what keeps the scheduler from
+/// calling this at all when there is nothing configured.
+void showAnnouncementCard(const String& text);
+
+/// One calendar event, already rendered to a line of prose by the caller.
+///
+/// **Exists because Calendar.cpp was drawing through showAnnouncementCard() and
+/// therefore stamping a green "NOTICE" banner over a household's own
+/// appointments.** The layout was never the problem - an event line is the same
+/// shape of content as a notice, one short paragraph, and the two-tier wrap
+/// below is that function's, unchanged, because those sizes were chosen against
+/// this exact screen and button row. What was wrong was the label and the
+/// colour: a dentist appointment is not a system notice, and on a wall display
+/// the banner is the part read from across the room.
+///
+/// `itemNumber`/`itemCount` draw a "2 of 3" beside the banner. Calendar is a
+/// list card whose items cycle one at a time, so without it a household seeing
+/// one appointment cannot tell whether it is the only one - and "nothing else
+/// today" versus "something else is coming" is most of what a glance at this
+/// card is for. Pass itemCount 1 (or 0) to omit it; "1 of 1" is noise.
+///
+/// Takes finished text and knows nothing about events, deliberately: the event
+/// itself must not reach this file. CalendarEventSummary carries an explicit
+/// rule that nothing in it may be logged, and on this device the remote debug
+/// stream is a log - Calendar.cpp keeps every title out of Log:: entirely, and
+/// that is only tractable while the formatting stays on its side of the wall.
+void showCalendarCard(const String& text, uint8_t itemNumber = 0, uint8_t itemCount = 0);
+
+/// A banner: a header strip reminding a household of something, drawn across
+/// the top of the panel instead of a card's own ordinary full-screen layout.
+/// Deliberately NOT full-screen - the strip claims only the top portion and
+/// leaves the rest showing nothing but chrome (the button row, drawn
+/// separately by CardManager's drawChrome() exactly as for every other card,
+/// and the corner clock) - the visual point next to a full-screen card is that
+/// it reads as a strip on the glass, not a card replaced.
+///
+/// `text` is the text of the announcement currently overlaying this card - see
+/// Cards::Announcement, and Cards::announcementFor() for how one is chosen.
+/// **Not** the card policy entry's own `text` field, which is what an earlier
+/// draft of this feature used when a banner was a per-card theme with one
+/// fixed message; that could not express a queue of independently dismissible
+/// reminders, and the queue is what replaced it.
+///
+/// Whether the strip is a plain reminder or one wanting a press is a property
+/// of the announcement (Cards::Announcement::isAction), not of the card and
+/// not of this function - either way the strip is drawn the same and the
+/// button row, if any, is drawn by drawChrome().
+///
+/// Never called with an empty string - CardManager's drawCurrent() falls back
+/// to a card's ordinary draw() when there is no announcement to put in the
+/// strip, the same tolerance showAnnouncementCard() gets from Announcement.cpp
+/// above.
+void showBannerCard(const String& text);
+
+/// The QR card: a scannable code with an optional caption. Ported from CAL's own
+/// bootloader-side showQr() (root Display.cpp) - same vendored CalQr.h/.c, same fixed
+/// version-6/ECC-LOW static buffer sizing, same qrcode_initText()/qrcode_getModule() render
+/// loop - adapted only to fit within the App's card layout (banner, corner clock, button
+/// row) rather than the whole panel, and to treat `caption` as optional supplementary text
+/// rather than CAL's own always-present caption/subCaption pair.
+///
+/// `qrData` is the payload actually encoded - never empty when this is called (see
+/// QrText.cpp's cardItemCount(), the same tolerance showAnnouncementCard() gets from
+/// Announcement.cpp). `caption` may be empty; when it is, only the code and its raw-data
+/// fallback line are drawn. The raw `qrData` is always shown as a small line beneath the
+/// code regardless of whether a caption is present, mirroring CAL's own showQr() - "the
+/// address in characters as well as in the code, because cameras fail" applies exactly as
+/// much on this panel as on CAL's.
+///
+/// The caption is drawn at **9pt, not 12pt**, which is this card's own "supplementary,
+/// not the point" argument applied to the font rather than only to the position. At 12pt
+/// the 300px box held about twenty-seven ordinary characters and was cutting captions
+/// nobody would call long - "Scan for our latest listings" measures 304px, "Book a tour
+/// of this property" 320px. The same two are 226px and 237px at 9pt. It is not a
+/// guarantee: `CardSpec::text` holds up to 280 characters and a long caption still
+/// ellipsizes, and says so in the stream. Nothing else on the card moves - the 22px step
+/// this layout was already carrying is exactly FreeSansBold9pt7b's own fontHeight().
+void showQrTextCard(const String& qrData, const String& caption);
+
+/// The real-estate listings card: one nearest-market listing per screen, with
+/// the scheduler cycling through however many the device fetched (up to
+/// Listings::kMaxListings) - see Listings.h's own remarks on why this is a
+/// *list* card in the literal sense, unlike showAircraftCard()'s single
+/// featured reading. `index`/`total` draw a small "2 of 5" caption so a
+/// household mid-cycle knows there is more to see rather than wondering
+/// whether the rotation is stuck - the first card on this build to actually
+/// need one, since every other list card today shows exactly one item
+/// (Aircraft.h's own remarks explain why). Stat-row layout, reusing
+/// showAircraftCard()'s label-left/value-right technique: this is the same
+/// shape of information (a handful of short facts about one thing), just a
+/// house instead of a plane. propertyType/price form the sub-headline under
+/// the address; bedrooms/bathrooms print without a trailing ".0" for a whole
+/// number and with one decimal otherwise (a bare double reading "3.0 bd"
+/// looks like a fetch error, not a design choice, to someone glancing at a
+/// kitchen counter).
+void showListingsCard(const String& address, const String& propertyType, int price,
+                      double bedrooms, double bathrooms, int squareFootage,
+                      int daysOnMarket, double distanceMiles, uint16_t index,
+                      uint16_t total, const String& updatedAt);
+
+/// The listings card's non-Ok states: not activated, provider disabled, the
+/// account's RentCast key not configured yet (a first-class resting state
+/// mirrored from the server's own ListingsResult.IsConfigured, not inferred
+/// from an error string), a fetch that succeeded with nothing currently
+/// listed nearby, a fetch that succeeded while the server's own upstream
+/// refresh did not (Listings::Status::RefreshFailed - empty because the
+/// question failed rather than because the market is, and drawn as such), and
+/// genuine auth/network trouble. Same white/bannered card family as every
+/// other content card, mirroring showAircraftStatus()'s muted-vs-amber split.
+///
+/// `detail` is always one of Listings.cpp's own literals. The server's
+/// lastRefreshError text never reaches this function, and no longer reaches
+/// the device's own operator surfaces either - see Listings::Result::message
+/// for where it went and why.
+/// One already-labelled fact for the featured listings card.
+///
+/// <para>Label and value both come from the server. This file prints them and
+/// interprets neither, which is what lets a boat broker's listings draw with no
+/// firmware change - the panel does not need to know what a beam is.</para>
+///
+/// <para>Pointers rather than Strings: the caller already holds this text, and
+/// copying it into Strings to hand it over would be six heap allocations on
+/// every repaint of a card on the device whose failure mode is contiguous
+/// heap. Borrowed for the duration of the call, never retained.</para>
+struct FactLine {
+  const char* label = "";
+  const char* value = "";
+};
+
+/// A property an agent sent this household, drawn one per card.
+///
+/// <para>Deliberately not showListingsCard() with more arguments. That one
+/// knows it is drawing real estate: it takes bedrooms and bathrooms and square
+/// footage as typed parameters, so a boat would arrive as three numbers that
+/// mean nothing. This takes a headline, a price and up to three labelled
+/// facts, and draws whatever it is given.</para>
+///
+/// <para>`title` is the keyword line the server derived - "New match", "Price
+/// drop" - and is empty when no rule matched, in which case the card draws
+/// without one rather than inventing a label.</para>
+///
+/// <para>`price` below zero means the source stated none, and nothing is drawn
+/// in its place. A $0 on a wall is worse than a blank.</para>
+///
+/// <para>`previousPrice` is what that price replaced, drawn as a second smaller
+/// line beneath it - "was $465,000". Below zero means the email stated none,
+/// which is the ordinary case and draws nothing. The card compares the two
+/// figures for nothing and reads no date: a listing carries this only when its
+/// own alert named both figures.</para>
+void showFeaturedListingCard(const String& title, const String& headline, const String& subhead,
+                      int32_t price, int32_t previousPrice, const FactLine* facts,
+                      uint8_t factCount, const String& updatedAt,
+                      const String& cachedImageId = String());
+
+void showListingsStatus(const String& headline, const String& detail, bool isProblem);
+
+/// Up to this many calendar days show in the forecast strip below - five
+/// columns fit the 320px panel at a readable size; Forecast::kMaxPeriods (10)
+/// is deliberately 2x this, since the strip reads every *other* fetched
+/// period (see showForecastCard()'s own remarks on why).
+constexpr uint8_t kMaxForecastStripDays = 5;
+
+/// The combined current-conditions-and-outlook card - one slide per Forecast
+/// instance. Replaces both the old per-period paging version of this card
+/// (which cycled one outlook period per dwell, "N of M" caption and all) and
+/// the retired standalone weather card - see the README's "The weather card
+/// retired, folded into Forecast" for why the two became one. `location` is
+/// the city/state (or bare postal code) GET /api/myweather/forecast resolved
+/// the card's own Home/Target choice to.
+///
+/// `currentIsDaytime`/`currentTemperature`/`currentUnit`/`currentShortForecast`
+/// are the fetched response's periods[0] - "Today" in daylight, "Tonight"
+/// after dark, whichever NWS's own first entry is - drawn as a hero the same
+/// way the retired showWeatherCard() drew /api/myweather/mine's own
+/// periods[0]: a 24pt number with the hand-drawn degree ring
+/// drawTemperature() already provides, the condition phrase truncated to one
+/// line beneath it. The period's own name ("Today"/"Tonight") is not a
+/// parameter here - it is never drawn, since currentIsDaytime already
+/// surfaces the one bit of it (day vs. night) this card shows, and the day
+/// strip's own first column carries the label "Now" rather than repeating
+/// it.
+///
+/// `dayNames`/`dayTemperatures`/`dayUnits`/`dayConditions` are parallel
+/// arrays of `dayCount` (<= kMaxForecastStripDays) entries - every *other*
+/// fetched period starting at index 0, skipping the overnight period NWS
+/// always interleaves between two daytime ones, so the strip is five
+/// distinct calendar days regardless of whether the device happens to fetch
+/// at 2pm or 2am. Column 0 duplicates the hero's own day (its name is
+/// shortened to "Now" rather than repeating "Today"/"Tonight" in a 60px-wide
+/// column); columns 1-4 are the four days after it.
+///
+/// Both the hero and every strip column draw a condition icon classified
+/// from their own shortForecast text - see classifyCondition() and
+/// drawWeatherIcon() in Display.cpp.
+void showForecastCard(const String& location, bool currentIsDaytime, int currentTemperature,
+                      const String& currentUnit, const String& currentShortForecast,
+                      const String* dayNames, const int* dayTemperatures,
+                      const String* dayUnits, const String* dayConditions, uint8_t dayCount,
+                      const String& updatedAt);
+
+/// The forecast card's non-Ok states: not activated, provider disabled, a
+/// fetch that succeeded but the requested location resolved to nothing or
+/// sent no periods (see Forecast::Status::Empty), and genuine auth/network
+/// trouble. Same white/bannered card family as every other content card,
+/// mirroring showListingsStatus()'s muted-vs-amber split.
+void showForecastStatus(const String& headline, const String& detail, bool isProblem);
+
+/// Shown when no registered card has anything to draw at all - which is the
+/// ordinary state for the first second or two after boot, before the first
+/// fetch lands. Same white/bannered card family as the two status screens
+/// above rather than the black boot ladder: nothing is wrong with the
+/// device, it simply has no content yet.
+void showNoContent(const String& headline, const String& detail);
+
+// --- Card chrome: the controls drawn on top of whatever card is showing.
+//
+// Both of these are drawn by CardManager after a card's own draw function
+// has finished, so they land on a completed card rather than being painted
+// over by it. Their geometry is decided here, not by the server: only this
+// file knows this panel's size and what else is already on it. The corner
+// clock owns the bottom-right (see drawClock in Display.cpp) and the
+// left/right edge strips belong to the reverse/forward touch zones (see
+// Touch.h), so the button row sits clear of all three.
+
+/// Up to Actions::kMaxButtonsPerCard buttons in a row along the bottom of the
+/// card. Labels are drawn verbatim, truncated to fit - the server chose the
+/// wording and this file does not second-guess it.
+void drawActionButtons(const String* labels, uint8_t count);
+
+/// Tells the display how much vertical room the card about to draw actually has.
+///
+/// **Call this BEFORE the card draws, not after.** CardManager paints buttons on
+/// top of a finished card, so a card with a button loses the 60px band from
+/// y=160 down without ever being told - which is how the home value card's
+/// compliance line came to be drawn underneath a button. Passing whether this
+/// card has buttons lets the card choose a tighter layout instead of drawing
+/// into a band that is about to be covered.
+void setContentBudget(bool hasActionButtons);
+
+/// The lowest y a card may draw to. 220 with no buttons (the corner clock starts
+/// there), 154 with them. Read it rather than hardcoding either number: a card
+/// that reads it keeps working if the button band ever moves again, and it has
+/// moved once already.
+int contentBottom();
+
+/// True when a button row is taking the bottom of the panel, so a card can pick
+/// its compact layout without repeating the arithmetic.
+bool contentIsTight();
+
+/// Reports a card that drew past <see cref="contentBottom"/> to the debug stream.
+/// Logged rather than clipped - clipping hides it behind a card that merely looks
+/// short, and the stream is the only diagnostic channel a deployed device has.
+void noteContentOverrun(const char* cardName, int reachedY);
+
+/// The hit rectangle for button `index` of `count`, in the same layout
+/// drawActionButtons() uses. Handed to Touch::setActionZones() so the hit
+/// test and the drawing can never disagree about where a button is.
+void actionButtonZone(uint8_t index, uint8_t count, int16_t& x, int16_t& y, int16_t& w,
+                      int16_t& h);
+
+/// A big green checkmark, centred on the panel, held briefly - what a card's
+/// action button acknowledges a press with (CardManager::handleTap()'s
+/// Touch::Hit::ActionButton case). This acknowledges the *press* only. It
+/// deliberately says nothing about delivery: a press is a passive push that
+/// rides the next ordinary check-in, with no confirmation and nothing for
+/// the user to wait for (see Actions.h). A button that does not visibly
+/// react to a finger reads as a dead button, which is its own, separate
+/// failure - and a confirmation only the button itself shows is easy to
+/// miss from any distance, which is why this is a big centre-screen mark
+/// rather than a small in-place recolor. Draws over whatever card is
+/// currently showing; the caller is responsible for redrawing the card
+/// afterward, since this has no notion of what was under it.
+void showButtonPressConfirmation();
+
+/// Small chevrons at the left and right edges marking the reverse/forward
+/// touch zones. CYD-Dickey leaves its equivalent zones completely invisible;
+/// these are drawn because an invisible control on a household appliance is
+/// only discoverable by accident. `canReverse` dims the left one when there
+/// is no history to step back into, so the affordance never promises
+/// something that will do nothing.
+void drawNavAffordances(bool canReverse);
+
+/// Briefly fills the tapped reverse/forward edge strip in its pressed colour
+/// and puts it straight back - the edge-zone equivalent of
+/// flashActionButton() above, for exactly the same reason: Touch's edge
+/// zones have no visible chrome of their own (see drawNavAffordances()'s
+/// chevrons, which are a discoverability hint, not a press indicator), so a
+/// tap there previously produced rewind()/advance() with nothing on the
+/// glass to say the touch was registered. `isForward` picks which edge lit
+/// up; `canReverse` is forwarded to the drawNavAffordances() redraw that
+/// restores the strip afterwards, so a flash on the (disabled) left edge
+/// still comes back dim rather than snapping to an enabled look it doesn't
+/// have.
+void flashNavEdge(bool isForward, bool canReverse);
+
+/// How many card draws in a row have failed - zero on a device drawing its
+/// cards normally, and reset to zero by the very next success.
+///
+/// The summary line above used to read "how many draws in a row have been
+/// unable to get the file buffer they asked for", which had not been true since
+/// draws became streaming and there stopped being a file buffer at all. It is
+/// corrected rather than quietly reworded because the stale wording did real
+/// damage: it, and the matching name on App.ino's constant, sent an evening's
+/// debugging after memory exhaustion on a device whose heap was fine (largest
+/// 8-bit block 21,492 at the time this number read 6 of 6).
+///
+/// Exists for App.ino's heap watchdog, which restarts the device on a RUN of
+/// these rather than on any heap threshold. That is the whole point: this
+/// number is a direct measurement of "this device can no longer draw its
+/// cards", where every heap figure available on this board is at best a proxy
+/// for it and at worst (ESP.getFreeHeap(), ESP.getMaxAllocHeap()) a proxy that
+/// has been measured overstating the truth by roughly 4x. See checkHeapHealth()
+/// in App.ino for the threshold this feeds and how it was derived.
+///
+/// Counts failed DRAWS, not failed allocations. It used to count the latter,
+/// against a whole-file read buffer that no longer exists - the draws stream
+/// from SD now, so there is no per-draw allocation left to fail (see
+/// drawImageFromSd's remarks on the shared-bus premise that turned out not to
+/// hold). Counting the draw is strictly better anyway: it is the outcome that
+/// matters, and it stays meaningful whatever the decode path does underneath.
+///
+/// A file with no recognisable image signature counts here too, and so does a
+/// failed RAM draw - see the three draw functions below. Both are cases of
+/// "this device could not put its card on the glass", which is the only thing
+/// this number has ever claimed to mean.
+///
+/// **A draw that never reached a decoder does NOT count, in either direction.**
+/// A cached file that will not open, and an empty RAM buffer, mean there was no
+/// image here - not that this device failed to render one. That is the ordinary
+/// resting state of a card nobody has configured a picture for, of a card whose
+/// asset has not been fetched yet, and of every graphic card on a device with no
+/// SD card. Counting it made the watchdog restart devices for the absence of a
+/// picture, which no amount of reclaimed memory was ever going to supply. Such a
+/// draw does not reset the count either: "there was nothing to draw" is no more
+/// evidence that this device can draw than that it cannot, so it is left out of
+/// the measurement entirely rather than being allowed to mask a genuine run.
+uint32_t consecutiveDrawFailures();
+
+/// Paints the whole panel with the current day/night theme background, and
+/// nothing else.
+///
+/// Every card body in this file starts with the same fill, so this exists for
+/// the one caller that is NOT a card body: Graphic.cpp's tight branch, which
+/// draws its picture through drawImageFromSdInRect() into (0, 0, 320, 154)
+/// instead of over the whole panel. The in-rect draw deliberately does not
+/// clear - it was written for an airline logo layered onto an already-composed
+/// aircraft card, where clearing would erase the card underneath it - so a
+/// caller using it as a card's entire content has to clear first or the
+/// previous card's pixels stay visible in the letterbox above and below the
+/// scaled image.
+///
+/// Here rather than in Graphic.cpp because this file owns the one LGFX
+/// instance for this panel and the theme colours that go with it, the same
+/// reason drawImageFromSd() and readTouchRaw() live here. A caller cannot
+/// reach bg() from outside, and should not: which grey a night-mode panel
+/// clears to is not a picture card's business.
+void clearPanel();
+
+/// Draws a cached image from the SD card, scaled to fit and centred on the
+/// whole panel. Clears to the theme background first, so a failed decode
+/// leaves a clean screen rather than a half-painted one; returns false in that
+/// case so the caller can put its own content back. Assets.cpp is the only
+/// caller - the SD read lives behind this function because this file owns the
+/// one LGFX instance for this panel, the same reason readTouchRaw() is here.
+///
+/// **PNG, JPEG or raw RGB565, decided by the file rather than by the caller.**
+/// This was drawPngFromSd() until JPEG became the default encoding for
+/// photographs, and it has been renamed rather than left alone: a name that
+/// says PNG on a function that dispatches on a sniffed signature would send the
+/// next person debugging a JPEG failure looking for a JPEG code path that does
+/// not exist under that name. Nothing in the parameters or the contract
+/// changed. See the implementation for the memory arithmetic that forced the
+/// format change, and sniffImageFormat() there for why the format travels in
+/// the file's own first bytes instead of on the wire.
+///
+/// The third format needs no decoder at all: an RGB565 file is a frame buffer
+/// in this panel's own pixel layout behind a 16-byte header, read a band of
+/// scanlines at a time straight into pushImage(). Its draw-time cost is one
+/// fixed 5,120-byte allocation - the same for every picture, where a decoder's
+/// workspace varies with the content - against the JPEG decoder's 3,900 and the
+/// PNG decoder's ~45,056 retained. The price is a file roughly ten times a
+/// JPEG of the same picture, which is free on an SD card and impossible without
+/// one: a device with no card fetches assets into a single contiguous heap
+/// buffer, so it can never hold one of these. The server's card policy editor
+/// refuses that assignment; see drawRgb565FromSd() in the implementation for
+/// the whole argument, including how the byte order was verified.
+bool drawImageFromSd(const String& path);
+
+/// Same decode, bounded to a caller-given rectangle instead of the whole
+/// panel - for a small logo layered onto a card another draw call has
+/// already composed, rather than the picture being the whole card. Does NOT
+/// clear the screen first, unlike drawImageFromSd(): clearing here would erase
+/// the content it is being layered onto. Scaled to fit within (w, h) and
+/// centred there.
+///
+/// This is the one draw where PNG is still expected to be the common case
+/// rather than the legacy one - it exists for airline logos, and a logo is
+/// exactly the kind of asset that needs real transparency over an already
+/// composed card. The format is still sniffed, not assumed: an operator who
+/// uploads a JPEG logo gets it drawn (opaque box and all) rather than getting
+/// nothing.
+///
+/// For the same transparency reason the server does not offer an RGB565 option
+/// for the asset types this path draws - RGB565 carries no alpha, so a logo in
+/// one would arrive as a logo in an opaque box. The implementation handles the
+/// format here regardless, centred and clipped to the rect, because the
+/// alternative to handling it is reporting a file this build reads perfectly
+/// well as unrecognised bytes and counting it against the draw watchdog.
+///
+/// UNVERIFIED ON HARDWARE more pointedly than most of this file: every other
+/// image draw here fills the whole panel, and this is the first one that
+/// doesn't. The bounded-rect behaviour is read from LovyanGFX's own
+/// drawPngFile/drawJpgFile parameters (maxWidth/maxHeight plus a centred
+/// datum), not confirmed against an actual decode of an actual logo on this
+/// actual panel.
+bool drawImageFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, int32_t h);
+
+/// Draws an image already sitting in RAM, scaled to fit and centred on the
+/// whole panel - the no-SD-card counterpart to drawImageFromSd() above, for
+/// Assets::fetchToRam()'s direct-to-RAM fallback. Same fillScreen()-first
+/// (a failed decode leaves a clean screen, not a half-painted one), same
+/// deliberate non-release of the PNG decoder's scratch buffer afterwards
+/// (see drawImageFromSd()'s own comment for the fragmentation reasoning this
+/// shares), same false-means-drew-nothing contract, and the same signature
+/// sniff. The only difference from drawImageFromSd() is that there is no SD
+/// read to do first: the caller already has the bytes, from the network rather
+/// than from a file - so there is no file to open in order to identify it
+/// either, just the front of the buffer.
+///
+/// An RGB565 buffer is handled here and should never arrive: a device taking
+/// this path has no SD card, and a device with no SD card cannot fetch one of
+/// those files at all, since the fetch wants every one of its ~153,600 bytes in
+/// a single contiguous heap block. The server refuses to assign one to a device
+/// that has REPORTED having no card; a device it has never heard from is only
+/// warned, which is the gap this branch covers. If the bytes do turn up they
+/// are already in RAM, so drawing them is one pushImage and no allocation at
+/// all - cheaper than either decoder by a wide margin.
+bool drawImageFromBuffer(const uint8_t* data, size_t size);
+
+/// Same bytes-already-in-RAM draw, bounded to a caller-given rectangle rather
+/// than the whole panel - the crossing of drawImageFromSdInRect() and
+/// drawImageFromBuffer(), and the one draw a device with no SD card can use for
+/// an airline logo.
+///
+/// Does NOT clear the screen first, for drawImageFromSdInRect()'s reason:
+/// clearing would erase the card this logo is being layered onto. Centred in
+/// (w, h); PNG and JPEG are scaled to fit on the way, RGB565 is not.
+///
+/// **RGB565 is the expected format here, not the unreachable one**, which is
+/// what sets this apart from drawImageFromBuffer() above. The reasoning there -
+/// that a card-less device cannot hold one of these - is about a full-panel
+/// asset and its ~153,600 bytes. The fleet's 58 airline logos run 2,124 to
+/// 5,932 bytes, every one sized by the server to fit 90x34: the tall ones are
+/// 34px high and narrower, the wide ones 90px across and shorter. All of them
+/// fit in a single contiguous block on a device whose largest 8-bit hole is
+/// the measured 28,660 to 40,948, and pushing one needs no decoder and no band
+/// buffer.
+///
+/// **So the rect must be at least 90x34, and that is a requirement rather
+/// than a preference.** This path cannot resample - drawRgb565FromBuffer()
+/// centres the frame and clips it to the rect - so a caller that hands over a
+/// box narrower than the asset does not get a smaller logo, it gets the middle
+/// of one with the ends cut off. AssetsOptions.cs states the same rule from
+/// the server's side: a type stored as RGB565 is sized to the rect it is drawn
+/// in. aircraftLogoZone() is the only caller and keeps its width at 90 on
+/// every panel for this reason.
+///
+/// PNG and JPEG are still sniffed and still drawn, and those two do scale, so
+/// a logo re-encoded back to either keeps working at any rect size.
+bool drawImageFromBufferInRect(const uint8_t* data, size_t size, int32_t x, int32_t y, int32_t w,
+                               int32_t h);
+
+/// Whether the most recent failed draw failed because this heap would not give
+/// up a block, rather than because the bytes were unreadable.
+///
+/// The three draw calls above all answer the same `false`, and for most of
+/// their callers that is enough: nothing was painted. Assets.cpp needs more
+/// than that, because its response to a failed draw is to delete the cached
+/// file and fetch it again - the right answer for a corrupt file and exactly
+/// the wrong one for a full heap. An RGB565 asset is ~153,600 bytes over WiFi,
+/// so charging a heap shortage to the file costs a re-download that will land
+/// on the same heap and fail the same way.
+///
+/// Found live on 2026-10-11: device 17 held 11,016 bytes free with a largest
+/// block of 3,444, declined the 5,120-byte band buffer, and had its graphic
+/// asset invalidated three times for a file that was never read.
+///
+/// Valid only immediately after a draw call returned false, and cleared at the
+/// start of every draw - there is one flag, not one per path, because a draw
+/// is the only thing that sets it and callers ask before drawing anything else.
+/// Hands LovyanGFX PNG scratch back, for a display that is not going to
+/// draw a picture.
+///
+/// <para>The scratch is roughly 44KB of contiguous heap. draw_png() allocates
+/// it on first use and the library deliberately never frees it, so repeated
+/// PNG draws reuse one block instead of each needing to find 44KB - which is
+/// the right trade for a display that shows pictures, and the reason
+/// releaseDecodeMemory() above declines to touch it.</para>
+///
+/// <para>It is the wrong trade for a display that shows none. The boot splash
+/// takes the block while setup() still has 110,580 contiguous bytes, and then
+/// it is held for the life of the process for one decorative logo. A TLS
+/// session needs 16,717 contiguous for each of two record buffers; three
+/// displays with SD cards measured 49,152, 54,528 and 51,200 bytes of
+/// largest-block gone in the boot phase, settled under 9,000, and could not
+/// open a session at all. They showed "cannot reach" on every card that
+/// fetches and could not take the firmware update that would have fixed it.
+/// The two displays with no card never decode a splash, pay nothing, and have
+/// never failed a handshake.</para>
+///
+/// <para>Called once, immediately after the splash, on either of two findings:
+/// the policy this display last received had no picture card in it, or this
+/// display has restarted itself repeatedly without once completing a check-in.
+/// See Identity::hasPictureCards() for why the first answer has to come from
+/// the previous boot, Identity::selfRestartBackoffSteps() for what the second
+/// one counts, and App.ino's decideSplashScratchRelease() for the order the two
+/// are asked in. A display that shows pictures and is reaching the server keeps
+/// the block exactly as before.</para>
+void releaseSplashDecodeMemory();
+
+bool lastDrawFailedOnAllocation();
+
+}  // namespace Display
+
+// A note on the day/night theme this file implements (see setEnvironment()
+// above): "day" is exactly the white-background/black-ink/grey-muted look
+// the card family already had (see kBgDay/kInkDay/kMutedDay in Display.cpp);
+// "night" is the black-background/white-ink/lighter-grey look the
+// boot-ladder screens (showStatus/showFailure) already had before this -
+// applied uniformly, so the whole App matches what a household would see
+// out their own window, not just the two content cards. The colour-banded
+// banners (WEATHER navy, OVERHEAD blue) and the amber warning colour are
+// deliberately NOT part of the swap - both already read fine against either
+// background, and inventing night variants of them would be theme-following
+// for its own sake rather than a real legibility need.

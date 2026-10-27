@@ -1,6 +1,18 @@
+// The board is chosen here and nowhere else. Everything below this block, and
+// every drawing call in this file, is the same on both boards.
+//
+// CONFIG_IDF_TARGET_ESP32S3 comes from the SDK, so it follows the FQBN without
+// anything having to pass it in. Only the taken branch compiles, which means a
+// break in the other one stays invisible until somebody builds for that board -
+// CI has to build BOTH or the untaken branch rots.
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#include <LovyanGFX.hpp>
+#include "BoardPanellan.h"
+#else
 #define LGFX_AUTODETECT
 #include <LovyanGFX.hpp>
 #include <LGFX_AUTODETECT.hpp>
+#endif
 
 #include <FS.h>
 #include <LittleFS.h>
@@ -23,10 +35,16 @@
 namespace Display {
 namespace {
 
-// LGFX_AUTODETECT senses the board rather than requiring a pin map. The panel
-// this runs on is an LCDWIKI E32R28T whose HSPI-style pinout differs from the
-// Sunton boards most published pin maps describe, and autodetect gets it right
-// where a copied pin map does not.
+// One declaration, two definitions of LGFX, picked by the block at the top of
+// this file.
+//
+// On the ESP32-2432S028, LGFX_AUTODETECT senses the board rather than requiring
+// a pin map. The panel there is an LCDWIKI E32R28T whose HSPI-style pinout
+// differs from the Sunton boards most published pin maps describe, and
+// autodetect gets it right where a copied pin map does not.
+//
+// On the Panellan, BoardPanellan.h supplies the pin map by hand, because
+// LovyanGFX has no entry for that panel to detect.
 LGFX lcd;
 
 constexpr int kScreenW = 320;
