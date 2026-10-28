@@ -26,8 +26,25 @@
 /// A device with no card in the slot is a completely ordinary state, not a
 /// fault: everything above this module treats a failed mount as "no assets
 /// are available", the same way CYD-Dickey's own SdCard.cpp does ("no card
-/// found (or mount failed)") and its splash screen silently skips itself.
-/// Weather and aircraft cards do not touch storage at all and keep working.
+/// found (or mount failed)") and its splash screen skips itself without saying
+/// so. Weather and aircraft cards do not touch storage at all and keep working.
+///
+/// **A board with no card SLOT is a third state, and begin() answers it without
+/// touching the bus.** The Panellan ZX2D80CE02S-V10 has no SD hardware - every
+/// SD pin in the vendor's configuration is -1, which BoardPanellan.h transcribes
+/// and states - so there is nothing a retry could find. begin() returns false at
+/// a board gate before SD.begin(), and the device then presents exactly as a
+/// card-less fleet device does: isReady() false, zero capacity,
+/// mountCostBytes() -1, assets held in RAM for the life of each draw. Nothing on
+/// the wire distinguishes the two, deliberately - a server reading a new shape
+/// here would be reading it from firmware newer than itself.
+///
+/// What the gate avoids is the attempt. SD.begin() claims the default SPI object
+/// and its variant pins, registers a FAT volume, and runs a card-init sequence
+/// whose CMD0 waits time out at 500ms each against a MISO line with nothing on
+/// it - three times, 200ms apart, every boot, for a slot the board does not
+/// have. It also puts the boot inside `kBootStageMountSd`, so anything that did
+/// hang in there would be recorded against a subsystem this board has none of.
 ///
 /// **UNVERIFIED ON HARDWARE.** Nobody has put a card in that slot. A clean
 /// compile proves this builds against the ESP32 core's SD library on the
@@ -36,7 +53,8 @@
 namespace Sd {
 
 /// Mounts the card. Safe to call more than once - a second call while
-/// already mounted is a no-op returning the current state.
+/// already mounted is a no-op returning the current state. Returns false
+/// immediately on a board with no card slot; see the board gate above.
 bool begin();
 
 bool isReady();
@@ -46,8 +64,13 @@ bool isReady();
 uint64_t totalBytes();
 uint64_t usedBytes();
 
-/// Contiguous 8-bit bytes the mount consumed, as the measured delta straddling
-/// SD.begin(). **-1 when no card is mounted**, which is a different fact from 0
+/// Contiguous internal 8-bit bytes the mount consumed (`HeapPools::kTlsCaps`),
+/// as the measured delta straddling SD.begin(). Internal because the figure
+/// exists to be compared against the TLS floor and mbedTLS allocates internal;
+/// the same number as a bare-capability delta on every device in the fleet,
+/// which registers no PSRAM in its heap.
+///
+/// **-1 when no card is mounted**, which is a different fact from 0
 /// and has to survive all the way to the server: 0 would mean "mounting cost
 /// nothing", -1 means "there was nothing to mount", and the devices with no card
 /// are exactly the ones where that distinction matters - they pay no mount cost

@@ -67,10 +67,13 @@ void begin();
 /// **Why a ballast rather than handing mbedTLS a buffer.** mbedtls_ssl_setup()
 /// allocates its own record buffers and takes no pointer from us, so the only
 /// way to guarantee it finds two 16,717-byte holes is to own them until it
-/// needs them and then get out of the way. releaseForHandshake() frees them
-/// immediately before a new session opens and reclaim() takes them back when
-/// the session closes, so between sessions nothing else can move into the
-/// space and fragment it.
+/// needs them and then get out of the way. The blocks are taken with
+/// `HeapPools::kTlsCaps` so they come out of the same pool mbedTLS will ask
+/// from; a bare 8-bit request can be served from PSRAM on a board that has it,
+/// and would then hold 33,434 bytes somewhere no handshake is ever going to
+/// look. beginRequest() frees them one statement before it opens a new session,
+/// and reclaimIdleBallast() takes them back once no session is live, so between
+/// sessions nothing else can move into the space and fragment it.
 ///
 /// This is what makes a check-in independent of what drawing has done to the
 /// heap. The three causes that starved handshakes - the splash's PNG decoder
@@ -172,21 +175,58 @@ HTTPClient& client();
 /// matters and was got wrong for a while: the total is 33,434, but the largest
 /// single contiguous demand is half that, so a device with a 20,000-byte block
 /// is much closer to working than a "needs 32KB" framing suggests.
+///
+/// **16,717 twice holds on the Panellan too, and that is a build fact rather
+/// than an assumption.** Its generated sdkconfig carries
+/// `CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN=16384` with
+/// `CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN` unset, which is the stock sizing: IN
+/// and OUT are both 16,717 and a session holds 33,434. The core overlay on this
+/// workstation sets `ASYMMETRIC_CONTENT_LEN` with IN 16384 and OUT 4096, giving
+/// 16,717 in and 4,429 out for 21,146 - so an overlay-built ESP32-2432S028
+/// binary and every other binary of the same commit disagree about the total
+/// while agreeing about this constant, which is the largest single demand and
+/// the only one either figure is compared against.
+///
+/// **And the block has to be in internal DRAM.** `mbedtls_ssl_setup()` calls
+/// `mbedtls_calloc`, which under `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC` is
+/// `esp_mbedtls_mem_calloc()` allocating `MALLOC_CAP_INTERNAL |
+/// MALLOC_CAP_8BIT`. PSRAM does not count toward this however much a board
+/// carries - see HeapPools.h.
 constexpr size_t kTlsRecordBufferBytes = 16717;
 
-/// The largest single contiguous 8-bit allocation this device could satisfy
-/// right now. `heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)`, never
-/// `ESP.getMaxAllocHeap()` - the latter reads a constant 32,756 on this board
-/// while the true figure has been measured anywhere from 1,780 to 77,812, and
-/// it has caused several wrong diagnoses.
+/// The largest single contiguous allocation a TLS session could be handed right
+/// now. Never `ESP.getMaxAllocHeap()` - that reads a constant 32,756 on the
+/// ESP32-2432S028 while the true figure has been measured anywhere from 1,780 to
+/// 77,812, and it has caused several wrong diagnoses.
+///
+/// **Measured over internal 8-bit heap, not the bare 8-bit capability**
+/// (`HeapPools::kTlsCaps`). Both generated sdkconfigs in this repository set
+/// `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC`, so mbedTLS allocates with
+/// `MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT` and cannot reach PSRAM however much
+/// of it a board carries. The two masks walk the same regions and return the
+/// same figure on the ESP32-2432S028, which has no PSRAM registered in its heap,
+/// so every number this fleet has recorded still reads as it always did. On the
+/// Panellan, whose 2MB of PSRAM *is* registered, the bare capability reports the
+/// largest hole in either pool and runs in the megabytes - which would describe
+/// a device that cannot stand up a handshake as having ample room. See
+/// HeapPools.h for the derivation.
+///
+/// The bare-capability figure is `HeapPools::largestAnyBlockBytes()`, which is
+/// what `largestFreeBlock8BitBytes` carries on the wire. This module does not
+/// re-export it: nothing here compares it against kTlsRecordBufferBytes, and a
+/// second name for it beside this one is how the wrong one gets reached for.
 size_t largestContiguousBytes();
 
 /// Whether a NEW TLS session could be established at this instant.
 ///
 /// This is a PROOF OF IMPOSSIBILITY when it returns false, not an estimate.
-/// Below kTlsRecordBufferBytes there is no block big enough for even the first
-/// of the two buffers, so `mbedtls_ssl_setup()` cannot succeed - no amount of
-/// retrying, waiting, or better luck changes that. Returning true is weaker: it
+/// Below kTlsRecordBufferBytes **of internal 8-bit heap** there is no block big
+/// enough for even the first of the two buffers, so `mbedtls_ssl_setup()` cannot
+/// succeed - no amount of retrying, waiting, or better luck changes that. The
+/// pool is load-bearing in that sentence: measured against the bare 8-bit
+/// capability on a board with PSRAM this would be a proof of nothing, because
+/// 2MB of PSRAM always holds a 16,717-byte hole and mbedTLS can never allocate
+/// in it. Returning true is weaker: it
 /// means the first buffer could be allocated, not that both can, so a handshake
 /// may still fail for ordinary reasons. The asymmetry is deliberate and is what
 /// makes the false case safe to act on.
@@ -227,6 +267,12 @@ bool canOpenNewSession();
 void diagnoseFailure(const char* tag);
 
 /// What one reconnect attempt actually did, at each step.
+///
+/// All four heap figures are internal 8-bit heap (`HeapPools::kTlsCaps`),
+/// because that is the pool a session's record buffers and its chain
+/// verification both allocate from. A bare-capability figure here would include
+/// PSRAM on the Panellan and make a probe that refused on the floor look like a
+/// probe that refused with memory to spare.
 struct ReconnectProbe {
   size_t freeBeforeClose;
   size_t largestBeforeClose;

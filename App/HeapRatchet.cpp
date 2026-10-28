@@ -2,26 +2,33 @@
 
 #include <esp_heap_caps.h>
 
+#include "HeapPools.h"
 #include "Log.h"
 
 namespace HeapRatchet {
 namespace {
 
-/// MALLOC_CAP_8BIT, bare, and deliberately NOT the MALLOC_CAP_INTERNAL|8BIT
-/// pair HeapTrace uses.
+/// Internal 8-bit heap - the pool HeapTrace measures, and the pool a TLS
+/// session allocates from.
 ///
-/// On this no-PSRAM ESP32-D0WD-V3 the two are the same pool and every figure
-/// either one produces is identical - HeapTrace's own header says so, and the
-/// [heapdiag] lines that print both side by side have always agreed. The reason
-/// to use the bare capability HERE is comparability: every number this
-/// investigation has recorded, including the 65,524-at-boot and 16,717-floor
-/// figures this module's whole design rests on, and including the
-/// bootLargestFreeBlockBytes and largestFreeBlock8BitBytes fields telemetry
-/// already sends, was taken with MALLOC_CAP_8BIT. The identity in HeapRatchet.h
-/// is checked against those two fields, so this has to be measured the same way
-/// they are or the check would be comparing two quantities that only happen to
-/// coincide on this board.
-constexpr uint32_t kCaps = MALLOC_CAP_8BIT;
+/// This read a bare MALLOC_CAP_8BIT while the ESP32-2432S028 was the only board
+/// in the repository, for comparability with the figures the investigation had
+/// already recorded. On that chip nothing is lost by naming the pool: no PSRAM
+/// is registered in its heap, the two masks walk the same regions, HeapTrace's
+/// header says so, the [heapdiag] lines that print both side by side have always
+/// agreed, and Telemetry.cpp records all four capability classes agreeing to the
+/// byte on device 17. The 65,524-at-boot and 16,717-floor figures this module's
+/// design rests on are unaffected, and so is the identity in HeapRatchet.h - on
+/// that board this is a relabeling.
+///
+/// On the Panellan it is the difference between an instrument and nothing. Its
+/// 2MB of PSRAM is registered as 8-bit capable heap, so a bare-capability
+/// largest-free-block reads in the megabytes, barely moves, and credits every
+/// phase bucket approximately zero for the life of the device - a module
+/// reporting that nothing carves the heap because it is watching a pool nothing
+/// carves. The internal pool is the scarce one, the one mbedTLS spends, and the
+/// one worth attributing. See HeapPools.h.
+constexpr uint32_t kCaps = HeapPools::kTlsCaps;
 
 /// A step worth a log line. Accounting has NO threshold - every byte is
 /// credited to a bucket, which is what makes the identity exact - but a line
@@ -131,21 +138,24 @@ void commitStep(int32_t bytes, size_t landedAt) {
 
 }  // namespace
 
-void begin(uint32_t bootLargestFreeBlock) {
+void begin(uint32_t bootLargestTlsBlock) {
   // 0 is BootDiag's "not measured", so fall back to taking the reading here.
   // Slightly worse - setup() has run further by now, so the anchor is lower and
   // every bucket measured against it is correspondingly smaller - but a module
   // that silently did nothing because a call order changed would be worse
   // still, and this way the failure is a slightly conservative number rather
   // than a missing one.
-  gFloor = (bootLargestFreeBlock > 0) ? static_cast<size_t>(bootLargestFreeBlock)
-                                      : heap_caps_get_largest_free_block(kCaps);
+  gFloor = (bootLargestTlsBlock > 0) ? static_cast<size_t>(bootLargestTlsBlock)
+                                     : heap_caps_get_largest_free_block(kCaps);
   gStarted = true;
 
-  Log::printf("[ratchet] attributing contiguous-heap loss from %u bytes; a new TLS session needs "
-              "16717 twice over, so that is the distance this boot has to fall before the device "
-              "goes unreachable",
-              static_cast<unsigned>(gFloor));
+  // Both figures ahead of the prose, because Log::printf's scratch is 256 bytes
+  // and truncates past it.
+  Log::printf("[ratchet] attributing internal contiguous-heap loss from %u bytes; %s largest is "
+              "%u. A new TLS session needs 16717 of internal twice over, so that is the distance "
+              "this boot has to fall before the device goes unreachable",
+              static_cast<unsigned>(gFloor), HeapPools::anyPoolLabel(),
+              static_cast<unsigned>(HeapPools::largestAnyBlockBytes()));
 }
 
 void observe() {

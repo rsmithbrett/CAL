@@ -40,6 +40,21 @@
 /// "plenty of room in unusable fragments", which is precisely the state that
 /// went unnoticed.
 ///
+/// **And three more beside them, over internal 8-bit heap:**
+/// `free8BitInternalBytes`, `largestFreeBlock8BitInternalBytes` and
+/// `bootLargestFreeBlock8BitInternalBytes`, plus `heapPoolsMeasured` naming what
+/// the bare fields span (`"internal"` or `"internal+psram"`). The bare three are
+/// `MALLOC_CAP_8BIT`, which is a permission and not a pool: on a board with
+/// PSRAM registered in its heap they describe internal DRAM and PSRAM together,
+/// and mbedTLS reaches only the first half of that - it allocates
+/// `MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`. So the internal three are the ones a
+/// TLS floor is graded against. Added rather than substituted, for the reason
+/// `freeHeapBytes` was: a field does not change meaning underneath a server that
+/// reads it. On every device in the fleet the internal three repeat the bare
+/// three exactly, since an ESP32-D0WD-V3 registers no PSRAM. Absent or null
+/// means what a report from older firmware already meant - one pool, and no
+/// distinction to draw. See HeapPools.h.
+///
 /// Deliberately has no timer of its own. It piggybacks on CheckIn's existing
 /// cadence instead - see performCheckIn() in App.ino, which calls report()
 /// once per successful check-in, immediately after. Telemetry data (signal

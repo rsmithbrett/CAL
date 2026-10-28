@@ -294,11 +294,13 @@ bool lastResetWasUnexpected();
 /// lost with the one that did not.
 const char* restartReasonToken();
 
-/// Records this boot's largest contiguous 8-bit block. Call once from setup(),
-/// as early as the rest of the boot allows and before the card rotation has
-/// drawn anything - the value is meant to be the high-water mark for the boot,
-/// so calling it late understates what was available and makes every later
-/// decay figure computed from it too small.
+/// Records this boot's largest contiguous 8-bit block, over both capability
+/// masks: bare 8-bit for bootLargestFreeBlock() and internal-only 8-bit for
+/// bootLargestTlsBlock(). Call once from setup(), as early as the rest of the
+/// boot allows and before the card rotation has drawn anything - the values are
+/// meant to be the high-water mark for the boot, so calling it late understates
+/// what was available and makes every later decay figure computed from them too
+/// small.
 void recordBootHeap();
 
 /// The value recordBootHeap() captured, or 0 if it was never called. Repeated
@@ -312,7 +314,22 @@ void recordBootHeap();
 /// anybody watching a stream. Device 17 went 90,100 at boot to 16,372 in
 /// twenty-six minutes and the only way anyone knew was reading log lines by
 /// hand - during which the same plateau was called wrongly twice.
+///
+/// Bare `MALLOC_CAP_8BIT`, which is what the `bootLargestFreeBlockBytes` field
+/// has always carried. On a board with PSRAM registered in its heap that spans
+/// both pools - use bootLargestTlsBlock() for anything compared against the TLS
+/// floor.
 uint32_t bootLargestFreeBlock();
+
+/// The same instant as bootLargestFreeBlock(), measured over internal 8-bit heap
+/// only (`HeapPools::kTlsCaps`), and the anchor HeapRatchet attributes loss from.
+///
+/// Identical to bootLargestFreeBlock() on every device in the fleet, which has
+/// no PSRAM registered in its heap. On the Panellan the bare figure is dominated
+/// by 2MB of PSRAM that mbedTLS cannot allocate in, so this is the figure a TLS
+/// floor or a decay-since-boot subtraction has to be computed from. See
+/// HeapPools.h.
+uint32_t bootLargestTlsBlock();
 
 /// The largest contiguous 8-bit block as it stood when the PREVIOUS boot decided
 /// to restart, or 0 when the last restart recorded no figure.
