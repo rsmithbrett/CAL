@@ -28,6 +28,18 @@
 /// otherwise reports nothing at all, leaving the question to the operator
 /// declaration the server holds. See MOTION_AWARE_DISPLAY_DESIGN.md.
 ///
+/// **A board whose ADC1 does not reach GPIO35 is a third state, and this module
+/// settles it at compile time.** The S3's ADC1 is GPIO1 to GPIO10 and its ADC2
+/// is GPIO11 to GPIO20, per the SDK's `soc/adc_channel.h`, so that pad has no
+/// channel on that target and there is no reading to take. `sampleSensor()`
+/// returns at a pin gate before reaching the ADC. That is a different thing from
+/// a reading that came back under the threshold, which is how this read on a
+/// board with no channel: the answer was a property of whatever
+/// `analogReadMilliVolts()` returns for an unmapped pin, and AdcPins.h records
+/// that the core does not refuse one. What reaches the server is the same either
+/// way - `capabilityToReport()` returns an empty string, which asserts no sensor
+/// state at all - and so is the brightness, which holds the fallback level.
+///
 /// **What turns the feature on is the policy, not the pin.** The server sends a
 /// motionPolicy only to a device it believes has a sensor; receiving one with
 /// enabled=true is the instruction to start watching GPIO35. A device that

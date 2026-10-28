@@ -1,15 +1,36 @@
 #include "Motion.h"
 
+#include "AdcPins.h"
 #include "Display.h"
 #include "Log.h"
 
 namespace Motion {
 namespace {
 
-/// The AM312 OUT line. Input-only at the silicon level on this part, which is
-/// exactly what a sensor line wants: nothing in this firmware can drive it by
-/// mistake. Broken out on the P3 header as 3.3V / IO35 / GND.
-constexpr uint8_t kPin = 35;
+/// The AM312 OUT line, on a target whose ADC1 reaches it.
+///
+/// GPIO35 on the fleet board, where it is ADC1_CH7 and input-only at the
+/// silicon level - which is what a sensor line wants, because nothing in this
+/// firmware can drive it by mistake. Broken out on the P3 header as
+/// 3.3V / IO35 / GND.
+///
+/// AdcPins::kNoPin where that channel does not exist. The S3's ADC1 is GPIO1 to
+/// GPIO10 and its ADC2 is GPIO11 to GPIO20, per soc/adc_channel.h, so GPIO35
+/// has no channel there and sampleSensor() below takes no reading at all.
+constexpr int8_t kPin = AdcPins::adc1PinOrNone(35);
+
+// kPin is derived from the SDK's channel table. This cross-checks that result
+// against the board gate, so a target where one side moves without the other
+// fails the build instead of sampling a pad that has no channel.
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+static_assert(kPin == AdcPins::kNoPin,
+              "this target's ADC1 does not reach GPIO35 - soc/adc_channel.h gives ADC1 as "
+              "GPIO1-10 and ADC2 as GPIO11-20 - so this module holds no sensor pin");
+#else
+static_assert(kPin == 35,
+              "the sensor pin is not GPIO35 on this target, which is the pad the measured "
+              "thresholds in this file and PowerProbe's own GPIO35 figures both describe");
+#endif
 
 /// Settling time after power-up before readings count (MOT 01). An AM312 needs
 /// its own warm-up and reports spuriously during it, so a device that booted
@@ -197,6 +218,17 @@ void stepFade() {
 
 /// True when a confirmed motion event has just occurred.
 bool sampleSensor() {
+  // No sensor pin on this board, so no reading is taken and none of the state
+  // below advances. This returns the same false a reading under the threshold
+  // returns, and the difference is what produced it: there, a measurement came
+  // back low; here, nothing was measured. Reaching the threshold comparison
+  // through a pad with no ADC channel would make the answer a property of
+  // whatever analogReadMilliVolts() hands back for an unmapped pin - see
+  // AdcPins.h - rather than of the room.
+  if (kPin < 0) {
+    return false;
+  }
+
   const uint32_t now = millis();
 
   if (now - gBootMs < kStabilizeMs) {
@@ -231,7 +263,7 @@ bool sampleSensor() {
   // value is reused rather than treating the gap as LOW, which would shred the
   // debounce pair and the stuck-high timer both.
   if (gLastSampleMs == 0 || now - gLastSampleMs >= kSampleIntervalMs) {
-    gLastMillivolts = analogReadMilliVolts(kPin);
+    gLastMillivolts = analogReadMilliVolts(static_cast<uint8_t>(kPin));
     gLastSampleMs = now;
   }
   const bool high = gLastMillivolts >= kHighThresholdMillivolts;
@@ -321,7 +353,18 @@ void begin() {
   // There is still no pull resistor and there cannot be: GPIO35 is in the
   // input-only 34-39 range, which has none on this part. That is precisely why
   // absent and idle read the same - see Motion.h.
+  //
+  // Set on both boards. The brightness side of service() still runs on a board
+  // with no sensor pin - it holds the fallback level, which is what a device
+  // with no policy in force does - and only the sampling is skipped.
   gBegun = true;
+
+  if (kPin < 0) {
+    Log::line("[motion] no sensor pin on this board - this target's ADC1 reaches GPIO1-10 and "
+              "its ADC2 GPIO11-20, so GPIO35 has no channel and no reading is taken. Brightness "
+              "holds the fallback level and the capability this device reports stays empty");
+    return;
+  }
 
   Log::printf("[motion] watching GPIO35, stabilising for %lu ms before any reading counts. "
               "No sensor fitted is indistinguishable from an idle one, so nothing is "

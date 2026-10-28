@@ -46,6 +46,23 @@
 /// voltages as measured; converting to battery volts is a later change, made
 /// once a multimeter has confirmed both the divider's existence and its values.
 ///
+/// **A board whose ADC1 does not reach these pads is not probed at all.** The
+/// S3's ADC1 is GPIO1 to GPIO10 and its ADC2 is GPIO11 to GPIO20, per the SDK's
+/// `soc/adc_channel.h`, so GPIO34 and GPIO35 have no channel on that target and
+/// `analogReadMilliVolts()` has nothing to sample. It does not refuse the pin
+/// either - AdcPins.h records what it does instead - so the pins below are
+/// derived from the SDK's channel table and both readings return 0 without
+/// calling the core.
+///
+/// **0 mV is not a pin voltage of zero.** At 11dB the ADC bottoms out near
+/// 140 mV: device 17's AM312 reads 142 mV idle, and four devices with nothing
+/// attached read 142, 147, 152 and 205. So 0 sits outside the range a connected
+/// pin can produce, and it is the figure this module reports for a pin it did
+/// not sample. What the wire does not carry is which of those two a 0 is:
+/// `adc34Millivolts` and `adc35Millivolts` are figures with no companion flag,
+/// so a reader needs the device's board to tell an unconnected pin from a board
+/// with no such pin.
+///
 /// Safe to call at any time: both pins are read-only, neither is driven, and
 /// GPIO35 is input-only at the silicon level so it cannot be driven by mistake.
 namespace PowerProbe {

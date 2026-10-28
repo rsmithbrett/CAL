@@ -1825,14 +1825,17 @@ its partition, and the paragraphs below are what the compile cannot answer. They
 are in the order to check them, because the early ones make the later ones
 unreadable if they fail.
 
-**Two of these are now compile-time rather than manual.** `App/Sound.h` and
+**Four of these are now compile-time rather than manual.** `App/Sound.h` and
 `App/CardManager.cpp` carry a `static_assert` against
 `MSPI_IOMUX_PIN_NUM_CS1`..`MSPI_IOMUX_PIN_NUM_MOSI` from the SDK's own
 `soc/spi_pins.h`, so a peripheral pin in the S3's flash-and-PSRAM range fails
-the build instead of the board. Put either pin back to its fleet-board value and
-the S3 compile stops with the pin named. They cover the two pins this repository
-had. They cover nothing about a pin somebody adds in the 33-37 range, which an
-octal part bonds and this quad part does not.
+the build instead of the board. `App/PowerProbe.cpp` and `App/Motion.cpp` carry
+one each against the SDK's `soc/adc_channel.h`, so a pin this target's ADC1 does
+not reach fails the build instead of returning a figure nobody can interpret.
+Put any of the four pins back to its fleet-board value and the S3 compile stops
+with the pin named - 14.9 quotes what it says. They cover the four pins this
+repository had. They cover nothing about a pin somebody adds in the 33-37 range,
+which an octal part bonds and this quad part does not.
 
 ### 14.1 Does anything light up at all
 
@@ -1912,17 +1915,132 @@ no `ASYMMETRIC_CONTENT_LEN` and no `MBEDTLS_DYNAMIC_BUFFER`. A session holds
 16,717 twice, 33,434 bytes, for its whole life. Read it off
 `App/build/esp32.esp32.esp32s3/sdkconfig`, not off the esp32 one beside it.
 
-### 14.9 Pins this repository still points at the wrong thing
+### 14.9 The two ADC pins, and what the core does with a pin it has no channel for
 
-Not fixed, and not fatal. `App/PowerProbe.cpp` reads GPIO34 and GPIO35 with
-`analogReadMilliVolts`, and neither is an ADC pin on the S3 - its ADC1 is
-GPIO1-10 and ADC2 is GPIO11-20. Both come back as 0 mV, which `Motion` reads as
-below its 1500 mV threshold and therefore as no motion, which is the safe
-answer. Expect zeros in telemetry and no motion-aware dimming.
-`App/SdStorage.cpp` still compiles the fleet board's chip select, GPIO5, into
-its mount path; on this board that is the vendor's RS485 RTS line, and the
-default SPI pins it reaches for are four of the six general-purpose header
-pins. The mount fails either way because there is no card.
+**Fixed.** `App/PowerProbe.cpp` read GPIO34 and GPIO35 with
+`analogReadMilliVolts`, and `App/Motion.cpp` read GPIO35 the same way. Neither
+pad has an ADC channel on the S3: `soc/adc_channel.h` for that target gives ADC1
+as GPIO1-10 and ADC2 as GPIO11-20, read on 2026-10-28 from
+`tools/esp32s3-libs/3.3.11/include/soc/esp32s3/include/soc/adc_channel.h`. Both
+modules now take their pin from `App/AdcPins.h`, which derives it from that
+table, and both return before calling the core when the table has no entry. The
+figures telemetry carries - `adc34Millivolts` and `adc35Millivolts` - are 0 on
+that board, as they were, and `Motion::capabilityToReport()` returns an empty
+string, as it did. The fleet board's generated code for both files is unchanged;
+see "what was compiled" below.
+
+**The previous version of this section said both pins come back as 0 mV. That
+was not established, and it is not what the core does.** In core 3.3.11,
+`__analogReadMilliVolts()` in `cores/esp32/esp32-hal-adc.c` calls
+`adc_oneshot_io_to_channel()` without assigning the result to the `err` it then
+tests, so the `log_e("Pin %u is not ADC pin!")` branch beside it cannot be
+reached. `adc_unit` and `channel` are left holding whatever the frame held, and
+`adc_unit` then indexes the file-scope `adc_handle` array, which has
+`SOC_ADC_PERIPH_NUM` (2) entries. The shipped S3 image agrees: disassembling
+`App/build/esp32.esp32.esp32s3/App.ino.elf` at `__analogReadMilliVolts` shows
+the `call8` to `adc_oneshot_io_to_channel` followed by no test of its result,
+and four instructions later `l32i a8, a5, 0` loads the unit from the
+uninitialized frame slot and `subx8`/`slli` scale it by the array's 28-byte
+stride. `__analogRead()` in the same file does assign `err` and does refuse the
+pin, so the two entry points differ on the same argument.
+
+That is why "0 mV reads as below the 1500 mV threshold, which is no motion" was
+the wrong thing to rely on. The reading was never taken; the answer was a
+property of the frame. `Motion` now returns at a pin gate, so what it reports is
+that nothing was measured rather than that nothing moved - the same empty
+capability string either way, reached for a reason that does not move when a
+core version or a threshold does.
+
+**Still carrying the fleet board's chip select: `App/SdStorage.cpp`.** It
+compiles GPIO5 into its mount path. The gate that keeps that pin from ever being
+driven on the S3 is `kBoardHasCardSlot` in commit `e6afc9a` on branch
+`fix/s3-heap-pool-and-sd-gate`, which is a sibling of this branch off `add4c66`
+and not an ancestor of it. No second guard was added here, because two gates on
+one mount with nothing comparing them is worse than one. Whichever of the two
+branches lands second has to keep that gate.
+
+The pin is not claimed before that gate, which is the part worth checking rather
+than assuming. `kChipSelectPin` is a `constexpr`; the global `SD` is
+`SDFS SD = SDFS(FSImplPtr(new VFSImpl()))` and its constructor sets `_pdrv` and
+nothing else; the global `SPI` is `SPIClass SPI(FSPI)` and its constructor sets
+every pin field to -1. `SD.begin()` is the only call in `App/` that reaches
+either object's hardware, and the gate returns before it. On the S3 that call
+would claim GPIO5 plus the variant's default SPI pins - `SS 10`, `MOSI 11`,
+`SCK 12`, `MISO 13` in `variants/esp32s3/pins_arduino.h` - which are four of the
+six pins the EXT header brings out.
+
+Two things nobody has read a datasheet for: that GPIO5 is this board's RS485 RTS
+line, which is secondhand and is not in `BoardPanellan.h` or in the vendor
+specification the server's `OPEN_ITEMS.md` transcribes, and what GPIO34 and
+GPIO35 are wired to on this board at all. The module is a quad-PSRAM part
+(`CONFIG_SPIRAM_MODE_QUAD=y`), so 33-37 are not bonded to the flash and PSRAM
+bus and the two pads are ordinary digital GPIOs there. Neither question changes
+any of the above, because nothing drives any of those pins now.
+
+#### What was compiled, and what the guards said when they were made to fail
+
+Not a full image. A compilation database per FQBN into its own `--build-path`,
+then the touched translation units compiled on both targets from the working
+tree: `Motion.cpp`, `PowerProbe.cpp`, and the two files that include their
+headers, `Telemetry.cpp` and `App.ino.cpp`. All eight compiles exit 0. That
+proves these files on both targets and says nothing about the whole image or its
+size.
+
+The fleet board's code is unchanged rather than only believed unchanged. Both
+files were compiled for `esp32:esp32:esp32:PartitionScheme=min_spiffs` at
+`17e990a` and again with this change, and compared: every non-debug section is
+identical in size, `objdump -d` is identical line for line, and
+`.rodata.str1.1` is identical. Only `.debug_*` moved, which is the comments.
+
+Each guard was then made to fail. Restores were verified by SHA-256 against a
+copy taken before the first perturbation, because a restored file keeps its old
+timestamp and a build that skips the rebuild reports the perturbed object's
+result.
+
+GPIO34 written back into `PowerProbe.cpp` on the S3:
+
+```
+App/PowerProbe.cpp:24:21: error: static assertion failed: this target's ADC1 does not reach GPIO34 or GPIO35 - soc/adc_channel.h gives ADC1 as GPIO1-10 and ADC2 as GPIO11-20 - so this module holds no pin for either
+   24 | static_assert(kPinA == AdcPins::kNoPin && kPinB == AdcPins::kNoPin,
+      |               ~~~~~~^~~~~~~~~~~~~~~~~~
+App/PowerProbe.cpp:24:21: note: the comparison reduces to '(34 == -1)'
+```
+
+GPIO35 written back into `Motion.cpp` on the S3:
+
+```
+App/Motion.cpp:26:20: error: static assertion failed: this target's ADC1 does not reach GPIO35 - soc/adc_channel.h gives ADC1 as GPIO1-10 and ADC2 as GPIO11-20 - so this module holds no sensor pin
+   26 | static_assert(kPin == AdcPins::kNoPin,
+      |               ~~~~~^~~~~~~~~~~~~~~~~~
+App/Motion.cpp:26:20: note: the comparison reduces to '(35 == -1)'
+```
+
+The fleet board's half of each pair bites too. The probe pin moved to GPIO27,
+which is ADC2 on that part and so not a pin this firmware can sample while WiFi
+is up:
+
+```
+App/PowerProbe.cpp:28:21: error: static assertion failed: the probe pins are not GPIO34 and GPIO35 on this target, which is the pair PowerProbe.h's reasoning and the adc34Millivolts and adc35Millivolts telemetry fields are written against
+   28 | static_assert(kPinA == 34 && kPinB == 35,
+      |               ~~~~~~^~~~~
+App/PowerProbe.cpp:28:21: note: the comparison reduces to '(-1 == 34)'
+```
+
+And the sensor pin moved to GPIO34, which is a valid ADC1 pin there and would
+have compiled under a weaker guard:
+
+```
+App/Motion.cpp:30:20: error: static assertion failed: the sensor pin is not GPIO35 on this target, which is the pad the measured thresholds in this file and PowerProbe's own GPIO35 figures both describe
+   30 | static_assert(kPin == 35,
+      |               ~~~~~^~~~~
+App/Motion.cpp:30:20: note: the comparison reduces to '(34 == 35)'
+```
+
+The S3 objects carry no ADC read at all afterwards. `nm -u` on `Motion.cpp.o`
+lists no `analog*` symbol, and `PowerProbe.cpp.o` lists only
+`analogSetAttenuation`, which is kept: with `pin == -1` it configures no channel
+and sets the two file-scope defaults, so it is safe on a board with no ADC pin
+and keeps one statement of this firmware's attenuation on both boards.
 
 ## What a clean compile does and does not prove
 
