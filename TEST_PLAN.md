@@ -224,22 +224,19 @@ wrong figure routes a reader to the wrong work.
    contiguity requirement. There must be no unqualified "needs roughly 32KB
    contiguous" left anywhere, in Markdown, in a workflow file or in a comment.
 2. `Http::kTlsRecordBufferBytes` must be the single definition of the number.
-   **This is currently aspirational and the tree does not meet it** - checked
-   2026-09-14, `grep -rn 16717 App/` finds three other sites:
-   - `App/SdStorage.cpp:144`, a live `largestAfterMount >= 16717` **comparison**.
-     This is the one that matters: it is a second definition of the figure that
-     decides whether the mount log says the device can open a TLS session, and
-     nothing makes it follow `kTlsRecordBufferBytes` if that constant ever
-     changes. `SdStorage.cpp` does not include `Http.h`, which is why it was
-     written as a literal; fixing it means either that include or lifting the
-     figure somewhere both can see. Left alone here rather than folded into an
-     unrelated change.
-   - `App/SdStorage.cpp:140` and `App/BootDiag.cpp:184` and
-     `App/HeapRatchet.cpp:146`, all inside log-string prose. Harmless to
-     behaviour, still a figure that can drift out of step with the constant.
+   **The live comparison now meets this; two log strings still do not.**
+   - `App/SdStorage.cpp`'s `largestAfterMount >= 16717` was the site that
+     mattered - a second definition of the figure deciding whether the mount log
+     says the device can open a TLS session, with nothing making it follow the
+     constant. It now reads `Http::kTlsRecordBufferBytes`, for the comparison and
+     for the figure printed beside it; `SdStorage.cpp` includes `Http.h` to do
+     it. Closed.
+   - `App/BootDiag.cpp` and `App/HeapRatchet.cpp` still carry 16717 inside
+     log-string prose. Harmless to behaviour, still a figure that can drift out
+     of step with the constant. Open.
 
-   Re-check this step after any change to `kTlsRecordBufferBytes`, and treat the
-   `SdStorage.cpp:144` comparison as the acceptance criterion for closing it.
+   `grep -rn 16717 App/` is the check. Re-run it after any change to
+   `kTlsRecordBufferBytes`.
 3. **The arithmetic worth re-deriving at the bench once**, because it is what
    the correction is for: a device sitting at largest8 = 21,000 satisfies the
    *first* record buffer and still cannot complete a handshake, because the
@@ -1879,3 +1876,141 @@ This is an **experiment**, not an instruction to publish to the fleet. See
 compilation or from the presence of an HTTP request.** Require real physical
 phone testing and keep the two-stage QR/URL fallback available as a separate
 experiment.
+
+## 14. The heap figure that gates TLS says which pool it measured
+
+`App/HeapPools.{h,cpp}` is new. It defines `kTlsCaps`
+(`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`) as the mask every TLS-relevant figure
+is taken with, and `anyPoolLabel()` as the string every line reporting a
+bare-capability figure prints beside it. `Http`, `HeapRatchet`, `BootDiag`,
+`SdStorage` and `Telemetry` were changed to use it.
+
+**No test was added, and no test failed first.** There is no test harness in this
+repository - the App and CAL are Arduino sketches with no unit-test target, and
+the suites this project runs live in the server tree. What exists instead is a
+compile-time guard and a bench procedure, and neither is a substitute for the
+other.
+
+### What is actually checked by a build
+
+`HeapPools.h` carries:
+
+```
+#if !defined(CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC)
+#error "HeapPools::kTlsCaps assumes CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC. ..."
+#endif
+```
+
+That is the premise the internal mask rests on: mbedTLS allocates through
+`esp_mbedtls_mem_calloc`, which under this option takes
+`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`. If a core tree ever sets
+`DEFAULT_MEM_ALLOC` or `EXTERNAL_MEM_ALLOC` instead, mbedTLS starts drawing from
+PSRAM, the internal mask stops describing the pool a handshake is graded
+against, and every figure in the list above would be measuring the wrong thing
+while still compiling.
+
+**The guard was proven to bite before the change was accepted**, by inverting its
+sense to `#if defined(...)` and confirming the build stops with that message
+rather than succeeding. Restore it with `git checkout -- App/HeapPools.h` and
+re-run; verify the restore against `git diff` rather than against a copy, and
+remember that a restored file can keep its old mtime and let the build skip the
+rebuild.
+
+### What a build does not prove, and what the bench has to settle
+
+1. **That the two masks really are the same number on the fleet board.** Three
+   places in this repository already assert it - `HeapTrace.h`, the `[heapdiag]`
+   lines, and the device 17 capture recorded in `Telemetry.cpp` - and the chip
+   argument is sound (`esp_psram_init()` finds nothing on an ESP32-D0WD-V3, so
+   no SPIRAM region is registered). It has not been re-measured since the
+   change. `logHeapSnapshot()` prints `8BIT` and `INT|8BIT` side by side on
+   every call: on any fleet device the two pairs must be identical, every time.
+   If they ever are not, every figure this fleet has recorded needs re-reading.
+2. **That they diverge on the Panellan, and by how much.** Expected: the bare
+   pair in the megabytes, the internal pair in the tens or low hundreds of
+   kilobytes, and `heapPoolsMeasured` reading `internal+psram`. Read it off the
+   `[telemetry] heap pools=` line and the `[heapdiag]` line on a first boot.
+   Nobody has booted this board.
+3. **That the ballast still lands.** `reserveTlsBallast()` now asks for
+   `kTlsCaps`, so on the Panellan it is competing for internal DRAM rather than
+   taking the easy PSRAM hole. `[http] TLS ballast reserved: 2 x 16717 bytes of
+   internal 8-bit heap held from boot` is the line that says it worked; the
+   `could not reserve` line is the one that says the S3's internal pool is
+   tighter at the top of `setup()` than this assumed. Either outcome is
+   information and the second is not a regression on the fleet board, where the
+   request is byte-identical to what it always was.
+4. **That `HeapRatchet`'s identity still balances.** It is now anchored to
+   `BootDiag::bootLargestTlsBlock()` and observes `kTlsCaps`, so the check is
+   `bootLargestFreeBlock8BitInternalBytes - largestFreeBlock8BitInternalBytes`
+   against the sum of the six buckets - not the bare pair the check used to
+   name. On a fleet device both pairs give the same answer, which is the cheap
+   way to confirm the change did not move anything.
+
+### The draw path was deliberately left alone
+
+`App/Display.cpp` carries fourteen bare-capability heap figures in its log lines
+and `App/Assets.cpp` one more. None was changed, and none is a TLS figure - they
+are about the pool a file buffer or a decoder scratch comes from, and on a board
+with PSRAM that pool legitimately may be PSRAM:
+`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` sends every `malloc()` above 4,096
+bytes to PSRAM first, and a 10-24KB file buffer or the PNG decoder's 44KB
+scratch is well above it.
+
+The right mask for those is an open question rather than an oversight, and it is
+one the board has to answer: whether LovyanGFX's decoder scratch and
+`ensureFileBufferCapacity()` do land in PSRAM on the Panellan, and what that does
+to the 32,768-byte PNG floor. `logHeapSnapshot()` prints `8BIT` and `INT|8BIT`
+side by side and is the line to read first on a first boot - the gap between the
+two pairs is the measurement. Until then those figures are unlabelled on the S3
+and a reader has to know which board sent them.
+
+### The reading end is not done
+
+`FleetHealth.IsBelowTlsFloor()`, `IsHeapFragmented()`,
+`LargestBlockLostSinceBoot()` and the `/api/telemetry` endpoint's own floor
+warning all grade `largestFreeBlock8BitBytes`, which is the bare field. The
+three new internal fields are additive and optional and nothing reads them yet,
+so a Panellan below the TLS floor still reads as healthy on `/diag/telemetry`.
+That is a server-tree change and it is a prerequisite for this being visible
+anywhere but a debug stream.
+
+## 15. The Panellan has no card slot, so no mount is attempted
+
+`Sd::begin()` returns false at a board gate - `kBoardHasCardSlot`, a `constexpr
+bool` gated on `CONFIG_IDF_TARGET_ESP32S3` and read by a runtime `if` - before
+touching `SD.begin()`.
+
+**No test was added and none failed first**, for the reason section 14 gives.
+
+### What a build proves
+
+That both branches compile on both boards. The gate is a runtime `if` on a
+constant rather than an `#if` around the mount specifically so that the
+card-mounting path is still compiled on the S3 and cannot rot there unnoticed.
+Confirm by building both FQBNs and reading each compile's own error count, not
+its exit code.
+
+That `sdkconfig.h` precedes the gate. `App/SdStorage.cpp` includes it first; a
+gate evaluated before that include takes the non-S3 branch, compiles clean, and
+would attempt the mount on the board that has no slot. The same trap
+`Display.cpp` and `CheckIn.cpp` each name at their own tops.
+
+### What the bench has to settle
+
+1. **That boot is quicker and quieter.** Expected on the Panellan: one
+   `[sd] this board has no card slot wired` line, no `[sd] no card found after 3
+   attempt(s)` line, and no `[sd] bus pins in force` line. Time `boot.sd` in the
+   boot-heap notes either side of the change - the attempt was costing up to
+   three rounds of SPI setup and CMD0 timeouts, which is arithmetic off the
+   core's `sd_diskio.cpp` (500ms per `sdWait`, two per attempt, 200ms between
+   attempts) and not a stopwatch reading.
+2. **That nothing downstream noticed.** `isReady()` false, `totalBytes()` and
+   `usedBytes()` zero, `mountCostBytes()` -1, assets held in RAM per draw, the
+   splash skipping itself at its own gate, and a telemetry row the server
+   already knows how to read because it is the shape a card-less fleet device
+   sends. Confirm on `/diag/telemetry` that the Panellan's row is
+   indistinguishable in shape from a card-less ESP32-2432S028's.
+3. **That the fleet board is untouched.** A card-equipped device must still log
+   its mount, its retry count and its mount cost exactly as before; a card-less
+   one must still log `no card found after 3 attempt(s)`. The gate changes
+   neither, and the only way to be sure is to read both lines off a real device.

@@ -18,8 +18,8 @@
 /// through the bignum arithmetic. The service's certificate chain is
 /// api.discoveraroundme.com <- YE2 <- Root YE <- ISRG Root X2, four levels
 /// deep and ECDSA P-384 at every link. Verifying that in software on this chip
-/// means a great many small MPI allocations, and it is the TOTAL free 8-bit
-/// heap that decides whether they all succeed, not the largest contiguous
+/// means a great many small MPI allocations, and it is the TOTAL free internal
+/// 8-bit heap that decides whether they all succeed, not the largest contiguous
 /// block. Measured on two real devices at the same moment:
 ///
 ///   device 7:  free8=10,948  largest8=34,804  -> verification FAILS
@@ -30,6 +30,24 @@
 /// one. It also explains why the symptom is intermittent: free8 is plentiful
 /// just after boot and falls as cards render, so the first check-in after a
 /// restart succeeds and later ones stop working.
+///
+/// **Which pool those two figures came out of is part of what they say.** They
+/// were taken with a bare `MALLOC_CAP_8BIT` on an ESP32-D0WD-V3, which registers
+/// no PSRAM in its heap, so both capability masks walked the same regions and
+/// these are internal figures whatever they were labelled. Nothing about them
+/// changes, and nothing above needs re-measuring.
+///
+/// It matters because a second board carries PSRAM. mbedTLS allocates with
+/// `MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT` on both boards -
+/// `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC` is set in both generated sdkconfigs, and
+/// the port wires `MBEDTLS_PLATFORM_STD_CALLOC` to `esp_mbedtls_mem_calloc` - so
+/// PSRAM can hold neither a record buffer nor one of these MPIs. A
+/// bare-capability free figure from a Panellan is dominated by 2MB that
+/// verification cannot spend, and would read as a device with room to spare while
+/// failing here with exactly the MBEDTLS_ERR_MPI_ALLOC_FAILED device 7 produced.
+/// So both figures that gate TLS are measured with `HeapPools::kTlsCaps` - see
+/// HeapPools.h - and the bare pair travels beside them under its own name,
+/// because that is what the existing wire fields mean.
 ///
 /// Pinning the two roots directly attacks that cost. mbedTLS parses the trust
 /// material it is given, so two certificates cost dramatically less to hold

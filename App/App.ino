@@ -81,6 +81,7 @@ size_t getArduinoLoopTaskStackSize(void) {
 // here because the RAM asset buffers are the largest thing a card-less device
 // holds, and freeing them is a recovery action rather than a card concern.
 #include "Graphic.h"
+#include "HeapPools.h"
 #include "HeapRatchet.h"
 #include "HomeValue.h"
 #include "Http.h"
@@ -1287,12 +1288,19 @@ void checkHeapHealth() {
   // streaming, sitting immediately after two heap numbers - so the line read as
   // a memory report with a memory trigger. It is a draw report: the count is
   // failed card draws and nothing about the heap decides anything here.
-  const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  // Internal 8-bit heap, and the pool is named, because this is the first heap
+  // figure anybody reading a deployed device's stream sees. A bare-capability
+  // figure from a board with PSRAM registered reads in the megabytes and would
+  // have a reader rule memory out on a device whose internal pool cannot hold a
+  // TLS record buffer. See HeapPools.h.
+  const size_t largestBlock = HeapPools::largestTlsBlockBytes();
   const uint32_t failures = Display::consecutiveDrawFailures();
   Log::printf(
-      "[health] largest 8BIT block=%u (ESP.getMaxAllocHeap says %u at the same instant), "
-      "consecutive failed draws=%lu/%lu after %lu ms uptime",
-      static_cast<unsigned>(largestBlock), static_cast<unsigned>(ESP.getMaxAllocHeap()),
+      "[health] largest internal 8BIT block=%u (%s largest is %u, ESP.getMaxAllocHeap says %u at "
+      "the same instant), consecutive failed draws=%lu/%lu after %lu ms uptime",
+      static_cast<unsigned>(largestBlock), HeapPools::anyPoolLabel(),
+      static_cast<unsigned>(HeapPools::largestAnyBlockBytes()),
+      static_cast<unsigned>(ESP.getMaxAllocHeap()),
       static_cast<unsigned long>(failures),
       static_cast<unsigned long>(kMaxConsecutiveDrawFailures),
       static_cast<unsigned long>(now));
@@ -1401,14 +1409,14 @@ void checkHeapHealth() {
 void checkUnreachableWatchdog() {
   // TWO WAYS IN, and the first is a proof rather than a count.
   //
-  // Http::canOpenNewSession() is false only when the largest contiguous 8-bit
-  // block is smaller than ONE of mbedTLS's two record buffers, at which point
-  // mbedtls_ssl_setup() cannot succeed - not "probably won't", cannot. A device
-  // in that state and already failing check-ins has exactly one recovery
-  // available to it, and every interval spent waiting for a fifth failure is an
-  // interval it is unreachable for telemetry, card policy AND firmware updates
-  // at once. Waiting to become more certain about something already proved is
-  // just downtime.
+  // Http::canOpenNewSession() is false only when the largest contiguous
+  // INTERNAL 8-bit block is smaller than ONE of mbedTLS's two record buffers, at
+  // which point mbedtls_ssl_setup() cannot succeed - not "probably won't",
+  // cannot. A device in that state and already failing check-ins has exactly one
+  // recovery available to it, and every interval spent waiting for a fifth
+  // failure is an interval it is unreachable for telemetry, card policy AND
+  // firmware updates at once. Waiting to become more certain about something
+  // already proved is just downtime.
   //
   // The count stays for what the proof does not cover: ample contiguous heap
   // and the requests failing anyway. That is genuinely ambiguous - a server
@@ -1426,6 +1434,12 @@ void checkUnreachableWatchdog() {
   // 4,084 contiguous against a 16,717 requirement, rendering their cards
   // perfectly off SD, invisible to the server for hours, and unable to be told
   // that the firmware fixing it was waiting for them.
+  //
+  // The pool is part of the proof. mbedTLS allocates internal only
+  // (CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC), so on a board with PSRAM registered in
+  // its heap a bare-capability figure would hold this gate open forever and the
+  // fast path would never fire for the devices it exists for. See HeapPools.h.
+
   // A known maintenance window exempts this device entirely, and it is checked
   // before everything below - including the provably-cannot-reconnect fast path.
   // During a deploy the failures are real, repeated, and explained; restarting
@@ -2641,15 +2655,19 @@ void setup() {
   // every telemetry report from then on; see BootDiag::bootLargestFreeBlock().
   BootDiag::recordBootHeap();
 
-  // Anchored to the figure recorded on the line above, at the same instant, so
-  // the per-phase attribution this module reports and the
-  // bootLargestFreeBlockBytes the server already receives are measured from one
-  // reading rather than two taken moments apart. That shared anchor is what
-  // lets the server check the buckets against
-  // (bootLargestFreeBlockBytes - largestFreeBlock8BitBytes) and catch this
-  // instrument being wrong - see HeapRatchet.h.
+  // Anchored to a figure recorded on the line above, at the same instant, so
+  // the per-phase attribution this module reports and the boot figure the server
+  // receives are measured from one reading rather than two taken moments apart.
+  // That shared anchor is what lets the server check the buckets against
+  // (boot largest block - live largest block) and catch this instrument being
+  // wrong - see HeapRatchet.h.
   //
-  HeapRatchet::begin(BootDiag::bootLargestFreeBlock());
+  // The INTERNAL anchor, matching the pool HeapRatchet observes and the pool a
+  // TLS session allocates from. The two anchors are the same number on every
+  // device in the fleet; they diverge on the Panellan, where the bare figure is
+  // dominated by PSRAM. The server-side check pairs this with
+  // largestFreeBlock8BitInternalBytes.
+  HeapRatchet::begin(BootDiag::bootLargestTlsBlock());
 
   // Everything from here to the end of setup() - the display, the SD mount,
   // WiFi, TLS, the boot check-in, and the splash decode above all - is billed to

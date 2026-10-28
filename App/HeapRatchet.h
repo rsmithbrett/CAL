@@ -11,13 +11,23 @@
 /// ---------------------------------------------------------------------------
 ///
 /// The figure that matters on this fleet is
-/// `heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)`. Not free total, and
-/// emphatically not `ESP.getMaxAllocHeap()`, which returns a constant 32,756 on
-/// this board and has produced several wrong diagnoses - one of which survived
-/// an entire evening. A new TLS session needs 16,717 contiguous bytes, twice
-/// over, in two flat allocations (Http::kTlsRecordBufferBytes), so the largest
-/// SINGLE block is the binding constraint. "Roughly 32KB" is a misreading of
-/// that requirement and cost another evening.
+/// `heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)` -
+/// `HeapPools::kTlsCaps`. Not free total, and emphatically not
+/// `ESP.getMaxAllocHeap()`, which returns a constant 32,756 on the
+/// ESP32-2432S028 and has produced several wrong diagnoses - one of which
+/// survived an entire evening. A new TLS session needs 16,717 contiguous bytes,
+/// twice over, in two flat allocations (Http::kTlsRecordBufferBytes), so the
+/// largest SINGLE block is the binding constraint. "Roughly 32KB" is a
+/// misreading of that requirement and cost another evening.
+///
+/// **The capability mask is part of the figure.** Every number this
+/// investigation recorded was taken with a bare `MALLOC_CAP_8BIT`, and on the
+/// ESP32-2432S028 that is the same query: no PSRAM is registered in its heap, so
+/// both masks walk the same regions, and HeapTrace, the [heapdiag] lines and
+/// Telemetry.cpp have each measured them agreeing to the byte. The Panellan
+/// registers 2MB of PSRAM as 8-bit capable heap and mbedTLS cannot allocate in
+/// it (`CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC`), so a bare figure from that board
+/// describes a pool nothing in this story spends. See HeapPools.h.
 ///
 /// Measured on device 17 (v2026.09.11.0017-customlibs, debug stream on), twice,
 /// to the minute: 65,524 bytes at boot, SOFTWARE_RESET+UNREACHABLE 34 minutes
@@ -57,7 +67,7 @@
 /// signed difference from the floor to the phase in force, and moves the floor.
 /// Nothing is thresholded away, so by construction:
 ///
-///   bootLargestFreeBlock - floor  ==  sum of the six phase buckets
+///   bootLargestTlsBlock - floor  ==  sum of the six phase buckets
 ///
 /// That identity is the point, and it is why the buckets are SIGNED rather than
 /// a tally of downward steps only. Three things follow from it that a
@@ -70,12 +80,18 @@
 ///   - A negative bucket is a phase that gives contiguous heap BACK - the free
 ///     list coalescing - which is real and worth seeing rather than clamping to
 ///     zero and calling noise.
-///   - The server can CHECK this instrument against the two figures telemetry
-///     already sends. If the buckets do not account for
-///     (bootLargestFreeBlockBytes - largestFreeBlock8BitBytes), then either a
-///     phase is missing a Scope or the carving happens somewhere none of the
-///     six phases cover. An instrument that can be caught being wrong from its
-///     own output is worth more than one that cannot.
+///   - The server can CHECK this instrument against two figures telemetry
+///     sends. If the buckets do not account for
+///     (bootLargestFreeBlock8BitInternalBytes - largestFreeBlock8BitInternalBytes),
+///     then either a phase is missing a Scope or the carving happens somewhere
+///     none of the six phases cover. An instrument that can be caught being
+///     wrong from its own output is worth more than one that cannot.
+///
+///     **Those are the internal-pool fields, not the bare-capability pair the
+///     check used to name.** This module observes internal 8-bit heap, so the
+///     identity holds against the fields measured the same way. On the fleet the
+///     two pairs are the same numbers and a server checking either reaches the
+///     same answer; on the Panellan only the internal pair balances.
 ///
 /// Observations happen only at phase BOUNDARIES, never mid-phase, and that is
 /// deliberate. A boundary is a quiescent point: whatever a phase allocated and
@@ -266,9 +282,15 @@ enum class Phase : uint8_t {
   kCount,
 };
 
-/// Seeds the floor from the figure BootDiag already captured in setup(), so
-/// this module's arithmetic and the bootLargestFreeBlockBytes the server
-/// already receives anchor to the same instant.
+/// Seeds the floor from the figure BootDiag already captured in setup(), so this
+/// module's arithmetic and the bootLargestFreeBlock8BitInternalBytes the server
+/// receives anchor to the same instant.
+///
+/// **Pass BootDiag::bootLargestTlsBlock(), not bootLargestFreeBlock().** This
+/// module observes internal 8-bit heap, and a bare-capability anchor would seed
+/// the floor from a pool it then never measures - on the Panellan that is a 2MB
+/// anchor against an internal floor, which credits the entire gap to whichever
+/// phase observes first and reads as a spectacular finding.
 ///
 /// Taking it as an argument rather than reading BootDiag directly keeps the
 /// dependency pointing one way - App.ino wires the two together, the same shape
@@ -276,7 +298,7 @@ enum class Phase : uint8_t {
 /// about each other. Passing 0 (BootDiag's own "not measured") makes this take
 /// its own reading instead, so the module still works if the call order in
 /// setup() is ever rearranged.
-void begin(uint32_t bootLargestFreeBlock);
+void begin(uint32_t bootLargestTlsBlock);
 
 /// Samples the largest block and credits the difference to the phase in force.
 ///

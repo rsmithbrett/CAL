@@ -2279,7 +2279,7 @@ dark actually reaches the server instead of being lost with the rest of RAM.
 | `kBatchIntervalMs` | 1000 ms | `loop()` already runs on roughly a 1-second cadence of its own (its closing `delay(1000)`), with no hardware timer or second task driving anything faster. A shorter timer would only be aspirational — `poll()` cannot be called any more often than `loop()` actually calls it. |
 | `kMaxBatchLines` / `kMaxBatchBytes` | 40 lines / 4 KB | Caps a single `POST` body so one flush can't spike request latency or hold up `loop()` for longer than necessary; whatever doesn't fit waits for the next `poll()`. |
 | `kMaxBufferedLines` / `kMaxBufferedBytes` | 200 lines / 16 KB | The buffer's ceiling when the heap can carry it — independent of and larger than the per-batch cap, and what protects against unbounded growth if the network is down for a while. Generous for several minutes of this firmware's real log volume (roughly one line every few seconds, brief bursts during WiFi join/check-in/update), and only ever paid while an admin has actually turned streaming on. **This is no longer the only thing bounding the buffer — see `kMinLargestBlockBytes` below.** |
-| `kMinLargestBlockBytes` | 33,434 bytes (`2 × Http::kTlsRecordBufferBytes`) | The heap floor the buffer refuses to encroach on. While the largest free 8-bit block is under it, the buffer's ceiling drops to **one batch** (40 lines / 4 KB) instead of 200 lines / 16 KB. Same figure `CheckIn.cpp` already uses for "this device could not have held a fresh TLS session", deliberately rather than a second threshold that could drift from it. |
+| `kMinLargestBlockBytes` | 33,434 bytes (`2 × Http::kTlsRecordBufferBytes`) | The heap floor the buffer refuses to encroach on. While the largest free **internal** 8-bit block is under it — `Http::largestContiguousBytes()`, which is the pool mbedTLS allocates from and not the bare-capability figure that spans PSRAM on a board that has it — the buffer's ceiling drops to **one batch** (40 lines / 4 KB) instead of 200 lines / 16 KB. Same figure `CheckIn.cpp` already uses for "this device could not have held a fresh TLS session", deliberately rather than a second threshold that could drift from it. |
 
 Once any buffer cap is hit, the oldest line is dropped to make room for the
 newest — oldest-first, never growing unbounded and never crashing — and the
@@ -3593,6 +3593,11 @@ Two fields are added to the telemetry request body:
 | --- | --- |
 | `free8BitBytes` | `heap_caps_get_free_size(MALLOC_CAP_8BIT)` |
 | `largestFreeBlock8BitBytes` | `heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)` |
+
+Both are bare-capability figures and still are. On a board with PSRAM registered
+in its heap they span both pools, which is not the quantity a TLS floor is graded
+against - see "A heap figure means nothing until it says which pool it measured"
+below for the internal-only fields that now sit beside them.
 
 **`freeHeapBytes` is unchanged and still sends `ESP.getFreeHeap()`.** It is
 neither repurposed nor removed, for two reasons that are both in the code:
@@ -5721,9 +5726,14 @@ measurements look like comfortable margin when they were not. The older text is
 left in place - this project keeps superseded reasoning rather than deleting it -
 but read it through this correction.
 
-**The figure that matters** is `heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)`.
-Not free total. Not `ESP.getMaxAllocHeap()`, for every reason the section above
-gives.
+**The figure that matters** is `heap_caps_get_largest_free_block()` over
+`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`. Not free total. Not
+`ESP.getMaxAllocHeap()`, for every reason the section above gives. And not the
+bare `MALLOC_CAP_8BIT` this said until a second board arrived: that is the same
+query on an ESP32-D0WD-V3, which registers no PSRAM in its heap, so every figure
+recorded here stands - but it is a different query on a board with PSRAM, and
+mbedTLS cannot allocate there. See "A heap figure means nothing until it says
+which pool it measured".
 
 **What was measured, twice, to the minute**, on device 17
 (`v2026.09.11.0017-customlibs`, debug stream on): 65,524 bytes at boot,
@@ -6959,3 +6969,154 @@ rather than discarded. That is the whole of it.
 
 `TEST_PLAN.md` section 6 carries the bench procedure for each of these, and it
 is the procedure - not this section - that decides whether any of it is true.
+
+## A heap figure means nothing until it says which pool it measured
+
+Every heap number in this repository was taken with a bare `MALLOC_CAP_8BIT`,
+and on the ESP32-2432S028 that was never a choice worth noticing.
+`MALLOC_CAP_8BIT` is a permission - "this memory allows 8-bit accesses" - and it
+sits in its own bit beside `MALLOC_CAP_INTERNAL` and `MALLOC_CAP_SPIRAM` (see
+`esp_heap_caps.h`). An ESP32-D0WD-V3 has no external RAM, `esp_psram_init()`
+finds nothing, no SPIRAM region is ever registered, and the bare mask and the
+internal mask therefore walk the same regions and return the same figure.
+`HeapTrace.h` says so, the `[heapdiag]` lines that print both have always
+agreed, and the device 17 capture recorded all four capability classes agreeing
+to the byte.
+
+The Panellan ZX2D80CE02S-V10 carries 2MB of QSPI PSRAM and is built with
+`PSRAM=enabled`, so `psramAddToHeap()` registers that PSRAM as 8-bit capable
+heap. A bare largest-free-block query on that board reports the largest hole in
+internal DRAM **or** PSRAM, whichever is bigger, which is a figure in the
+megabytes for the whole life of the device.
+
+**mbedTLS cannot reach that PSRAM.** Both generated `sdkconfig` files in this
+repository set `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y`, and the ESP-IDF mbedTLS
+port wires `MBEDTLS_PLATFORM_STD_CALLOC` to `esp_mbedtls_mem_calloc`, which
+under that option allocates `MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`. So every
+allocation a TLS session makes comes out of internal DRAM: both 16,717-byte
+record buffers, and every small MPI the four ECDSA P-384 links of the chain are
+verified with. `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` does not enter into
+it - that threshold steers `malloc()`, and mbedTLS does not go through
+`malloc()`.
+
+Which is a specific failure, not a tidiness complaint. A Panellan with its
+internal pool exhausted reports megabytes free and megabytes contiguous, so
+`Http::canOpenNewSession()` measured against the bare mask returns true for a
+device that cannot stand up a handshake - and that function's whole contract is
+that `false` is a proof of impossibility. The server's
+`FleetHealth.IsBelowTlsFloor()` grades the same bare figure and could never
+fire. `HeapRatchet`, anchored to a bare boot figure, would credit every phase
+bucket approximately zero and report that nothing carves the heap, because it
+would be watching a pool nothing carves. And the two numbers reaching the debug
+stream - a deployed device's only diagnostic channel - would read as maximum
+health throughout the failure they exist to explain.
+
+### What changed
+
+`App/HeapPools.{h,cpp}` holds the rule in one place: **a figure that gates TLS
+is measured with `HeapPools::kTlsCaps`, never with the bare capability.** It
+also carries `anyPoolLabel()`, which every line reporting a bare figure now
+prints, so a reader of a stream can tell which pools a number spans without
+knowing which board sent it.
+
+Measured with `kTlsCaps`, and so unchanged on every device in the fleet:
+
+- `Http::largestContiguousBytes()`, and with it `canOpenNewSession()`, the
+  `[http] refusing` line, the reconnect probe's four figures, and the
+  debug-stream buffer ceiling in `Log.cpp` that reads it.
+- The TLS ballast itself. It was taken with the bare mask, which on a board with
+  PSRAM can be satisfied from PSRAM - reserving 33,434 bytes somewhere no
+  handshake is ever going to look, while leaving the pool it does look in
+  exactly as crowded as before.
+- `HeapRatchet`'s observations, and the boot anchor it attributes loss from.
+- `Sd::begin()`'s mount-cost delta.
+- The `[health]` line's figure, which is the first heap number anybody reading a
+  deployed device's stream sees. It decides nothing - the cannot-draw watchdog
+  counts failed draws - but a megabyte there has a reader rule memory out.
+
+`HeapPools.h` also carries an `#error` on `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC`
+being absent. If a future core tree switches to `DEFAULT_MEM_ALLOC` or
+`EXTERNAL_MEM_ALLOC`, mbedTLS starts drawing from PSRAM, the internal mask stops
+being the pool a handshake is graded against, and every figure above would be
+measuring the wrong thing while still compiling and still looking plausible. The
+build stops instead.
+
+### What did not change
+
+The wire fields. `free8BitBytes`, `largestFreeBlock8BitBytes` and
+`bootLargestFreeBlockBytes` still carry bare-capability figures, because that is
+what they have always meant and a field does not change meaning underneath a
+server that reads it - the same argument `freeHeapBytes` is still sent under.
+Three optional fields are added beside them, all measured over
+`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`:
+
+| Field | Source |
+| --- | --- |
+| `free8BitInternalBytes` | `heap_caps_get_free_size()` over that mask |
+| `largestFreeBlock8BitInternalBytes` | `heap_caps_get_largest_free_block()` over that mask |
+| `bootLargestFreeBlock8BitInternalBytes` | the largest block over that mask at the instant `recordBootHeap()` runs |
+
+plus `heapPoolsMeasured`, which is `"internal"` or `"internal+psram"` and says
+what the bare fields on the same row span. Absent or null means what a report
+from older firmware already meant: one pool, one pair of figures, no distinction
+to draw. On every device in the fleet the internal fields repeat the bare ones
+exactly, which is the cheapest way for the fleet's own stored rows to establish
+that rather than leaving it as something to take on trust.
+
+**The draw path was left alone, on purpose.** `Display.cpp` has fourteen
+bare-capability figures in its log lines and `Assets.cpp` one more. None is a TLS
+figure: they are about the pool a file buffer or a decoder scratch comes from,
+and on a board with PSRAM that may genuinely be PSRAM -
+`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` sends every `malloc()` above 4,096
+bytes to PSRAM first, and a 10-24KB file buffer or the PNG decoder's 44KB scratch
+is well above it. Which mask those should use, and what PSRAM does to the
+32,768-byte PNG floor, is a question the board has to answer rather than one to
+settle by editing. `logHeapSnapshot()` prints both masks side by side and is the
+line to read first on a first boot.
+
+**The reading end is still the bare field, and that half is not done here.**
+`FleetHealth.IsBelowTlsFloor()`, `IsHeapFragmented()`,
+`LargestBlockLostSinceBoot()` and the `/api/telemetry` endpoint's own floor
+warning all grade `largestFreeBlock8BitBytes`. Until they prefer the internal
+field where it is present, a Panellan below the TLS floor still reads as healthy
+*on the server* - the device now says so in its own log lines and on three new
+wire fields, and nothing is yet reading them. That is a server change, in the
+server tree, and it is the gate between this work and the symptom being visible
+on `/diag/telemetry`.
+
+## The Panellan has no card slot, so the App stops looking for one
+
+Every SD pin in the vendor's configuration for the Panellan ZX2D80CE02S-V10 is
+-1 - `BoardPanellan.h` transcribes them and says so. There is no slot, no card,
+and nothing a mount could find.
+
+`Sd::begin()` was attempting one anyway. It is written for the fleet's other
+condition, the empty slot some devices ship with, where three attempts 200ms
+apart are the right response: a real card can need tens to a couple of hundred
+milliseconds after power-up before it answers CMD0, and a single attempt was
+once found reporting zero capacity for a device's entire uptime with a card
+seated the whole time. On a board with no slot those retries settle nothing.
+`SD.begin()` claims the default SPI object and its variant pins, registers a FAT
+volume, and runs a card-init sequence whose CMD0 waits time out at 500ms each
+against a MISO line with nothing on it - three times, every boot. It also puts
+the boot inside `kBootStageMountSd`, so anything that ever did hang in there
+would be recorded against a subsystem this board has none of.
+
+A board gate on `CONFIG_IDF_TARGET_ESP32S3` - the same macro the pin map and the
+reported board name are gated on, so the three cannot disagree about which board
+a binary is - returns false before any of that. It is a `constexpr bool` read by
+a runtime `if`, not an `#if` around the mount, so both paths compile on both
+boards: only the taken branch of an `#if` is compiled, which is how an untaken
+branch rots unseen until somebody builds for that board.
+
+**Nothing downstream needed changing, which is the point.** `isReady()` stays
+false, so `Assets` returns at each of its gates and the splash returns at its
+own; `totalBytes()` and `usedBytes()` stay zero; `mountCostBytes()` stays -1,
+which still means "there was nothing to mount" rather than "mounting was free".
+Telemetry sends the shape it already sends for a card-less fleet device, so a
+server six months older than this firmware reads a row it already knows how to
+read.
+
+Not verified on hardware. No Panellan has been booted, so the 500ms-per-CMD0
+figure is read off the core's own `sd_diskio.cpp` rather than measured, and the
+gate is proven only by both boards compiling.

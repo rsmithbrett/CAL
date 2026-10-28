@@ -1,12 +1,48 @@
 #include "SdStorage.h"
 
+// sdkconfig.h before kBoardHasCardSlot below, which reads
+// CONFIG_IDF_TARGET_ESP32S3. Without it that name is undefined at the point it
+// is tested, the build takes the other branch, and the result compiles clean -
+// the same trap Display.cpp and CheckIn.cpp each describe at their own tops.
+#include "sdkconfig.h"
+
 #include <SD.h>
 #include <esp_heap_caps.h>
 
+#include "HeapPools.h"
+#include "Http.h"
 #include "Log.h"
 
 namespace Sd {
 namespace {
+
+/// Whether this board has a card slot wired at all.
+///
+/// The Panellan ZX2D80CE02S-V10 does not. Every SD pin in the vendor's
+/// configuration for it is -1 - see BoardPanellan.h, which transcribes them and
+/// says so - so there is no slot, no card, and nothing for begin() below to
+/// find. That is not the same condition as the empty slot some fleet devices
+/// ship with: an empty slot can have a card put in it, and begin() retrying
+/// three times over 600ms is the right response to one. On a board with no slot
+/// the retries settle nothing and cost the boot three rounds of SPI bus setup
+/// and card-init timeouts for an answer that is a wiring fact.
+///
+/// A plain `constexpr bool` with a runtime `if`, not an `#if` around the mount,
+/// so both paths compile on both boards. Only the taken branch of an `#if` is
+/// compiled, which is how an untaken branch rots unseen until somebody builds
+/// for that board - the cost Display.cpp names at its own board gate. The
+/// compiler folds the branch away either way.
+///
+/// Gated on CONFIG_IDF_TARGET_ESP32S3, the same macro the pin map and the
+/// reported board name are gated on, so the three cannot disagree about which
+/// board this binary is. Chip id is coarser than board: a second S3 panel that
+/// does have a slot would need a marker of its own here, for the reason
+/// CheckIn.cpp gives about kBoardWireName.
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+constexpr bool kBoardHasCardSlot = false;
+#else
+constexpr bool kBoardHasCardSlot = true;
+#endif
 
 // The same chip-select CYD-Dickey's SdCard.cpp uses on this board family
 // (its `static const int SD_CS_PIN = 5;`). Not autodetected - unlike the
@@ -102,11 +138,37 @@ bool begin() {
   if (gReady) {
     return true;
   }
+
+  // No slot on this board, so nothing is attempted. gReady stays false and
+  // gMountCostBytes stays -1, which is exactly the state every caller already
+  // handles: Assets gates each of its entry points on isReady(), the splash
+  // returns at the same gate, telemetry sends zero capacity and a -1 mount cost,
+  // and the weather and aircraft cards never touch storage. So this board
+  // behaves as a card-less fleet device behaves, and -1 still says "there was
+  // nothing to mount" rather than "mounting was free".
+  //
+  // Returning here rather than letting SD.begin() fail three times is what the
+  // gate buys. SD.begin() claims the default SPI bus and its variant pins,
+  // registers a FAT volume, and runs the card-init sequence whose CMD0 waits
+  // time out at 500ms each against a floating MISO - three attempts 200ms apart,
+  // for a slot the board does not have.
+  if (!kBoardHasCardSlot) {
+    Log::line("[sd] this board has no card slot wired - every SD pin in its configuration is -1, "
+              "so no mount is attempted. Assets are held in RAM for the life of each draw, the "
+              "same as on a fleet device with an empty slot");
+    return false;
+  }
+
   // Captured before the first attempt so the mount's cost is a measured delta
   // in the fleet's own logs rather than something inferred by comparing two
   // devices, or two boots, that differ in other ways too. This is the number
   // that decides whether kMaxOpenFiles was worth changing.
-  const size_t largestBeforeMount = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  //
+  // Internal 8-bit heap (HeapPools::kTlsCaps), because what this cost is
+  // measured against is the TLS floor, and mbedTLS allocates internal. The same
+  // figure as the bare capability on every device in the fleet, which registers
+  // no PSRAM in its heap.
+  const size_t largestBeforeMount = HeapPools::largestTlsBlockBytes();
 
   for (uint8_t attempt = 0; attempt < kMaxMountAttempts; ++attempt) {
     // max_files named explicitly - see kMaxOpenFiles for the 67KB measurement
@@ -129,19 +191,24 @@ bool begin() {
       // important to know as one that still costs everything, and only one of
       // those two outcomes would ever get investigated if this only logged the
       // bad case.
-      const size_t largestAfterMount = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+      const size_t largestAfterMount = HeapPools::largestTlsBlockBytes();
       // Retained as well as printed. Computed as a signed long first: a mount
       // that somehow LEFT more contiguous memory than it found would produce a
       // negative cost, and clamping that to 0 would hide a measurement worth
       // seeing rather than tidy one up.
       gMountCostBytes = static_cast<int32_t>(
           static_cast<long>(largestBeforeMount) - static_cast<long>(largestAfterMount));
-      Log::printf("[sd] mount cost %ld bytes of the largest contiguous 8-bit block (%u -> %u) "
-                  "with max_files=%d; a TLS record buffer needs 16717, so %s",
+      // Http::kTlsRecordBufferBytes rather than a second copy of 16717. The two
+      // were separate literals in separate files with nothing comparing them,
+      // which TEST_PLAN.md tracks as an open duplication; this comparison is the
+      // live one it names, so it reads the constant it is grading against.
+      Log::printf("[sd] mount cost %ld bytes of the largest internal 8-bit block (%u -> %u) with "
+                  "max_files=%d; a TLS record buffer needs %lu of internal, so %s",
                   static_cast<long>(largestBeforeMount) - static_cast<long>(largestAfterMount),
                   static_cast<unsigned>(largestBeforeMount),
                   static_cast<unsigned>(largestAfterMount), kMaxOpenFiles,
-                  largestAfterMount >= 16717
+                  static_cast<unsigned long>(Http::kTlsRecordBufferBytes),
+                  largestAfterMount >= Http::kTlsRecordBufferBytes
                       ? "this device can still open a new TLS session"
                       : "this device CANNOT open a new TLS session and is unreachable until it "
                         "restarts without a card, or this cost comes down further");
@@ -198,8 +265,8 @@ uint64_t usedBytes() { return gReady ? SD.usedBytes() : 0; }
 
 // Deliberately NOT gated on gReady the way the two above are. Those answer
 // "how big is the card", which is meaningless without one. This answers "what
-// did mounting cost", and -1 is the honest answer for a device that never
-// mounted - whereas gating it would return 0 and claim the mount was free.
+// did mounting cost", and -1 is what a device that never mounted has to report -
+// whereas gating it would return 0 and claim the mount was free.
 int32_t mountCostBytes() { return gMountCostBytes; }
 
 }  // namespace Sd

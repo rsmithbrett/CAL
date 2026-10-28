@@ -4,6 +4,7 @@
 #include <esp_heap_caps.h>
 
 #include "Config.h"
+#include "HeapPools.h"
 #include "Log.h"
 #include "Tls.h"
 
@@ -40,7 +41,13 @@ bool takeBallast() {
     if (block != nullptr) {
       continue;
     }
-    block = static_cast<uint8_t*>(heap_caps_malloc(kTlsRecordBufferBytes, MALLOC_CAP_8BIT));
+    // HeapPools::kTlsCaps, not the bare 8-bit capability, so the ballast is
+    // held in the pool mbedTLS will allocate its record buffers from. Under
+    // CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC that is internal DRAM; a bare 8-bit
+    // request on a board with PSRAM registered can be satisfied from PSRAM,
+    // which would reserve space the handshake is never going to ask for while
+    // leaving the pool it does ask for exactly as crowded as before.
+    block = static_cast<uint8_t*>(heap_caps_malloc(kTlsRecordBufferBytes, HeapPools::kTlsCaps));
     if (block == nullptr) {
       return false;
     }
@@ -92,15 +99,21 @@ bool reserveTlsBallast() {
   const bool held = takeBallast();
   if (!held) {
     freeBallast();
-    Log::printf("[http] could not reserve the TLS ballast: largest 8-bit block is %lu and this "
-                "needs %lu twice. Handshakes will depend on whatever the heap looks like when "
-                "they happen, which is the behaviour this reservation exists to remove",
+    // Figures before prose on this line and the next. Log::printf formats into a
+    // fixed 256-byte scratch and marks what it had to cut, so a sentence of
+    // reasoning ahead of the numbers is a line that truncates the only part of
+    // itself worth reading. The reasoning is in Http.h.
+    Log::printf("[http] could not reserve the TLS ballast: largest internal 8-bit block %lu, "
+                "needs %lu twice; %s largest %lu. Handshakes now depend on what the heap looks "
+                "like when they happen",
                 static_cast<unsigned long>(largestContiguousBytes()),
-                static_cast<unsigned long>(kTlsRecordBufferBytes));
+                static_cast<unsigned long>(kTlsRecordBufferBytes), HeapPools::anyPoolLabel(),
+                static_cast<unsigned long>(HeapPools::largestAnyBlockBytes()));
     return false;
   }
-  Log::printf("[http] TLS ballast reserved: 2 x %lu bytes held from boot. Largest 8-bit block %lu "
-              "-> %lu, and a handshake gets these back when it needs them",
+  Log::printf("[http] TLS ballast reserved: 2 x %lu bytes of internal 8-bit heap held from boot. "
+              "Largest internal block %lu -> %lu, and a handshake gets these back when it needs "
+              "them",
               static_cast<unsigned long>(kTlsRecordBufferBytes),
               static_cast<unsigned long>(before),
               static_cast<unsigned long>(largestContiguousBytes()));
@@ -112,7 +125,7 @@ bool ballastHeld() { return gBallast[0] != nullptr && gBallast[1] != nullptr; }
 bool ready() { return gReady; }
 
 size_t largestContiguousBytes() {
-  return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  return HeapPools::largestTlsBlockBytes();
 }
 
 bool canOpenNewSession() {
@@ -142,7 +155,10 @@ void reclaimIdleBallast() {
 ReconnectProbe probeReconnect() {
   ReconnectProbe probe{};
 
-  probe.freeBeforeClose = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  // Internal 8-bit heap on both figures, because that is the pool a session
+  // allocates from - the record buffers and every MPI the chain is verified
+  // with. See HeapPools.h.
+  probe.freeBeforeClose = HeapPools::freeTlsBytes();
   probe.largestBeforeClose = largestContiguousBytes();
 
   // Step one, and the step no ordinary traffic performs. gHttp.end() finishes a
@@ -153,7 +169,7 @@ ReconnectProbe probeReconnect() {
 
   // Step two. Deliberately after the close, because the teardown returns the
   // record buffers and this is the figure a reconnect is actually decided on.
-  probe.freeAfterClose = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  probe.freeAfterClose = HeapPools::freeTlsBytes();
   probe.largestAfterClose = largestContiguousBytes();
 
   const uint32_t startedMs = millis();
@@ -233,12 +249,16 @@ bool beginRequest(const String& url) {
   // prevent a handshake it was never going to attempt.
   if (!gClient.connected() && !canOpenNewSession()) {
     Log::printf(
-        "[http] refusing %s - largest 8-bit block is %lu and one TLS record buffer needs %lu, so a "
-        "new session is impossible rather than unlikely. Not spending a 15s handshake timeout to "
-        "discover that. This device needs a restart to talk to the server again - see "
+        // The URL is a %s of unbounded length and the scratch is 256 bytes, so
+        // every figure comes before the prose. What gets cut is the cross
+        // reference, which is in the source either way.
+        "[http] refusing %s - largest internal 8-bit block %lu, one TLS record buffer needs %lu; "
+        "%s largest %lu, which mbedTLS cannot reach. A new session is impossible rather than "
+        "unlikely, so no 15s handshake timeout is spent discovering that - see "
         "Http::canOpenNewSession() and BootDiag::RestartCause::Unreachable.",
         url.c_str(), static_cast<unsigned long>(largestContiguousBytes()),
-        static_cast<unsigned long>(kTlsRecordBufferBytes));
+        static_cast<unsigned long>(kTlsRecordBufferBytes), HeapPools::anyPoolLabel(),
+        static_cast<unsigned long>(HeapPools::largestAnyBlockBytes()));
     return false;
   }
 
@@ -282,12 +302,24 @@ void diagnoseFailure(const char* tag) {
   // the wrong conclusion to hand someone at the start of an investigation.
   // Both figures are printed because they answer different questions: free8 is
   // "how much is there" and largest8 is "how much can actually be handed to one
-  // allocation", and mbedTLS needs the second.
-  Log::printf("[http] %s failed - wifi=%d rssi=%d dBm ip=%s free8=%lu largest8=%lu", tag,
-              static_cast<int>(wifi), static_cast<int>(WiFi.RSSI()),
+  // allocation", and mbedTLS needs the second. Chain verification spends the
+  // first - see TlsRoots.h for the two devices that settled that.
+  //
+  // Internal, and the pool is named. mbedTLS allocates with
+  // MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT, so a bare-capability pair from a board
+  // with PSRAM registered describes memory no handshake can reach. The
+  // any-pool figures follow on the same line because the gap between the two
+  // pairs is the whole picture on such a board, and because they are the
+  // quantities the wire fields carry.
+  Log::printf("[http] %s failed - wifi=%d rssi=%d dBm ip=%s freeInt8=%lu largestInt8=%lu "
+              "(%s: free8=%lu largest8=%lu)",
+              tag, static_cast<int>(wifi), static_cast<int>(WiFi.RSSI()),
               WiFi.localIP().toString().c_str(),
-              static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
-              static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+              static_cast<unsigned long>(HeapPools::freeTlsBytes()),
+              static_cast<unsigned long>(HeapPools::largestTlsBlockBytes()),
+              HeapPools::anyPoolLabel(),
+              static_cast<unsigned long>(HeapPools::freeAnyBytes()),
+              static_cast<unsigned long>(HeapPools::largestAnyBlockBytes()));
 
   if (wifi != WL_CONNECTED) {
     Log::printf("[http] %s: not associated with an access point - nothing above this can work",

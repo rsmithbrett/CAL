@@ -12,6 +12,7 @@
 #include "Assets.h"
 #include "BootDiag.h"
 #include "Config.h"
+#include "HeapPools.h"
 #include "HeapRatchet.h"
 #include "Http.h"
 #include "Identity.h"
@@ -139,8 +140,28 @@ void report(const char* lastCheckInOutcome) {
   // exactly the second case, and a single free-size column on /diag/telemetry
   // would have shown a device in that state as merely low rather than as
   // unable to draw a card at all.
-  const uint32_t free8Bit = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-  const uint32_t largestFreeBlock8Bit = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  const uint32_t free8Bit = HeapPools::freeAnyBytes();
+  const uint32_t largestFreeBlock8Bit = HeapPools::largestAnyBlockBytes();
+
+  // **The same two quantities over internal 8-bit heap only, which is the pool
+  // mbedTLS allocates from and therefore the pool the TLS floor is graded
+  // against.** Sent beside the bare pair rather than instead of it, for the same
+  // reason freeHeapBytes is still sent beside free8BitBytes: a field's meaning
+  // does not change underneath a server that reads it, and keeping both makes
+  // the gap between them visible per device.
+  //
+  // On every device in the fleet these are the same numbers as the pair above.
+  // No PSRAM is registered in an ESP32-D0WD-V3's heap, so both capability masks
+  // walk the same regions - the measurement on device 17 recorded in the block
+  // above found all four classes agreeing to the byte. The two pairs diverge
+  // only on a board with PSRAM, where the bare pair runs in the megabytes while
+  // the internal pair is what decides whether a handshake can happen. See
+  // HeapPools.h.
+  //
+  // Null or absent on the wire means what a report from older firmware already
+  // meant: one pool, one pair of figures, and no distinction to draw.
+  const uint32_t freeInternal8Bit = HeapPools::freeTlsBytes();
+  const uint32_t largestFreeBlockInternal8Bit = HeapPools::largestTlsBlockBytes();
 
   // Cleared by App.ino's setup() the moment WiFi first connects (see
   // Identity.h's own remarks on bootAttempts), so this reads 0 for every
@@ -203,6 +224,12 @@ void report(const char* lastCheckInOutcome) {
   requestDoc["freeHeapBytes"] = freeHeap;
   requestDoc["free8BitBytes"] = free8Bit;
   requestDoc["largestFreeBlock8BitBytes"] = largestFreeBlock8Bit;
+  requestDoc["free8BitInternalBytes"] = freeInternal8Bit;
+  requestDoc["largestFreeBlock8BitInternalBytes"] = largestFreeBlockInternal8Bit;
+  // Which pools the two bare fields above span on this device, so a server
+  // reading a stored row can tell whether they describe one pool or two without
+  // knowing which board sent it. "internal" or "internal+psram".
+  requestDoc["heapPoolsMeasured"] = HeapPools::anyPoolLabel();
   requestDoc["bootCount"] = bootCount;
   requestDoc["lastCheckInOutcome"] = lastCheckInOutcome;
   requestDoc["sdTotalBytes"] = sdTotalBytes;
@@ -359,6 +386,12 @@ void report(const char* lastCheckInOutcome) {
   // ratchet went a week unquantified, and how the same plateau got called
   // wrongly twice in one evening.
   requestDoc["bootLargestFreeBlockBytes"] = BootDiag::bootLargestFreeBlock();
+  // The same instant over internal 8-bit heap, which is the one the phase
+  // buckets below are anchored to and the one a decay-since-boot subtraction has
+  // to use. Pairs with largestFreeBlock8BitInternalBytes. Identical to the field
+  // above on every device in the fleet; see HeapPools.h for the board where it
+  // is not.
+  requestDoc["bootLargestFreeBlock8BitInternalBytes"] = BootDiag::bootLargestTlsBlock();
 
   // And the third figure, which closes the pair: what was left when the PREVIOUS
   // boot gave up. Sent only when there is one, so an ordinary power-on carries no
@@ -546,6 +579,23 @@ void report(const char* lastCheckInOutcome) {
               static_cast<unsigned>(HeapRatchet::stepCount()),
               static_cast<unsigned>(HeapRatchet::worstStepBytes()),
               HeapRatchet::worstStepPhaseName(), HeapRatchet::worstStepSubject());
+
+  // A THIRD line, for the same 256-byte reason, carrying the pool the figures on
+  // the first line actually span and the internal-only pair beside them.
+  //
+  // The first line's free8BIT/largest8BIT are bare-capability figures. On every
+  // device in the fleet this line repeats them, because an ESP32-D0WD-V3 has one
+  // 8-bit pool - and a line that reports the same numbers twice is the cheapest
+  // possible way for the fleet's own logs to establish that, rather than leaving
+  // it as something a reader has to take on trust. On a board with PSRAM the two
+  // pairs diverge, and the internal pair is the one a TLS handshake is decided
+  // by: whoever reads the stream from a device that cannot reach the server
+  // needs this line, not the one above it.
+  Log::printf("[telemetry] heap pools=%s freeInt8BIT=%lu largestInt8BIT=%lu "
+              "(a TLS record buffer needs %lu of internal, twice over)",
+              HeapPools::anyPoolLabel(), static_cast<unsigned long>(freeInternal8Bit),
+              static_cast<unsigned long>(largestFreeBlockInternal8Bit),
+              static_cast<unsigned long>(Http::kTlsRecordBufferBytes));
 }
 
 }  // namespace Telemetry

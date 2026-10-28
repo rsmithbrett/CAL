@@ -4,6 +4,7 @@
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 
+#include "HeapPools.h"
 #include "Log.h"
 
 namespace BootDiag {
@@ -50,6 +51,15 @@ char gReasonToken[48] = "UNREPORTED+NONE";
 // missing figure rather than as a device with no memory, and the pairing with
 // the live figure is simply unavailable for that report.
 uint32_t gBootLargestFreeBlock = 0;
+
+// The same instant, measured over internal 8-bit heap only. Identical to the
+// figure above on a board with no PSRAM registered in its heap, which is every
+// device in the fleet; on the Panellan the one above spans 2MB of PSRAM and this
+// one is the pool a TLS session draws from. Carried separately rather than
+// replacing it, because bootLargestFreeBlockBytes on the wire is defined as the
+// bare-capability figure and a field does not change meaning underneath a server
+// that reads it.
+uint32_t gBootLargestTlsBlock = 0;
 
 /// The largest contiguous 8-bit block as it stood when the PREVIOUS boot decided
 /// to restart, read out of NVS by takeRecordedCause() and 0 when nothing was
@@ -244,14 +254,21 @@ bool lastResetWasUnexpected() { return describe(esp_reset_reason()).unexpected; 
 const char* restartReasonToken() { return gReasonToken; }
 
 void recordBootHeap() {
-  gBootLargestFreeBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  Log::printf("[boot] largest contiguous 8-bit block at boot: %u bytes (a TLS record buffer "
-              "needs 16717) - now carried on every telemetry report, so the decay since boot "
-              "is arithmetic rather than something somebody has to sit and watch",
+  gBootLargestFreeBlock = HeapPools::largestAnyBlockBytes();
+  gBootLargestTlsBlock = HeapPools::largestTlsBlockBytes();
+  // Both figures ahead of the prose: Log::printf's scratch is 256 bytes and
+  // marks what it cut, so a line that explains itself first is a line that
+  // truncates its own numbers.
+  Log::printf("[boot] largest internal 8-bit block at boot: %u, %s largest %u (a TLS record "
+              "buffer needs 16717 of internal) - carried on every telemetry report, so decay "
+              "since boot is arithmetic rather than something to sit and watch",
+              static_cast<unsigned>(gBootLargestTlsBlock), HeapPools::anyPoolLabel(),
               static_cast<unsigned>(gBootLargestFreeBlock));
 }
 
 uint32_t bootLargestFreeBlock() { return gBootLargestFreeBlock; }
+
+uint32_t bootLargestTlsBlock() { return gBootLargestTlsBlock; }
 
 uint32_t lastRestartLargestFreeBlock() { return gLastRestartLargestFreeBlock; }
 
