@@ -503,19 +503,28 @@ three-quarters of a megabyte. The entire spread between the four App figures is
 When the compiler is free, the numbers to capture are `stat -c%s` on
 `build/esp32.esp32.esp32/CAL.ino.bin` and
 `App/build/esp32.esp32.esp32/App.ino.bin`, which is exactly what
-`ci/build-firmware.sh`'s own `check_size` reads.
+`ci/check-partition-fit.sh` reads for the 4MB board.
 
 ### 3.3 What `build-firmware.sh` already gets right, and should keep
 
 Two things in that script are load-bearing for this feature and must not be
 lost when it grows a CAL-image step.
 
-`arduino-cli`'s `Sketch uses X of Y bytes` line reports against the FQBN's
-static `min_spiffs` memory map (1,966,080 bytes), **not** against this project's
-asymmetric table — so a build that has genuinely outgrown `factory` still reports
-"fits". The script's `partition_size()` parses the 5th comma-separated field of
-`partitions.csv` and `check_size()` compares `stat -c%s` of the real `.bin`
-against it. That is the only ceiling check that means anything, and OTA-CAL adds
+`arduino-cli`'s `Sketch uses X of Y bytes` line reports against the
+`PartitionScheme` named in the FQBN, **not** against this project's asymmetric
+table — so a build that has genuinely outgrown `factory` still reports "fits".
+Under `min_spiffs` that figure is 1,966,080 bytes. Under
+`PartitionScheme=custom`, which is how the ESP32-S3 board wrappers select a
+sketch-supplied table, it is 16,777,216, which accepts any image either board
+can currently produce. The comparison that means anything is
+`ci/check-partition-fit.sh`: its `partition_size()` parses the 5th
+comma-separated field of a partition table, and it compares `stat -c%s` of the
+real `.bin` against that. The table it reads is the copy `arduino-cli` writes
+into the build output directory beside the image, so each board's image is
+measured against the table that build compiled with, whatever that table is
+called in the sketch root and whichever board's table is sitting there by the
+time the check runs. `ci/build-firmware.sh` and both `compile-*-s3.cmd` wrappers
+call that one script. OTA-CAL adds
 a new reason to trust it: the *server* will be handing devices a CAL image, and
 `Updater`'s existing `manifest.sizeBytes > target->size` guard is a
 belt-and-braces check against a mismatched table, not a substitute for refusing
@@ -1011,7 +1020,7 @@ re-hash the destination". Build the writer once behind a source interface.
 1. **§2's bench tests.** Test A settles the fallthrough. Test B is go/no-go on
    §5.4. Nothing after this is worth starting until both have been observed.
 2. **§3's re-measure**, and add a CAL-image ceiling check to
-   `ci/build-firmware.sh` next to the two `check_size` calls.
+   `ci/build-firmware.sh` next to the two ceiling checks it already runs.
 3. **The writer, with the SD source only** (§5.3). Testable at a bench with no
    server, no `Kind=Cal` and no network — and it delivers Brett's "test cal off a
    SD" as a shipped capability rather than a scaffold.
@@ -1050,8 +1059,8 @@ Both conclusions survive:
   of 604,928 — close to the 731,984 estimated before measuring, the difference
   being the App growing by today's four builds.
 
-`ci/build-firmware.sh` now carries a third `check_size`: CAL against `ota_0`, not
-only against `factory`. That invariant had no guard, and it is the one the whole
+`ci/build-firmware.sh` now carries a third ceiling check: CAL against `ota_0`,
+not only against `factory`. That invariant had no guard, and it is the one the whole
 feature rests on. Note which way round the risk runs — `factory` (1,703,936) is
 the SMALLER partition, so a CAL that comfortably fits its own home would still
 break staging if the table were ever rebalanced the other way. The build now says

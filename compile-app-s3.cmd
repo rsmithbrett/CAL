@@ -46,6 +46,11 @@ REM two boards do not clobber each other and .gitignore already covers both.
 
 setlocal
 set ROOT=C:\Users\Administrator\Documents\CAL
+REM The same path with forward slashes, for arguments handed to bash: dirname
+REM and the rest of the check script read a backslash as text, not a separator.
+set ROOTFS=C:/Users/Administrator/Documents/CAL
+set GITBASH=C:\Program Files\Git\bin\bash.exe
+set S3BUILD=App/build/esp32.esp32.esp32s3
 cd /d %ROOT%
 
 echo ==^> Checking the working tree's App partition table is the committed one
@@ -102,5 +107,44 @@ if errorlevel 1 (
 )
 echo restore verified >> "%ROOT%\app-s3-compile.log"
 
+REM The size check measures a binary from this run, so a failed compile reports
+REM that failure instead and leaves the previous run's image alone.
+if not "%BUILD_RC%"=="0" goto :compile_failed
+
+REM ==> SIZE CHECK. ci/check-partition-fit.sh compares the image against the
+REM table in its own build directory, which is the 8MB table this build used -
+REM arduino-cli copies it there, so the check reads the right ceiling even
+REM though the swap above has already been undone by the time it runs.
+REM
+REM ota_0 only: the App is delivered over the air into ota_0 and runs there,
+REM and factory holds CAL. The pre-re-table field ceiling in
+REM ci/build-firmware.sh is not checked here either - that number is the layout
+REM on the deployed 4MB units and says nothing about this board.
+REM
+REM A missing bash is a failure rather than a skip. An unchecked image reads the
+REM same as a checked one in a log, and PartitionScheme=custom means
+REM arduino-cli will not refuse an oversized one.
+echo ==^> Verifying compiled size against the table this build used
+if not exist "%GITBASH%" goto :no_bash
+
+"%GITBASH%" "%ROOTFS%/ci/check-partition-fit.sh" "%ROOTFS%/%S3BUILD%/App.ino.bin" ota_0 "App Panellan (ota_0)" >> "%ROOT%\app-s3-compile.log" 2>&1
+if errorlevel 1 goto :size_check_failed
+
+echo FINISHED > "%ROOT%\app-s3-done.flag"
+exit /b 0
+
+:size_check_failed
+echo SIZE CHECK FAILED - see app-s3-compile.log.
+echo SIZE-CHECK-FAILED > "%ROOT%\app-s3-done.flag"
+exit /b 1
+
+:no_bash
+echo ERROR: no bash at "%GITBASH%" - the size check cannot run, and this image has
+echo        no other ceiling on it. Install Git for Windows or point GITBASH at a
+echo        bash, then re-run.
+echo SIZE-CHECK-UNAVAILABLE > "%ROOT%\app-s3-done.flag"
+exit /b 1
+
+:compile_failed
 echo FINISHED > "%ROOT%\app-s3-done.flag"
 exit /b %BUILD_RC%

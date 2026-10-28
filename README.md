@@ -2778,9 +2778,14 @@ real heap, a real TLS stack, a real NVS partition and a real server on the other
 end. `TEST_PLAN.md` carries the bench procedure for every behaviour a compile
 cannot reach, and is explicit about which of them cost hours of wall-clock time.
 Two practical notes from it, worth repeating here: report sizes against the
-**real** ceilings from `partitions.csv` - `ota_0` is 2,359,296 bytes since
-`callog` was added, and CAL's own `factory` is 1,441,792 - never
-`arduino-cli`'s generic 1,966,080; and compiles on this project routinely look
+**real** ceilings, read from the partition table in the build output directory
+beside the image rather than quoted from here, and never against the figure
+`arduino-cli` prints for the `PartitionScheme` named in the FQBN - 1,966,080
+under `min_spiffs`, and 16,777,216 under the `custom` scheme the ESP32-S3
+wrappers use, neither of which is a partition in any table here.
+`ci/check-partition-fit.sh` makes that comparison for every board and both
+sketches, and fails the build on an image that does not fit; and compiles on
+this project routinely look
 hung when they are not - check the OS process list rather than the console. On
 the machine this was last built on, a cold CAL compile took roughly 35 minutes
 and produced no console output at all until the final two lines, so an empty log

@@ -21,7 +21,10 @@ REM   PartitionScheme=custom
 REM                   Declares build.partitions empty and lifts
 REM                   upload.maximum_size to 16777216, so the sketch's own table
 REM                   is used and the min_spiffs ceiling of 1966080 does not
-REM                   refuse a valid build.
+REM                   refuse a valid build. A 16MB ceiling accepts any image this
+REM                   board can produce, so arduino-cli will not refuse one that
+REM                   overflows a partition - the size check at the end of this
+REM                   script is what holds the image to its own table.
 REM
 REM Output goes to the build directory arduino-cli names after the FQBN, so the
 REM two boards do not clobber each other and .gitignore already covers both.
@@ -41,6 +44,11 @@ REM ArduinoJson still resolve from the sketchbook as before.
 
 setlocal
 set ROOT=C:\Users\Administrator\Documents\CAL
+REM The same path with forward slashes, for arguments handed to bash: dirname
+REM and the rest of the check script read a backslash as text, not a separator.
+set ROOTFS=C:/Users/Administrator/Documents/CAL
+set GITBASH=C:\Program Files\Git\bin\bash.exe
+set S3BUILD=build/esp32.esp32.esp32s3
 cd /d %ROOT%
 
 echo ==^> Checking the working tree's partition table is the committed one
@@ -83,5 +91,47 @@ if errorlevel 1 (
 )
 echo restore verified >> "%ROOT%\cal-s3-compile.log"
 
+REM The size check measures a binary from this run, so a failed compile reports
+REM that failure instead and leaves the previous run's image alone.
+if not "%BUILD_RC%"=="0" goto :compile_failed
+
+REM ==> SIZE CHECK. ci/check-partition-fit.sh compares the image against the
+REM table in its own build directory, which is the 8MB table this build used -
+REM arduino-cli copies it there, so the check reads the right ceiling even
+REM though the swap above has already been undone by the time it runs.
+REM
+REM factory is where CAL runs. ota_0 is where a CAL update is staged and booted
+REM before it copies itself into factory, so a CAL image has to fit both (see
+REM CAL_OTA_DESIGN.md section 5.4). The pre-re-table field ceiling in
+REM ci/build-firmware.sh is not checked here: that number is the layout on the
+REM deployed 4MB units and says nothing about this board.
+REM
+REM A missing bash is a failure rather than a skip. An unchecked image reads the
+REM same as a checked one in a log, and this board has no other ceiling on it.
+echo ==^> Verifying compiled size against the table this build used
+if not exist "%GITBASH%" goto :no_bash
+
+"%GITBASH%" "%ROOTFS%/ci/check-partition-fit.sh" "%ROOTFS%/%S3BUILD%/CAL.ino.bin" factory "CAL Panellan (factory)" >> "%ROOT%\cal-s3-compile.log" 2>&1
+if errorlevel 1 goto :size_check_failed
+
+"%GITBASH%" "%ROOTFS%/ci/check-partition-fit.sh" "%ROOTFS%/%S3BUILD%/CAL.ino.bin" ota_0 "CAL Panellan (must also fit ota_0, for OTA staging)" >> "%ROOT%\cal-s3-compile.log" 2>&1
+if errorlevel 1 goto :size_check_failed
+
+echo FINISHED > "%ROOT%\cal-s3-done.flag"
+exit /b 0
+
+:size_check_failed
+echo SIZE CHECK FAILED - see cal-s3-compile.log.
+echo SIZE-CHECK-FAILED > "%ROOT%\cal-s3-done.flag"
+exit /b 1
+
+:no_bash
+echo ERROR: no bash at "%GITBASH%" - the size check cannot run, and this image has
+echo        no other ceiling on it. Install Git for Windows or point GITBASH at a
+echo        bash, then re-run.
+echo SIZE-CHECK-UNAVAILABLE > "%ROOT%\cal-s3-done.flag"
+exit /b 1
+
+:compile_failed
 echo FINISHED > "%ROOT%\cal-s3-done.flag"
 exit /b %BUILD_RC%

@@ -265,35 +265,22 @@ echo "==> Compiling App"
 # actually baked into the binary - a build well within the true factory or
 # ota_0 ceiling can look alarming there, and worse, a build that has genuinely
 # grown past the real ceiling still reports "fits" against the wrong number.
-# This reads partitions.csv itself (the one source of truth for both real
-# ceilings) rather than trusting either arduino-cli's message or a
-# hand-maintained constant here that could drift from partitions.csv the next
-# time someone resizes a partition.
+# The comparison is ci/check-partition-fit.sh, which reads the table out of the
+# build output directory beside the image rather than a filename in the sketch
+# root. That is the table this image was compiled against, so the same check
+# covers a board whose table is named something else and is selected by being
+# copied over partitions.csv for the length of one compile - the two
+# compile-*-s3.cmd wrappers call this same script for exactly that reason, and
+# a ceiling read from the sketch root afterwards would be the other board's.
+# Reading a table also keeps the ceilings out of this file, so resizing a
+# partition does not leave a constant here to drift.
 echo "==> Verifying compiled size against the real partition table"
-partition_size() {
-  # $1: partition name from partitions.csv's own Name column (e.g. "factory").
-  # Column layout: Name, Type, SubType, Offset, Size, Notes - Size is the 5th
-  # comma-separated field, a hex literal like "0x160000".
-  local hex
-  hex=$(grep -E "^${1}," partitions.csv | head -1 | awk -F',' '{gsub(/ /,"",$5); print $5}')
-  printf '%d' "$hex"
-}
-check_size() {
-  # $1: human label for the message. $2: compiled .bin path. $3: real
-  # ceiling in bytes, from partition_size above.
-  local label="$1" bin_path="$2" ceiling="$3"
-  local actual
-  actual=$(stat -c%s "$bin_path")
-  local pct=$((actual * 100 / ceiling))
-  echo "    ${label}: ${actual} / ${ceiling} bytes (${pct}%)"
-  if [ "$actual" -gt "$ceiling" ]; then
-    echo "ERROR: ${label} binary (${actual} bytes) exceeds its real partition ceiling (${ceiling} bytes)." >&2
-    echo "        This is the actual flashable image size, not arduino-cli's generic scheme check above - a build this size will not fit and must not ship." >&2
-    exit 1
-  fi
-}
-check_size "CAL (factory)" "${BUILD_DIR}/CAL.ino.bin" "$(partition_size factory)"
-check_size "App (ota_0)" "App/${BUILD_DIR}/App.ino.bin" "$(partition_size ota_0)"
+# Invoked via bash explicitly rather than ./ci/check-partition-fit.sh: a script
+# committed from a Windows filesystem does not reliably carry its executable
+# bit into git, and this way it does not matter.
+CHECK_FIT="bash ci/check-partition-fit.sh"
+$CHECK_FIT "${BUILD_DIR}/CAL.ino.bin" factory "CAL (factory)"
+$CHECK_FIT "App/${BUILD_DIR}/App.ino.bin" ota_0 "App (ota_0)"
 
 # CAL MUST ALSO FIT ota_0, WHICH IS NOT WHERE IT RUNS.
 #
@@ -316,7 +303,7 @@ check_size "App (ota_0)" "App/${BUILD_DIR}/App.ino.bin" "$(partition_size ota_0)
 # the two, which means a CAL that fits its own home could still be the one that
 # breaks this if the table is ever rebalanced the other way. Checked here so the
 # build says so rather than a device discovering it during an update.
-check_size "CAL (must also fit ota_0, for OTA staging)" "${BUILD_DIR}/CAL.ino.bin" "$(partition_size ota_0)"
+$CHECK_FIT "${BUILD_DIR}/CAL.ino.bin" ota_0 "CAL (must also fit ota_0, for OTA staging)"
 
 # AND AGAINST THE TABLE THE FLEET IS ACTUALLY RUNNING, WHICH IS NOT THIS ONE.
 #
@@ -338,10 +325,14 @@ check_size "CAL (must also fit ota_0, for OTA staging)" "${BUILD_DIR}/CAL.ino.bi
 # table either - filed separately - so this number came from reading 0x8000 on a
 # real unit and is the only evidence there is.
 #
+# It is passed as an explicit byte count rather than a partition name because
+# it is not a partition in any table here, and it applies to this board only:
+# the 4MB units in the field are the ones carrying that layout.
+#
 # DELETE THIS CHECK when the USB pass has re-tabled the fleet, and not before.
 # Until then it is the binding constraint and the other one is aspirational.
 FIELD_FACTORY_CEILING=1441792
-check_size "CAL (field factory, pre-re-table)" "${BUILD_DIR}/CAL.ino.bin" "$FIELD_FACTORY_CEILING"
+$CHECK_FIT "${BUILD_DIR}/CAL.ino.bin" "bytes:${FIELD_FACTORY_CEILING}" "CAL (field factory, pre-re-table)"
 
 echo "==> Computing checksums"
 (

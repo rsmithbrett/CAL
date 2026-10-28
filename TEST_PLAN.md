@@ -1839,9 +1839,30 @@ Recorded once, because several commits in this repository lean on it:
     cable, and `ota_0` can be refilled over the air — so `factory` is the number
     with headroom and `ota_0` is the one to watch.
 
-  `ci/build-firmware.sh` reads the table rather than holding constants, for
+  `ci/check-partition-fit.sh` reads the table rather than holding constants, for
   exactly this reason. A number typed into prose is a number that will be wrong
   the next time somebody re-tables a device.
+
+  **There is more than one table now, so the check reads the one that build
+  used.** The 8MB Panellan has its own layout in
+  `partitions-panellan-8mb.csv`, and the board wrappers select a board by
+  copying its table over `partitions.csv` for the length of one compile. The
+  check therefore reads `partitions.csv` out of the build output directory,
+  where `arduino-cli` puts the table it compiled against, beside the image it
+  produced. Each board's figures come from that board's own table, and reading
+  the sketch root instead would measure one board's image against the other
+  board's ceilings. Read the figures for a board off the table in that board's
+  build directory, the same place the check does. Four ceilings are checked:
+  CAL against `factory` and, for OTA staging, against `ota_0`; the App against
+  `ota_0`; and on the 4MB board only, CAL against the pre-re-table field
+  ceiling that the deployed units are actually running.
+
+  `ci/build-firmware.sh` runs the check for the 4MB board, and
+  `compile-cal-s3.cmd` and `compile-app-s3.cmd` run it for the Panellan. The
+  S3 wrappers need it for a reason beyond a second table: they pass
+  `PartitionScheme=custom`, which raises `arduino-cli`'s own refusal to
+  16,777,216 bytes, so nothing but this check stands between an oversized S3
+  image and a published release.
 - `strings` on the built image proves a literal is present. That is a real check
   and worth doing when a change is "the card must now be able to say X".
 - It proves nothing about heap, TLS, NVS, timing, the panel, or any decision
