@@ -1818,6 +1818,112 @@ The other side of it is asserted in the server repository by
   somebody sets the price by hand, so this device should never see the pair. It is not
   guarded here.
 
+## 14. The App's first boot on the Panellan
+
+Nothing has ever drawn a card on the Panellan. The App compiles for it and fits
+its partition, and the paragraphs below are what the compile cannot answer. They
+are in the order to check them, because the early ones make the later ones
+unreadable if they fail.
+
+**Two of these are now compile-time rather than manual.** `App/Sound.h` and
+`App/CardManager.cpp` carry a `static_assert` against
+`MSPI_IOMUX_PIN_NUM_CS1`..`MSPI_IOMUX_PIN_NUM_MOSI` from the SDK's own
+`soc/spi_pins.h`, so a peripheral pin in the S3's flash-and-PSRAM range fails
+the build instead of the board. Put either pin back to its fleet-board value and
+the S3 compile stops with the pin named. They cover the two pins this repository
+had. They cover nothing about a pin somebody adds in the 33-37 range, which an
+octal part bonds and this quad part does not.
+
+### 14.1 Does anything light up at all
+
+`Display::begin()` asserts GPIO47 directly before `panelDevice.init()`, so a
+black panel after that write is the bus and not the backlight. LovyanGFX's own
+default brightness is 127 and `Display::begin()` raises it to 255 one call
+later, so a panel stuck at half brightness means the second call did not run.
+
+### 14.2 Which way up, and is anything cut off
+
+`setRotation(1)` plus the config's `offset_rotation = 2` gives internal rotation
+3, and the viewport reads back 320x240 - the same figures the fleet board gives,
+arrived at differently. So a card laid out in absolute coordinates has the room
+it expects. What the compile cannot say is which way up. LovyanGFX's table
+carries two variants of the fleet board, and they do not agree: the ILI9341
+variant sets the panel's `offset_rotation` to 2 and lands on internal rotation
+3 like the Panellan, while the ST7789 variant leaves it at 0, lands on 1, and
+puts the 2 on its touch config instead. Each is right for its own glass.
+`offset_rotation` in `BoardPanellan.h` is the knob if the picture is upside
+down, and the value there is the vendor's. A fleet unit with the ILI9341 panel
+is the one worth standing the Panellan beside.
+
+### 14.3 Red and blue, and black and white
+
+The Panellan config sets `rgb_order = true` where the fleet board's panel
+defaults to BGR, so the two boards write different MADCTL color-order bits. It
+also sets `invert = true` and carries `0x21` in the vendor's init list, where
+the fleet board inverts neither way. Both values are the vendor's. The check is
+one look at a card with known colors: a warning amber that reads blue is the
+color order, and a white day card that comes up black is the inversion.
+
+### 14.4 A logo with a soft edge
+
+This board is write-only - RD is tied off and `readable = false` - and
+LovyanGFX's PNG decoder has a separate path for that case. It thresholds alpha
+at 128, draws every pixel above it opaque, skips the rest, and does it one
+`writeFillRectPreclipped(x, y, 1, 1)` at a time. So a logo with an anti-aliased
+edge draws with a hard edge and draws slowly, where the same file on the fleet
+board blends against a read-back line. Look at an airline logo and a
+featured-listing photo, and time the draw.
+
+### 14.5 The asset path, which has no SD card under it
+
+The vendor's pin header gives every SD pin as -1. The RGB565 rung needs a card
+and refuses without one, so every picture on this board comes down the
+direct-to-RAM fallback and is decoded by PNG or JPEG. `Graphic.cpp` says in a
+log line that the RAM fallback has no in-rect draw, so a picture card with a
+button bound to it draws full-screen with the button row over its bottom edge.
+Expect that line and check the picture against it.
+
+### 14.6 Touch
+
+The FT5x06 reports over I2C port 1 on GPIO8/9, and reports nothing if
+`Touch_FT5x06::_check_init()` reads a zero vendor id. The arithmetic downstream
+is sound - the affine map takes raw 0..240 by 0..320 into the panel's own 0..319
+by 0..239, and `Panel_Device::convertRawXY` folds the panel's `offset_rotation`
+in - but whether a finger on the left edge reads as the left edge is a fact
+about the glass. Tap the two edge strips and the middle; left is previous on
+every panel.
+
+### 14.7 What the heap figures mean here, which is not what they mean on the fleet
+
+`MALLOC_CAP_8BIT` spans PSRAM on this target, so every log line and telemetry
+field reporting an 8BIT largest free block reports a figure out of the PSRAM
+pool rather than out of internal RAM, and it will dwarf anything the fleet has
+ever sent. `logHeapSnapshot()` prints the
+`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT` pair beside it, as
+`INT|8BIT free= largest=`, and that is the one to read. The 45,056-byte PNG
+decoder scratch is a plain `malloc`, which with
+`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` prefers PSRAM, so the fleet's
+draw-or-not-draw threshold does not apply here.
+
+### 14.8 TLS, because this binary's mbedTLS is not the fleet's
+
+The S3 half of the installed core is stock: `MBEDTLS_SSL_MAX_CONTENT_LEN 16384`,
+no `ASYMMETRIC_CONTENT_LEN` and no `MBEDTLS_DYNAMIC_BUFFER`. A session holds
+16,717 twice, 33,434 bytes, for its whole life. Read it off
+`App/build/esp32.esp32.esp32s3/sdkconfig`, not off the esp32 one beside it.
+
+### 14.9 Pins this repository still points at the wrong thing
+
+Not fixed, and not fatal. `App/PowerProbe.cpp` reads GPIO34 and GPIO35 with
+`analogReadMilliVolts`, and neither is an ADC pin on the S3 - its ADC1 is
+GPIO1-10 and ADC2 is GPIO11-20. Both come back as 0 mV, which `Motion` reads as
+below its 1500 mV threshold and therefore as no motion, which is the safe
+answer. Expect zeros in telemetry and no motion-aware dimming.
+`App/SdStorage.cpp` still compiles the fleet board's chip select, GPIO5, into
+its mount path; on this board that is the vendor's RS485 RTS line, and the
+default SPI pins it reaches for are four of the six general-purpose header
+pins. The mount fails either way because there is no card.
+
 ## What a clean compile does and does not prove
 
 Recorded once, because several commits in this repository lean on it:

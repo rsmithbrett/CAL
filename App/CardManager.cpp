@@ -1,5 +1,17 @@
 #include "CardManager.h"
 
+// sdkconfig.h before the board gate on the action-button pin further down, for
+// the reason Display.cpp gives at its own top: without it
+// CONFIG_IDF_TARGET_ESP32S3 is undefined where the gate is evaluated and an S3
+// build takes the fleet board's branch while compiling clean.
+#include "sdkconfig.h"
+
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+// Names the pins the flash and PSRAM controller owns on this target, for the
+// guard beside that gate.
+#include <soc/spi_pins.h>
+#endif
+
 #include "Actions.h"
 #include "Config.h"
 #include "Display.h"
@@ -1146,16 +1158,36 @@ void refreshOneDueCard() {
   }
 }
 
-// --- The physical button on GPIO27 -------------------------------------------
+// --- The physical button -----------------------------------------------------
 //
-// GPIO27 because it is the one free pin on this board: GPIO0 is the BOOT button
-// and carries CAL's WiFi-reset gesture, GPIO34 is the onboard LDR, and GPIO35 is
-// the PIR (shared with the adc35Millivolts probe). PowerProbe.h names 27 as free
-// and ADC-capable and deliberately does not probe it.
+// GPIO27 on the fleet board, because it is the one free pin there: GPIO0 is the
+// BOOT button and carries CAL's WiFi-reset gesture, GPIO34 is the onboard LDR,
+// and GPIO35 is the PIR (shared with the adc35Millivolts probe). PowerProbe.h
+// names 27 as free and ADC-capable and deliberately does not probe it.
 //
 // Wired to ground through the button, read with INPUT_PULLUP, so idle is HIGH and
 // a press is LOW.
-constexpr uint8_t kActionButtonPin = 27;
+//
+// -1 on the Panellan, which has no such button and no pin resembling one. GPIO27
+// there is `MSPI_IOMUX_PIN_NUM_HD`, the hold line of the bus the cache fetches
+// code and PSRAM over, and the vendor's own pin header brings out GPIO10 to 14
+// and 21 as its general-purpose set. A pinMode() on 27 reconfigures a live bus
+// signal, and what follows is a cache fault rather than a button that does
+// nothing.
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+constexpr int8_t kActionButtonPin = -1;
+
+// A peripheral pin in the flash-and-PSRAM range stops being a peripheral pin
+// the moment this file reads it. The range is CS1 through MOSI, the set a
+// quad-PSRAM module bonds; D4 upward are brought out only on an octal part and
+// are left to a board that knows it has one.
+static_assert(kActionButtonPin < MSPI_IOMUX_PIN_NUM_CS1 ||
+                  kActionButtonPin > MSPI_IOMUX_PIN_NUM_MOSI,
+              "the action-button pin is one of this target's flash/PSRAM pins - GPIO27 is the "
+              "flash hold line");
+#else
+constexpr int8_t kActionButtonPin = 27;
+#endif
 
 // Long enough to outlast contact bounce on a mechanical switch, short enough
 // that a deliberate press is never missed. The same order as Motion's own
@@ -1167,18 +1199,26 @@ bool gActionButtonReady = false;
 bool gActionButtonDown = false;
 uint32_t gActionButtonChangedMs = 0;
 
-/// A debounced falling edge on GPIO27, true for exactly one loop iteration per
-/// press - the same contract Touch::poll() offers, so the caller can treat the
-/// two identically.
+/// A debounced falling edge on the button pin, true for exactly one loop
+/// iteration per press - the same contract Touch::poll() offers, so the caller
+/// can treat the two identically.
+///
+/// Always false on a board with no button, which touches no pin at all.
 ///
 /// Edge-triggered rather than level-triggered: a finger held on the button is
 /// one press, not one per loop iteration, and a stuck button is then one press
 /// at boot rather than a flood for as long as it is stuck.
 bool actionButtonPressed() {
+  if (kActionButtonPin < 0) {
+    return false;
+  }
+
+  const uint8_t pin = static_cast<uint8_t>(kActionButtonPin);
+
   if (!gActionButtonReady) {
-    pinMode(kActionButtonPin, INPUT_PULLUP);
+    pinMode(pin, INPUT_PULLUP);
     gActionButtonReady = true;
-    gActionButtonDown = digitalRead(kActionButtonPin) == LOW;
+    gActionButtonDown = digitalRead(pin) == LOW;
     gActionButtonChangedMs = millis();
 
     // A button already down at the first read is the stuck case, and reporting
@@ -1186,7 +1226,7 @@ bool actionButtonPressed() {
     return false;
   }
 
-  const bool down = digitalRead(kActionButtonPin) == LOW;
+  const bool down = digitalRead(pin) == LOW;
   const uint32_t now = millis();
 
   if (down == gActionButtonDown) {

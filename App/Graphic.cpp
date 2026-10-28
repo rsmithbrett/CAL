@@ -30,16 +30,15 @@ static_assert(Cards::kMaxAssetIdLength >= Assets::kMaxIdLength,
 /// The panel's own dimensions, needed here only by the tight draw below, which
 /// has to name a rectangle rather than saying "the whole screen".
 ///
-/// Restated rather than exported from Display.h on purpose. Display.cpp's
-/// kScreenW/kScreenH are deliberately private - the whole point of that file
-/// owning the one LGFX instance is that no card does panel arithmetic, and
-/// making them public would invite exactly that. The one number here that can
-/// actually move is the bottom of the content area, and that is read from
-/// Display::contentBottom() at the call site rather than written down; the
-/// width and the full height are fixed by the hardware this firmware is
-/// compiled for, not by a layout decision anybody is going to revisit.
-constexpr int kPanelWidth = 320;
-constexpr int kPanelHeight = 240;
+/// Read from Display rather than written down, because the viewport is a
+/// runtime fact: Display::begin() takes an orientation and a portrait panel
+/// reports 240x320. Held as literal 320 and 240, the rectangle below is 320
+/// wide on a 240-wide panel and the px count beside it is a height minus a
+/// content bottom measured against the other axis. screenWidth() and
+/// screenHeight() are the accessors Touch.cpp already navigates by, and they
+/// report what begin() brought up.
+int panelWidth() { return Display::screenWidth(); }
+int panelHeight() { return Display::screenHeight(); }
 
 /// One picture card's worth of fetch/itemCount/draw logic, parameterized on
 /// `N` purely to give each instantiation its own set of static globals - the
@@ -309,7 +308,7 @@ struct Instance {
       Log::verbose("[%s] drawing '%s'%s into (0, 0, %d, %d) - a button is bound to this card, so "
                    "the picture is scaled into the band above the button row instead of filling "
                    "the panel",
-                   id(), gCachedId.c_str(), gFromRam ? " (from RAM)" : " (from SD)", kPanelWidth,
+                   id(), gCachedId.c_str(), gFromRam ? " (from RAM)" : " (from SD)", panelWidth(),
                    Display::contentBottom());
     } else {
       Log::verbose("[%s] drawing '%s'%s", id(), gCachedId.c_str(),
@@ -342,12 +341,12 @@ struct Instance {
         Log::printf("[%s] asset '%s' is in RAM and there is no in-rect draw for a RAM buffer, so "
                     "this picture is drawn full-screen and the button row still covers its "
                     "bottom %d px",
-                    id(), gCachedId.c_str(), kPanelHeight - Display::contentBottom());
+                    id(), gCachedId.c_str(), panelHeight() - Display::contentBottom());
       }
       drew = Assets::drawRam(gCachedId, gRamBuffer);
     } else if (tight) {
       Display::clearPanel();
-      drew = Assets::drawCachedInRect(gCachedId, 0, 0, kPanelWidth, Display::contentBottom());
+      drew = Assets::drawCachedInRect(gCachedId, 0, 0, panelWidth(), Display::contentBottom());
     } else {
       drew = Assets::drawCached(gCachedId);
     }
