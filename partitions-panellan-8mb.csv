@@ -1,15 +1,25 @@
 # Panellan ZX2D80CE02S-V10 partition layout - 8MB WT32-S3-WROVER-N8R2
 #
-# NOT YET IN USE. The build does not read this file: Arduino takes the
-# partitions.csv sitting beside the sketch, so selecting this table means
-# putting it there. See compile-cal-s3.cmd.
+# IN USE BY THE S3 BUILDS, INDIRECTLY. Arduino reads the partitions.csv sitting
+# beside the sketch and there is only one such name, so compile-app-s3.cmd and
+# compile-cal-s3.cmd copy this file over App/partitions.csv for the compile and
+# restore the 4MB table afterwards. The size check then reads ota_0 out of the
+# copy arduino-cli left in the build directory, so the ceiling an S3 image is
+# measured against comes from these rows.
 #
-# EVERY SIZE BELOW IS AN ESTIMATE. The 4MB table beside this one carries the
-# opposite claim in capital letters, and it earns it - each of its figures was
-# moved to fit a measured binary. Nothing here has been measured, because no
-# binary has ever been built for this board. The numbers are the ones
-# DEVICE_BOARD_AXIS_DESIGN.md section 6 proposed, carried forward so there is
-# something to boot, and they are to be replaced off the first S3 build.
+# EVERY SIZE BELOW IS STILL AN ESTIMATE, and that is the part to keep in mind.
+# The 4MB table beside this one carries the opposite claim in capital letters,
+# and it earns it - each of its figures was moved to fit a measured binary.
+# Binaries have now been built for this board, CAL and App both, so the sizes
+# these rows have to hold are measured; the rows themselves are not. The numbers
+# are the ones DEVICE_BOARD_AXIS_DESIGN.md section 7 proposed, carried forward so
+# there is something to boot.
+#
+# They have deliberately NOT been moved to fit the first S3 builds. Every figure
+# here is larger than its measurement by a wide margin, which is the direction
+# that costs nothing, and factory cannot be resized in the field at all - see
+# below. Narrowing them wants the margin argument the 4MB table makes, made
+# again for this chip, and that has not been done.
 #
 # FORMAT NOTE: no trailing comments on the data rows below. The generator reads
 # the column after Size as the flags field, so a "# ..." there is parsed as a

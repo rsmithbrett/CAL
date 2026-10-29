@@ -45,13 +45,22 @@ REM Output goes to the build directory arduino-cli names after the FQBN, so the
 REM two boards do not clobber each other and .gitignore already covers both.
 
 setlocal
-set ROOT=C:\Users\Administrator\Documents\CAL
+REM The tree this script builds is the tree it sits in. %~dp0 names the directory
+REM holding this file, with a trailing backslash that the next line takes off so
+REM %ROOT%\App does not come out with a doubled separator. Deriving it rather than
+REM writing a path out is what lets a worktree or a second checkout build itself:
+REM a written-out path builds that one tree and size-checks that one tree's
+REM binary, from wherever the script is run.
+set ROOT=%~dp0
+if "%ROOT:~-1%"=="\" set ROOT=%ROOT:~0,-1%
 REM The same path with forward slashes, for arguments handed to bash: dirname
 REM and the rest of the check script read a backslash as text, not a separator.
-set ROOTFS=C:/Users/Administrator/Documents/CAL
+REM Derived from ROOT rather than written again, so the two cannot name
+REM different trees.
+set ROOTFS=%ROOT:\=/%
 set GITBASH=C:\Program Files\Git\bin\bash.exe
 set S3BUILD=App/build/esp32.esp32.esp32s3
-cd /d %ROOT%
+cd /d "%ROOT%"
 
 echo ==^> Checking the working tree's App partition table is the committed one
 git diff --quiet -- App/partitions.csv
@@ -65,24 +74,28 @@ if errorlevel 1 (
 del /q "%ROOT%\app-s3-compile.log" 2>nul
 del /q "%ROOT%\app-s3-done.flag" 2>nul
 
-REM Copied from App's OWN partitions-panellan-8mb.csv, beside this sketch, rather
-REM than from the root copy. The two are byte-identical and the PAIR is what gets
-REM checked: the table check pairs by filename and diffs each pair present on both
-REM sides, so root partitions-panellan-8mb.csv against App's is what catches a
-REM stale App table. A table present on one side only is reported as unpaired and
-REM does NOT fail the build, so building App from the root file would leave this
-REM board's table unchecked while looking fine.
+REM Copied from App's own partitions-panellan-8mb.csv, beside this sketch, rather
+REM than from the root copy, so this build uses the table that sits with the
+REM sketch it bakes into App.ino.merged.bin. The two are byte-identical, and
+REM `diff partitions-panellan-8mb.csv App/partitions-panellan-8mb.csv` is how to
+REM confirm it. Nothing automates that check.
+REM
+REM Nothing in ci/ pairs the 8MB tables. ci/build-firmware.sh diffs exactly one
+REM pair, root partitions.csv against App/partitions.csv, which is the 4MB pair.
+REM There is no loop pairing tables by filename and no reporting of an unpaired
+REM table anywhere in ci/, so a drifted App-side 8MB table is caught by the hand
+REM diff above or not at all.
 REM
 REM That matters because App.ino.merged.bin is a published release asset and bakes
-REM its table in at 0x8000. An App-side table that has drifted silently re-tables
-REM any device flashed with that image, which is the failure the 4MB pair was
-REM caught in on 2026-09-15.
+REM its table in at 0x8000. An App-side table that has drifted re-tables any
+REM device flashed with that image without saying so, which is the failure the 4MB
+REM pair was caught in on 2026-09-15.
 echo ==^> Swapping in the 8MB table
 copy /y "%ROOT%\App\partitions.csv" "%ROOT%\App\partitions.csv.4mb-backup" >nul
 copy /y "%ROOT%\App\partitions-panellan-8mb.csv" "%ROOT%\App\partitions.csv" >nul
 
 echo ==^> Compiling
-cd /d %ROOT%\App
+cd /d "%ROOT%\App"
 C:\Tools\arduino-cli\arduino-cli.exe compile ^
   --fqbn esp32:esp32:esp32s3:PSRAM=enabled,CDCOnBoot=cdc,PartitionScheme=custom ^
   --build-property build.flash_size=8MB ^
@@ -90,7 +103,7 @@ C:\Tools\arduino-cli\arduino-cli.exe compile ^
   --export-binaries . > "%ROOT%\app-s3-compile.log" 2>&1
 set BUILD_RC=%ERRORLEVEL%
 echo EXIT=%BUILD_RC% >> "%ROOT%\app-s3-compile.log"
-cd /d %ROOT%
+cd /d "%ROOT%"
 
 echo ==^> Restoring the 4MB table
 copy /y "%ROOT%\App\partitions.csv.4mb-backup" "%ROOT%\App\partitions.csv" >nul

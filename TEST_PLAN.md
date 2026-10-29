@@ -232,7 +232,7 @@ wrong figure routes a reader to the wrong work.
      for the figure printed beside it; `SdStorage.cpp` includes `Http.h` to do
      it. Closed.
    - `App/BootDiag.cpp` and `App/HeapRatchet.cpp` still carry 16717 inside
-     log-string prose. Harmless to behaviour, still a figure that can drift out
+     log-string prose. Harmless to behavior, still a figure that can drift out
      of step with the constant. Open.
 
    `grep -rn 16717 App/` is the check. Re-run it after any change to
@@ -1699,7 +1699,7 @@ cannot decode on it, and no second picture card. A deliberately corrupted
 cached file does the job on any device.
 
 Device 39's shape used to be the worked example - its only image-bearing card
-is `aircraft`, and the airline logo was a PNG needing 45,056 contiguous bytes
+is `aircraft`, and the airline logo was a PNG needing 44,408 contiguous bytes
 against a largest block that has never exceeded 36,852. **That example no
 longer reproduces**, twice over: the server re-encoded every airline logo to
 RGB565 on 2026-10-26, which needs a 5,120-byte band buffer and no decoder, and
@@ -1900,7 +1900,7 @@ field reporting an 8BIT largest free block reports a figure out of the PSRAM
 pool rather than out of internal RAM, and it will dwarf anything the fleet has
 ever sent. `logHeapSnapshot()` prints the
 `MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT` pair beside it, as
-`INT|8BIT free= largest=`, and that is the one to read. The 45,056-byte PNG
+`INT|8BIT free= largest=`, and that is the one to read. The 44,408-byte PNG
 decoder scratch is a plain `malloc`, which with
 `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` prefers PSRAM, so the fleet's
 draw-or-not-draw threshold does not apply here.
@@ -1950,11 +1950,15 @@ core version or a threshold does.
 
 **Still carrying the fleet board's chip select: `App/SdStorage.cpp`.** It
 compiles GPIO5 into its mount path. The gate that keeps that pin from ever being
-driven on the S3 is `kBoardHasCardSlot` in commit `e6afc9a` on branch
-`fix/s3-heap-pool-and-sd-gate`, which is a sibling of this branch off `add4c66`
-and not an ancestor of it. No second guard was added here, because two gates on
-one mount with nothing comparing them is worse than one. Whichever of the two
-branches lands second has to keep that gate.
+driven on the S3 is `kBoardHasCardSlot` at `App/SdStorage.cpp:41-42`, false
+behind `CONFIG_IDF_TARGET_ESP32S3`. It arrived in commit `e6afc9a`, which is an
+ancestor of this branch through `07f5e6e`, so the gate is in the tree here and
+`git merge-base --is-ancestor e6afc9a HEAD` says so. No second guard was added,
+because two gates on one mount with nothing comparing them is worse than one.
+
+This paragraph used to say `e6afc9a` was a sibling of this branch and not an
+ancestor of it, and warned that whichever branch landed second had to keep the
+gate. Both branches have landed and the gate is here.
 
 The pin is not claimed before that gate, which is the part worth checking rather
 than assuming. `kChipSelectPin` is a `constexpr`; the global `SD` is
@@ -1966,13 +1970,29 @@ would claim GPIO5 plus the variant's default SPI pins - `SS 10`, `MOSI 11`,
 `SCK 12`, `MISO 13` in `variants/esp32s3/pins_arduino.h` - which are four of the
 six pins the EXT header brings out.
 
-Two things nobody has read a datasheet for: that GPIO5 is this board's RS485 RTS
-line, which is secondhand and is not in `BoardPanellan.h` or in the vendor
-specification the server's `OPEN_ITEMS.md` transcribes, and what GPIO34 and
-GPIO35 are wired to on this board at all. The module is a quad-PSRAM part
-(`CONFIG_SPIRAM_MODE_QUAD=y`), so 33-37 are not bonded to the flash and PSRAM
-bus and the two pads are ordinary digital GPIOs there. Neither question changes
-any of the above, because nothing drives any of those pins now.
+Both of those pins now have a datasheet answer. The vendor document (WT32S3-28S
+PRO / ZX2D80CE02S, 2025/06/11) gives GPIO5 as the RS485 RTS line in its Hardware
+Peripherals table, with GPIO4 as RXD and GPIO6 as TXD, so what this paragraph
+used to call secondhand is the vendor's own figure. And the document brings out
+exactly six pins, GPIO 10, 11, 12, 13, 14 and 21 on the Extended IO header
+(Tab.2); GPIO34 and GPIO35 appear in no interface table in it, so nothing on this
+board is wired to them and there is nowhere to wire anything. The module is a
+quad-PSRAM part (`CONFIG_SPIRAM_MODE_QUAD=y`), so 33-37 are not bonded to the
+flash and PSRAM bus and the two pads are ordinary digital GPIOs on the chip, with
+no pad on the board to reach them through. Neither answer changes any of the
+above, because nothing drives any of those pins now.
+
+`kBoardHasCardSlot = false` has a vendor answer too. The document describes no SD
+or TF card slot anywhere, which is independent of the measurement that gate was
+first set from.
+
+**Where a presence pad would have to go, if one is ever fitted.** GPIO10, and
+there is no second choice. The S3's ADC1 reaches GPIO1 to GPIO10, of the six pins
+the EXT header brings out only GPIO10 is in that range, GPIO 11-14 are ADC2 and
+GPIO21 has no ADC channel at all. GPIO10 is also the variant's default `SS`, so
+anything claiming it has to be the only claimant. Nothing is wired to it today
+and this is not a plan, it is the answer to the question so the next person
+doesn't re-derive it.
 
 #### What was compiled, and what the guards said when they were made to fail
 
@@ -2122,7 +2142,7 @@ compilation or from the presence of an HTTP request.** Require real physical
 phone testing and keep the two-stage QR/URL fallback available as a separate
 experiment.
 
-## 14. The heap figure that gates TLS says which pool it measured
+## 15. The heap figure that gates TLS says which pool it measured
 
 `App/HeapPools.{h,cpp}` is new. It defines `kTlsCaps`
 (`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`) as the mask every TLS-relevant figure
@@ -2191,23 +2211,46 @@ rebuild.
    name. On a fleet device both pairs give the same answer, which is the cheap
    way to confirm the change did not move anything.
 
-### The draw path was deliberately left alone
+### The draw path was mostly left alone, and one figure in it was load-bearing
 
 `App/Display.cpp` carries fourteen bare-capability heap figures in its log lines
-and `App/Assets.cpp` one more. None was changed, and none is a TLS figure - they
-are about the pool a file buffer or a decoder scratch comes from, and on a board
-with PSRAM that pool legitimately may be PSRAM:
-`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` sends every `malloc()` above 4,096
-bytes to PSRAM first, and a 10-24KB file buffer or the PNG decoder's 44KB
-scratch is well above it.
+and `App/Assets.cpp` one more. Most are about the pool a file buffer or a decoder
+scratch comes from, and on a board with PSRAM that pool legitimately may be
+PSRAM: `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` sends every `malloc()` above
+4,096 bytes to PSRAM first, and a 10-24KB file buffer or the PNG decoder's
+44,408-byte scratch is well above it.
 
-The right mask for those is an open question rather than an oversight, and it is
-one the board has to answer: whether LovyanGFX's decoder scratch and
-`ensureFileBufferCapacity()` do land in PSRAM on the Panellan, and what that does
-to the 32,768-byte PNG floor. `logHeapSnapshot()` prints `8BIT` and `INT|8BIT`
-side by side and is the line to read first on a first boot - the gap between the
-two pairs is the measurement. Until then those figures are unlabelled on the S3
-and a reader has to know which board sent them.
+**One of the fifteen is a TLS figure, which this section used to deny.**
+`Assets.cpp:1107-1111` prints a bare largest-free-block in the same sentence as
+`Http::kTlsRecordBufferBytes` and invites the reader to compare the two, and the
+`HeapTrace::mark()` immediately below it records an internal-pool figure
+(`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`, `HeapTrace.cpp:13`) for the same
+moment. On a fleet device those two agree to the byte and the comparison means
+something. On the Panellan the printed figure spans PSRAM, mbedTLS can't use
+PSRAM, and the sentence reads as reassurance about a pool a handshake never
+touches. Still open: the fix is `HeapPools::kTlsCaps` for any figure a reader is
+asked to compare against a TLS number, and no figure in the draw path has been
+moved onto it yet.
+
+`notePngDrawFailure()` was the one figure in the draw path that decided something
+rather than reporting it, and it is now closed. It compared a bare
+largest-free-block against the decoder's demand to tell a bad file apart from a
+heap too small to decode, and on the Panellan the bare figure spans a PSRAM hole
+in the megabytes, so the comparison can't come out true and every refused PNG
+reads as a bad file: the branch that keeps a SHA-256 verified cache becomes
+unreachable, and the device re-fetches and re-fails every rotation. It now asks
+`malloc()` for the decoder's 44,408 bytes and frees them, so the test is the same
+call in whatever pool the decoder's own request would have used, and the pool
+question stops gating the decision.
+`FIRMWARE_CORE_AND_DRIVERS_DESIGN.md` §2.7 has the reasoning.
+
+The right mask for the remaining thirteen is an open question rather than an
+oversight, and it is one the board has to answer: whether
+`ensureFileBufferCapacity()`'s buffers land in PSRAM on the Panellan, and what
+that does to the 44,408-byte PNG floor. `logHeapSnapshot()` prints `8BIT` and
+`INT|8BIT` side by side and is the line to read first on a first boot - the gap
+between the two pairs is the measurement. Until then those figures are unlabeled
+on the S3 and a reader has to know which board sent them.
 
 ### The reading end is not done
 
@@ -2219,13 +2262,13 @@ so a Panellan below the TLS floor still reads as healthy on `/diag/telemetry`.
 That is a server-tree change and it is a prerequisite for this being visible
 anywhere but a debug stream.
 
-## 15. The Panellan has no card slot, so no mount is attempted
+## 16. The Panellan has no card slot, so no mount is attempted
 
 `Sd::begin()` returns false at a board gate - `kBoardHasCardSlot`, a `constexpr
 bool` gated on `CONFIG_IDF_TARGET_ESP32S3` and read by a runtime `if` - before
 touching `SD.begin()`.
 
-**No test was added and none failed first**, for the reason section 14 gives.
+**No test was added and none failed first**, for the reason section 15 gives.
 
 ### What a build proves
 
@@ -2259,3 +2302,123 @@ would attempt the mount on the board that has no slot. The same trap
    its mount, its retry count and its mount cost exactly as before; a card-less
    one must still log `no card found after 3 attempt(s)`. The gate changes
    neither, and the only way to be sure is to read both lines off a real device.
+
+## 17. Two reporting defects on the Panellan, 2026-10-28
+
+Both were found by review rather than by a run, and neither can be reached by a
+test in this repository. Section 15 has why: the App and CAL are Arduino sketches
+with no unit-test target, and the suites this project runs live in the server
+tree. For the first defect there is a server-side test that covers the half of
+the behavior the server owns, and it was made to fail on purpose. For the second
+there is nothing to write, and saying so is better than implying otherwise.
+
+### 17.1 `Motion::operatingState()` had no pin gate
+
+`App/Motion.cpp` computed the field from `gPolicy` alone, so a target whose ADC1
+reaches no channel for GPIO35 answered `"enabled"` whenever an operator had
+declared a sensor and switched motion on. `"enabled"` is the one value the server
+credits with being able to detect presence:
+`src/DiscoverAroundMe.Telemetry/CardImpressionRollup.cs` selects on it and stamps
+`device_periods.PresenceMeasurable` from the result, and any rate built on seen
+time divides by those rows. A board with no pad would have contributed a
+guaranteed zero to the numerator and a full count to the denominator, and the rate
+would read as attention falling off.
+
+It now returns `"fallback"` behind the same `kPin < 0` gate `sampleSensor()` and
+`begin()` already use. `"fallback"` rather than a new string, so nothing on the
+server, in the simulator's bounded option list or in any later reader has to learn
+a value first. `MOTION_AWARE_DISPLAY_DESIGN.md` section 1 and
+`CARD_IMPRESSIONS_DESIGN.md` carry the reasoning and the server's rollup comment
+now names five cases where it named four.
+
+**What a build proves.** That both boards compile, and that `kPin` still agrees
+with the board gate: the `static_assert` pair at `App/Motion.cpp:26` and `:30`
+fails if a target's channel table and the gate ever disagree, which is what 14.9
+records. It does not prove the new gate is read, because an omitted runtime test
+is legal C++ and warns about nothing. That is the same limit 14.9 already states.
+
+**The server-side tests that do bite.**
+`Telemetry.Tests.CardImpressionRollupTests.ADisplaysPeriodSaysWhetherPresenceCouldBeMeasured`
+gained `"disabled"`, an unrecognized string and `""` beside the `"enabled"`,
+`"fallback"` and null cases it had. Made to fail on purpose by turning the
+rollup's positive match into an exclusion list, which is the change a later editor
+would plausibly make. A second gap turned up while looking for a mutation the
+suite missed, and `ARerolledPeriodTakesTheDisplaysLatestReportedState` closes it:
+moving the `PresenceMeasurable` assignment into the new-row initializer passed
+every case in the file, because they all roll each period once. The counts for
+both are in the server tree's `TEST_PLAN.md` entry for this date.
+
+**What the bench has to settle.** On a Panellan with a motion policy resolved for
+it, that the telemetry report's `motionOperatingState` reads `"fallback"` on the
+wire. And that a fleet device with a working AM312 still reports `"enabled"`,
+which is the case the gate must not have broken. Neither has run.
+
+No page shows this field. `/diag/telemetry` renders no motion column and
+`DIAGNOSTIC_PRIVILEGES_DESIGN.md` keeps `MotionOperatingState` out of the diag
+projection on purpose, so there is nothing to photograph and nothing to read off a
+page. The check is the device's own stream, or the stored row, or the impressions
+report's presence-measurable count.
+
+**Where a sensor could go on this board, for whoever asks next.** GPIO10, and
+nowhere else. The vendor datasheet brings out six IOs and only GPIO10 is in the
+S3's ADC1 range. 14.9 has the detail.
+
+### 17.2 `notePngDrawFailure()` decided from a figure that spans PSRAM
+
+`App/Display.cpp` told a malformed PNG apart from a decoder that could not
+allocate by reading `heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)` and
+comparing it against the decoder's demand. On the fleet board the figure and the
+pool `malloc()` draws from are the same memory and the comparison holds. On the
+Panellan the bare capability spans 2MB of PSRAM, the largest block is in the
+megabytes for the life of the device, and the comparison can never come out true:
+every refused PNG files as a bad file, `gLastDrawFailedOnAllocation` is never set,
+and `Assets.cpp` takes the branch that DELETES the sha256-verified cached copy and
+reports a decode failure. The re-fetch pulls the same bytes and fails the same
+way, so the device spends a TLS session and an SD write on it every rotation. The
+function's own doc comment names that as the expensive direction to be wrong in.
+
+It now asks `malloc()` for the decoder's own request size and frees it again, so
+the answer comes from the same call in whatever pool the decoder's request would
+have landed in. No mask is chosen and no board has to be measured first.
+`FIRMWARE_CORE_AND_DRIVERS_DESIGN.md` section 2.7 has the reasoning, the cases the
+probe still cannot separate and why each errs cheaply.
+
+**Three things this does not claim.** On a Panellan whose PSRAM came up a
+44,408-byte `malloc` essentially never fails, so a refusal there will still almost
+always read as a bad file - the difference is that the reading now follows from a
+request that was made rather than from a comparison that could not come out true.
+The probe models one of the decode's three `malloc`s, the workspace, and not the
+per-image scanline buffer or the palette. And three of the four draw entry points
+note a cause at all: `drawImageFromSd`, the full-screen SD path, never calls this
+function, so a refusal there reads as a bad file on both boards and deletes the
+cache. That last one is a separate defect of the same shape, it predates this
+change, and it is not fixed here.
+
+The threshold constant moved from 45,056 to 44,408, which is the single `malloc`
+`lgfx_pngle_new()` makes. Three numbers were in use for the one quantity: 45,056
+is the largest-free-block drop one decode was observed to cost on device 17,
+32,768 is `lz_buf` inside the allocation, and 44,408 is the request.
+`docs/rgb565-feasibility.md` carried the first as the allocation and now says
+which is which.
+
+**No test was added and none failed first**, for the reason at the top of this
+section. There is no harness that can call `notePngDrawFailure()`.
+
+**What a build proves.** That both boards compile with `HeapPools.h` included in
+`Display.cpp` and the probe in place. Nothing about the decision.
+
+**What the bench has to settle, and it needs a corrupt file on purpose.** Put a
+truncated or non-PNG file into the cache under an asset id a card draws **through
+an in-rect path**, on both boards, and read the one log line: it leads with which
+way the refusal was read, then whether the malloc came back null, then the largest
+and free figures over both masks with the pool label. Expected on both boards with
+a healthy heap: the malloc succeeds, the line reads `a file that will not decode`,
+and `Assets.cpp` invalidates the cache. Expected on a fleet device whose largest
+block is under 44,408: the malloc comes back null and the cache is kept. The
+second case is the one the fleet already produces by itself, and the one the old
+comparison could not reach on the Panellan for a reason that had nothing to do
+with the device in front of you.
+
+Read the line for truncation while you are there. `Log::printf` formats into 256
+bytes and marks anything longer, and the worst case here was counted at about 200
+with the verdict first precisely so the verdict cannot be the part that gets cut.

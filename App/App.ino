@@ -480,12 +480,12 @@ void decideBootNarration(bool splashOnScreen) {
 ///
 /// The second question outranks the first, because the first one's answer is a
 /// remembered byte and a device that cannot reach the server can never correct
-/// it. Device 17 held `true` for 84 consecutive restarts and kept 45,056 bytes
-/// for a picture it could not fetch, while holding them was what stopped it
-/// reaching the server: free8 at the boot handshake was about 10,262 after two
-/// mbedTLS record buffers, under the 20,764 the four-level chain was measured
-/// needing. Nothing cleared the flag because clearing it needs the check-in the
-/// flag prevents.
+/// it. Device 17 held `true` for 84 consecutive restarts and kept the
+/// decoder's 44,408 bytes for a picture it could not fetch, while holding them
+/// was what stopped it reaching the server: free8 at the boot handshake was
+/// about 10,262 after two mbedTLS record buffers, under the 20,764 the
+/// four-level chain was measured needing. Nothing cleared the flag because
+/// clearing it needs the check-in the flag prevents.
 ///
 /// **Why the backoff counter rather than the other three signals.**
 /// BootDiag::lastRestartCause() is one boot's fact: a household that power-cycles
@@ -942,7 +942,7 @@ constexpr uint32_t kMaxConsecutiveDrawFailures = 6;
 // A restart's only mechanism here is handing the device a fresh heap, which is
 // worth trying: releasing a TLS session moved a measured largest block from
 // 6,132 to 36,852 and a 10,568-byte allocation that had just failed then
-// succeeded. What it cannot do is raise the ceiling. A PNG needs 45,056 bytes in
+// succeeded. What it cannot do is raise the ceiling. A PNG needs 44,408 bytes in
 // one block; a device whose largest block has never exceeded 36,852 will not get
 // them from any heap, and if that picture is on its only image-bearing card
 // there is never a successful draw to clear the counter either. The run then

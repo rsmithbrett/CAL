@@ -136,6 +136,17 @@ void clearReportedCounters();
 
 /// For telemetry: "enabled", "disabled" or "fallback". What the device is DOING,
 /// as against what the policy permits.
+///
+/// "enabled" is the one value the server credits with being able to detect
+/// presence, so it is gated on this target having an ADC1 channel for the sensor
+/// pad as well as on the policy. A board with no channel answers "fallback",
+/// which is what a device with no policy answers - see the function body for why
+/// it reuses that string instead of adding one.
+///
+/// On that board the sentence above stops holding: the field says what the server
+/// may credit rather than what the backlight is doing, because `service()` still
+/// runs an enabled policy's Active and Dim there. `backlightState` on the same
+/// report is the field that says what the panel is doing.
 String operatingState();
 
 }  // namespace Motion

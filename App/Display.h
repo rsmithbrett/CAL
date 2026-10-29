@@ -946,7 +946,7 @@ void clearPanel();
 /// scanlines at a time straight into pushImage(). Its draw-time cost is one
 /// fixed 5,120-byte allocation - the same for every picture, where a decoder's
 /// workspace varies with the content - against the JPEG decoder's 3,900 and the
-/// PNG decoder's ~45,056 retained. The price is a file roughly ten times a
+/// PNG decoder's 44,408 retained. The price is a file roughly ten times a
 /// JPEG of the same picture, which is free on an SD card and impossible without
 /// one: a device with no card fetches assets into a single contiguous heap
 /// buffer, so it can never hold one of these. The server's card policy editor

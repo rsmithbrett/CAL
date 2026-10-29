@@ -29,12 +29,26 @@
 /// pin, and it appears neither in LovyanGFX's table for that board nor in
 /// PowerProbe.h's free-pin reasoning.
 ///
-/// THE PANELLAN HAS NO AMPLIFIER AND NO FREE PIN THAT RESEMBLES ONE. Its vendor
-/// pin header gives every I2S pin as -1 and names no speaker, and GPIO26 there
-/// is the PSRAM chip select - `CONFIG_SPIRAM_CS_IO=26` in the generated
-/// sdkconfig, `MSPI_IOMUX_PIN_NUM_CS1` in the SDK's own pin table. Attaching
-/// LEDC to it routes a square wave onto the line the cache reads PSRAM over,
-/// and that heap holds most of what a PSRAM build allocates.
+/// The Panellan has a speaker connector and no documented pin behind it, which is
+/// why it holds -1 rather than a candidate. The vendor datasheet (WT32S3-28S
+/// PRO / ZX2D80CE02S, 2025/06/11) lists four connectors in its Interface Package
+/// table and one of them is a speaker: a 2-pin Molex SD-53398-0271, beside the
+/// 7-pin debug, the 8-pin expand-I/O and the 4-pin RS485. No pin table anywhere
+/// in that document says which GPIO drives it. The Extended IO header (Tab.2)
+/// gives this board's only unclaimed pins as GPIO 10, 11, 12, 13, 14 and 21, and
+/// names no speaker among them. So the connector is a vendor fact and the pin
+/// behind it is not a fact this repository has. -1 stays until somebody puts a
+/// meter on it.
+///
+/// This comment used to say the vendor pin header gave every I2S pin as -1 and
+/// named no speaker. `BoardPanellan.h` carries no I2S fields at all, and the
+/// vendor does name one.
+///
+/// GPIO26 is not a candidate here the way it is on the fleet board. On this
+/// target it is the PSRAM chip select - `CONFIG_SPIRAM_CS_IO=26` in the
+/// generated sdkconfig, `MSPI_IOMUX_PIN_NUM_CS1` in the SDK's own pin table.
+/// Attaching LEDC to it routes a square wave onto the line the cache reads
+/// PSRAM over, and that heap holds most of what a PSRAM build allocates.
 namespace Sound {
 
 /// The amplifier input, or -1 on a board with no amplifier. One pin, not a

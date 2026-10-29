@@ -358,7 +358,7 @@ uint32_t lastRestartLargestFreeBlock();
 /// Read by App.ino's watchdog to decide whether another restart is worth making.
 /// A restart's only mechanism is handing the device a fresh heap, so a run of
 /// them with no successful draw in between says the shortage is structural - a
-/// PNG wants 45,056 bytes in one block and some devices have never had more than
+/// PNG wants 44,408 bytes in one block and some devices have never had more than
 /// 36,852 - and further restarts cost a household a reboot every twenty minutes
 /// for nothing. See kMaxCannotDrawRestarts.
 uint8_t cannotDrawRestarts();

@@ -600,20 +600,33 @@ bracketing touch reads with transactions, which is moot here.)
 number is why [§6](#6-recommendation-with-confidence-levels) rates JPEG higher
 than the plan does.
 
-**Update, 2026-09-10 — the PNG row's "~44KB" is now measured on hardware, and
-it is 45,056 bytes exactly** (largest free 8BIT block 110,580 -> 65,524 across
-the first draw of a boot). Per-draw `largest8` is flat after that, confirming
-the "allocated once and deliberately retained" reading above from the other
-direction. What this revises is the *argument*, not the number: with streaming
+**Update, 2026-09-10 — what one decode costs in largest free block is measured
+on hardware, and it is 45,056 bytes exactly** (largest free 8BIT block 110,580
+-> 65,524 across the first draw of a boot). Per-draw `largest8` is flat after
+that, confirming the "allocated once and deliberately retained" reading above
+from the other direction.
+
+What that measurement revises is the *argument*, not the number: with streaming
 in place there is no per-draw contiguity cost left to remove, so the case for
-JPEG is now specifically that it does not hold a 45KB block for the whole
+JPEG is now specifically that it does not hold a 44KB block for the whole
 uptime — and the thing that block is measurably in the way of is a new TLS
 session, which needs 16,717 bytes contiguous for each of mbedTLS's two record
 buffers (`Http::kTlsRecordBufferBytes`) and cannot find either once cards have
 been rendering. This line said "~32KB contiguous" until 2026-09-14; see the
 correction note at the head of the README's "The numbers tonight rests on"
-section, and note that a 45KB block held for the whole uptime is in the way of
-the real 16,717-byte requirement just as squarely.
+section, and note that a held 44KB block is in the way of the 16,717-byte
+requirement just as squarely.
+
+**Corrected 2026-10-28: 45,056 is not the allocation, and the paragraph above
+used to say it was.** The request is 44,408 bytes, read as the literal `0xad78`
+passed to `malloc` in the disassembly of `lgfx_pngle_new` in both built ELFs and
+checked against `sizeof(pngle_t)` added up from this library's source. 45,056 is
+the drop in largest free block that one decode was observed to cost, which
+carries the allocator's own overhead and depends on where in the heap the block
+landed, and is 0xB000 besides. Both figures are measurements and they measure
+different things; only 44,408 has to fit in one piece. The third figure this
+project has used for the same quantity, 32,768, is `lz_buf` alone, about three
+quarters of the request.
 
 One more capability worth recording, because it solves a problem this firmware
 currently solves badly: `drawJpg(Stream*, ...)` exists

@@ -1135,8 +1135,9 @@ bool drawRam(const String& id, const RamAssetBuffer& buffer) {
 
   // Stages 5 and 6 of 8 bracket the decoder, which is the other candidate for
   // holding memory it does not give back: a PNG decode on this hardware was
-  // measured retaining 45,056 bytes once, and although that turned out not to
-  // be the SD devices' problem it has never been ruled out as this one's.
+  // measured costing 45,056 bytes of largest block once for its 44,408-byte
+  // request, and although that turned out not to be the SD devices' problem it
+  // has never been ruled out as this one's.
   // Bracketing every attempt rather than only the first means a retry's cost is
   // visible too - two decodes of the same image should cost the same, and a
   // second that costs more is itself the finding.

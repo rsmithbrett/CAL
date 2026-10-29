@@ -2865,7 +2865,7 @@ disposable tag can no longer cost the permanent one.
   "has never fired", then "probably should not have". Device 39 settled it: 31
   restarts at roughly 21-minute intervals, `RestartLargestFreeBlockBytes` of
   34,804 at essentially every one of them, and a single image-bearing card whose
-  airline-logo PNG needs 45,056 contiguous bytes against an all-time maximum
+  airline-logo PNG needs 44,408 contiguous bytes against an all-time maximum
   largest block of 36,852. The decode cannot succeed, there is no second picture
   card to produce the successful draw that would clear the counter, and the
   restart is therefore a loop by construction. Two things changed: the cause is
@@ -3651,9 +3651,10 @@ the other stops working entirely.
 once, by the boot splash, at a point in `setup()` where `maxAllocHeap` is
 still 110,580 bytes, and because LovyanGFX keeps it unless asked not to, every
 later card draw reuses it and never needs a large contiguous block to decode
-again. (The "~44KB" is now measured exactly: **45,056 bytes**, as largest
-110,580 -> 65,524 across the first draw of a boot, with per-draw `largest8`
-flat after that. Both halves of this paragraph's claim therefore hold on
+again. (The allocation is 44,408 bytes, read off the malloc in lgfx_pngle_new;
+the 45,056 measured as largest 110,580 -> 65,524 across the first draw of a boot
+is the drop in largest block, not the request. Per-draw `largest8` is flat after
+that. Both halves of this paragraph's claim therefore hold on
 hardware — and that one held block is now the *remaining* argument for JPEG,
 which is not the argument JPEG was originally justified on. See the end of this
 file.) Releasing it was tried, and it broke every graphic card on the device
@@ -3948,7 +3949,7 @@ does not fix it, this becomes a restart every few minutes, which is exactly what
 intervals - the interval is how long its rotation took to fail seven draws, not
 a memory curve - and no restart could ever have helped it. Its only
 image-bearing card is `aircraft`, whose picture is an airline-logo PNG; a PNG
-needs 45,056 bytes in one contiguous block and that device's all-time maximum
+needs 44,408 bytes in one contiguous block and that device's all-time maximum
 largest block is 36,852. The decode cannot succeed on any heap it will ever
 have. With no second picture card there is never a successful draw to clear the
 counter, so it climbs past 6 and the device restarts, forever.
@@ -5123,15 +5124,15 @@ position is that a fourth explanation is missing rather than that three
 explanations covered everything.
 
 **One measurement that partly settles the JPEG argument above and partly revises
-it.** `drawPngFile` retains approximately 44KB - **45,056 bytes exactly,
-measured as largest 110,580 -> 65,524 across the first draw of a boot** - and
-then reuses it. Per-draw `largest8` after that is **flat**. So the streaming
+it.** `drawPngFile` retains a single 44,408-byte allocation - **costing 45,056 of
+largest block, measured as 110,580 -> 65,524 across the first draw of a boot**
+- and then reuses it. Per-draw `largest8` after that is **flat**. So the streaming
 change did what it was supposed to: the per-draw collapse that build `0006`
 showed, where a single 5,686-byte draw took the largest block from 12,276 down
 to 5,876, is gone, and picture cards no longer carve the heap on every rotation.
 
 The case for JPEG is therefore narrower than the section above argues, and it
-still stands. What remains is not per-draw churn but that one-time 45,056-byte
+still stands. What remains is not per-draw churn but that one-time 44,408-byte
 block, held for the whole uptime, which is one of the long-lived allocations
 dividing the heap that a new TLS session then cannot find 32KB in. `draw_jpg`'s
 entire workspace is one ~3,900-byte `malloc` freed on every exit path, so
@@ -5140,7 +5141,7 @@ conversion a **pending lever on the TLS problem**, which is not how it was
 originally justified - it was justified on per-draw contiguity, and per-draw
 contiguity has since been fixed by other means. Worth being explicit that the
 two figures in this section which invite a connection - the post-WiFi cap on
-`largest8` at 34,804, and a 45,056-byte block sitting just under 44KB - are
+`largest8` at 34,804, and a 44,408-byte block costing 45,056 of it - are
 suggestive of each other and that nothing here establishes any relationship
 between them.
 
@@ -7068,16 +7069,36 @@ to draw. On every device in the fleet the internal fields repeat the bare ones
 exactly, which is the cheapest way for the fleet's own stored rows to establish
 that rather than leaving it as something to take on trust.
 
-**The draw path was left alone, on purpose.** `Display.cpp` has fourteen
-bare-capability figures in its log lines and `Assets.cpp` one more. None is a TLS
-figure: they are about the pool a file buffer or a decoder scratch comes from,
-and on a board with PSRAM that may genuinely be PSRAM -
-`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` sends every `malloc()` above 4,096
-bytes to PSRAM first, and a 10-24KB file buffer or the PNG decoder's 44KB scratch
-is well above it. Which mask those should use, and what PSRAM does to the
-32,768-byte PNG floor, is a question the board has to answer rather than one to
-settle by editing. `logHeapSnapshot()` prints both masks side by side and is the
-line to read first on a first boot.
+**Most of the draw path was left alone, on purpose.** `Display.cpp` has fourteen
+bare-capability figures in its log lines and `Assets.cpp` one more. Most are about
+the pool a file buffer or a decoder scratch comes from, and on a board with PSRAM
+that may genuinely be PSRAM: `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` sends
+every `malloc()` above 4,096 bytes to PSRAM first, and a 10-24KB file buffer or
+the PNG decoder's 44,408-byte scratch is well above it. Which mask those should
+use, and what PSRAM does to the 44,408-byte PNG floor, is a question the board has
+to answer rather than one to settle by editing. `logHeapSnapshot()` prints both
+masks side by side and is the line to read first on a first boot.
+
+**One of the fifteen is a TLS figure, and this paragraph used to say none was.**
+`Assets.cpp:1107-1111` prints a bare largest-free-block in the same sentence as
+`Http::kTlsRecordBufferBytes`, and the `HeapTrace::mark()` right below it records
+an internal-pool figure for the same instant. On a fleet device the two agree to
+the byte. On the Panellan the printed one spans PSRAM, mbedTLS can't use PSRAM,
+and a reader comparing it against the record-buffer size is being reassured about
+a pool no handshake touches. Still open, and the fix is `HeapPools::kTlsCaps` for
+any figure a reader is asked to compare against a TLS number.
+
+**`notePngDrawFailure()` was the one draw-path figure that decided something.** It
+told a bad PNG apart from a heap too small to decode one by comparing a bare
+largest-free-block against the decoder's demand, which works where `malloc()` and
+the figure cover the same pool and can't work where they don't. On the Panellan
+the bare figure spans a PSRAM hole in the megabytes, so the comparison never comes
+out true, every refused PNG files as a bad file, and the branch that keeps a
+SHA-256 verified cached copy becomes unreachable. The device then deletes the
+cache, re-fetches the identical bytes and fails the same way on every rotation, at
+a TLS session and an SD write each time. It now asks `malloc()` for 44,408 bytes
+and frees them, so the question is answered by the same call in the same pool the
+decoder would have drawn from.
 
 **The reading end is still the bare field, and that half is not done here.**
 `FleetHealth.IsBelowTlsFloor()`, `IsHeapFragmented()`,

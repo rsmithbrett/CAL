@@ -72,6 +72,11 @@
 #include "CalQr.h"
 
 #include "Display.h"
+// Which pools a heap figure spans, for notePngDrawFailure()'s log line. The
+// decision there is a malloc rather than a figure; the figures are printed for a
+// reader of the debug stream, and on a board with PSRAM a bare-capability number
+// means nothing without the label beside it.
+#include "HeapPools.h"
 #include "Http.h"
 #include "Log.h"
 
@@ -6038,7 +6043,7 @@ constexpr size_t kRgb565BytesPerPixel = 2;
 /// approaching the ceiling. 30 bands draw a full 320x240 frame.
 ///
 /// **The comparison that matters.** LovyanGFX's JPEG decoder takes a
-/// 3,900-byte workspace; its PNG decoder wants roughly 45,056 and keeps it.
+/// 3,900-byte workspace; its PNG decoder wants 44,408 and keeps it.
 /// So this path's peak allocation is the same order as the cheap decoder's and
 /// an order below the expensive one's - and unlike either, it does not vary
 /// with the picture. A decoder's appetite depends on the image; a band of
@@ -6058,29 +6063,46 @@ constexpr size_t kRgb565MaxBandBytes = kRgb565BandLines * 320 * kRgb565BytesPerP
 /// point, so a stale true cannot outlive the draw that set it.
 ///
 /// Set from two kinds of evidence. The rgb565 band path sets it from a malloc
-/// that actually came back null, which is the fact itself. The png paths set
-/// it from the heap figure at the moment of refusal, because their decoder
-/// answers a bare false either way - see notePngDrawFailure().
+/// that actually came back null, which is the fact itself. The png paths set it
+/// from a malloc of the decoder's own request size, taken and freed at the moment
+/// of refusal, because their decoder answers a bare false either way - see
+/// notePngDrawFailure().
 bool gLastDrawFailedOnAllocation = false;
 
-/// The one contiguous block a PNG decode needs, measured at 45,056 bytes.
+/// The one contiguous block a PNG decode asks for: 44,408 bytes.
 ///
-/// `lgfx_pngle_new()` takes the whole `_pngle_t` in a single malloc, so the
+/// `lgfx_pngle_new()` takes the whole `_pngle_t` in a single `malloc`, so the
 /// figure is the struct: `lz_buf[32768]` for the format's inflate window, a
 /// 10,992-byte `lgfx_tinfl_decompressor`, `read_buf[512]`, `out_buf[64]` and the
-/// fields around them. The 32KB window alone is about three quarters of it, and
-/// a heap that can hand over 34,804 bytes and no more cannot start a decode.
+/// fields around them. Read two ways and they agree - the literal `0xad78`
+/// passed to `malloc` in the disassembly of `lgfx_pngle_new` in both built ELFs,
+/// and the struct's fields added up from the installed LovyanGFX 1.2.28 source
+/// for a 32-bit target.
 ///
-/// Display.h, CardManager.cpp, App.ino and HeapRatchet.h quote the same
-/// allocation as 44KB or 45,056, and docs/rgb565-feasibility.md carries the
-/// hardware measurement.
+/// Two other numbers describe other quantities and neither is the allocation.
+/// 45,056 is what one decode was observed to cost in largest free block on
+/// device 17 (110,580 down to 65,524, in docs/rgb565-feasibility.md): a delta
+/// across a window, carrying allocator overhead and depending on where the block
+/// landed, and 0xB000 besides. 32,768 is `lz_buf` alone, about three quarters of
+/// the request. A 32,768-byte hole does not let a PNG decode and a 44,408-byte
+/// one does. DEVICE_MEMORY.md and FIRMWARE_CORE_AND_DRIVERS_DESIGN.md section
+/// 2.4 draw the distinction. Prose in this repository that says "44KB" means
+/// this figure, which is 43.4 KiB; 44 KiB is 45,056, so the abbreviation reads
+/// as either and is not a figure to carry anywhere.
+///
+/// This is a copy of a size belonging to a struct that is private to
+/// `lgfx_pngle.c`, so no `static_assert` can tie the two together. The figure is
+/// the probe's own request size below, which means a LovyanGFX that grew
+/// `_pngle_t` would have the probe asking for less than the decoder and reading
+/// a genuine shortage as a bad file - the expensive direction. Re-read `0xad78`
+/// out of `lgfx_pngle_new` after any library bump.
 ///
 /// Every device in the fleet except one sits below this figure for a largest
 /// contiguous 8BIT block, which is why a logo draws on some and not others.
-constexpr size_t kPngDecoderScratchBytes = 45056;
+constexpr size_t kPngDecoderScratchBytes = 44408;
 
-/// Reads a refused PNG draw as an allocation failure when the heap could not
-/// have held the decoder, and records the figures either way.
+/// Reads a refused PNG draw as an allocation failure when the decoder's own
+/// allocation cannot be made, and records the figures either way.
 ///
 /// <para>drawPngFile() and drawPng() both answer a bare false, for a malformed
 /// file and for a decoder that could not allocate alike. Without this the
@@ -6090,25 +6112,91 @@ constexpr size_t kPngDecoderScratchBytes = 45056;
 /// when it was written, so the re-fetch pulls the identical bytes and fails
 /// the same way, every rotation, for as long as the heap stays low.</para>
 ///
-/// <para>The reading is a judgement from one number rather than an answer from
-/// the decoder, and the asymmetry is what makes that acceptable: reading a bad
-/// file as an allocation failure keeps a file that will never draw, which
-/// costs one SD entry, while reading an allocation failure as a bad file costs
-/// a TLS session and an SD write on every cycle forever.</para>
+/// <para>The test is the decoder's own allocation rather than a heap figure, and
+/// a heap figure is what it used to be. It asked for the largest free block over
+/// the bare 8-bit capability and compared that against the demand. Where
+/// `malloc()` can only reach internal DRAM the figure and the pool are the same
+/// memory and the comparison holds. On the Panellan the bare capability spans 2MB
+/// of PSRAM, the largest block is in the megabytes for the life of the device,
+/// and the comparison can never come out true - so every refused PNG read as a
+/// bad file and the branch that keeps a verified cache was unreachable, which is
+/// the expensive direction taken unconditionally.</para>
+///
+/// <para>So it asks `malloc()` for what `lgfx_pngle_new()` asks for and frees it
+/// again. Whichever pool the decoder's own request would have landed in, this
+/// request lands in the same one under the same
+/// `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL` threshold, because it is the same call
+/// at the same size. No mask has to be chosen and no board has to be measured
+/// first. The rgb565 band path above already works from a `malloc` that came back
+/// null, and this puts the png path on the same evidence.</para>
+///
+/// <para>What it does NOT do is cover every allocation a decode makes. There are
+/// three: the 44,408-byte workspace in `lgfx_pngle_new()`, a per-image
+/// `scanline_buf` sized from the picture's width (about 966 bytes for a 320-wide
+/// RGB8, several KB for a large one) and a palette of up to 1,024 bytes. The
+/// probe models the first. A decode that got the workspace and failed on one of
+/// the two small ones is a shortage the probe can still read either way, and on
+/// the Panellan those two fall under the 4,096-byte threshold and are attempted
+/// in internal DRAM first while the workspace prefers PSRAM. Both land on the
+/// cheap side in practice, because the probe asks for a second 44,408 while the
+/// first is still held, and a heap that cannot spare 44,408 is reported as a
+/// shortage - which keeps the file.</para>
+///
+/// <para>The same held-workspace case is why it cannot separate a bad file from a
+/// shortage once the boot splash has taken the block: a decode never allocates
+/// again then, the probe is asking for a second copy, and a low heap reads as a
+/// shortage for a file that was actually bad. That keeps a file which will never
+/// draw, costing one SD entry. The figure comparison erred the same way in the
+/// same case, since a held workspace is exactly why the largest block was low.
+/// Nothing moved.</para>
+///
+/// <para>The asymmetry is what makes either reading acceptable: reading a bad
+/// file as an allocation failure keeps a file that will never draw, which costs
+/// one SD entry, while reading an allocation failure as a bad file costs a TLS
+/// session and an SD write on every cycle forever.</para>
+///
+/// <para>On a Panellan whose PSRAM came up, a 44,408-byte `malloc` succeeds
+/// essentially always, so a refusal there will almost always read as a bad file.
+/// That is the answer rather than a workaround: the decoder genuinely could have
+/// allocated, so the file is what is left. What changed is that the reading
+/// follows from a request that was actually made instead of from a comparison
+/// that could not come out true.</para>
 void notePngDrawFailure(const char* where) {
-  const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  const bool tooSmallToHaveDecoded = largest < kPngDecoderScratchBytes;
+  // Taken and handed straight back. The same transient the decoder itself would
+  // have made, on a path only reached after a draw has already returned false,
+  // at most kMaxDrawAttempts times per asset.
+  //
+  // It costs one diagnostic: a successful probe lowers
+  // heap_caps_get_minimum_free_size() for the rest of the boot, which HeapTrace
+  // prints as minFreeInt on every later stage mark. That cliff corresponds to
+  // nothing retained. largestInt and freeInt are unaffected, because the
+  // allocator coalesces on free.
+  void* probe = malloc(kPngDecoderScratchBytes);
+  const bool couldNotAllocate = probe == nullptr;
+  if (probe != nullptr) {
+    free(probe);
+  }
 
-  gLastDrawFailedOnAllocation = tooSmallToHaveDecoded;
+  gLastDrawFailedOnAllocation = couldNotAllocate;
 
-  Log::printf("[display] %s refused a png - 8BIT largest=%u free=%u, the decoder needs %u in one "
-              "block, reading this as %s",
+  // Both masks and which pools the bare one spans. The decision above reads
+  // neither; these are for somebody reading the stream, and a bare figure with no
+  // label beside it is what made this function wrong on a second board.
+  //
+  // The verdict comes before the figures because Log::printf formats into 256
+  // bytes and marks a longer line truncated. Worst case here is about 200.
+  Log::printf("[display] %s refused a png - %s. malloc(%u) %s. largest/free %u/%u over 8BIT "
+              "(%s), %u/%u internal",
               where,
-              static_cast<unsigned>(largest),
-              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+              couldNotAllocate ? "no room to decode, keeping the cache"
+                               : "a file that will not decode",
               static_cast<unsigned>(kPngDecoderScratchBytes),
-              tooSmallToHaveDecoded ? "no room to decode, keeping the cache"
-                                    : "a file that will not decode");
+              couldNotAllocate ? "came back null" : "succeeded",
+              static_cast<unsigned>(HeapPools::largestAnyBlockBytes()),
+              static_cast<unsigned>(HeapPools::freeAnyBytes()),
+              HeapPools::anyPoolLabel(),
+              static_cast<unsigned>(HeapPools::largestTlsBlockBytes()),
+              static_cast<unsigned>(HeapPools::freeTlsBytes()));
 }
 
 /// Classifies the bytes at the front of an image, wherever they came from.
@@ -6283,7 +6371,7 @@ ImageFormat sniffImageFormat(const String& path) {
 /// photograph and a flat colour cost exactly the same, where a decoder's
 /// workspace and its failure modes both vary with content. Compare what this
 /// file has measured of the alternatives - 3,900 bytes for the JPEG decoder,
-/// roughly 45,056 retained for the PNG one, against a largest free 8BIT block
+/// 44,408 retained for the PNG one, against a largest free 8BIT block
 /// seen as low as 5,876 at draw time.
 ///
 /// **The decode already happened, on the server, once.** Every
@@ -6964,7 +7052,7 @@ bool drawImageFromSd(const String& path) {
     // Snapshotted like the two decoders, and this is the pair most worth
     // capturing: the whole claim of this format is that a draw costs one
     // fixed 5,120-byte band buffer and gives it straight back, where the JPEG
-    // path's 3,900 varies with nothing and the PNG path's ~45,056 is retained
+    // path's 3,900 varies with nothing and the PNG path's 44,408 is retained
     // for the process lifetime. The before/after figures either bear that out
     // on a real heap or they do not, and a claim in a comment is not a
     // measurement.

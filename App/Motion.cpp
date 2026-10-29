@@ -355,14 +355,20 @@ void begin() {
   // absent and idle read the same - see Motion.h.
   //
   // Set on both boards. The brightness side of service() still runs on a board
-  // with no sensor pin - it holds the fallback level, which is what a device
-  // with no policy in force does - and only the sampling is skipped.
+  // with no sensor pin and only the sampling is skipped, so the level it holds is
+  // whatever the policy in force asks for: fallback with no policy or a policy
+  // that is not enabled, and with an enabled policy active until the active
+  // timeout and dim from then on, because the transition to off is guarded on this
+  // device having confirmed motion once and gEverDetected can never become true
+  // here. Touch is the only wake there.
   gBegun = true;
 
   if (kPin < 0) {
     Log::line("[motion] no sensor pin on this board - this target's ADC1 reaches GPIO1-10 and "
-              "its ADC2 GPIO11-20, so GPIO35 has no channel and no reading is taken. Brightness "
-              "holds the fallback level and the capability this device reports stays empty");
+              "its ADC2 GPIO11-20, so GPIO35 has no channel and no reading is taken. The "
+              "capability this device reports stays empty and its operating state stays "
+              "'fallback', so nothing credits it with detecting presence. A policy arriving "
+              "later still drives brightness, which starts active and holds dim");
     return;
   }
 
@@ -520,7 +526,33 @@ int32_t lastDetectedAgeSeconds() {
 void clearReportedCounters() { gEventsSinceReport = 0; }
 
 String operatingState() {
-  if (!gPolicy.present) {
+  // A board with no sensor pin answers what a device with no sensor answers, and
+  // the pin test comes first because the policy cannot override hardware.
+  //
+  // The server reads this field for one decision. "enabled" is the one value that
+  // credits a display with being able to tell somebody was there, and
+  // CardImpressionRollup stamps device_periods.PresenceMeasurable from it; every
+  // other value lands on the not-measuring side. Crediting a target whose ADC1
+  // reaches no channel for the pad puts a guaranteed zero numerator over a
+  // denominator that counts, and a presence rate then reads as attention falling
+  // away.
+  //
+  // "fallback" rather than a fifth string of its own, so nothing has to be taught
+  // to the rollup, to the simulator's bounded option list, or to any later reader
+  // of the field before this means something. It is the same value a display with
+  // no policy sends, and the no-channel case belongs in that bucket for the same
+  // reason. Two things it costs. The wire no longer separates "no policy" from "no
+  // channel for the pin", which is a compile-time property of this binary and is
+  // stated in begin()'s log line and in kPin. And on a board with no pin but an
+  // enabled policy this stops describing what the backlight is doing: service()
+  // still runs Active then holds Dim there, so a stored row can read
+  // motionOperatingState=fallback beside backlightState=dim. The backlight field
+  // on the same report is the one that says what the panel is doing;
+  // MOTION_AWARE_DISPLAY_DESIGN.md section 1 carries that split.
+  //
+  // Same gate as sampleSensor() and begin(), and the same shape as
+  // capabilityToReport() answering the same empty string either way.
+  if (kPin < 0 || !gPolicy.present) {
     return "fallback";
   }
   return gPolicy.enabled && gFault != FaultCode::StuckHigh ? "enabled" : "disabled";
