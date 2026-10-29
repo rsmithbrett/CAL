@@ -2078,12 +2078,40 @@ Recorded once, because several commits in this repository lean on it:
   `ota_0`; and on the 4MB board only, CAL against the pre-re-table field
   ceiling that the deployed units are actually running.
 
-  `ci/build-firmware.sh` runs the check for the 4MB board, and
-  `compile-cal-s3.cmd` and `compile-app-s3.cmd` run it for the Panellan. The
-  S3 wrappers need it for a reason beyond a second table: they pass
+  `ci/build-firmware.sh` runs the check for **both** boards as of 2026-10-28,
+  and `compile-cal-s3.cmd` and `compile-app-s3.cmd` run the Panellan's half of
+  it locally. It used to run the 4MB board's three only, which left the two S3
+  images measured on one workstation and nowhere else. The check matters more
+  for that board than for the other one: the S3 FQBN passes
   `PartitionScheme=custom`, which raises `arduino-cli`'s own refusal to
   16,777,216 bytes, so nothing but this check stands between an oversized S3
   image and a published release.
+
+  **Measured 2026-10-28**, read off the check's own output against the table in
+  each image's own build directory:
+
+  | Image | Partition | Size | Ceiling | |
+  | --- | --- | --- | --- | --- |
+  | `CAL.ino.bin`, Panellan | `factory` | 1,286,784 | 2,097,152 | 61% |
+  | `CAL.ino.bin`, Panellan | `ota_0` | 1,286,784 | 2,621,440 | 49% |
+  | `App.ino.bin`, Panellan | `ota_0` | 1,501,264 | 2,621,440 | 57% |
+
+  Both images came out **smaller** than their ESP32 counterparts, which the 8MB
+  table's own header predicted the other way round. Nobody should shrink
+  `factory` off this: it is the partition that needs a cable to resize and it
+  holds the recovery image. These figures are from a local build of an earlier
+  commit than the CI change, and the first CI build will produce its own - a
+  local binary and a CI binary of one commit are not the same thing, and
+  `versions.txt` and the sdkconfig are how to tell them apart.
+
+  **The CI pass swaps the table in and restores it on any exit.** Both copies
+  move, the root one and `App/partitions.csv`, and the restore comes out of git
+  rather than out of a backup so a corrupt backup cannot pass it. A restore
+  that does not take fails the script even when the compiles succeeded: an 8MB
+  table left under the 4MB name produces an `App.ino.merged.bin` that re-tables
+  whatever it is flashed to. The script also refuses to start when either table
+  already differs from `HEAD`, so an interrupted run cannot make the mix-up
+  permanent by backing up the wrong table on the next one.
 - `strings` on the built image proves a literal is present. That is a real check
   and worth doing when a change is "the card must now be able to say X".
 - It proves nothing about heap, TLS, NVS, timing, the panel, or any decision

@@ -204,10 +204,25 @@ jobs:
             echo
             echo 'Wired install, no sign-in needed: <https://discoveraroundme.com/cal>'
             echo
-            echo 'That page leads with the CH340 driver, which a fresh unit usually needs'
-            echo 'before any serial port shows up in the browser at all, then hands off to'
-            echo "Espressif's esptool-js to do the flash. Use \`CAL.ino.merged.bin\` below"
-            echo 'for a unit being set up from scratch.'
+            echo 'That page leads with the CH340 driver, which a fresh ESP32-2432S028 usually'
+            echo 'needs before any serial port shows up in the browser at all, then hands off'
+            echo "to Espressif's esptool-js to do the flash."
+            echo
+            # NAMED PER BOARD, because there are two of each file now and flashing the
+            # wrong one produces a unit that does not boot. The suffix is the board's
+            # wire name; the unsuffixed files are the ESP32-2432S028's and have been
+            # since before any board had a name. See the README's own table.
+            echo 'For a unit being set up from scratch, use the merged image for its board:'
+            echo
+            echo '| Board | File |'
+            echo '| --- | --- |'
+            echo '| ESP32-2432S028 | `CAL.ino.merged.bin` |'
+            echo '| Panellan ZX2D80CE02S | `CAL.ino.merged.panellan-zx2d80ce02s.bin` |'
+            echo
+            echo 'The esptool-js step on that page was worked out against an ESP32 behind a'
+            echo 'USB-serial bridge chip. The Panellan is an ESP32-S3 with native USB and its'
+            echo 'bootloader-entry and reset sequence has not been measured, so that page is'
+            echo 'not the route for that board yet.'
             echo
             echo '### Checksums'
             echo '```'
@@ -245,7 +260,18 @@ jobs:
           # permanent release. combined-checksums.txt already carries both
           # (see ci/build-firmware.sh) and is the one meant for a release's
           # own assets; the per-binary files are a local build-time
-          # convenience only.
+          # convenience only. There are four of them now, one per sketch per
+          # board, which is the same collision four ways.
+          #
+          # THE PANELLAN'S EIGHT FILES CARRY ITS WIRE NAME, for that same
+          # basename rule: an App.ino.bin for each board cannot both be in one
+          # release. ci/build-firmware.sh makes those copies and sums them
+          # under these names. The ESP32-2432S028's names are unchanged and
+          # must stay that way - every release published to date carries them,
+          # https://discoveraroundme.com/cal hands CAL.ino.merged.bin to a
+          # household, and the server's firmware catalog resolves CAL.ino.bin
+          # and App.ino.bin. These sixteen names are a wire contract with that
+          # server's FirmwareReleaseAssets; see the README's own table.
           files: |
             build/esp32.esp32.esp32/CAL.ino.merged.bin
             build/esp32.esp32.esp32/CAL.ino.bin
@@ -255,6 +281,14 @@ jobs:
             App/build/esp32.esp32.esp32/App.ino.bin
             App/build/esp32.esp32.esp32/App.ino.bootloader.bin
             App/build/esp32.esp32.esp32/App.ino.partitions.bin
+            build/esp32.esp32.esp32s3/CAL.ino.merged.panellan-zx2d80ce02s.bin
+            build/esp32.esp32.esp32s3/CAL.ino.panellan-zx2d80ce02s.bin
+            build/esp32.esp32.esp32s3/CAL.ino.bootloader.panellan-zx2d80ce02s.bin
+            build/esp32.esp32.esp32s3/CAL.ino.partitions.panellan-zx2d80ce02s.bin
+            App/build/esp32.esp32.esp32s3/App.ino.merged.panellan-zx2d80ce02s.bin
+            App/build/esp32.esp32.esp32s3/App.ino.panellan-zx2d80ce02s.bin
+            App/build/esp32.esp32.esp32s3/App.ino.bootloader.panellan-zx2d80ce02s.bin
+            App/build/esp32.esp32.esp32s3/App.ino.partitions.panellan-zx2d80ce02s.bin
             combined-checksums.txt
 
       - name: Compute the next vYYYY.MM.DD.NNNN
@@ -304,9 +338,13 @@ jobs:
           name: ${{ steps.version.outputs.tag }}
           body_path: release-body.md
           make_latest: false
-          # See the "latest" step above: CAL's and App's per-binary
-          # checksums.txt collide on basename and are deliberately left out;
-          # combined-checksums.txt already carries both.
+          # See the "latest" step above: the four per-binary checksums.txt
+          # collide on basename and are deliberately left out;
+          # combined-checksums.txt already carries all sixteen lines. The
+          # Panellan's assets carry its wire name for the same basename
+          # reason, and the other board's names do not move. THIS LIST AND THE
+          # ONE ABOVE MUST STAY IDENTICAL - a file published to latest and not
+          # to the permanent tag is a file nothing can recover after the fact.
           files: |
             build/esp32.esp32.esp32/CAL.ino.merged.bin
             build/esp32.esp32.esp32/CAL.ino.bin
@@ -316,4 +354,12 @@ jobs:
             App/build/esp32.esp32.esp32/App.ino.bin
             App/build/esp32.esp32.esp32/App.ino.bootloader.bin
             App/build/esp32.esp32.esp32/App.ino.partitions.bin
+            build/esp32.esp32.esp32s3/CAL.ino.merged.panellan-zx2d80ce02s.bin
+            build/esp32.esp32.esp32s3/CAL.ino.panellan-zx2d80ce02s.bin
+            build/esp32.esp32.esp32s3/CAL.ino.bootloader.panellan-zx2d80ce02s.bin
+            build/esp32.esp32.esp32s3/CAL.ino.partitions.panellan-zx2d80ce02s.bin
+            App/build/esp32.esp32.esp32s3/App.ino.merged.panellan-zx2d80ce02s.bin
+            App/build/esp32.esp32.esp32s3/App.ino.panellan-zx2d80ce02s.bin
+            App/build/esp32.esp32.esp32s3/App.ino.bootloader.panellan-zx2d80ce02s.bin
+            App/build/esp32.esp32.esp32s3/App.ino.partitions.panellan-zx2d80ce02s.bin
             combined-checksums.txt

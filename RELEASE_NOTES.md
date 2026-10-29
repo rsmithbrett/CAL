@@ -23,7 +23,22 @@ dated heading after.
 
 ## Unreleased
 
-Nothing yet.
+### The Panellan ZX2D80CE02S has firmware to install — CAL and App
+
+Every release until this one carried images for the ESP32-2432S028 only, so a
+Panellan panel had nothing it could be given. Both boards build now and both
+appear in every release.
+
+The Panellan's files carry the board in their names and the ESP32-2432S028's are
+unchanged, so an existing procedure, bookmark or script keeps working. For a
+Panellan being set up from scratch over a cable, use
+`CAL.ino.merged.panellan-zx2d80ce02s.bin`; for an ESP32-2432S028, keep using
+`CAL.ino.merged.bin`. The checksums below name all sixteen files.
+
+One thing to know before reaching for a cable: the wired install page's flashing
+step was worked out against an ESP32 behind a USB-serial bridge chip, and the
+Panellan is an ESP32-S3 with native USB. Nobody has measured its bootloader-entry
+and reset sequence yet, so that page is not the route for this board today.
 
 ---
 

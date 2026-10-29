@@ -2771,6 +2771,23 @@ checksum - kept in one script rather than only in CI config so it runs
 identically by hand or inside any CI provider. See **Shipping** below for how
 a push to `main` turns this into a published release with no further action.
 
+**It builds both boards.** Four compiles, not two: CAL and App for the 4MB
+ESP32-2432S028 against `partitions.csv`, then CAL and App for the 8MB Panellan
+ZX2D80CE02S against `partitions-panellan-8mb.csv`. The two boards land in
+build directories named after their own FQBNs, so neither overwrites the other,
+and `ci/check-partition-fit.sh` measures each image against the table its own
+build compiled against.
+
+**The Panellan pass swaps the partition table in and out, the way the two
+`compile-*-s3.cmd` wrappers do.** Arduino reads the `partitions.csv` sitting
+beside the sketch and there is only one such name, so selecting a board's table
+means putting it there. The script restores the 4MB table whether the Panellan
+compile worked or not, and then checks the restore against git rather than
+against its own backup - a corrupt backup must not be able to pass that check.
+Both copies move together, the root one and `App/partitions.csv`, because the
+"the two partition tables agree" gate earlier in the script diffs them and
+`App.ino.merged.bin` bakes its copy in at `0x8000`.
+
 **A clean compile is not a test, and `TEST_PLAN.md` is where that is dealt
 with.** Nothing in this repository can be exercised by an automated test - there
 is no host-runnable target, and the behaviour that matters is a function of a
@@ -2837,6 +2854,40 @@ a few lines of YAML, not re-deriving the build.
 Every push publishes to the rolling **`latest`** release (same tag, same
 download URLs, every time - this is what a device-setup page should link to)
 and to a new, **permanent** `vYYYY.MM.DD.NNNN` release that is never reused.
+
+### One release per version, and the board is a suffix on the asset name
+
+Both boards' artifacts go into the same release. **A GitHub release asset is
+addressed by its basename alone**, so two files called `App.ino.bin` cannot both
+be in one release: the second upload becomes an "update" of the first, which is
+the replace-in-place race described below. The Panellan's eight artifacts
+therefore carry the board's wire name before the extension, and the
+ESP32-2432S028's keep the names every release published to date already uses:
+
+| | ESP32-2432S028 | Panellan ZX2D80CE02S |
+|---|---|---|
+| App, over the air | `App.ino.bin` | `App.ino.panellan-zx2d80ce02s.bin` |
+| App, wired | `App.ino.merged.bin` | `App.ino.merged.panellan-zx2d80ce02s.bin` |
+| CAL, over the air | `CAL.ino.bin` | `CAL.ino.panellan-zx2d80ce02s.bin` |
+| CAL, wired | `CAL.ino.merged.bin` | `CAL.ino.merged.panellan-zx2d80ce02s.bin` |
+
+`.bootloader.bin` and `.partitions.bin` follow the same rule for both sketches.
+
+**The unsuffixed names belong to the 4MB board and do not move.** Every release
+published to date carries them, the server's firmware catalog resolves them, and
+`https://discoveraroundme.com/cal` serves `CAL.ino.merged.bin` to a household.
+Suffixing that board would make every existing release unresolvable - the address
+404s and the page falls through to a configured URL without saying the version it
+names is not the version it serves.
+
+**These names are a wire contract with the server repository, not a build
+detail.** DiscoverAroundMe's `/diag/firmware` registers an App or a CAL by
+looking for the asset named for a kind and a board, and its
+`FirmwareReleaseAssets` writes the same rule from the other side: the 4MB board
+unsuffixed, every other board `.<wire name>` before `.bin`, with the wire names
+coming from `DeviceBoard`. If the two sides disagree the registration finds
+nothing and says nothing - there is no error for an asset that is simply absent.
+Change a name here and change it there in the same pass.
 
 **That second half silently did not happen at least once.** The two publish
 steps run in sequence, and a failed step aborts the rest of the job by

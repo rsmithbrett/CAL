@@ -31,6 +31,29 @@ BOARD_INDEX_URL="https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pa
 FQBN="esp32:esp32:esp32:PartitionScheme=min_spiffs"
 BUILD_DIR="build/esp32.esp32.esp32"
 
+# THE SECOND BOARD. Same toolchain, same libraries, different chip, different
+# partition table - see the Panellan block further down for what each of these
+# FQBN options is for and why none of them is optional.
+S3_FQBN="esp32:esp32:esp32s3:PSRAM=enabled,CDCOnBoot=cdc,PartitionScheme=custom"
+S3_BUILD_DIR="build/esp32.esp32.esp32s3"
+PANELLAN_TABLE="partitions-panellan-8mb.csv"
+
+# The board's wire name, which is the suffix on its published asset names. It is
+# DeviceBoard's own string on the server side and it is a WIRE CONTRACT: the
+# server looks for an asset called exactly this and nothing tells either side
+# when they disagree, because a release holding no such asset reads the same as a
+# release published before this board existed. See README's "One release per
+# version" table and the server's FirmwareReleaseAssets.
+PANELLAN_WIRE="panellan-zx2d80ce02s"
+
+# BoardPanellan.h lives in an in-repo library rather than twice in two sketch
+# folders, so both sketches read one pin map. Passed to every compile including
+# the 4MB ones: their include of it is behind CONFIG_IDF_TARGET_ESP32S3 so they
+# do not need it, and passing it anyway means one compile line shape rather than
+# two. The flag ADDS to the default search path, so LovyanGFX and ArduinoJson
+# still resolve the way they did.
+LIBRARIES_DIR="libraries"
+
 echo "==> Installing esp32:esp32@${ESP32_CORE_VERSION}"
 arduino-cli core update-index --additional-urls "$BOARD_INDEX_URL"
 arduino-cli core install "esp32:esp32@${ESP32_CORE_VERSION}" --additional-urls "$BOARD_INDEX_URL"
@@ -251,13 +274,13 @@ for RETIRED in drawTruncatedLeft drawRightJustified wrappedLeftText wrappedCente
   fi
 done
 
-echo "==> Compiling CAL"
-arduino-cli compile --fqbn "$FQBN" --export-binaries .
+echo "==> Compiling CAL for the ESP32-2432S028"
+arduino-cli compile --fqbn "$FQBN" --libraries "$LIBRARIES_DIR" --export-binaries .
 
-echo "==> Compiling App"
+echo "==> Compiling App for the ESP32-2432S028"
 (
   cd App
-  arduino-cli compile --fqbn "$FQBN" --export-binaries .
+  arduino-cli compile --fqbn "$FQBN" --libraries "../$LIBRARIES_DIR" --export-binaries .
 )
 
 # arduino-cli's own "Sketch uses X of Y bytes" line checks the FQBN's generic
@@ -334,6 +357,143 @@ $CHECK_FIT "${BUILD_DIR}/CAL.ino.bin" ota_0 "CAL (must also fit ota_0, for OTA s
 FIELD_FACTORY_CEILING=1441792
 $CHECK_FIT "${BUILD_DIR}/CAL.ino.bin" "bytes:${FIELD_FACTORY_CEILING}" "CAL (field factory, pre-re-table)"
 
+# =====================================================================
+# THE PANELLAN ZX2D80CE02S, which is the other board and the other table
+# =====================================================================
+#
+# Until 2026-10-28 this script built one board and the S3 target existed only in
+# compile-cal-s3.cmd and compile-app-s3.cmd on one workstation. A real Panellan
+# in the field was therefore offered nothing at all, and before its board was
+# declared server-side it was offered the ESP32 CAL and the ESP32 App, failed to
+# install both and invalidated its ota_0.
+#
+# THE PARTITION TABLE IS SWAPPED IN AND OUT HERE, exactly as the two .cmd
+# wrappers do it and for the same reason: Arduino reads the partitions.csv
+# sitting beside the sketch and there is only one such name, so selecting a
+# board's table means putting it there. BOTH copies move, the root one and
+# App/partitions.csv, because the "two partition tables agree" gate above diffs
+# them against each other and App.ino.merged.bin bakes its copy in at 0x8000 -
+# a stale one re-tables any device flashed with that image.
+#
+# FQBN notes, and none of these four is optional:
+#   PSRAM=enabled   QSPI. The module is a WROVER-N8R2 and the installed S3
+#                   libraries are CONFIG_SPIRAM_MODE_QUAD, re-verified against
+#                   the generated sdkconfig of both S3 builds on 2026-10-27.
+#   CDCOnBoot=cdc   The S3 has native USB. Without this Serial goes nowhere and
+#                   a running board looks dead.
+#   PartitionScheme=custom
+#                   Declares build.partitions empty and lifts
+#                   upload.maximum_size to 16777216, so the sketch's own table
+#                   is used and the min_spiffs ceiling of 1966080 does not
+#                   refuse a valid build. A 16MB ceiling accepts anything this
+#                   board can produce, so arduino-cli will not refuse an
+#                   oversized image - check-partition-fit.sh is what holds
+#                   these two to their own table.
+#   build.flash_size=8MB
+#                   The generic esp32s3 board has NO FlashSize menu and hard
+#                   defaults to 4MB. Left at 4MB the image header disagrees with
+#                   an 8MB table and partitions past 4MB are rejected.
+echo "==> Checking the working tree's partition tables are the committed ones"
+# Refused rather than backed up, for the reason the .cmd wrappers refuse: if a
+# previous run died between the swap and the restore, the tree is holding the 8MB
+# table under the name partitions.csv, and a second run would back up the WRONG
+# table and make the mix-up permanent.
+if ! git diff --quiet -- partitions.csv App/partitions.csv; then
+  echo "ERROR: partitions.csv and/or App/partitions.csv differ from HEAD." >&2
+  echo "       A previous run may have been interrupted before restoring them." >&2
+  echo "       Inspect them, restore the 4MB table to both, then re-run." >&2
+  git diff --stat -- partitions.csv App/partitions.csv >&2 || true
+  exit 1
+fi
+
+# Restored on ANY exit, including a failed compile, a failed size check and a
+# ctrl-C - so the tree this script was handed is the tree it leaves behind. The
+# restore comes out of git rather than out of a backup copy, so a corrupt backup
+# cannot pass it, and a restore that did not take fails the script even when
+# everything before it succeeded: an 8MB table left under the 4MB name produces an
+# App.ino.merged.bin that re-tables whatever device it is flashed to, and nothing
+# between here and that device reports anything wrong.
+restore_fleet_partition_tables() {
+  local rc=$?
+
+  git checkout -- partitions.csv App/partitions.csv 2>/dev/null || true
+
+  if ! git diff --quiet -- partitions.csv App/partitions.csv; then
+    echo "ERROR: the 4MB partition tables were not restored." >&2
+    echo "       partitions.csv and/or App/partitions.csv still differ from HEAD. Fix them" >&2
+    echo "       before any other build - an 8MB table under the 4MB name produces an" >&2
+    echo "       App.ino.merged.bin that re-tables whatever it is flashed to." >&2
+    exit 1
+  fi
+
+  return $rc
+}
+trap restore_fleet_partition_tables EXIT
+
+echo "==> Swapping in the 8MB table"
+cp -f "$PANELLAN_TABLE" partitions.csv
+cp -f "App/$PANELLAN_TABLE" App/partitions.csv
+
+# Copied from each sketch's OWN copy rather than both from the root one. The two
+# are byte-identical and the PAIR is what the gate above checks: root
+# partitions-panellan-8mb.csv against App's. Building App from the root file
+# would leave this board's App-side table unchecked while looking fine.
+echo "==> Checking the two 8MB partition tables agree"
+if ! diff -q partitions.csv App/partitions.csv >/dev/null; then
+  echo "ERROR: $PANELLAN_TABLE and App/$PANELLAN_TABLE differ." >&2
+  diff partitions.csv App/partitions.csv >&2 || true
+  exit 1
+fi
+
+echo "==> Compiling CAL for the Panellan ZX2D80CE02S"
+arduino-cli compile --fqbn "$S3_FQBN" --build-property build.flash_size=8MB \
+  --libraries "$LIBRARIES_DIR" --export-binaries .
+
+echo "==> Compiling App for the Panellan ZX2D80CE02S"
+(
+  cd App
+  arduino-cli compile --fqbn "$S3_FQBN" --build-property build.flash_size=8MB \
+    --libraries "../$LIBRARIES_DIR" --export-binaries .
+)
+
+# Measured against the table in each image's OWN build directory, which is the
+# 8MB table these two compiles used - arduino-cli copies it there. So the check
+# reads the right ceiling even though the trap above will have put the 4MB table
+# back by the time anybody reads the log.
+#
+# factory and ota_0 for CAL, for the CAL_OTA_DESIGN.md section 5.4 reason the 4MB
+# pair is checked against both. ota_0 only for the App. The pre-re-table field
+# ceiling is NOT checked here: that number is the layout on the deployed 4MB
+# units and says nothing about this board.
+echo "==> Verifying the Panellan images against the table those builds used"
+$CHECK_FIT "${S3_BUILD_DIR}/CAL.ino.bin" factory "CAL Panellan (factory)"
+$CHECK_FIT "${S3_BUILD_DIR}/CAL.ino.bin" ota_0 "CAL Panellan (must also fit ota_0, for OTA staging)"
+$CHECK_FIT "App/${S3_BUILD_DIR}/App.ino.bin" ota_0 "App Panellan (ota_0)"
+
+# A GITHUB RELEASE ASSET IS ADDRESSED BY ITS BASENAME ALONE, so the two boards'
+# files cannot share one. Uploading a second file under a name already present
+# turns into an "update" of the first, which raced GitHub's API and 404'd when
+# this script's two checksums.txt were both listed - see the release steps in
+# .github/workflows/build-and-release.yml.
+#
+# So the Panellan's artifacts are copied to suffixed names and those are what the
+# release publishes. The 4MB board's names do NOT move: every release published
+# to date carries them, https://discoveraroundme.com/cal hands CAL.ino.merged.bin
+# to a household, and the server's catalog resolves CAL.ino.bin and App.ino.bin.
+# Renaming them makes every existing release unresolvable at once.
+#
+# Copied rather than renamed so check-partition-fit.sh's own output above, and
+# anything else reading the build directory by arduino-cli's names, keeps working.
+echo "==> Naming the Panellan artifacts for the release"
+for STEM in CAL.ino CAL.ino.merged CAL.ino.bootloader CAL.ino.partitions; do
+  cp -f "${S3_BUILD_DIR}/${STEM}.bin" "${S3_BUILD_DIR}/${STEM}.${PANELLAN_WIRE}.bin"
+  echo "    ${STEM}.${PANELLAN_WIRE}.bin"
+done
+for STEM in App.ino App.ino.merged App.ino.bootloader App.ino.partitions; do
+  cp -f "App/${S3_BUILD_DIR}/${STEM}.bin" "App/${S3_BUILD_DIR}/${STEM}.${PANELLAN_WIRE}.bin"
+  echo "    ${STEM}.${PANELLAN_WIRE}.bin"
+done
+
 echo "==> Computing checksums"
 (
   cd "$BUILD_DIR"
@@ -343,10 +503,38 @@ echo "==> Computing checksums"
   cd "App/$BUILD_DIR"
   sha256sum App.ino.merged.bin App.ino.bin App.ino.bootloader.bin App.ino.partitions.bin > checksums.txt
 )
+# THE PANELLAN'S ARE SUMMED UNDER THEIR PUBLISHED NAMES, not arduino-cli's. The
+# combined file is what somebody checks a download against, so the name in it has
+# to be the name of the file they downloaded. Summing the unsuffixed copies would
+# print four lines that read as the 4MB board's and contradict the other half of
+# this file.
+(
+  cd "$S3_BUILD_DIR"
+  sha256sum \
+    "CAL.ino.merged.${PANELLAN_WIRE}.bin" \
+    "CAL.ino.${PANELLAN_WIRE}.bin" \
+    "CAL.ino.bootloader.${PANELLAN_WIRE}.bin" \
+    "CAL.ino.partitions.${PANELLAN_WIRE}.bin" > checksums.txt
+)
+(
+  cd "App/$S3_BUILD_DIR"
+  sha256sum \
+    "App.ino.merged.${PANELLAN_WIRE}.bin" \
+    "App.ino.${PANELLAN_WIRE}.bin" \
+    "App.ino.bootloader.${PANELLAN_WIRE}.bin" \
+    "App.ino.partitions.${PANELLAN_WIRE}.bin" > checksums.txt
+)
 # One combined file is what actually goes in a release's notes/body and is
-# published as its own downloadable asset - a release with two separate
+# published as its own downloadable asset - a release with four separate
 # checksums.txt files floating among its other assets would just mean
-# guessing which one covers which binary.
-cat "$BUILD_DIR/checksums.txt" "App/$BUILD_DIR/checksums.txt" | tee combined-checksums.txt
+# guessing which one covers which binary, and all four share one basename so
+# only the first could be uploaded anyway.
+cat \
+  "$BUILD_DIR/checksums.txt" \
+  "App/$BUILD_DIR/checksums.txt" \
+  "$S3_BUILD_DIR/checksums.txt" \
+  "App/$S3_BUILD_DIR/checksums.txt" | tee combined-checksums.txt
 
-echo "==> Done. CAL artifacts in ${BUILD_DIR}/, App artifacts in App/${BUILD_DIR}/"
+echo "==> Done."
+echo "    ESP32-2432S028: ${BUILD_DIR}/ and App/${BUILD_DIR}/"
+echo "    Panellan ZX2D80CE02S: ${S3_BUILD_DIR}/ and App/${S3_BUILD_DIR}/"
