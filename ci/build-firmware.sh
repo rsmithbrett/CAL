@@ -97,6 +97,47 @@ if ! diff -q partitions.csv App/partitions.csv >/dev/null; then
   exit 1
 fi
 
+# AND THEY HAVE TO BE THE COMMITTED ONES, which the check above cannot tell.
+#
+# The Panellan pass further down swaps the 8MB table in under the name
+# partitions.csv and restores it. A run that died between those two steps leaves
+# BOTH copies holding the 8MB table - so they agree with each other, the gate
+# above passes, and the 4MB compiles that follow build against the other board's
+# layout. Every table-derived ceiling in the first half of this log is then the
+# wrong board's and reports green, and App.ino.merged.bin bakes an 8MB table in
+# at 0x8000.
+#
+# This check used to sit beside the swap, which is after those compiles. It
+# refused, so nothing shipped, but only once a full 4MB build had been measured
+# against the wrong numbers. Two seconds here instead.
+#
+# git diff is given HEAD and a SINGLE trailing --, deliberately. Outside a
+# repository `git diff --quiet -- a b` falls back to --no-index and compares the
+# two paths AGAINST EACH OTHER, which returns 0 for two copies of the same wrong
+# table - so the guard passed and the restore's own verification passed while an
+# 8MB table sat under the 4MB name. Naming HEAD cannot fall into --no-index, and
+# the work-tree test below says plainly when there is no git to ask.
+require_committed_partition_tables() {
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "ERROR: this is not a git work tree, so the partition tables cannot be checked" >&2
+    echo "       against HEAD - and this script swaps one of them in and out." >&2
+    echo "       Run it from a git checkout. An exported or copied tree cannot tell a" >&2
+    echo "       restored table from an 8MB one left behind by an interrupted run." >&2
+    exit 1
+  fi
+
+  if ! git diff --quiet HEAD -- partitions.csv App/partitions.csv; then
+    echo "ERROR: partitions.csv and/or App/partitions.csv differ from HEAD." >&2
+    echo "       A previous run may have been interrupted between the 8MB swap and the" >&2
+    echo "       restore. Inspect them, restore the 4MB table to both, then re-run." >&2
+    git diff --stat HEAD -- partitions.csv App/partitions.csv >&2 || true
+    exit 1
+  fi
+}
+
+echo "==> Checking the partition tables are the committed ones"
+require_committed_partition_tables
+
 # EVERY PUBLIC MOTION ENTRY POINT MUST HAVE A CALLER.
 #
 # Motion::noteTouchAndShouldSwallow() shipped in v2026.09.15.0004 declared,
@@ -393,32 +434,41 @@ $CHECK_FIT "${BUILD_DIR}/CAL.ino.bin" "bytes:${FIELD_FACTORY_CEILING}" "CAL (fie
 #                   The generic esp32s3 board has NO FlashSize menu and hard
 #                   defaults to 4MB. Left at 4MB the image header disagrees with
 #                   an 8MB table and partitions past 4MB are rejected.
-echo "==> Checking the working tree's partition tables are the committed ones"
-# Refused rather than backed up, for the reason the .cmd wrappers refuse: if a
-# previous run died between the swap and the restore, the tree is holding the 8MB
-# table under the name partitions.csv, and a second run would back up the WRONG
-# table and make the mix-up permanent.
-if ! git diff --quiet -- partitions.csv App/partitions.csv; then
-  echo "ERROR: partitions.csv and/or App/partitions.csv differ from HEAD." >&2
-  echo "       A previous run may have been interrupted before restoring them." >&2
-  echo "       Inspect them, restore the 4MB table to both, then re-run." >&2
-  git diff --stat -- partitions.csv App/partitions.csv >&2 || true
-  exit 1
-fi
+# The committed-tables check already ran near the top of this script, before the
+# 4MB compiles, so a tree left holding the 8MB table never reaches a compile at
+# all. Re-asserted here because what follows is what makes that check necessary.
+require_committed_partition_tables
 
-# Restored on ANY exit, including a failed compile, a failed size check and a
-# ctrl-C - so the tree this script was handed is the tree it leaves behind. The
-# restore comes out of git rather than out of a backup copy, so a corrupt backup
-# cannot pass it, and a restore that did not take fails the script even when
-# everything before it succeeded: an 8MB table left under the 4MB name produces an
-# App.ino.merged.bin that re-tables whatever device it is flashed to, and nothing
-# between here and that device reports anything wrong.
+# Restored on any exit this script can see: a failed compile, a failed size check,
+# a failed rename, and SIGINT or SIGTERM. EXIT alone does not cover a ctrl-C -
+# bash dying from an uncaught SIGINT runs no EXIT trap - so INT and TERM are
+# trapped by name, and each of those arms EXITS rather than returning. A handler
+# that restores and returns would hand control back to the line after the
+# interrupted compile, which would then build the S3 target against the 4MB table
+# just put back: worse than not trapping the signal at all. A kill -9 is still
+# outside this, and the committed-tables check above is what catches that on the
+# next run.
+#
+# The restore comes out of git rather than out of a backup copy, so a corrupt
+# backup cannot pass it, and a restore that did not take fails the script even
+# when everything before it succeeded: an 8MB table left under the 4MB name
+# produces an App.ino.merged.bin that re-tables whatever device it is flashed to,
+# and nothing between here and that device reports anything wrong.
+#
+# Idempotent, because the success path calls it directly before the checksums so
+# the log reads in order, and the trap then runs it a second time on the way out.
 restore_fleet_partition_tables() {
   local rc=$?
 
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "ERROR: cannot restore the 4MB partition tables - this is not a git work tree." >&2
+    echo "       Whatever is in partitions.csv and App/partitions.csv now is what is there." >&2
+    exit 1
+  fi
+
   git checkout -- partitions.csv App/partitions.csv 2>/dev/null || true
 
-  if ! git diff --quiet -- partitions.csv App/partitions.csv; then
+  if ! git diff --quiet HEAD -- partitions.csv App/partitions.csv; then
     echo "ERROR: the 4MB partition tables were not restored." >&2
     echo "       partitions.csv and/or App/partitions.csv still differ from HEAD. Fix them" >&2
     echo "       before any other build - an 8MB table under the 4MB name produces an" >&2
@@ -429,6 +479,20 @@ restore_fleet_partition_tables() {
   return $rc
 }
 trap restore_fleet_partition_tables EXIT
+trap 'restore_fleet_partition_tables; echo "interrupted (SIGINT)" >&2; exit 130' INT
+trap 'restore_fleet_partition_tables; echo "terminated (SIGTERM)" >&2; exit 143' TERM
+
+# THE PREVIOUS RUN'S ARTIFACTS GO FIRST, so a stem that stops being produced
+# fails the rename instead of being published from the last build. The build
+# directories are not cleaned by arduino-cli and are not cleaned between runs:
+# a .bin left there from an earlier compile is copied to its published name,
+# summed under that name, and uploaded, with the script exiting 0. CI runs on a
+# fresh checkout so this is a workstation and .cmd-wrapper hazard, which is
+# exactly where the artifacts of two different builds get mixed into one
+# checksummed set. Only the exported images are removed, not the object cache,
+# so this costs nothing in compile time.
+echo "==> Clearing the previous Panellan artifacts"
+rm -f "$S3_BUILD_DIR"/*.bin "App/$S3_BUILD_DIR"/*.bin
 
 echo "==> Swapping in the 8MB table"
 cp -f "$PANELLAN_TABLE" partitions.csv
@@ -484,6 +548,17 @@ $CHECK_FIT "App/${S3_BUILD_DIR}/App.ino.bin" ota_0 "App Panellan (ota_0)"
 #
 # Copied rather than renamed so check-partition-fit.sh's own output above, and
 # anything else reading the build directory by arduino-cli's names, keeps working.
+# RESTORED HERE, not only by the trap on the way out. The trap runs after the
+# last line of this script, so on the success path its output landed after
+# "==> Done." and a reader skimming the tail saw a completion banner followed by
+# the restore - or, when the restore failed, a completion banner followed by the
+# error. Calling it directly puts the restore and its verification where they
+# happened. The trap stays for every path that does not reach this line, and the
+# function is idempotent so running twice costs a no-op git checkout.
+echo "==> Restoring the 4MB partition tables"
+restore_fleet_partition_tables
+echo "    restore verified"
+
 echo "==> Naming the Panellan artifacts for the release"
 for STEM in CAL.ino CAL.ino.merged CAL.ino.bootloader CAL.ino.partitions; do
   cp -f "${S3_BUILD_DIR}/${STEM}.bin" "${S3_BUILD_DIR}/${STEM}.${PANELLAN_WIRE}.bin"

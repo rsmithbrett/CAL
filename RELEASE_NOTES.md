@@ -38,7 +38,12 @@ Panellan being set up from scratch over a cable, use
 One thing to know before reaching for a cable: the wired install page's flashing
 step was worked out against an ESP32 behind a USB-serial bridge chip, and the
 Panellan is an ESP32-S3 with native USB. Nobody has measured its bootloader-entry
-and reset sequence yet, so that page is not the route for this board today.
+and reset sequence yet, so that page is not the route for this board today. Until
+somebody does, a Panellan takes its loader from esptool by hand:
+
+```
+esptool.py --chip esp32s3 write_flash 0x0 CAL.ino.merged.panellan-zx2d80ce02s.bin
+```
 
 ---
 

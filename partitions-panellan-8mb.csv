@@ -1,15 +1,26 @@
 # Panellan ZX2D80CE02S-V10 partition layout - 8MB WT32-S3-WROVER-N8R2
 #
-# NOT YET IN USE. The build does not read this file: Arduino takes the
-# partitions.csv sitting beside the sketch, so selecting this table means
-# putting it there. See compile-cal-s3.cmd.
+# IN USE, AND NOT UNDER THIS NAME. Arduino takes the partitions.csv sitting
+# beside the sketch, so selecting this table means copying it over that name for
+# the length of a compile and restoring the 4MB one afterwards.
+# ci/build-firmware.sh does that for both sketches on every push as of
+# 2026-10-28, and compile-cal-s3.cmd and compile-app-s3.cmd do it locally. This
+# header said "NOT YET IN USE" until then.
 #
-# EVERY SIZE BELOW IS AN ESTIMATE. The 4MB table beside this one carries the
-# opposite claim in capital letters, and it earns it - each of its figures was
-# moved to fit a measured binary. Nothing here has been measured, because no
-# binary has ever been built for this board. The numbers are the ones
-# DEVICE_BOARD_AXIS_DESIGN.md section 6 proposed, carried forward so there is
-# something to boot, and they are to be replaced off the first S3 build.
+# EVERY SIZE BELOW IS STILL AN ESTIMATE, and that is now the gap worth closing.
+# The 4MB table beside this one carries the opposite claim in capital letters,
+# and it earns it - each of its figures was moved to fit a measured binary. The
+# numbers here are the ones DEVICE_BOARD_AXIS_DESIGN.md section 6 proposed,
+# carried forward so there is something to boot.
+#
+# Binaries now exist. Measured 2026-10-28 off a local build: CAL 1,286,784 of
+# factory's 2,097,152 (61%), and the App 1,501,264 of ota_0's 2,621,440 (57%).
+# Both came out SMALLER than their ESP32 counterparts, which the paragraph this
+# replaced predicted the other way round. Replacing these figures is a decision
+# about how much headroom this board gets, not arithmetic off one compile, and
+# factory is the partition that needs a cable to resize and holds the recovery
+# image. The server's own upload ceilings read these two sizes, so moving them
+# means moving FirmwareOptions in the same pass.
 #
 # FORMAT NOTE: no trailing comments on the data rows below. The generator reads
 # the column after Size as the flags field, so a "# ..." there is parsed as a

@@ -173,7 +173,7 @@ jobs:
 
       - name: Compose the release body
         # WHAT CHANGED FOR A READER, THEN THE CHECKSUMS. The body was
-        # combined-checksums.txt alone, so every release read as eight SHA-256
+        # combined-checksums.txt alone, so every release read as a run of SHA-256
         # lines and nothing else - a person deciding whether to install this
         # learned nothing from it. Owner, 2026-10-04: "the detail is what fixed
         # or changed for the user not code description."
@@ -222,7 +222,12 @@ jobs:
             echo 'The esptool-js step on that page was worked out against an ESP32 behind a'
             echo 'USB-serial bridge chip. The Panellan is an ESP32-S3 with native USB and its'
             echo 'bootloader-entry and reset sequence has not been measured, so that page is'
-            echo 'not the route for that board yet.'
+            echo 'not the route for that board yet. Until somebody measures it, a Panellan is'
+            echo 'flashed with esptool by hand:'
+            echo
+            echo '```'
+            echo 'esptool.py --chip esp32s3 write_flash 0x0 CAL.ino.merged.panellan-zx2d80ce02s.bin'
+            echo '```'
             echo
             echo '### Checksums'
             echo '```'
@@ -250,6 +255,16 @@ jobs:
           name: Latest build (${{ github.sha }})
           body_path: release-body.md
           make_latest: true
+          # A PATH THAT MATCHES NOTHING FAILS THE UPLOAD RATHER THAN BEING SKIPPED.
+          # The default is false: an unmatched path logs a warning and the release
+          # publishes anyway, so a Panellan artifact the build did not produce would
+          # give a release that reads as complete and carries fourteen files instead
+          # of sixteen. The server then renders one row fewer and nothing on either
+          # side reports it, because an absent asset is what a release published
+          # before that board looks like. This step's continue-on-error still applies,
+          # so a failure here does not cost the permanent release below - but that one
+          # has no continue-on-error, so the same miss fails the job there.
+          fail_on_unmatched_files: true
           # CAL's and App's own per-binary checksums.txt are deliberately not
           # listed here: both build directories produce a file with that
           # exact same basename, GitHub release assets are addressed by
@@ -338,6 +353,10 @@ jobs:
           name: ${{ steps.version.outputs.tag }}
           body_path: release-body.md
           make_latest: false
+          # See the "latest" step: an unmatched path fails this rather than
+          # publishing a release that is short a file and says nothing. This step
+          # has no continue-on-error, so that failure is the job's.
+          fail_on_unmatched_files: true
           # See the "latest" step above: the four per-binary checksums.txt
           # collide on basename and are deliberately left out;
           # combined-checksums.txt already carries all sixteen lines. The
