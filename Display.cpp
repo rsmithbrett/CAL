@@ -34,6 +34,7 @@
 #include "CalQr.h"
 
 #include "Display.h"
+#include <PresenceInput.h>
 // wrappedCenteredText() says when it has ellipsized. A boot screen whose
 // message was cut is exactly the kind of thing nobody notices until a
 // household reads half an instruction, and the journal survives the reboot
@@ -434,7 +435,15 @@ void showRecoveryMenu(Recovery::Screen screen) {
     button(Recovery::kMenuRows[0], "Set up Wi-Fi", kInk);
     button(Recovery::kMenuRows[1], "Reset identity", kWarn);
     button(Recovery::kMenuRows[2], "Reload application", kInk);
-    button(Recovery::kMenuRows[3], "Back", kMuted);
+    button(Recovery::kPresenceTest, "Diagnostics", kInk);
+    button(Recovery::kBack, "Back", kMuted);
+    return;
+  }
+  if (screen == Recovery::Screen::Diagnostics) {
+    centeredText("Diagnostics", 12, kInk, 2);
+    button(Recovery::kMenuRows[0], "Presence sensor", kInk);
+    button(Recovery::kMenuRows[1], "GPIO monitor", kInk);
+    button(Recovery::kMenuRows[2], "Back", kMuted);
     return;
   }
   const bool identity = screen == Recovery::Screen::ConfirmIdentity;
@@ -444,6 +453,121 @@ void showRecoveryMenu(Recovery::Screen screen) {
                       58, kInk, 2, 20, 5);
   button(Recovery::kCancel, "Cancel", kMuted);
   button(Recovery::kConfirm, identity ? "Reset" : "Reload", kWarn);
+}
+
+void showPresenceTest(const PresenceTest::State& reading, uint32_t now, bool supported,
+                      bool redrawFrame) {
+  startPanel();
+  if (redrawFrame) {
+    clear();
+    centeredText("Presence sensor", 10, kInk, 2);
+  }
+  lcd.fillRect(0, 38, kScreenW, 20, kBg);
+  lcd.fillRect(42, 70, 236, 14, kBg);
+  lcd.fillRect(0, 94, kScreenW, 64, kBg);
+  constexpr uint32_t green = 0x38C878u;
+  const uint32_t signalColour = supported && reading.high ? green : kMuted;
+  centeredText(!supported ? "No sensor input mapped"
+                         : !reading.hasReading ? "Waiting for reading"
+                                               : reading.high ? "Signal HIGH" : "Signal LOW",
+               40, signalColour, 2);
+  // Same geometry as CAL's download progress bar; binary output, not distance
+  // or a confidence percentage. Unsupported boards show an unfilled outline.
+  lcd.drawRect(40, 68, 240, 18, kMuted);
+  if (supported && reading.hasReading && reading.high) {
+    lcd.fillRect(42, 70, 236, 14, green);
+  }
+  if (supported && reading.hasReading) {
+    centeredText("GPIO35: " + String(reading.mv) + " mV", 96, kInk, 2);
+    centeredText("Signal changes: " + String(reading.changes), 120, kInk, 1);
+    centeredText(reading.changes ? "Last change: " + String((now - reading.lastChangeMs) / 1000) + " s ago"
+                                : String("Last change: none yet"), 134, kMuted, 1);
+    centeredText(now < PresenceInput::kStabilizeMs ? "Power-up settling; raw signal only" : "Raw signal test; App policy not loaded",
+                 148, kMuted, 1);
+    for (uint8_t i = 0; i < PresenceTest::kHistorySize; ++i) {
+      const uint8_t value = reading.historyAt(i);
+      lcd.fillRect(40 + i * 5, 164, 4, 10, value == 2 ? green : value == 1 ? kMuted : 0x202020u);
+    }
+    centeredText("Recent signal: last 12 seconds", 177, kMuted, 1);
+  } else if (!supported) {
+    centeredText("Panellan ESP32-S3", 101, kInk, 2);
+    centeredText("No fixed PIR pin is mapped.", 131, kMuted, 1);
+    centeredText("Use GPIO monitor for wired inputs.", 149, kMuted, 1);
+  }
+  if (redrawFrame) {
+    const Recovery::Rect& back = Recovery::kPresenceBack;
+    lcd.drawRoundRect(back.x, back.y, back.w, back.h, 5, kMuted);
+    centeredText("Back", back.y + 13, kInk, 2);
+  }
+}
+
+void showGpioMonitor(const GpioMonitor::State& state, bool allPins, uint8_t page,
+                     uint32_t now, bool redrawFrame) {
+  startPanel();
+  const auto label = [](const char* text, int x, int y, uint8_t size, uint32_t colour) {
+    lcd.setTextDatum(top_left); lcd.setTextSize(size); lcd.setTextColor(colour, kBg);
+    lcd.drawString(text, x, y);
+  };
+  const auto button = [&](const Recovery::Rect& r, const char* text) {
+    lcd.drawRoundRect(r.x, r.y, r.w, r.h, 4, kMuted);
+    label(text, r.x + 9, r.y + 15, 1, kInk);
+  };
+  if (redrawFrame) {
+    clear();
+    label("GPIO monitor", 16, 10, 2, kInk);
+    lcd.drawRoundRect(224, 4, 80, 28, 4, kMuted);
+    label(allPins ? "Changes" : "All pins", 233, 14, 1, kInk);
+    button(Recovery::kGpioPrevious, "Previous");
+    button(Recovery::kGpioBack, "Back");
+    button(Recovery::kGpioNext, "Next");
+  }
+  lcd.fillRect(0, 32, kScreenW, 152, kBg);
+  char text[64];
+  snprintf(text, sizeof(text), allPins ? "All GPIO numbers - page %u/%u"
+                                     : "Watching %u inputs - changes %u/2",
+           allPins ? page + 1 : GpioMonitor::kInputCount,
+           allPins ? (GpioMonitor::kPortCount + 3) / 4 : page + 1);
+  label(text, 16, 32, 1, kMuted);
+  for (uint8_t row = 0; row < 4; ++row) {
+    const uint8_t index = page * 4 + row;
+    uint8_t pin = index;
+    uint32_t value = 0, changedMs = 0, changes = 0;
+    bool sampled = false, high = false, changed = false;
+    if (allPins) {
+      if (pin >= GpioMonitor::kPortCount) break;
+      const GpioMonitor::Input* input = state.input(pin);
+      if (input) {
+        value = input->value; sampled = input->sampled; high = input->high;
+        changedMs = input->lastChangeMs; changes = input->changes; changed = changes > 0;
+      }
+    } else {
+      if (index >= state.count()) {
+        if (row == 0) label("Waiting for signal changes", 16, 60, 1, kMuted);
+        break;
+      }
+      const GpioMonitor::Event& event = state.event(index);
+      pin = event.pin; value = event.value; high = event.high; sampled = true;
+      changedMs = event.when; changed = true; changes = state.input(pin)->changes;
+    }
+    const int y = 50 + row * 33;
+    const uint32_t colour = changed && static_cast<uint32_t>(now - changedMs) < 2000 ? 0x38C878u : kInk;
+    snprintf(text, sizeof(text), "GPIO %u", pin);
+    label(text, 16, y, 2, colour);
+    const GpioMonitor::Kind kind = GpioMonitor::kind(pin);
+    if (sampled) {
+      if (kind == GpioMonitor::Kind::Analog) snprintf(text, sizeof(text), "%lumV %s", static_cast<unsigned long>(value), high ? "HIGH" : "LOW");
+      else snprintf(text, sizeof(text), "%s", high ? "HIGH" : "LOW");
+      label(text, 118, y + 3, 1, colour);
+      lcd.drawRect(216, y + 1, 88, 12, kMuted);
+      const uint32_t level = kind == GpioMonitor::Kind::Analog ? (value > 3300 ? 3300 : value) : high ? 3300 : 0;
+      lcd.fillRect(218, y + 3, (84 * level) / 3300, 8, colour);
+      if (changed) snprintf(text, sizeof(text), "Changes %lu - last %lus ago", static_cast<unsigned long>(changes), static_cast<unsigned long>((now - changedMs) / 1000));
+      else snprintf(text, sizeof(text), "Baseline - no change yet");
+    } else {
+      snprintf(text, sizeof(text), "%s", kind == GpioMonitor::Kind::Unavailable ? "Unavailable on this chip" : "Reserved/unverified - not sampled");
+    }
+    label(text, 16, y + 20, 1, kMuted);
+  }
 }
 
 void showConnected(const String& headline, const String& detail) {

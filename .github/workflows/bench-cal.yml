@@ -8,6 +8,10 @@ on:
     paths:
       - "CAL.ino"
       - "Recovery*"
+      - "PresenceTest.h"
+      - "GpioMonitor.h"
+      - "libraries/DamBoards/**"
+      - "App/Motion.cpp"
       - "Provisioning.cpp"
       - "Identity.cpp"
       - "Identity.h"

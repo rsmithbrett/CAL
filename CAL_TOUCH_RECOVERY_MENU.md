@@ -16,6 +16,10 @@ The startup splash, application cards, firmware download and CAL self-install
 screens do not listen for this gesture. Physical BOOT recovery remains.
 A refused enrollment is still the existing terminal error screen, not a QR.
 
+The menu also includes live presence and GPIO tests for both board types.
+See [CAL_GPIO_DIAGNOSTICS.md](CAL_GPIO_DIAGNOSTICS.md) for the input allowlists,
+graphic scales, recent-change feed, all-pin inventory and hardware checks.
+
 ## Opening and closing configuration
 
 Tap **top-left, top-right, top-left, top-right, top-left, top-right**.
@@ -36,9 +40,11 @@ The screen title is **Configuration**, with four full-width rows:
 | 1 | Set up Wi-Fi | Restart CAL and open its portal immediately. Preserve the secret, setup AP password and remembered networks. |
 | 2 | Reset identity | Show confirmation. After Reset, remove the local device secret, keep Wi-Fi and restart registration recovery. |
 | 3 | Reload application | Show confirmation. After Reload, reinstall the server's current App even if the version matches. Preserve identity and Wi-Fi. |
-| 4 | Back | Return to the underlying setup screen without modifying persisted state. |
+| 4, left | Diagnostics | Open Presence sensor or GPIO monitor. These tests change no registration or network settings. |
+| 4, right | Back | Return to the underlying setup screen without modifying persisted state. |
 
-Rows are at x=16, width=288, height=42, with y=44, 90, 136 and 182.
+The first three rows are x=16, width=288, height=42 at y=44, 90 and 136.
+The footer at y=182 splits into Diagnostics (208 pixels) and Back (72 pixels).
 Confirmation buttons are **Cancel** and **Reset**/**Reload**, 136 × 44 each.
 Rendering and hit testing share the rectangles in `RecoveryState.h`.
 
@@ -52,7 +58,8 @@ must stay on. It reloads the **App**, not CAL. It does not select an arbitrary
 build, bypass authentication or change which release is current.
 
 Cancel returns to Configuration. After **60 seconds without a new tap**, the
-menu or confirmation closes without taking its action. Timers use unsigned
+menu or confirmation closes without taking its action. Live diagnostics remain
+open until Back so a sensor can be tested without a time limit. Timers use unsigned
 elapsed time, including across the `millis()` rollover. The sequence is a
 convenience for a physically present operator, not an authentication boundary.
 The menu displays and logs no credentials.
@@ -114,7 +121,7 @@ and does not duplicate or merge that change.
 
 ## Memory, build and deployment
 
-The controller is **16 bytes on the tested host ABI**, plus one enabled flag.
+The controller is **20 bytes on the tested host ABI**, plus one enabled flag.
 The gesture uses fixed fields, no dynamic allocation, no additional task/stack,
 no new driver and no framebuffer. Drawing reuses the LCD and text helpers;
 temporary Arduino Strings can be allocated for confirmation text by those

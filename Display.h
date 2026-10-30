@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 #include "RecoveryState.h"
+#include "PresenceTest.h"
+#include "GpioMonitor.h"
 
 /// Everything CAL draws.
 ///
@@ -52,6 +54,10 @@ void showConnected(const String& headline, const String& detail = "");
 /// Coordinates follow the displayed rotation. Recovery owns edge detection.
 bool readTouch(int32_t& x, int32_t& y);
 void showRecoveryMenu(Recovery::Screen screen);
+void showPresenceTest(const PresenceTest::State& reading, uint32_t now, bool supported,
+                      bool redrawFrame = true);
+void showGpioMonitor(const GpioMonitor::State& state, bool allPins, uint8_t page,
+                     uint32_t now, bool redrawFrame = true);
 
 /// Progress during a firmware download. Percent is 0-100.
 void showUpdateProgress(uint8_t percent, const String& version);

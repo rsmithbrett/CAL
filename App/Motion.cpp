@@ -1,6 +1,7 @@
 #include "Motion.h"
 
 #include "AdcPins.h"
+#include <PresenceInput.h>
 #include "Display.h"
 #include "Log.h"
 
@@ -18,6 +19,7 @@ namespace {
 /// GPIO10 and its ADC2 is GPIO11 to GPIO20, per soc/adc_channel.h, so GPIO35
 /// has no channel there and sampleSensor() below takes no reading at all.
 constexpr int8_t kPin = AdcPins::adc1PinOrNone(35);
+static_assert(kPin == PresenceInput::kPin, "CAL and App presence wiring must agree");
 
 // kPin is derived from the SDK's channel table. This cross-checks that result
 // against the board gate, so a target where one side moves without the other
@@ -35,7 +37,7 @@ static_assert(kPin == 35,
 /// Settling time after power-up before readings count (MOT 01). An AM312 needs
 /// its own warm-up and reports spuriously during it, so a device that booted
 /// because somebody walked past would otherwise wake on its own noise.
-constexpr uint32_t kStabilizeMs = 30000;
+constexpr uint32_t kStabilizeMs = PresenceInput::kStabilizeMs;
 
 /// Millivolts at or above which GPIO35 counts as HIGH.
 ///
@@ -52,7 +54,7 @@ constexpr uint32_t kStabilizeMs = 30000;
 /// cannot resolve below about 140 mV. 3155 is what "3.3V" actually looks like
 /// through this path, and 142 is what 0V looks like - which is also why an absent
 /// sensor and an idle one are indistinguishable here. See Motion.h.
-constexpr uint32_t kHighThresholdMillivolts = 1500;
+constexpr uint32_t kHighThresholdMillivolts = PresenceInput::kHighThresholdMillivolts;
 
 /// Minimum gap between ADC reads of the sensor pin.
 ///
@@ -69,7 +71,7 @@ constexpr uint32_t kHighThresholdMillivolts = 1500;
 /// non-blocking for the same reason. Adding an unbounded per-iteration hardware
 /// read to the hot loop to service a sensor that changes on human timescales
 /// would be trading a real thing for nothing.
-constexpr uint32_t kSampleIntervalMs = 50;
+constexpr uint32_t kSampleIntervalMs = PresenceInput::kSampleIntervalMs;
 
 /// Two HIGH samples this far apart to confirm an event (MOT 02). Rejects
 /// electrical noise without needing a timer or an interrupt - the loop already
