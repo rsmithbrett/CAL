@@ -195,12 +195,17 @@ jobs:
             # EVERY release carries this, which is why it is generated rather than typed
             # into RELEASE_NOTES.md. No release body had ever contained a link of any
             # kind, so a reader told a new CAL exists had nowhere to go - and for CAL
-            # that matters more than for the App, because the loader cannot be replaced
-            # by the App's over-the-air path and a cable is sometimes the only route.
+            # that matters more than for the App, because a loader that will not boot is
+            # the one image the over-the-air route cannot rescue.
             echo '### Installing this'
             echo
-            echo 'The App updates itself over the air. **CAL does not** - it is the factory'
-            echo 'loader, so putting a new one on a device means a USB cable.'
+            echo 'Both update over the air. CAL cannot write the partition it runs from, so it'
+            echo 'takes the long way: the App reboots into CAL, CAL downloads its replacement'
+            echo 'into the staging slot, reboots into it, and that candidate copies itself into'
+            echo 'the factory partition. See CAL_OTA_DESIGN.md.'
+            echo
+            echo 'A cable is for the two cases that route cannot reach: a device that has never'
+            echo 'been claimed, and a candidate that will not boot or cannot reach the server.'
             echo
             echo 'Wired install, no sign-in needed: <https://discoveraroundme.com/cal>'
             echo

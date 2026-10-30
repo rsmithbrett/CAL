@@ -7,9 +7,9 @@
 
 /// Everything CAL draws.
 ///
-/// CAL's screens are deliberately plain and few. It is the one component that
-/// cannot be updated without physically recovering the unit, so it renders
-/// status and hands off - it does not attempt to render product content.
+/// CAL's screens are deliberately plain and few. It is the component whose own
+/// replacement is the riskiest thing a device does, so it renders status and
+/// hands off - it does not attempt to render product content.
 namespace Display {
 
 /// Brings the panel up. Idempotent, and not actually required before the draw

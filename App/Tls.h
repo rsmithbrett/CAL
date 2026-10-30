@@ -17,10 +17,11 @@ namespace Tls {
 /// Deliberately validates against trusted ROOTS rather than pinning the leaf,
 /// and that distinction carries the whole argument. Leaf pinning is ordinarily
 /// good practice on an embedded device and is a liability here: server
-/// certificates rotate on a ninety-day cycle, CAL cannot be updated over the
-/// air, and a device trusting exactly one leaf certificate would stop working
-/// the day that certificate is replaced - taking every unit in the field with
-/// it simultaneously.
+/// certificates rotate on a ninety-day cycle, and CAL has to reach this server
+/// over TLS to fetch its own replacement. A device trusting exactly one leaf
+/// certificate would stop working the day that certificate is replaced, and the
+/// route out of that state is the route that just broke - taking every unit in
+/// the field with it at once.
 ///
 /// The trust SOURCE has since changed and that reasoning has not. It was the
 /// ESP32 core's ~150-certificate Mozilla bundle; it is now the two ISRG roots,

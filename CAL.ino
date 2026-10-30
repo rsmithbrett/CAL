@@ -5,8 +5,9 @@
 // overwritten by an update, and exists to get the unit onto a network,
 // authenticate it, and install the real application into the OTA slot.
 //
-// Because it cannot be replaced without physically recovering the hardware, it
-// does as little as possible: no card rendering, no product logic, no policy.
+// Because replacing it means trampolining through the staging slot, and a cable
+// when that goes wrong, it does as little as possible: no card rendering, no
+// product logic, no policy.
 // It gets the device to the point where something that CAN be updated takes
 // over, and it stays behind as the recovery image if that ever fails.
 

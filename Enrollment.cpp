@@ -58,7 +58,8 @@ Result requestKey(const Service::Discovery& discovery) {
   }
 
   // The wording shown on screen comes from the server rather than from a table
-  // compiled in here. CAL cannot be updated to change a sentence.
+  // compiled in here. Changing a sentence here would mean replacing the loader
+  // on every device in the field.
   out.message = doc["message"] | "";
   out.setupUrl = doc["setupUrl"] | "";
 

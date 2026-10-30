@@ -23,7 +23,50 @@ dated heading after.
 
 ## Unreleased
 
-Nothing yet.
+### Six taps on the glass opens a configuration menu - CAL
+
+Somebody standing at a device can now reach configuration without opening the
+case. Tap top-left, top-right, top-left, top-right, top-left, top-right, lifting
+between taps and finishing inside eight seconds. A Configuration menu appears
+with four choices:
+
+- **Set up Wi-Fi** restarts the device straight into its setup portal, keeping
+  its identity, its setup password and every network it remembers.
+- **Reset identity** removes the device's secret so it can be claimed again. It
+  asks first, and the screen says what it costs: an administrator has to allow
+  re-registration on the device registry page before the device works again.
+- **Reload application** reinstalls the current app even when the version already
+  matches, which is the way out of a display that draws but misbehaves. If a
+  reload is already waiting, that row reads **Cancel reload** instead and takes
+  the request back.
+- **Diagnostics** opens a live presence-sensor reading or a GPIO monitor, which
+  report what the pins are actually doing on either board. Neither changes any
+  setting. They close themselves after ten minutes.
+
+The gesture works on the Wi-Fi setup code, the claim code, the service setup code
+and, new in this release, the startup splash. The BOOT button still does what it
+always did.
+
+### A touch during startup pauses the boot so you can get in - CAL
+
+The menu used to be reachable only once the device had settled on a screen, which
+is no help on a unit that restarts before it gets there. Touch the panel while
+the splash is up and the boot stops where it is, for ten seconds, renewed by each
+further tap, which is long enough to drum out the six-tap gesture. Stop touching
+and it carries on as normal.
+
+A device nobody touches waits 1.2 seconds and then boots as before. A panel that
+reads as permanently pressed - shorted, wet, or a failed controller - gives up
+after two minutes and boots anyway, so a broken touchscreen can't keep a device
+down.
+
+### A device refused at claim time keeps asking - CAL
+
+A device whose registration was refused used to stop on an error screen and stay
+there until somebody power-cycled it, with its own recovery menu out of reach.
+Now it draws the same message and keeps asking on its normal retry schedule, so
+pressing "Allow re-registration" is enough on its own - nobody has to go to the
+device. The menu stays reachable by touch the whole time.
 
 ---
 

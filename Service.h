@@ -24,8 +24,9 @@ struct Discovery {
   ///
   /// The asymmetry is deliberate. A wrong App path costs a failed download and a
   /// retry. A wrong CAL path costs an attempt to install something that is not a CAL
-  /// into the recovery partition, on the one binary that cannot be replaced remotely
-  /// if it goes wrong. Guessing is the more dangerous option here, so this does not.
+  /// into the recovery partition, on the one binary whose own replacement is the thing
+  /// that would then be broken. Guessing is the more dangerous option here, so this
+  /// does not.
   String calManifestPath;
   String calBinaryPath;
   String pairingPath;

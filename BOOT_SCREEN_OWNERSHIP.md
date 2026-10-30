@@ -285,9 +285,10 @@ survive the App → CAL → App hop.
 Rejected on coupling. Those enum values are the App's schema, versioned on the
 App's clock, and `BootDiag.h` states the contract as "written to NVS by one boot
 and read by the next". Making CAL a third reader puts a wire format between the
-binary that is replaced weekly and the binary that cannot be replaced without a
-USB cable, pointing the wrong way: an App change to those numbers would
-misinform a CAL that can only be fixed by a truck roll. `esp_reset_reason()`,
+binary that is replaced weekly and the binary that replaces itself only by
+trampolining through its own staging slot, pointing the wrong way: an App change
+to those numbers would misinform the one component whose own update path is what
+is then at risk. `esp_reset_reason()`,
 `mustContactServer()` and `bootAttempts()` are all facts CAL already owns, and
 the coarseness costs nothing — every restart the finer signal would have
 identified as therapeutic is already covered by §5.1 plus §5.2, and every

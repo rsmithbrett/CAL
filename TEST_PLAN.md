@@ -2408,7 +2408,7 @@ check below is a person at a device.
 ### 16d. The bench checks the assertions can't make
 
 1. **Photograph both confirmation screens** on both boards. Read the whole
-   sentence off the glass. The identity text runs to 171 characters at text size
+   sentence off the glass. The identity text runs to 125 characters at text size
    2 in a 304-pixel column, and `wrappedCenteredText` is given six lines, so
    this is where an ellipsis would show up. Confirm Reset/Reload is the left
    button and Cancel the right, and that tapping where Back sat on the menu

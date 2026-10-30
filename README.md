@@ -2821,7 +2821,8 @@ URLs — the host is already known, and accepting a host from the document would
 be a way to redirect an entire fleet somewhere unintended. TLS uses the root
 bundle rather than a pinned leaf certificate, because a pinned leaf turns a
 routine ninety-day rotation into the simultaneous bricking of every device, and
-CAL cannot be updated to trust a new one.
+the route to a CAL that trusts a new one runs over the connection that just
+stopped working.
 
 ## Branding and the QR target
 
@@ -2944,7 +2945,8 @@ core's differently-named API. Renaming both the file and its include guard is
 what makes the local copy win. The functions inside are untouched, are MIT
 licensed, and do not clash with `esp_qrcode_*`. Keeping the copy in-tree also
 means the QR code CAL renders is fixed for the service life of the factory
-partition, which is the right property for a component that cannot be updated.
+partition, which is the right property for a component replaced as rarely as
+this one.
 
 **The custom `partitions.csv` at the repo root is what actually gets built.**
 Naming a `PartitionScheme` on the `arduino-cli compile` command line (the
@@ -5659,9 +5661,10 @@ opinion about and the bundle version never did.
 
 `Tls.h`'s reasoning about validating against roots rather than pinning the leaf is
 untouched by this, and now says why: **roots are not the thing that rotates every
-ninety days.** Leaf certificates are, CAL cannot be updated over the air, and a
-device trusting exactly one leaf would stop working the day it was replaced -
-taking every unit in the field with it simultaneously. Narrowing the trust store
+ninety days.** Leaf certificates are, CAL reaches the server over TLS to fetch
+its own replacement, and a device trusting exactly one leaf would stop working
+the day it was replaced - taking every unit in the field with it at once, with
+the route out running over the connection that just broke. Narrowing the trust store
 from 150 roots to two leaves that argument completely intact, which is the
 distinction worth keeping straight: this change is about how much trust material
 the device holds, not about how specific the trust is.
