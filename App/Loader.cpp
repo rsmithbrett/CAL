@@ -39,6 +39,16 @@ void requestUpdate() {
   bootFactoryAndRestart();
 }
 
+void returnToLoaderForWifiSetup() {
+  // Opening network setup must not revoke this device's server identity.
+  // updreq makes CAL run its network ladder even with a healthy App installed;
+  // provforced skips the old network and opens the portal immediately.
+  Identity::setProvisioningForced(true);
+  Identity::setUpdateRequested(true);
+  Log::line("[loader] returning to CAL for WiFi setup - device secret kept");
+  bootFactoryAndRestart();
+}
+
 void returnToLoaderForReprovisioning() {
   // Deliberately does NOT call Identity::setProvisioningForced(true). That
   // flag exists for one reason - CAL.ino's BOOT-button gesture ("we moved it
