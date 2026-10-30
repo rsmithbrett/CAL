@@ -700,7 +700,7 @@ void ensureWifiConnected() {
 
           BootDiag::recordRestartIntent(BootDiag::RestartCause::Reprovision);
 
-          Loader::returnToLoaderForReprovisioning();
+          Loader::returnToLoaderForWifiSetup();
           // Unreachable: the call above never returns.
         }
         // Held briefly, then released before the 3-second confirm
@@ -3023,7 +3023,7 @@ void setup() {
 
     BootDiag::recordRestartIntent(BootDiag::RestartCause::Reprovision);
 
-    Loader::returnToLoaderForReprovisioning();
+    Loader::returnToLoaderForWifiSetup();
     // Unreachable: the call above never returns.
   }
   // Reached when BOOT was never touched (a no-op) or when it was held and let
