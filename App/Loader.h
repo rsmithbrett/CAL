@@ -13,6 +13,11 @@ namespace Loader {
 /// Never returns.
 [[noreturn]] void requestUpdate();
 
+/// Opens CAL's WiFi setup portal, preserving the device secret and remembered
+/// networks. Used for a BOOT hold at startup or after a failed WiFi join.
+/// Never returns.
+[[noreturn]] void returnToLoaderForWifiSetup();
+
 /// Forgets the locally stored device secret, then reboots into CAL (with the
 /// same update-requested flag requestUpdate() sets, so CAL does its own WiFi
 /// join rather than handing straight back to this same App) after the server
