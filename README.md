@@ -2547,9 +2547,10 @@ A household with four pictures gets four items in the rotation. Registered at
 ones.
 
 **Fetching happens in `fetch()` and never in `draw()`.** This is Cards.h's rule
-for every card, and it is worth restating here because an earlier draft of this
-module had it the other way around, reaching for the network from the draw path
-so that stepping backwards through the rotation became an HTTP request.
+for every card, and it is restated here because this card is the one most
+tempted to break it: ten pictures and one heap buffer make fetching on demand
+look reasonable. It costs a rewind through the rotation an HTTP request with a
+twenty-second timeout, on the loop task, with the previous card still on screen.
 `fetch()` runs on the scheduler's refresh timer, calls
 `Assets::ensureCached()` once per id and records the answers in a
 `gOnCard[kMaxPhotos]` array; `ensureCached()` returns at once for a picture
@@ -2599,7 +2600,11 @@ tell "nobody has chosen any" from "chosen but not reaching the glass" without
 inferring it from an absent log line.
 
 **Only JPEG arrives here, and the server is what guarantees that.** The PNG
-decoder wants 44,408 bytes in one contiguous allocation, the figure
+decoder wants 44,408 bytes in one contiguous allocation - the demand itself,
+which is the `0xad78` literal in `lgfx_pngle_new`, and not the same number as
+the 45,056 this file quotes elsewhere for what one decode costs in largest free
+block. The second is a window delta measured around a draw; the first is what
+has to be contiguous for the draw to start at all. The figure
 `PersonalPhotos.h` cites, and a display past `setup()` cannot be counted on to
 have them, so a stored PNG would fetch, fail to draw, and leave the card showing
 the no-content panel with nothing on screen saying why. The server filters the
