@@ -420,7 +420,7 @@ bool readTouch(int32_t& x, int32_t& y) {
   return gPanelStarted && lcd.getTouch(&x, &y);
 }
 
-void showRecoveryMenu(Recovery::Screen screen) {
+void showRecoveryMenu(Recovery::Screen screen, bool reloadPending) {
   startPanel();
   clear();
   const auto button = [](const Recovery::Rect& rect, const char* label, uint32_t colour) {
@@ -434,7 +434,11 @@ void showRecoveryMenu(Recovery::Screen screen) {
     centeredText("Configuration", 12, kInk, 2);
     button(Recovery::kMenuRows[0], "Set up Wi-Fi", kInk);
     button(Recovery::kMenuRows[1], "Reset identity", kWarn);
-    button(Recovery::kMenuRows[2], "Reload application", kInk);
+    // Row 3 toggles. A reload survives reboots and only clears on a successful
+    // install, so a request the server cannot satisfy would otherwise sit there
+    // with nothing on the glass naming it and no way to take it back.
+    button(Recovery::kMenuRows[2], reloadPending ? "Cancel reload" : "Reload application",
+           reloadPending ? kWarn : kInk);
     button(Recovery::kPresenceTest, "Diagnostics", kInk);
     button(Recovery::kBack, "Back", kMuted);
     return;
@@ -448,11 +452,25 @@ void showRecoveryMenu(Recovery::Screen screen) {
   }
   const bool identity = screen == Recovery::Screen::ConfirmIdentity;
   centeredText(identity ? "Reset identity?" : "Reload application?", 18, kWarn, 2);
-  wrappedCenteredText(identity ? "Removes this device's secret. An administrator may need to allow re-registration."
+  // The identity text says "must", not "may need to". The server refuses every
+  // device that completed enrollment - RegisterViaMacAddressAsync answers 409
+  // whenever SecretRetrievedAtUtc is set - so an administrator is always
+  // required. And CAL shows the refusal screen afterwards, which does not poll
+  // this menu, so the operator loses the way back in. Both are facts somebody
+  // needs before tapping Reset rather than after.
+  //
+  // 125 characters, and the length is load-bearing. This call gets six lines of
+  // 20px between the heading and kConfirm, and wrappedCenteredText ellipsizes
+  // past that. At text size 2 the default 6x8 face is 12px a character across a
+  // 304px box, so 25 characters a line: a 171-character draft of this sentence
+  // wrapped to eight lines and stopped at "and this menu is", which reads as a
+  // finished sentence and loses the warning. Measure a replacement before
+  // writing it.
+  wrappedCenteredText(identity ? "Removes this device's secret. An administrator must allow re-registration before this device works again. This menu goes too."
                                : "Downloads the current application again, even if its version matches. Keep power on.",
-                      58, kInk, 2, 20, 5);
-  button(Recovery::kCancel, "Cancel", kMuted);
+                      58, kInk, 2, 20, 6);
   button(Recovery::kConfirm, identity ? "Reset" : "Reload", kWarn);
+  button(Recovery::kCancel, "Cancel", kMuted);
 }
 
 void showPresenceTest(const PresenceTest::State& reading, uint32_t now, bool supported,
@@ -515,18 +533,32 @@ void showGpioMonitor(const GpioMonitor::State& state, bool allPins, uint8_t page
   if (redrawFrame) {
     clear();
     label("GPIO monitor", 16, 10, 2, kInk);
-    lcd.drawRoundRect(224, 4, 80, 28, 4, kMuted);
-    label(allPins ? "Changes" : "All pins", 233, 14, 1, kInk);
+    // Drawn from the shared rect rather than the same four numbers written
+    // again, so an edit to kGpioMode moves the button and its hit box together.
+    lcd.drawRoundRect(Recovery::kGpioMode.x, Recovery::kGpioMode.y,
+                      Recovery::kGpioMode.w, Recovery::kGpioMode.h, 4, kMuted);
+    label(allPins ? "Changes" : "All pins", Recovery::kGpioMode.x + 9,
+          Recovery::kGpioMode.y + 10, 1, kInk);
     button(Recovery::kGpioPrevious, "Previous");
     button(Recovery::kGpioBack, "Back");
     button(Recovery::kGpioNext, "Next");
   }
   lcd.fillRect(0, 32, kScreenW, 152, kBg);
   char text[64];
-  snprintf(text, sizeof(text), allPins ? "All GPIO numbers - page %u/%u"
-                                     : "Watching %u inputs - changes %u/2",
-           allPins ? page + 1 : GpioMonitor::kInputCount,
-           allPins ? (GpioMonitor::kPortCount + 3) / 4 : page + 1);
+  // Two calls rather than one with a ternary format string. The changes line
+  // said "%u/2" with the 2 written in, so raising kEventCount would have left
+  // the later pages unreachable and unmentioned; both counts now come from the
+  // constants that size their views.
+  if (allPins) {
+    snprintf(text, sizeof(text), "All GPIO numbers - page %u/%u",
+             static_cast<unsigned>(page + 1),
+             static_cast<unsigned>((GpioMonitor::kPortCount + 3) / 4));
+  } else {
+    snprintf(text, sizeof(text), "Watching %u inputs - changes page %u/%u",
+             static_cast<unsigned>(GpioMonitor::kInputCount),
+             static_cast<unsigned>(page + 1),
+             static_cast<unsigned>((GpioMonitor::kEventCount + 3) / 4));
+  }
   label(text, 16, 32, 1, kMuted);
   for (uint8_t row = 0; row < 4; ++row) {
     const uint8_t index = page * 4 + row;

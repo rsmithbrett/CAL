@@ -32,7 +32,14 @@ external bias for a meaningful idle reading in this no-pull diagnostic mode.
   displayed page. The screen updates at most four times a second.
 - **Changes** is the default: a feed of the latest eight observed HIGH/LOW
   transitions across all monitored inputs, four per page. Newest events appear
-  first. Previous/Next switch between the latest and older events.
+  first. Previous/Next wrap through the pages, and the status line on the
+  original board reads `Watching 3 inputs - changes page 1/2`.
+- **That page count is derived, not fixed at two.** Both the paging and the
+  status line divide `GpioMonitor::kEventCount` by the four rows a page holds,
+  so raising the size of the feed adds pages. The figure was written into both
+  places as a literal `2`, which was right only while the feed held exactly
+  eight events: a larger feed would have left the extra events unreachable, with
+  the screen still saying `2`.
 - Each event shows GPIO number, value, HIGH/LOW, transition count and age. A
   changed row is green for two seconds. Initial readings establish baselines
   and do not generate false change events.
@@ -79,11 +86,19 @@ the App. `GpioMonitor.h` contains a separate explicit board allowlist and a
 bounded debounced input/event model. CAL's Recovery module handles sampling
 and passes state to the display. No extra tasks, interrupts, images or
 framebuffers are introduced; the title and navigation remain in place while
-readings refresh. No sampling runs outside the selected live diagnostic.
+readings refresh. No sampling runs outside the selected live diagnostic. The
+mode button is drawn from `Recovery::kGpioMode`, the rectangle its hit test
+already asks, so the button and the target cannot drift apart. A `static_assert`
+in `RecoveryState.h` holds the mode button clear of each of the three footer
+buttons, and each footer button clear of its neighbor, in every build of both
+boards.
 
 HTTP and DNS stay serviced when a test is opened over the Wi-Fi portal.
-Tests remain open until Back; they do not expire after the menu's 60-second
-idle timeout. A form submitted underneath waits for the user to exit diagnostics.
+A test outlasts the menu's 60-second idle timeout and closes itself after
+**10 minutes** without a tap. A form submitted underneath waits until then, or
+until somebody takes Back. With no limit at all, a screen left open parked the
+portal loop that applies those credentials, and the enrollment loop that polls
+for a device key, for as long as it stayed up.
 
 Run `bash ci/test-recovery-menu.sh` for both target configurations. It tests
 dedicated presence support/absence, threshold crossings, history gaps/wrap,

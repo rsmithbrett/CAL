@@ -56,6 +56,64 @@ void begin() {
   enabled = true;
 }
 
+bool holdBootForTouch() {
+  begin();
+
+  const uint32_t entered = millis();
+  uint32_t lastContact = entered;
+  bool held = false;
+
+  while (true) {
+    const uint32_t now = millis();
+
+    // THE HARD CAP, CHECKED FIRST. A panel that reads permanently down - shorted,
+    // wet, or a bad controller - would otherwise extend the hold on every pass
+    // and stop this device booting for good. CAL is the image a cable or an OTA
+    // candidate has to rescue, so it must always reach the end of its own boot.
+    if (static_cast<uint32_t>(now - entered) >= kBootHoldCapMs) {
+      Journal::printf("[recovery] boot hold hit its %u ms cap - continuing. If nobody is "
+                      "touching this panel, suspect the touch controller",
+                      static_cast<unsigned>(kBootHoldCapMs));
+      end();
+      return false;
+    }
+
+    Journal::poll();
+    const InputResult input = poll();
+
+    if (input.action != Action::None) execute(input.action);
+
+    // The menu is up, so the hold is over and the caller takes it from here.
+    if (visible()) {
+      Journal::line("[recovery] configuration opened from the boot hold");
+      return true;
+    }
+
+    if (input.tapped) {
+      lastContact = now;
+      if (!held) {
+        held = true;
+        Journal::line("[recovery] touch during boot - holding the sequence");
+      }
+    }
+
+    // Two deadlines, and which one applies depends on whether anybody has
+    // touched yet. Before the first contact this is only a listen window; after
+    // one it becomes a hold that each further tap renews, long enough that six
+    // taps at a human cadence fit inside it.
+    const uint32_t limit = held ? kBootHoldMs : kBootListenMs;
+    if (static_cast<uint32_t>(now - lastContact) >= limit) {
+      if (held) {
+        Journal::line("[recovery] touches stopped - resuming the boot");
+      }
+      end();
+      return false;
+    }
+
+    delay(10);
+  }
+}
+
 void end() {
   enabled = false;
   controller.reset();
@@ -68,8 +126,33 @@ InputResult poll(bool gestureAllowed) {
   int32_t x = 0, y = 0;
   const bool down = Display::readTouch(x, y);
   const Screen before = controller.screen();
-  const InputResult result = controller.update(millis(), down, x, y, gestureAllowed,
-                                                GpioMonitor::kPortCount);
+  const bool reloadPending = Identity::appReloadRequested();
+  InputResult result = controller.update(millis(), down, x, y, gestureAllowed,
+                                         GpioMonitor::kPortCount,
+                                         GpioMonitor::kEventCount, reloadPending);
+
+  // CANCEL RELOAD IS HANDLED HERE AND NEVER RETURNED. Every other action ends in
+  // execute(), which restarts the device, and all three callers are written as
+  // "if the action is not None, execute it". Clearing a request needs no restart,
+  // so it is done here and the action is turned back into None, which leaves
+  // those callers correct without any of them knowing this exists.
+  //
+  // setAppReloadRequested(false) otherwise runs in exactly one place:
+  // installApplication() on success. So a request the server cannot satisfy -
+  // a board with no current App release, where the manifest reports isConfigured
+  // false - never cleared, and while it stood CAL skipped its own update check
+  // and every boot took the full network ladder instead of the healthy-App
+  // shortcut. This is the way back from that state for somebody at the device.
+  if (result.action == Action::CancelReload) {
+    Identity::setAppReloadRequested(false);
+    if (Identity::appReloadRequested()) {
+      stop("Could not cancel the application reload");
+    }
+    Journal::line("[recovery] pending application reload cancelled");
+    result.action = Action::None;
+    result.redraw = true;
+  }
+
   if (result.redraw) {
     if (controller.screen() == Screen::PresenceTest) {
       presence.reset();
@@ -91,7 +174,7 @@ InputResult poll(bool gestureAllowed) {
       Display::showGpioMonitor(gpio, controller.gpioAll(), controller.gpioPage(), millis());
       lastDrawMs = millis();
     } else {
-      Display::showRecoveryMenu(controller.screen());
+      Display::showRecoveryMenu(controller.screen(), Identity::appReloadRequested());
     }
     if (before == Screen::Closed) Journal::line("[recovery] touch menu opened");
   }

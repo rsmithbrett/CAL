@@ -6,15 +6,26 @@
 // on a host, including clock wrap, held fingers and destructive confirmation.
 namespace Recovery {
 
-enum class Action : uint8_t { None, WifiSetup, ResetIdentity, ReloadApplication };
+/// CancelReload is the one action that does not restart the device. It clears a
+/// request rather than making one, so Recovery::poll() handles it and callers
+/// never see it - see that function, and execute()'s own remarks on why every
+/// other action ends in esp_restart().
+enum class Action : uint8_t { None, WifiSetup, ResetIdentity, ReloadApplication, CancelReload };
 enum class Screen : uint8_t { Closed, Menu, ConfirmIdentity, ConfirmReload, Diagnostics, PresenceTest, GpioMonitor };
 
 struct Rect {
   int16_t x, y, w, h;
-  bool contains(int32_t px, int32_t py) const {
+  constexpr bool contains(int32_t px, int32_t py) const {
     return px >= x && px < x + w && py >= y && py < y + h;
   }
 };
+
+/// Whether two rectangles share no pixel. Half-open on both axes, matching
+/// contains().
+constexpr bool disjoint(const Rect& a, const Rect& b) {
+  return a.x + a.w <= b.x || b.x + b.w <= a.x ||
+         a.y + a.h <= b.y || b.y + b.h <= a.y;
+}
 
 // Shared by rendering and hit testing, in CAL's 320x240 landscape coordinates.
 constexpr Rect kMenuRows[] = {{16, 44, 288, 42}, {16, 90, 288, 42},
@@ -26,10 +37,106 @@ constexpr Rect kGpioMode = {224, 4, 80, 28};
 constexpr Rect kGpioPrevious = {16, 190, 84, 44};
 constexpr Rect kGpioBack = {108, 190, 104, 44};
 constexpr Rect kGpioNext = {220, 190, 84, 44};
-constexpr Rect kCancel = {16, 180, 136, 44};
-constexpr Rect kConfirm = {168, 180, 136, 44};
+
+/// Confirmation buttons. CONFIRM IS ON THE LEFT AND CANCEL ON THE RIGHT, which
+/// reverses the usual order and is deliberate: kBack sits bottom-right on the
+/// menu, so bottom-right is where an operator has just learned to tap to leave.
+/// With Confirm there, the pixels that said "get me out of here" on one screen
+/// said "Reset" on the next. The assertion below keeps Cancel in kBack's band.
+constexpr Rect kConfirm = {16, 180, 136, 44};
+constexpr Rect kCancel = {168, 180, 136, 44};
+
+/// The two corner zones the opening gesture watches, as rectangles rather than
+/// inline comparisons, so the assertions below can be written about them.
+///
+/// THEY STOP AT y=44, WHERE THE FIRST MENU ROW BEGINS. They ran to y=60 when
+/// this feature was written, overlapping kMenuRows[0] by a 48x16 band in each
+/// corner. The sixth tap opens the menu and returns before any hit test, so that
+/// tap was safe - but a seventh, in the same corner the operator had just tapped
+/// six times, landed on row 0. Row 0 is Set up Wi-Fi, the one row with no
+/// confirmation screen, so one stray contact rebooted the device, forced its
+/// portal and left an open setup AP broadcasting until the abandonment timeout.
+constexpr Rect kGestureLeft = {0, 0, 64, 44};
+constexpr Rect kGestureRight = {256, 0, 64, 44};
+
 constexpr uint32_t kGestureWindowMs = 8000;
 constexpr uint32_t kMenuIdleMs = 60000;
+
+/// How long a live diagnostics screen may sit untouched. Generous rather than
+/// absent: a sensor test wants no deadline a person would notice, but an
+/// unbounded one parks the loop it was opened from. On the enrollment QR that
+/// loop polls for a device key; in the captive portal it applies credentials a
+/// phone has already submitted. A screen left open stops both until somebody
+/// returns to the device.
+constexpr uint32_t kDiagnosticsIdleMs = 600000;
+
+/// How long holdBootForTouch() listens before anybody has touched. Paid on every
+/// boot CAL draws, ahead of the App, so it is deliberately short - long enough
+/// for somebody reaching for a panel that has just lit up, not long enough to be
+/// read as a slow device.
+constexpr uint32_t kBootListenMs = 1200;
+
+/// How long the boot stays held after the most recent tap. Comfortably past
+/// kGestureWindowMs so six taps at a human cadence fit inside one hold, and each
+/// further tap renews it.
+constexpr uint32_t kBootHoldMs = 10000;
+
+/// The ceiling on one holdBootForTouch() call, counted from entry and never
+/// renewed. A touch panel reading permanently down would otherwise renew the
+/// hold on every pass and stop this device booting for good - and CAL is the
+/// image that has to reach the end of its own boot for a cable or an OTA
+/// candidate to rescue anything.
+constexpr uint32_t kBootHoldCapMs = 120000;
+
+// --- geometry, proved at compile time on both boards --------------------------
+//
+// These replace a host test that could not fail: it checked each rectangle only
+// against its own x/y/w/h, which holds for any rectangle and any half-open
+// contains(), so every boundary mutation passed it. A static_assert costs
+// nothing, runs in every arduino-cli build of both boards, and needs no host
+// compiler at all.
+
+static_assert(disjoint(kGestureLeft, kMenuRows[0]) && disjoint(kGestureRight, kMenuRows[0]),
+              "A tap after the menu opens must not land on row 0, which is the "
+              "unconfirmed Set up Wi-Fi action.");
+static_assert(disjoint(kGestureLeft, kMenuRows[1]) && disjoint(kGestureRight, kMenuRows[1]),
+              "A gesture zone over row 1 would open a confirmation on a stray tap.");
+static_assert(disjoint(kGestureLeft, kMenuRows[2]) && disjoint(kGestureRight, kMenuRows[2]),
+              "A gesture zone over row 2 would open a confirmation on a stray tap.");
+static_assert(disjoint(kGestureLeft, kPresenceTest) && disjoint(kGestureRight, kPresenceTest),
+              "A gesture zone must not reach the Diagnostics footer.");
+static_assert(disjoint(kGestureLeft, kBack) && disjoint(kGestureRight, kBack),
+              "A gesture zone must not reach Back.");
+static_assert(disjoint(kGestureLeft, kGestureRight), "The two corner zones must not meet.");
+
+static_assert(disjoint(kMenuRows[0], kMenuRows[1]) && disjoint(kMenuRows[1], kMenuRows[2]) &&
+                  disjoint(kMenuRows[0], kMenuRows[2]),
+              "Menu rows must not overlap; the first match in the hit chain would win silently.");
+static_assert(disjoint(kPresenceTest, kBack), "Diagnostics and Back must not overlap.");
+
+static_assert(disjoint(kConfirm, kCancel), "Confirm and Cancel must not overlap.");
+static_assert(disjoint(kConfirm, kBack),
+              "The destructive confirmation must not sit where Back sits on the menu.");
+static_assert(!disjoint(kCancel, kBack),
+              "Cancel should hold Back's band, so bottom-right always means leave.");
+
+static_assert(disjoint(kGpioMode, kGpioPrevious) && disjoint(kGpioMode, kGpioBack) &&
+                  disjoint(kGpioMode, kGpioNext) && disjoint(kGpioPrevious, kGpioBack) &&
+                  disjoint(kGpioBack, kGpioNext),
+              "GPIO monitor controls must not overlap.");
+
+static_assert(kGestureLeft.x >= 0 && kGestureRight.x + kGestureRight.w <= 320 &&
+                  kMenuRows[2].y + kMenuRows[2].h <= 240 && kCancel.y + kCancel.h <= 240,
+              "Every rectangle must fit CAL's 320x240 landscape panel.");
+
+static_assert(kDiagnosticsIdleMs > kMenuIdleMs,
+              "A live diagnostics screen should outlast the menu, not undercut it.");
+
+static_assert(kBootHoldMs > kGestureWindowMs,
+              "A hold shorter than the gesture window could expire mid-sequence, so six taps "
+              "at a human cadence would never open the menu from a boot hold.");
+static_assert(kBootHoldCapMs > kBootHoldMs && kBootHoldMs > kBootListenMs,
+              "The cap must outlast a hold, and a hold must outlast the listen window.");
 
 struct InputResult {
   Action action = Action::None;
@@ -54,13 +161,25 @@ class Controller {
   uint8_t gpioPage() const { return gpioPage_; }
   bool gpioAll() const { return gpioAll_; }
 
+  /// gpioEventCapacity is how many recorded changes the Changes view can hold,
+  /// which decides its page count. It was a hardcoded 2 here, correct only while
+  /// GpioMonitor kept exactly eight events: raising that cap would have made the
+  /// extra events unreachable with nothing to say so. Recovery.cpp passes the
+  /// real constant.
+  /// reloadPending turns row 3 into Cancel reload. The row toggles rather than a
+  /// fifth one being added, which would mean a new rectangle, a new assertion and
+  /// a tighter pitch on a menu already three rows and a footer deep - and the row
+  /// a person taps for "something about the application" is the same row either
+  /// way. A cancel is not destructive, so it takes effect without a confirmation.
   InputResult update(uint32_t now, bool down, int32_t x, int32_t y,
-                     bool gestureAllowed = true, uint8_t gpioPortCount = 49) {
+                     bool gestureAllowed = true, uint8_t gpioPortCount = 49,
+                     uint8_t gpioEventCapacity = 8, bool reloadPending = false) {
     InputResult out;
     const bool rising = down && !wasDown_;
     wasDown_ = down;
-    if (visible() && screen_ != Screen::PresenceTest && screen_ != Screen::GpioMonitor &&
-        static_cast<uint32_t>(now - lastActivity_) >= kMenuIdleMs) {
+    const bool live = screen_ == Screen::PresenceTest || screen_ == Screen::GpioMonitor;
+    const uint32_t idleLimit = live ? kDiagnosticsIdleMs : kMenuIdleMs;
+    if (visible() && static_cast<uint32_t>(now - lastActivity_) >= idleLimit) {
       screen_ = Screen::Closed;
       step_ = 0;
       out.restore = true;
@@ -80,8 +199,8 @@ class Controller {
 
     if (!visible()) {
       if (!gestureAllowed) return out;
-      const bool left = x >= 0 && x < 64 && y >= 0 && y < 60;
-      const bool right = x >= 256 && x < 320 && y >= 0 && y < 60;
+      const bool left = kGestureLeft.contains(x, y);
+      const bool right = kGestureRight.contains(x, y);
       const bool expected = (step_ % 2 == 0) ? left : right;
       if (expected) {
         if (step_ == 0) started_ = now;
@@ -104,7 +223,10 @@ class Controller {
     if (screen_ == Screen::Menu) {
       if (kMenuRows[0].contains(x, y)) out.action = Action::WifiSetup;
       else if (kMenuRows[1].contains(x, y)) screen_ = Screen::ConfirmIdentity;
-      else if (kMenuRows[2].contains(x, y)) screen_ = Screen::ConfirmReload;
+      else if (kMenuRows[2].contains(x, y)) {
+        if (reloadPending) out.action = Action::CancelReload;
+        else screen_ = Screen::ConfirmReload;
+      }
       else if (kPresenceTest.contains(x, y)) screen_ = Screen::Diagnostics;
       else if (kBack.contains(x, y)) {
         screen_ = Screen::Closed;
@@ -118,7 +240,10 @@ class Controller {
       } else if (kMenuRows[2].contains(x, y)) screen_ = Screen::Menu;
       out.redraw = screen_ != Screen::Diagnostics;
     } else if (screen_ == Screen::GpioMonitor) {
-      const uint8_t pages = gpioAll_ ? (gpioPortCount + 3) / 4 : 2;
+      // Four rows a page in both views. Guarded against zero because a modulo by
+      // it is how Previous and Next would fault.
+      const uint8_t rows = gpioAll_ ? gpioPortCount : gpioEventCapacity;
+      const uint8_t pages = rows ? static_cast<uint8_t>((rows + 3) / 4) : 1;
       if (kGpioMode.contains(x, y)) { gpioAll_ = !gpioAll_; gpioPage_ = 0; out.redraw = true; }
       else if (kGpioPrevious.contains(x, y)) { gpioPage_ = (gpioPage_ + pages - 1) % pages; out.redraw = true; }
       else if (kGpioNext.contains(x, y)) { gpioPage_ = (gpioPage_ + 1) % pages; out.redraw = true; }

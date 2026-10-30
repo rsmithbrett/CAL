@@ -292,15 +292,24 @@ void awaitKeyAssignment(const Service::Discovery& discovery) {
       return;
     }
 
-    if (result.state == Enrollment::State::Refused) {
-      // This hardware already holds a secret, so it is either a reflashed unit
-      // or something claiming an address that is not its own. Either way an
-      // administrator has to intervene; the device must not keep asking.
-      haltWithFailure(result.message.length() > 0
-                          ? result.message
-                          : String("This device is already registered"),
-                      "An administrator must re-issue its key.");
-    }
+    // A REFUSAL WAITS AND ASKS AGAIN RATHER THAN HALTING. This hardware already
+    // holds a secret server-side, so it is either a reflashed unit or something
+    // claiming an address that is not its own, and an administrator does have to
+    // intervene. What changed is what happens while nobody has.
+    //
+    // This used to call haltWithFailure(), which loops forever with no network
+    // work and no Recovery::poll(). Three things followed from that. The device
+    // could not notice the administrator pressing "Allow re-registration", so
+    // somebody had to go and power-cycle it. The recovery menu was unreachable,
+    // so Set up Wi-Fi and Reload were gone as well. And with no secret it could
+    // neither check in nor ship debug-stream lines, so the only diagnostic left
+    // was a cable. Reset identity from the touch menu reaches this state in one
+    // confirmed tap, which made a touchscreen recovery feature a reason to visit
+    // the device.
+    //
+    // Falling through to the same wait loop costs one request per interval on a
+    // device already out of service, and the interval doubles to kMaxWaitMs.
+    const bool refused = result.state == Enrollment::State::Refused;
 
     // No third argument. showQr prints the payload itself, so passing the MAC
     // as the subcaption drew it twice - the large line and the small one under
@@ -315,6 +324,18 @@ void awaitKeyAssignment(const Service::Discovery& discovery) {
     // the unit against, and it is the half of this screen a person reads rather than
     // photographs.
     const auto drawQr = [&]() {
+      if (refused) {
+        // No QR on a refusal: scanning it would open a claim page the server
+        // answers 409 for. What an operator needs is the address to match the
+        // unit against and the fact that this clears itself once the key is
+        // re-issued.
+        Display::showFailure(result.message.length() > 0
+                                 ? result.message
+                                 : String("This device is already registered"),
+                             "An administrator must allow re-registration. This "
+                             "keeps asking and needs no restart.");
+        return;
+      }
       Display::showQr(result.setupUrl.length() > 0 ? result.setupUrl
                                                  : Identity::macAddress(),
                     result.message.length() > 0 ? result.message
@@ -501,6 +522,32 @@ void setup() {
                   "splash - CAL chose not to draw, it did not fail to get there");
     Journal::line("[display] the App's own \"Starting\" screen is about a second away, and any "
                   "screen CAL still needs brings the panel up by itself");
+  }
+
+  // THE BOOT HOLD. A touch here stops the sequence while somebody keeps tapping,
+  // and six corner taps open configuration. It runs only where CAL drew the
+  // splash, because the other path deliberately leaves the panel untouched - no
+  // lcd.init(), so there is no touch to read - and bringing it up would be the
+  // duplicate draw that path exists to avoid.
+  //
+  // Placed here on purpose: after something is on the glass, and before both the
+  // handover below and the network ladder further down. On a healthy device the
+  // handover is about a second away and no setup screen is ever shown, so this is
+  // the only point in that boot where a finger can reach the recovery menu.
+  if (!appDrawsTheLoadingScreen && Recovery::holdBootForTouch()) {
+    while (Recovery::visible()) {
+      Journal::poll();
+      const Recovery::InputResult input = Recovery::poll();
+      if (input.action != Recovery::Action::None) Recovery::execute(input.action);
+      if (input.restore) {
+        // Closed by Back or by its own idle timeout. Put the splash back and let
+        // the boot carry on from where it paused.
+        if (!Display::showBrandSplash()) Display::showNeutralSplash();
+      }
+      delay(10);
+    }
+    Recovery::end();
+    Journal::line("[recovery] configuration closed - the boot continues");
   }
 
   // A unit holding no secret is newly flashed, not faulty. Every device is

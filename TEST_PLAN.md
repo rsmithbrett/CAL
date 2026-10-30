@@ -2287,3 +2287,149 @@ would attempt the mount on the board that has no slot. The same trap
    its mount, its retry count and its mount cost exactly as before; a card-less
    one must still log `no card found after 3 attempt(s)`. The gate changes
    neither, and the only way to be sure is to read both lines off a real device.
+
+---
+
+## 16. The touch recovery menu, and the boot hold that reaches it
+
+`RecoveryState.h`, `Recovery.cpp`, `Display.cpp` and `CAL.ino`. Design in
+[CAL_TOUCH_RECOVERY_MENU.md](CAL_TOUCH_RECOVERY_MENU.md) and
+[CAL_GPIO_DIAGNOSTICS.md](CAL_GPIO_DIAGNOSTICS.md).
+
+**This is the one part of this repository with a host-runnable test**, which is
+why it gets a section that is mostly about a test rather than mostly about a
+bench. `RecoveryState.h` has no Arduino or display dependency, so the input
+state machine compiles and runs on a workstation with a fake clock, a fake
+finger and stubbed NVS.
+
+### 16a. What runs, and where
+
+`tests/recovery-menu-test.cpp` links against production `Recovery.cpp` with
+stubs for touch, drawing, NVS, the partition table and `esp_restart()`. Its
+`main()` runs the state machine checks, the presence and GPIO sampling models,
+and then `integrationTests()`, which drives the production module. It asserts
+the six-tap sequence and the wrong-order, outside-tap, five-tap, timeout and
+disabled-entry cases; held fingers, drags and sub-100 ms bounce; both
+confirmations, Cancel, Back, menu expiry and `millis()` rollover on both timers;
+the live screens outlasting the 60-second menu timeout; GPIO paging, mode
+switching and counters surviving a page change; each action's persisted intent,
+secret removal or preservation, recorded restart cause, and the failure paths
+that must stop without restarting; and `Updater::Manifest::needsInstall()`
+including a same-version forced reload. It prints `PASS:` and the controller's
+host-ABI size.
+
+`ci/test-recovery-menu.sh` builds and runs it twice, once plain and once with
+`-DCONFIG_IDF_TARGET_ESP32S3=1`, under `g++ -std=c++17 -Wall -Wextra -Werror`,
+so the Panellan's allowlist and its absent PIR mapping are covered by the same
+assertions. `.github/workflows/bench-cal.yml` runs it as **Test recovery gesture
+and actions on host**, ahead of the compiles, on any PR touching `Recovery*`,
+`CAL.ino`, `Display.*`, `GpioMonitor.h`, `tests/**` or `ci/**`.
+
+**No assertion in that test has been executed on this workstation.** There is no
+host C++ compiler here; the cross toolchain was used for `-fsyntax-only` and
+nothing else, which proves the file parses and does not run a single `assert`.
+CI is where it runs, and a CI pass is the only evidence that any of 16a holds.
+Read the step's own output, not the workflow's green tick.
+
+### 16b. What every build proves, on both boards
+
+`RecoveryState.h` carries a block of `static_assert`s over the shared
+rectangles, so the geometry is checked by the compiler in every `arduino-cli`
+build of either board and needs no host compiler at all:
+
+- Each corner gesture zone against all three menu rows, the Diagnostics footer,
+  Back, and the other zone.
+- The three rows against each other, and Diagnostics against Back.
+- Confirm against Cancel, and Confirm against Back.
+- Cancel **not** disjoint from Back, which is the deliberate one: bottom-right
+  has to keep meaning leave.
+- The mode button against each GPIO footer button, and each of those against
+  its neighbor.
+- The outermost edges inside 320 × 240: the left zone's left edge, the right
+  zone's right edge, the last menu row's bottom and Cancel's bottom.
+- The timer orderings: diagnostics outlasting the menu, a boot hold outlasting
+  the gesture window, and the cap outlasting a hold which outlasts the listen
+  window.
+
+These are what the geometry rests on now. The host test's own boundary check
+compares each rectangle against its own x/y/w/h, which is true of any rectangle
+and any half-open `contains()`, so it passed every boundary mutation, including
+the y<60 zones that overlapped Set up Wi-Fi by 48 × 16 in each corner. That
+check is still in the file; it is not the guarantee.
+
+**Nobody has inverted one of these to confirm it bites.** The procedure is the
+one section 14 uses for `HeapPools.h`: flip an assertion's sense, confirm the
+build stops with that message, restore with `git checkout --`, verify against
+`git diff`, and remember a restored file can keep its old mtime and let the
+build skip the rebuild.
+
+### 16c. The boot hold, which has no automated coverage at all
+
+`Recovery::holdBootForTouch()` cannot be reached by the host test as it stands:
+it drives `millis()`, `delay()` and `Display::readTouch()` in a loop, and the
+test's `delay()` stub throws to stand in for the terminal error path. Every
+check below is a person at a device.
+
+1. **The listen window.** On a device with a healthy App installed, which draws
+   no QR, power on and touch nothing. The splash must appear within about two
+   seconds, and the handover must follow about 1.2 seconds later than it did
+   before this change. That 1,200 ms is paid on every boot CAL draws.
+2. **One tap, then nothing.** Tap a corner during the splash and stop. The boot
+   pauses, and resumes about ten seconds after that tap. Expect
+   `[recovery] touch during boot - holding the sequence` and
+   `[recovery] touches stopped - resuming the boot`, and expect the splash to
+   still be on the glass, because nothing drew over it.
+3. **Renewal.** Tap every few seconds for a minute. Each tap must extend the
+   hold, and the boot must not resume while tapping continues.
+4. **Six taps from the splash.** Open Configuration with the corner sequence on
+   that same healthy device. Expect
+   `[recovery] configuration opened from the boot hold`, then exercise Back and,
+   on a second run, the 60-second expiry. Both must redraw the splash and let
+   the handover complete, with
+   `[recovery] configuration closed - the boot continues` in the journal. This
+   is the whole point of the feature: before it, a device with a current App and
+   a claimed secret could not reach this menu by touch.
+5. **A seventh tap.** With the menu open from a boot hold, tap the same corner
+   once more. Nothing may happen. A device that restarts into its portal here is
+   the y<60 defect back.
+6. **The stuck panel, which is the case that bounds the whole design.** Hold a
+   finger down from power-on and leave it; then repeat with the touch lines
+   shorted, and once with a wet panel. The device must reach the end of its boot
+   at 120 seconds, with the cap's line naming the figure and saying to suspect
+   the touch controller. A unit that never boots has failed this, and failed it
+   on the one image a cable or an OTA candidate has to be able to rescue.
+7. **The quiet path is still quiet.** Software-restart a device whose App owns
+   the loading screen (see
+   [BOOT_SCREEN_OWNERSHIP.md](BOOT_SCREEN_OWNERSHIP.md)). The hold must be
+   skipped entirely: no `[recovery]` line, no `lcd.init()`, no splash, and no
+   1,200 ms added to that boot. Touch cannot be read on that path and must not
+   be attempted.
+
+### 16d. The bench checks the assertions can't make
+
+1. **Photograph both confirmation screens** on both boards. Read the whole
+   sentence off the glass. The identity text runs to 171 characters at text size
+   2 in a 304-pixel column, and `wrappedCenteredText` is given six lines, so
+   this is where an ellipsis would show up. Confirm Reset/Reload is the left
+   button and Cancel the right, and that tapping where Back sat on the menu
+   cancels rather than resetting.
+2. **The 10-minute diagnostics limit.** Open the presence screen or the GPIO
+   monitor from the captive portal and leave it untouched. It must close itself
+   and restore the QR, and the portal must then apply a form a phone submitted
+   while it was up. Nothing asserts the figure: the host test proves only that a
+   live screen outlasts the 60-second menu timeout.
+3. **The Changes feed's page count.** Read the status line and confirm it says
+   `changes page 1/2` rather than a literal `2`. Raise
+   `GpioMonitor::kEventCount` in a scratch build that is never registered, and
+   confirm the line and the paging both follow it.
+
+### 16e. Known gaps, recorded rather than discovered later
+
+- No host assertion covers `holdBootForTouch()`, the 10-minute limit's actual
+  expiry, or the rendering: `showRecoveryMenu()` is a stub in the test and only
+  its handoff is observed.
+- The host test runs on CI's Linux `g++`. The controller's size and ABI there
+  are not the device's, which is why its printed figure says "host ABI".
+- A tap landing between two rectangles does nothing, by construction. There is
+  no assertion that the gaps are small enough for a finger; that is item 1 of
+  the physical acceptance checks in the design document.

@@ -53,7 +53,10 @@ void showConnected(const String& headline, const String& detail = "");
 
 /// Coordinates follow the displayed rotation. Recovery owns edge detection.
 bool readTouch(int32_t& x, int32_t& y);
-void showRecoveryMenu(Recovery::Screen screen);
+/// reloadPending makes row 3 read "Cancel reload" rather than "Reload
+/// application", so a request that is already outstanding is visible on the
+/// glass and can be taken back.
+void showRecoveryMenu(Recovery::Screen screen, bool reloadPending = false);
 void showPresenceTest(const PresenceTest::State& reading, uint32_t now, bool supported,
                       bool redrawFrame = true);
 void showGpioMonitor(const GpioMonitor::State& state, bool allPins, uint8_t page,
