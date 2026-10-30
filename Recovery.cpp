@@ -57,6 +57,10 @@ InputResult poll(bool gestureAllowed) {
   if (!factory || esp_ota_set_boot_partition(factory) != ESP_OK) {
     stop("Cannot restart CAL");
   }
+  // Persist the return-to-CAL intent before any destructive change. A power
+  // loss after clearing identity must not take the healthy-App shortcut.
+  Identity::setUpdateRequested(true);
+  if (!Identity::updateRequested()) stop("Cannot save recovery request");
 
   switch (action) {
     case Action::WifiSetup:
@@ -79,9 +83,7 @@ InputResult poll(bool gestureAllowed) {
     default:
       stop("Invalid recovery action");
   }
-  Identity::setUpdateRequested(true);
-  if (!Identity::updateRequested() ||
-      Identity::provisioningForced() != (action == Action::WifiSetup)) {
+  if (Identity::provisioningForced() != (action == Action::WifiSetup)) {
     stop("Cannot save recovery request");
   }
   BootDiag::recordRestartIntentIfNoneRecorded(

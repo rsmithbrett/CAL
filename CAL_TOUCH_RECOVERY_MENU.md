@@ -81,6 +81,8 @@ This change adds no touch task, queue or separate framebuffer.
 `Recovery::execute()` verifies factory boot selection, persists the request,
 reads relevant values back, records the existing restart cause and restarts.
 A boot-selection or persistence failure stops with an explicit error.
+The update-requested flag is persisted and verified before identity is removed,
+so an interrupted reset cannot skip CAL on a subsequent healthy-App boot.
 
 | Action | Changes before restart |
 |---|---|

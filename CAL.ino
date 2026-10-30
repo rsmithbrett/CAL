@@ -35,7 +35,7 @@ namespace {
 /// application decide when to check for updates - otherwise a service outage
 /// becomes a fleet outage.
 bool mustContactServer() {
-  // Both inputs are read into locals and logged, rather than being short-
+  // Inputs are read into locals and logged, rather than being short-
   // circuited inside the return. The whole point of this decision is that it
   // is the difference between "CAL touched the network" and "CAL did not", and
   // a reader of the journal has to be able to tell which input drove it -

@@ -16,6 +16,7 @@ bool fingerDown = false;
 int32_t touchX = 0, touchY = 0;
 bool secretHeld = true, forced = false, update = false, reload = false;
 bool factorySelected = false, saveFails = false, factoryMissing = false;
+bool updateSaveFails = false;
 int clears = 0, failures = 0, draws = 0;
 Recovery::Screen drawn = Recovery::Screen::Closed;
 BootDiag::RestartCause cause = BootDiag::RestartCause::None;
@@ -118,6 +119,7 @@ void resetActions() {
   secretHeld = true; forced = false; update = false; reload = false;
   clears = 0; factorySelected = false; saveFails = false; factoryMissing = false;
   failures = 0; cause = BootDiag::RestartCause::None;
+  updateSaveFails = false;
 }
 
 void expectRestart(Recovery::Action action) {
@@ -157,6 +159,10 @@ void integrationTests() {
   try { Recovery::execute(Action::ResetIdentity); assert(false); }
   catch (const Stopped&) {}
   assert(failures == 1 && clears == 0 && !update);
+  resetActions(); updateSaveFails = true;
+  try { Recovery::execute(Action::ResetIdentity); assert(false); }
+  catch (const Stopped&) {}
+  assert(secretHeld && clears == 0 && !update && failures == 1);
 
   // Use the production manifest decision, including same-version reinstalls.
   Updater::Manifest manifest;
@@ -194,7 +200,7 @@ void clearSecret() { ++clears; if (!saveFails) secretHeld = false; }
 bool provisioningForced() { return forced; }
 void setProvisioningForced(bool v) { if (!saveFails) forced = v; }
 bool updateRequested() { return update; }
-void setUpdateRequested(bool v) { if (!saveFails) update = v; }
+void setUpdateRequested(bool v) { if (!saveFails && !updateSaveFails) update = v; }
 bool appReloadRequested() { return reload; }
 void setAppReloadRequested(bool v) { if (!saveFails) reload = v; }
 }
