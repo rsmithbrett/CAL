@@ -23,6 +23,19 @@ dated heading after.
 
 ## Unreleased
 
+### A display can show the household's own photographs — App
+
+A family uploads pictures on their own page and ticks which ones they want up. The
+display draws those, one at a time, in with the rest of its cards. Nothing is
+configured on the device and an operator never picks the pictures.
+
+The card appears only once somebody has added it to that display's rotation, so
+installing this release changes nothing on its own.
+
+A display with no SD card holds one photograph in memory at a time and moves to the
+next one each time it refreshes, so the set still cycles. A picture that cannot be
+loaded says so on screen for its turn rather than leaving the previous card up.
+
 ### The Panellan ZX2D80CE02S has firmware to install — CAL and App
 
 Every release until this one carried images for the ESP32-2432S028 only, so a

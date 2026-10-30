@@ -481,7 +481,19 @@ struct CardSpec {
 // symptom is a card that never appears. One CardSpec and one PolicyEntry,
 // roughly 230 bytes of .bss between them, against the same contiguous-block
 // budget the sports accounting above weighs.
-static constexpr uint8_t kMaxCards = 34;
+//
+// 35 as of 2026-10-30, when PersonalPhotos.cpp registered "personalphotos". The registry
+// was exactly full at 34 again, so this edit was not optional for the same reason the one
+// above was not. The count is now exactly the registrations: 10 single-instance modules,
+// 20 across the four five-instance ones, four sports and this.
+//
+// kMaxPolicyCards follows this, and Cards::Policy is a member of CheckIn::Result, which is
+// a stack local on the check-in path - see StackWatch.h, whose own arithmetic quotes 28
+// PolicyEntry slots at roughly 146 bytes apiece and is now seven slots out of date. One
+// more slot is about 146 bytes against a 16384-byte loop stack that already carries a TLS
+// handshake and a 4KB JSON parse. Worth knowing before the next bump, which is why it is
+// written here rather than left to be rediscovered.
+static constexpr uint8_t kMaxCards = 35;
 
 /// Called from each card module's own translation unit at static-init time
 /// (see the `kRegistered` idiom at the bottom of Weather.cpp/Aircraft.cpp),
