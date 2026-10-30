@@ -23,6 +23,12 @@ dated heading after.
 
 ## Unreleased
 
+Nothing yet.
+
+---
+
+## v2026.10.30.0003
+
 ### Six taps on the glass opens a configuration menu - CAL
 
 Somebody standing at a device can now reach configuration without opening the
