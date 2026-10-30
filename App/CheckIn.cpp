@@ -8,10 +8,13 @@
 #include <ArduinoJson.h>
 #include <time.h>
 
+#include <cstring>
+
 #include "Actions.h"
 #include "Impressions.h"
 #include "Assets.h"
 #include "CardManager.h"
+#include "PersonalPhotos.h"
 #include "Config.h"
 #include "Http.h"
 #include "Identity.h"
@@ -262,6 +265,40 @@ void addClearedAnnouncements(JsonDocument& requestDoc) {
   }
 
   Log::printf("[checkin] carrying %u cleared announcement(s)", count);
+}
+
+/// Hands the household's chosen photographs to the card that draws them.
+///
+/// An absent member and an empty array are the same instruction - draw none - and
+/// both reach PersonalPhotos::setFromCheckIn with a count of zero, which clears the
+/// card. That matters for the absent case: a server too old to send the field, or a
+/// deployment with no photo source wired, must leave a display showing nothing rather
+/// than whatever it drew last week.
+///
+/// Anything that is not an array is treated as absent, the same tolerance
+/// parseCardPolicy applies to a member it cannot read.
+void parsePersonalPhotos(JsonVariantConst source) {
+  char ids[PersonalPhotos::kMaxPhotos][PersonalPhotos::kAssetIdLength + 1] = {};
+  uint8_t count = 0;
+
+  if (source.is<JsonArrayConst>()) {
+    for (JsonVariantConst entry : source.as<JsonArrayConst>()) {
+      if (count >= PersonalPhotos::kMaxPhotos) {
+        break;
+      }
+
+      const char* const id = entry.as<const char*>();
+      if (id == nullptr || id[0] == '\0') {
+        continue;
+      }
+
+      std::strncpy(ids[count], id, PersonalPhotos::kAssetIdLength);
+      ids[count][PersonalPhotos::kAssetIdLength] = '\0';
+      ++count;
+    }
+  }
+
+  PersonalPhotos::setFromCheckIn(ids, count);
 }
 
 /// Turns the response's ISO-8601 `maintenanceUntilUtc` into an epoch second, or
@@ -1142,6 +1179,7 @@ Result perform() {
   parseCardActions(responseDoc["cardActions"], result);
   parseAcceptedActionIds(responseDoc["acceptedActionIds"], result);
   parseAnnouncements(responseDoc["announcements"], result);
+  parsePersonalPhotos(responseDoc["personalPhotoAssetIds"]);
 
   Log::printf(
       "[checkin] ok (acknowledged=%d updateAvailable=%d calUpdateAvailable=%d debugStream=%d "

@@ -81,6 +81,7 @@ size_t getArduinoLoopTaskStackSize(void) {
 // here because the RAM asset buffers are the largest thing a card-less device
 // holds, and freeing them is a recovery action rather than a card concern.
 #include "Graphic.h"
+#include "PersonalPhotos.h"
 #include "HeapPools.h"
 #include "HeapRatchet.h"
 #include "HomeValue.h"
@@ -2039,6 +2040,7 @@ void performCheckIn() {
       // small block sitting in the middle of a large hole denies the hole.
       Graphic::releaseRamBuffers();
       Aircraft::releaseRamBuffer();
+      PersonalPhotos::releaseRamBuffer();
       return;
     }
 
@@ -2087,6 +2089,7 @@ void performCheckIn() {
     // less able to sit in the middle of the hole a handshake needs.
     Graphic::releaseRamBuffers();
     Aircraft::releaseRamBuffer();
+    PersonalPhotos::releaseRamBuffer();
     return;
   }
 
