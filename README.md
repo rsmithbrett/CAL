@@ -2511,6 +2511,110 @@ data of its own, now also re-asserts its current status once per check-in —
 see "Re-asserting every provider's status once per check-in" at the end of this
 file for why change-only logging leaves a live stream blind.)
 
+### A personal-photographs card: the household picks the pictures, not an operator
+
+`App/PersonalPhotos.h`/`.cpp` registers one card, `personalphotos`, that draws
+a family's own photographs one at a time. What separates it from every other
+picture this build can put on the glass is where the pictures come from: the
+check-in response carries them, not the card policy. A graphic card draws
+whatever `CardPolicyEntry.assetId` somebody typed into an operator page, and
+three of those have been configurable that way since the picture card shipped.
+These are chosen by the household, on the household's own page, and nobody at
+the operator end names one. The server scopes the set to the household holding
+this display and sends it as `personalPhotoAssetIds`.
+
+**Ids, not bytes.** Each picture is fetched from `/api/assets/{id}/content`
+through `Assets.h`, the same route and the same SD cache every other image on
+this display already goes through, so what rides on the check-in response is at
+most ten 36-character GUIDs and nothing that scales with picture size. That
+response is this project's tightest byte budget and ten photographs in it would
+not survive the parse. `CheckIn.cpp`'s `parsePersonalPhotos()` reads the array
+into a fixed `char[kMaxPhotos][kAssetIdLength + 1]`, skips entries that are null
+or empty, and stops at `kMaxPhotos` (10, matching the server's own
+`PersonalPhotoCard.PicturesOnTheCard`). `setFromCheckIn()` replaces the held set
+rather than merging into it, because the server sends the household's current
+choice in full every time: a picture missing from a later response is one the
+family unticked or deleted, and keeping it would draw something they have
+already removed. An empty array is a real answer and clears the card.
+
+**A `List`, not an interstitial.** Graphic is one picture, so it interleaves
+after every N other cards. This is a variable-length set cycled an item at a
+time, which is what `Kind::List` means, and it gives each photograph its own
+10-second dwell the way the aircraft and calendar cards give each of theirs one.
+A household with four pictures gets four items in the rotation. Registered at
+`order` 4, behind the cards with data of their own and ahead of the decorative
+ones.
+
+**Fetching happens in `fetch()` and never in `draw()`.** This is Cards.h's rule
+for every card, and it is worth restating here because an earlier draft of this
+module had it the other way around, reaching for the network from the draw path
+so that stepping backwards through the rotation became an HTTP request.
+`fetch()` runs on the scheduler's refresh timer, calls
+`Assets::ensureCached()` once per id and records the answers in a
+`gOnCard[kMaxPhotos]` array; `ensureCached()` returns at once for a picture
+already on the card, so the ordinary pass is ten cheap checks and the fetches
+only happen on the first pass after a household changes their set. `draw()` then
+reads that array and calls `Assets::drawCached()`, which never fetches. An item
+whose decode fails clears its own flag and puts
+`Display::showNoContent("No picture to show", ...)` on the panel, since
+`drawImageFromSd()` has already cleared it, and that item stays out until the
+next fetch, so a picture this display cannot decode costs one dwell instead of
+blanking the card on every cycle.
+
+**A display with no SD card holds one photograph in heap and moves along.**
+When nothing in the set reached the card, `fetch()` falls back to
+`Assets::fetchToRam()` for a single item, the same RAM fallback the graphic
+cards and the airline logo already use. One buffer, not ten: only one picture is
+on screen at a time, and ten at ten to twenty kilobytes apiece is several times
+what this device has spare. `fetch()` advances `gRamNext` on every pass, so a
+cardless display still cycles the whole set, just at the refresh cadence rather
+than the dwell one. In between, `draw()` asks `Assets::drawRam()` for the item
+the buffer holds and draws the no-content panel for any other, which is the
+ordinary state for a cardless display holding one of several.
+
+`PersonalPhotos::releaseRamBuffer()` hands that buffer back from the check-in
+failure path in `App.ino`, beside `Graphic::releaseRamBuffers()` and
+`Aircraft::releaseRamBuffer()`. The header gives the measurement behind it: a
+TLS session needs 16,717 bytes contiguous for each of two record buffers, and
+what denies the second one is not how much heap is free but where the occupied
+blocks sit, so a single ten-to-twenty-kilobyte picture parked in the middle of
+the heap is enough to stop a handshake. A device that cannot complete a handshake
+cannot check in, be sent a policy, or be offered an update, so the picture is
+the cheaper thing to give up. The internal `releaseRam()` gates on the buffer
+pointer rather than on which item it believes is loaded, matching
+`Aircraft.cpp`: `fetchToRam()` commits `buffer.data` before it can fail, so a
+fetch that times out leaves bytes held with no item recorded against them, and
+gating on the item would make that state unreclaimable by the one path that most
+needs to reclaim it. A device whose fetches are failing is the same device whose
+check-ins are failing.
+
+**A household that has chosen nothing gets no card at all.** `itemCount()`
+reports zero, the scheduler's existing empty-card skipping passes over the card
+entirely, and nothing about it appears in the rotation. That is the resting
+state for every display in the fleet until somebody uploads a picture, and it is
+the same tolerance a graphic card with no `assetId` already gets. `fetch()` logs
+the count on change, including the zero case, so a debug-stream observer can
+tell "nobody has chosen any" from "chosen but not reaching the glass" without
+inferring it from an absent log line.
+
+**Only JPEG arrives here, and the server is what guarantees that.** The PNG
+decoder wants 44,408 bytes in one contiguous allocation, the figure
+`PersonalPhotos.h` cites, and a display past `setup()` cannot be counted on to
+have them, so a stored PNG would fetch, fail to draw, and leave the card showing
+the no-content panel with nothing on screen saying why. The server filters the
+list to pictures with a drawable copy before sending it, which is why this
+module does no format check of its own and has no way to report one. A picture a
+family holds and this fleet cannot draw is counted for them on their own page
+instead.
+
+**`Cards::kMaxCards` moved from 34 to 35.** The registry was exactly full at 34,
+so this was not optional: a 35th registration would have hit `registerCard()`'s
+log-and-drop overflow path on firmware with no automated tests, and the symptom
+is a card that never appears. The cap is now exactly the registrations, with no
+spare slot, and that constant's own comment carries the arithmetic along with a
+note that `StackWatch.h`'s quoted `PolicyEntry` count is further out of date for
+it.
+
 ## SelfTest: a diagnostic firmware for screen and SD isolation
 
 `SelfTest/` is a third sketch, sibling to `App/`, built the night of
