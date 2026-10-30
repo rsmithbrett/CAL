@@ -2518,7 +2518,8 @@ a family's own photographs one at a time. What separates it from every other
 picture this build can put on the glass is where the pictures come from: the
 check-in response carries them, not the card policy. A graphic card draws
 whatever `CardPolicyEntry.assetId` somebody typed into an operator page, and
-three of those have been configurable that way since the picture card shipped.
+all five of its instances have been configurable that way for as long as they
+have existed.
 These are chosen by the household, on the household's own page, and nobody at
 the operator end names one. The server scopes the set to the household holding
 this display and sends it as `personalPhotoAssetIds`.
