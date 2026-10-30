@@ -371,6 +371,7 @@ bool installApplication(const Service::Discovery& discovery, const Manifest& man
   Identity::setInstalledAppVersion(manifest.version);
   Identity::clearBootAttempts();
   Identity::setUpdateRequested(false);
+  Identity::setAppReloadRequested(false);
   Journal::printf("[install] committed '%s' - boot attempts and the update-requested "
                   "flag are cleared",
                   manifest.version.c_str());

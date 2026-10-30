@@ -6,10 +6,16 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - "CAL.ino"
+      - "Recovery*"
       - "Provisioning.cpp"
       - "Identity.cpp"
       - "Identity.h"
       - "Display.cpp"
+      - "Display.h"
+      - "Updater.cpp"
+      - "Updater.h"
+      - "tests/**"
       - "partitions.csv"
       - "ci/**"
       - ".github/workflows/bench-cal.yml"
@@ -24,6 +30,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-arduino-cli@v2
+
+      - name: Test recovery gesture and actions on host
+        run: bash ci/test-recovery-menu.sh
 
       - name: Compile against production toolchain and check real partitions
         run: bash ci/build-firmware.sh

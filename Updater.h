@@ -18,6 +18,13 @@ struct Manifest {
   String version;
   String sha256;              // lower-case hex, verified before the image is committed
   uint32_t sizeBytes = 0;
+
+  // A local reinstall request bypasses version equality, never the requirement
+  // for a valid, configured manifest. Missing Apps still use normal recovery.
+  bool needsInstall(const String& installedVersion, bool haveApp,
+                    bool forceReload = false) const {
+    return ok && isConfigured && (forceReload || version != installedVersion || !haveApp);
+  }
 };
 
 Manifest fetchManifest(const Service::Discovery& discovery, const String& pathOverride = String());

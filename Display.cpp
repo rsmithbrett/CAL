@@ -414,20 +414,36 @@ void showStatus(const String& headline, const String& detail) {
 // Shown while a phone is associated to the setup access point. Provisioning swaps
 // back to the join code the moment the last station leaves, so the screen always
 // says which of the two things the person should be doing.
-// A tap, anywhere, rising edge only. LovyanGFX already drives this panel's touch
-// controller - the App reads it the same way - so nothing new is initialised here and
-// the loader gains a read rather than a driver.
-//
-// Rising edge, because the portal loop runs every 2 ms and a finger rests for a
-// couple of hundred: a level read would fire a hundred times per tap.
-bool wasTapped() {
-  static bool wasDown = false;
-  int32_t x = 0;
-  int32_t y = 0;
-  const bool isDown = lcd.getTouch(&x, &y);
-  const bool rising = isDown && !wasDown;
-  wasDown = isDown;
-  return rising;
+// LovyanGFX already drives touch; Recovery adds the gesture and release tracking.
+bool readTouch(int32_t& x, int32_t& y) {
+  return gPanelStarted && lcd.getTouch(&x, &y);
+}
+
+void showRecoveryMenu(Recovery::Screen screen) {
+  startPanel();
+  clear();
+  const auto button = [](const Recovery::Rect& rect, const char* label, uint32_t colour) {
+    lcd.drawRoundRect(rect.x, rect.y, rect.w, rect.h, 5, colour);
+    lcd.setTextDatum(middle_center);
+    lcd.setTextSize(2);
+    lcd.setTextColor(colour, kBg);
+    lcd.drawString(label, rect.x + rect.w / 2, rect.y + rect.h / 2);
+  };
+  if (screen == Recovery::Screen::Menu) {
+    centeredText("Configuration", 12, kInk, 2);
+    button(Recovery::kMenuRows[0], "Set up Wi-Fi", kInk);
+    button(Recovery::kMenuRows[1], "Reset identity", kWarn);
+    button(Recovery::kMenuRows[2], "Reload application", kInk);
+    button(Recovery::kMenuRows[3], "Back", kMuted);
+    return;
+  }
+  const bool identity = screen == Recovery::Screen::ConfirmIdentity;
+  centeredText(identity ? "Reset identity?" : "Reload application?", 18, kWarn, 2);
+  wrappedCenteredText(identity ? "Removes this device's secret. An administrator may need to allow re-registration."
+                               : "Downloads the current application again, even if its version matches. Keep power on.",
+                      58, kInk, 2, 20, 5);
+  button(Recovery::kCancel, "Cancel", kMuted);
+  button(Recovery::kConfirm, identity ? "Reset" : "Reload", kWarn);
 }
 
 void showConnected(const String& headline, const String& detail) {

@@ -1,10 +1,17 @@
 # CAL — Client Application Loader
 
-The first application flashed onto a Discover Around Me device, and the only
-one that is never delivered over the air. CAL lives in the `factory` partition,
+The first application flashed onto a Discover Around Me device. CAL lives in
+the `factory` partition,
 gets the unit onto a network, authenticates it with its device secret, installs
 the real product application into the OTA partition, and hands over. It is a
 loader and a recovery image, not a product.
+
+CAL's setup QR screens provide a touchscreen recovery menu: tap the top-left
+and top-right corners alternately three times to set up Wi-Fi, reset identity
+or reload the application. See [CAL_TOUCH_RECOVERY_MENU.md](CAL_TOUCH_RECOVERY_MENU.md)
+for behavior, confirmations, memory notes and verification. CAL itself can be
+updated through the shipped [CAL OTA trampoline](CAL_OTA_DESIGN.md) on capable
+loaders; older USB-only descriptions below are historical.
 
 The server this talks to lives in a separate repository
 (`DiscoverAroundMe`, https://github.com/rsmithbrett/DiscoverAroundMe); its
@@ -17,9 +24,9 @@ The product application and the loader have opposite constraints, and putting
 them in one binary means one of the two gets the wrong treatment.
 
 The application changes constantly and must be replaceable remotely — a bug in
-it costs a download. CAL cannot be replaced without physically recovering the
-hardware and putting a USB cable into it, so a bug in CAL costs a truck roll or
-a returned unit. That difference is what justifies the split: CAL is written to
+it costs a download. CAL is the recovery image, so a bug that breaks its own
+recovery/update path can require physically recovering the hardware. That
+difference is what justifies the split: CAL is written to
 do as little as possible and change as rarely as possible. It renders no cards,
 holds no product logic, resolves no policy, and knows nothing about weather,
 listings, calendars or content. It gets the device to the point where something
@@ -34,8 +41,8 @@ build; a shared history would imply a coupling that does not exist.
 
 An LCDWIKI **E32R28T**, from the "Cheap Yellow Display" family — ESP32-WROOM-32E,
 **4 MB flash**, no PSRAM, an ILI9341 240×320 panel driven in landscape
-(320×240), and an XPT2046 resistive touch controller. CAL does not use touch at
-all; every one of its screens is either informational or a QR code, and the one
+(320×240), and an XPT2046 resistive touch controller. CAL uses touch for its
+setup QR and recovery menu; the one
 place a person has to type something (a WiFi password) deliberately happens on
 their phone rather than on a resistive panel.
 

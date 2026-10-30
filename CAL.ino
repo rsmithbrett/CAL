@@ -21,6 +21,7 @@
 #include "Identity.h"
 #include "Journal.h"
 #include "Provisioning.h"
+#include "Recovery.h"
 #include "Service.h"
 #include "SelfInstall.h"
 #include "Updater.h"
@@ -40,10 +41,11 @@ bool mustContactServer() {
   // a reader of the journal has to be able to tell which input drove it -
   // `haveBootableApplication()` logs its own three reasons in turn.
   const bool updateRequested = Identity::updateRequested();
+  const bool reloadRequested = Identity::appReloadRequested();
   const bool bootable = Updater::haveBootableApplication();
-  const bool must = updateRequested || !bootable;
-  Journal::printf("[boot] contact the server? updreq=%d bootableApp=%d -> %s",
-                  updateRequested ? 1 : 0, bootable ? 1 : 0,
+  const bool must = updateRequested || reloadRequested || !bootable;
+  Journal::printf("[boot] contact the server? updreq=%d reload=%d bootableApp=%d -> %s",
+                  updateRequested ? 1 : 0, reloadRequested ? 1 : 0, bootable ? 1 : 0,
                   must ? "YES"
                        : "no - a healthy app is installed and nothing asked for an "
                          "update, so the network is not touched at all");
@@ -268,6 +270,7 @@ void awaitKeyAssignment(const Service::Discovery& discovery) {
   bool everLogged = false;
 
   Journal::line("[enroll] no secret held - waiting for an administrator to assign one");
+  Recovery::begin();
 
   while (true) {
     const Enrollment::Result result = Enrollment::requestKey(discovery);
@@ -285,6 +288,7 @@ void awaitKeyAssignment(const Service::Discovery& discovery) {
 
     if (result.state == Enrollment::State::Issued) {
       Journal::line("[enroll] secret issued and stored - continuing the ladder");
+      Recovery::end();
       return;
     }
 
@@ -310,19 +314,26 @@ void awaitKeyAssignment(const Service::Discovery& discovery) {
     // The MAC stays printed underneath either way. It is what an administrator matches
     // the unit against, and it is the half of this screen a person reads rather than
     // photographs.
-    Display::showQr(result.setupUrl.length() > 0 ? result.setupUrl
+    const auto drawQr = [&]() {
+      Display::showQr(result.setupUrl.length() > 0 ? result.setupUrl
                                                  : Identity::macAddress(),
                     result.message.length() > 0 ? result.message
                                                 : String("Waiting to be set up"),
                     "",
                     Identity::macAddress());
+    };
+    drawQr();
 
     // Broken into short slices rather than one long delay(), purely so the
     // serial 'd' command still answers during a wait that can last hours. The
     // total is unchanged.
-    for (uint32_t waited = 0; waited < waitMs; waited += 100) {
+    const uint32_t waitStarted = millis();
+    while (static_cast<uint32_t>(millis() - waitStarted) < waitMs || Recovery::visible()) {
       Journal::poll();
-      delay(100);
+      const Recovery::InputResult input = Recovery::poll();
+      if (input.action != Recovery::Action::None) Recovery::execute(input.action);
+      if (input.restore) drawQr();
+      delay(10);
     }
     waitMs = waitMs * 2 > kMaxWaitMs ? kMaxWaitMs : waitMs * 2;
   }
@@ -598,7 +609,10 @@ void setup() {
   // Skipped entirely when the server offered no CAL path. An installation that does
   // not do CAL updates says nothing about them, and a device must not invent a path
   // to the one partition it cannot recover from remotely.
-  if (discovery.calManifestPath.length() > 0) {
+  // A requested App reinstall should not first replace CAL via the same slot.
+  // Leave the normal CAL-update path unchanged on every other boot.
+  const bool reloadRequested = Identity::appReloadRequested();
+  if (!reloadRequested && discovery.calManifestPath.length() > 0) {
     const Updater::Manifest calManifest =
         Updater::fetchManifest(discovery, discovery.calManifestPath);
     const String runningCal = Identity::installedCalVersion();
@@ -670,28 +684,28 @@ void setup() {
   // entire safety argument is that the survivor of a failed update can retry.
   // The survivor could not retry, because it did not believe anything was wrong.
   const bool haveApp = Updater::haveBootableApplication();
-  const bool needsInstall =
-      manifest.ok && manifest.isConfigured &&
-      (manifest.version != Identity::installedAppVersion() || !haveApp);
+  const bool needsInstall = manifest.needsInstall(Identity::installedAppVersion(),
+                                                  haveApp, reloadRequested);
 
-  // Four inputs, so the journal distinguishes "the manifest could not be fetched"
+  // Five inputs, so the journal distinguishes "the manifest could not be fetched"
   // from "the server has no current build marked" from "the build the server
   // names is already installed" from "the versions match but there is nothing on
-  // the flash to run". Those look identical from outside and want four different
-  // investigations.
+  // the flash to run", and an explicit reinstall request. Those look identical
+  // from outside and want different investigations.
   //
   // KEPT SHORT ON PURPOSE. Log::printf formats into a fixed 256-byte scratch and
   // truncates past it. A first version of this line spelled out "(same version,
   // but nothing bootable is installed)" and was cut mid-sentence on device 17 -
   // the verdict survived and the explanation did not, which was luck rather than
-  // design. "noApp" carries the same fact in five characters.
-  Journal::printf("[update] install? manifestOk=%d isConfigured=%d bootableApp=%d "
-                  "offered='%s' installed='%s' -> %s%s",
+  // design. The decision and version strings now have separate lines.
+  Journal::printf("[update] install? manifestOk=%d isConfigured=%d bootableApp=%d reload=%d -> %s",
                   manifest.ok ? 1 : 0, manifest.isConfigured ? 1 : 0, haveApp ? 1 : 0,
-                  manifest.version.c_str(), Identity::installedAppVersion().c_str(),
-                  needsInstall ? "YES" : "no",
-                  (needsInstall && manifest.version == Identity::installedAppVersion())
-                      ? " (noApp)" : "");
+                  reloadRequested ? 1 : 0, needsInstall ? "YES" : "no");
+  Journal::printf("[update] offered='%s' installed='%s'", manifest.version.c_str(),
+                  Identity::installedAppVersion().c_str());
+  if (reloadRequested && !needsInstall) {
+    Journal::line("[update] reload remains pending - no usable current App manifest");
+  }
 
   if (needsInstall) {
     if (!Updater::installApplication(discovery, manifest)) {
@@ -709,7 +723,7 @@ void setup() {
       haltWithFailure("Update failed",
                       "Restart the device to try again.");
     }
-  } else if (manifest.ok) {
+  } else if (manifest.ok && !reloadRequested) {
     // installApplication() clears updateRequested on the path that actually
     // installs something. This is the other successful path - the server was
     // reached and confirmed the running version is already current - and it
@@ -744,10 +758,21 @@ void setup() {
   if (discovery.qrUrl.length() > 0) {
     Journal::printf("[boot] nothing to hand over to - showing the server's QR (%s)",
                     discovery.qrUrl.c_str());
-    Display::showQr(discovery.qrUrl,
+    const auto drawQr = [&]() {
+      Display::showQr(discovery.qrUrl,
                     discovery.qrCaption.length() > 0 ? discovery.qrCaption
                                                      : "Scan to get started",
                     "");
+    };
+    drawQr();
+    Recovery::begin();
+    while (true) {
+      Journal::poll();
+      const Recovery::InputResult input = Recovery::poll();
+      if (input.action != Recovery::Action::None) Recovery::execute(input.action);
+      if (input.restore) drawQr();
+      delay(10);
+    }
   } else {
     Journal::line("[boot] nothing to hand over to and discovery supplied no QR URL - "
                   "showing the not-yet-activated screen");

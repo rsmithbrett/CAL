@@ -10,6 +10,7 @@
 #include "Display.h"
 #include "Identity.h"
 #include "Journal.h"
+#include "Recovery.h"
 
 namespace Provisioning {
 namespace {
@@ -562,7 +563,6 @@ bool run() {
   // one left behind.
   gStage = Stage::Waiting;
 
-  const uint32_t deadline = millis() + Config::kProvisioningAbandonTimeoutMs;
   bool abandoned = false;
   int lastStationCount = 0;
 
@@ -576,7 +576,10 @@ bool run() {
   // a screen. Going back to the code when the last station leaves is what lets a
   // second phone, or the same one after it drops, start again without a restart.
   Stage drawnStage = Stage::Waiting;
-  while (!credentialsAccepted) {
+  Recovery::begin();
+  Recovery::Action pendingAction = Recovery::Action::None;
+  uint32_t lastMenuActivity = millis();
+  while (!credentialsAccepted || Recovery::visible()) {
     // iOS may associate, fetch the captive page and never bring CNA onscreen.
     // Association timing gives a firm baseline for comparing Camera/Settings.
     const int stationCount = WiFi.softAPgetStationNum();
@@ -590,7 +593,12 @@ bool run() {
     // A TAP ANYWHERE PUTS THE CODE BACK. The screen can be wrong - a phone that
     // slept leaves us saying Connected until the deauth arrives - and this is the
     // way out that needs no explanation and cannot make anything worse.
-    if (Display::wasTapped()) {
+    const Recovery::InputResult input = Recovery::poll(gStage == Stage::Waiting);
+    if (input.action != Recovery::Action::None) {
+      pendingAction = input.action;
+      break;  // Close HTTP, DNS and the AP before restarting.
+    }
+    if (input.tapped && !Recovery::visible()) {
       Journal::printf("[portal] tapped at +%lu ms - showing the code again",
                       static_cast<unsigned long>(millis() - portalStartedMs));
       gStage = Stage::Waiting;
@@ -600,7 +608,7 @@ bool run() {
     // repaints when it changes. Both calls clear the whole panel, so redrawing on
     // every pass would be a flicker rather than a screen.
     const Stage stage = gStage;
-    if (stage != drawnStage) {
+    if (!Recovery::visible() && (stage != drawnStage || input.restore)) {
       drawnStage = stage;
       switch (stage) {
         case Stage::Joined:
@@ -618,7 +626,11 @@ bool run() {
           break;
       }
     }
-    if (millis() >= deadline) {
+    // Keep servicing the portal under the menu; a phone may submit its form.
+    // A submitted form waits for Back/timeout rather than dismissing the menu.
+    if (Recovery::visible()) lastMenuActivity = millis();
+    if (!Recovery::visible() &&
+        static_cast<uint32_t>(millis() - lastMenuActivity) >= Config::kProvisioningAbandonTimeoutMs) {
       abandoned = true;
       break;
     }
@@ -628,9 +640,10 @@ bool run() {
     delay(2);
   }
 
-  if (!abandoned) {
+  Recovery::end();
+  if (!abandoned && credentialsAccepted) {
     delay(400);  // let the acknowledgement page reach the handset
-  } else {
+  } else if (abandoned) {
     Journal::printf("[portal] abandoned - nobody submitted credentials within %lu ms",
                     static_cast<unsigned long>(Config::kProvisioningAbandonTimeoutMs));
   }
@@ -638,6 +651,7 @@ bool run() {
   dns.stop();
   WiFi.softAPdisconnect(true);
   cachedNetworkOptionsHtml = "";
+  if (pendingAction != Recovery::Action::None) Recovery::execute(pendingAction);
   Journal::printf("[portal] closed; probes=%u, returning %s",
                   static_cast<unsigned>(probeRequests), abandoned ? "false" : "true");
   return !abandoned;

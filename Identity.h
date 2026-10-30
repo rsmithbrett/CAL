@@ -90,6 +90,11 @@ void setInstalledAppVersion(const String& version);
 bool updateRequested();
 void setUpdateRequested(bool requested);
 
+/// Explicit CAL-menu reinstall, even when the server's version matches. Kept
+/// until an App installation succeeds; does not erase identity or app metadata.
+bool appReloadRequested();
+void setAppReloadRequested(bool requested);
+
 /// Incremented by CAL immediately before handing control to the application,
 /// and cleared by the application once it reaches steady state. A value above
 /// the threshold means the installed application is not surviving boot, and CAL
