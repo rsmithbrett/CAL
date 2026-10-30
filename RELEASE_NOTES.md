@@ -23,6 +23,12 @@ dated heading after.
 
 ## Unreleased
 
+Nothing yet.
+
+---
+
+## v2026.10.30.0001
+
 ### A display can show the household's own photographs — App
 
 A family uploads pictures on their own page and ticks which ones they want up. The
