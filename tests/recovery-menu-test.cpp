@@ -60,14 +60,18 @@ void stateTests() {
   assert(!c.update(clockMs + 1, true, 20, 60).tapped); // held/dragged finger
   assert(tap(c, 40, 110).action == Action::None);
   assert(c.screen() == Screen::ConfirmIdentity);
-  assert(tap(c, 30, 200).action == Action::None); // Cancel
+  // Cancel is the RIGHT button and Confirm the LEFT one, so bottom-right means
+  // leave on this screen exactly as it does on the menu. kCancel spans x 168..304
+  // and kConfirm x 16..152; tapping them the other way round is what this file
+  // did until the link error above stopped anybody finding out.
+  assert(tap(c, 200, 200).action == Action::None); // Cancel, on the right
   assert(c.screen() == Screen::Menu);
   tap(c, 40, 110);
-  assert(tap(c, 200, 200).action == Action::ResetIdentity);
+  assert(tap(c, 40, 200).action == Action::ResetIdentity); // Confirm, on the left
   c.reset(); open(c);
   assert(tap(c, 40, 155).action == Action::None);
   assert(c.screen() == Screen::ConfirmReload);
-  assert(tap(c, 200, 200).action == Action::ReloadApplication);
+  assert(tap(c, 40, 200).action == Action::ReloadApplication); // Confirm, on the left
   c.reset(); open(c);
   assert(tap(c, 40, 60).action == Action::WifiSetup);
   c.reset(); open(c);
