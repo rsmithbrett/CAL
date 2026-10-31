@@ -8,9 +8,9 @@ table, and that even if it did, there is a millisecond window with no valid tabl
 and no redundant copy.
 
 **A unit left on the old table is not broken.** It keeps working, with less room
-for CAL to grow. There is no deadline; there is only the fact that CAL is
-installed over USB alone, so a device nobody can reach can never take a new CAL
-anyway.
+for CAL to grow. It takes a new CAL over the air like any other device; what it
+does not have is the extra factory headroom, so it is the one that runs out first
+as CAL grows. There is no deadline.
 
 ---
 

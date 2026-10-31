@@ -2814,9 +2814,10 @@ Only two things about the outside world are compiled into CAL (`Config.h`): a
 target, timeouts and branding all come from the discovery document fetched at
 runtime, following §9 of the Device Client Specification.
 
-The reason is that CAL cannot be changed. An IP address compiled into a factory
-partition strands every unit in the field the day the service moves; a name can
-be repointed. For the same reason, discovery returns *paths* rather than full
+The reason is that replacing CAL is the riskiest thing a device does, and the
+route runs through the server it would be losing. An IP address compiled into a
+factory partition strands every unit in the field the day the service moves, with
+no way back; a name can be repointed. For the same reason, discovery returns *paths* rather than full
 URLs — the host is already known, and accepting a host from the document would
 be a way to redirect an entire fleet somewhere unintended. TLS uses the root
 bundle rather than a pinned leaf certificate, because a pinned leaf turns a

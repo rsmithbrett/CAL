@@ -16,10 +16,11 @@ namespace Tls {
 ///
 /// Deliberately validates against a root bundle rather than pinning the leaf.
 /// Pinning is ordinarily good practice on an embedded device and is a liability
-/// here: server certificates rotate on a ninety-day cycle, CAL cannot be
-/// updated over the air, and a device trusting exactly one leaf certificate
-/// would stop working the day that certificate is replaced - taking every unit
-/// in the field with it simultaneously.
+/// here: server certificates rotate on a ninety-day cycle, and CAL reaches this
+/// server over TLS to fetch its own replacement. A device trusting exactly one
+/// leaf certificate would stop working the day that certificate is replaced, and
+/// the route out of that state is the route that just broke - taking every unit
+/// in the field with it at once.
 bool configure(NetworkClientSecure& client);
 
 }  // namespace Tls
