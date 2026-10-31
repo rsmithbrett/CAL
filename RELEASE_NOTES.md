@@ -23,6 +23,12 @@ dated heading after.
 
 ## Unreleased
 
+Nothing yet.
+
+---
+
+## v2026.10.31.0002
+
 ### Six taps on a display that is already running opens configuration - CAL and App
 
 Tap the top-left and top-right corners alternately, six times, on a display that is
