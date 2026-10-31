@@ -179,10 +179,15 @@ void stateTests() {
   assert(!c.visible());
   c.open(clockMs);
   assert(tap(c, 260, 200).restore && !c.visible()); // Back
+  // THE SECOND RUN CONTINUES THE ALTERNATION, starting right, because three taps
+  // left the sequence expecting one. Starting left again would be the wrong
+  // corner, which resets the counter to 1 on its own and would let this pass
+  // whether open() cleared step_ or not - which is exactly what it did on the
+  // first attempt, and the mutation run is what said so.
   for (int i = 0; i < 3; ++i) {
     clockMs += 200;
     c.update(clockMs - 1, false, 0, 0);
-    c.update(clockMs, true, i % 2 ? 288 : 32, 30);
+    c.update(clockMs, true, i % 2 ? 32 : 288, 30);
   }
   assert(!c.visible()); // three is not six, and the earlier three did not carry
 }
