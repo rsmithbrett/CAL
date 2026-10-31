@@ -20,6 +20,11 @@ bool factorySelected = false, saveFails = false, factoryMissing = false;
 bool updateSaveFails = false;
 int clears = 0, failures = 0, draws = 0;
 Recovery::Screen drawn = Recovery::Screen::Closed;
+// The second argument production passes to showRecoveryMenu. Recorded rather
+// than dropped so the stub cannot quietly diverge from the real signature
+// again - it took both arguments for a week before this was noticed, and the
+// test had not linked on main since.
+bool drawnReloadPending = false;
 PresenceTest::State lastPresence;
 bool presenceSupported = false;
 uint32_t adcMv = 140;
@@ -209,6 +214,10 @@ void integrationTests() {
     fingerDown = true; poll();
   }
   assert(visible() && drawn == Screen::Menu && draws == 1);
+  // The menu is drawn with the reload flag production reads, not without it.
+  // A stub that took one argument where production passed two is what stopped
+  // this whole file linking, so the second argument is asserted, not ignored.
+  assert(drawnReloadPending == reload);
   fingerDown = false; poll();
   clockMs += 200; touchX = 40; touchY = 200; fingerDown = true;
   assert(poll().action == Action::None);
@@ -314,7 +323,9 @@ int esp_ota_set_boot_partition(const esp_partition_t* p) {
 [[noreturn]] void esp_restart() { throw Restart{}; }
 namespace Display {
 bool readTouch(int32_t& x, int32_t& y) { x = touchX; y = touchY; return fingerDown; }
-void showRecoveryMenu(Recovery::Screen screen) { drawn = screen; ++draws; }
+void showRecoveryMenu(Recovery::Screen screen, bool reloadPending) {
+  drawn = screen; drawnReloadPending = reloadPending; ++draws;
+}
 void showFailure(const String&, const String&) { ++failures; }
 void showPresenceTest(const PresenceTest::State& reading, uint32_t, bool supported, bool) {
   lastPresence = reading; presenceSupported = supported; ++presenceDraws;
@@ -336,6 +347,7 @@ void setAppReloadRequested(bool v) { if (!saveFails) reload = v; }
 namespace Journal {
 void line(const char*) {}
 void poll() {}
+void printf(const char*, ...) {}
 }
 namespace BootDiag {
 void recordRestartIntentIfNoneRecorded(RestartCause value) { cause = value; }
