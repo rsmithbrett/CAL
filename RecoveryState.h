@@ -181,7 +181,6 @@ class Controller {
   /// otherwise still be counting when the menu closes.
   void open(uint32_t now) {
     screen_ = Screen::Menu;
-    step_ = 0;
     lastActivity_ = now;
   }
 
