@@ -2323,9 +2323,36 @@ host-ABI size.
 The three `Controller::open` assertions were written after the code they cover,
 not before it. The last of them is the one that bites: drop the `step_` reset
 from `Controller::open` and three corner taps taken before the open still
-count, so three more after the menu closes reopen it with nobody asking. That
-mutation was pushed to a branch and run through `bench-cal.yml`, and the run is
-the evidence, not this paragraph.
+count, so three more after the menu closes reopen it with nobody asking.
+`mut/m12-open-keeps-step` carries exactly that mutation and fails on
+`recovery-menu-test.cpp` line 192, while the same commit without it passes. The
+two runs are the evidence, not this paragraph.
+
+**The first version of that assertion caught nothing, and only a mutation run
+said so.** Its second run of taps started from the left corner again, which is
+the wrong corner after three and resets the counter on its own, so the
+assertion held whether or not `open()` cleared `step_`. It reads as a test of
+the reset and was a test of nothing. Continuing the alternation is what gives
+it teeth. A green mutation run is the only reason this was found before it
+shipped.
+
+### 16c. The release is gated on this test
+
+`build-and-release.yml` runs `ci/test-recovery-menu.sh` as its first step, so a
+failing host test stops the release rather than being reported after it. Before
+that, `bench-cal.yml` was the only runner and it fires on pull requests alone.
+Work that reached main by merge never re-ran it, and on 2026-10-30 the test
+stopped linking for a week without anybody finding out: `showRecoveryMenu` grew
+a `reloadPending` argument and `Journal::printf` arrived with the boot hold,
+while the stubs kept the old shapes. Three releases published over it,
+`v2026.10.30.0003` among them, which is the loader currently marked current on
+both boards.
+
+Repairing the link then exposed a second thing the link error had been hiding:
+the confirmation taps still addressed the pre-swap button positions, so the
+test asserted Cancel where Confirm now sits. The swap was made to stop
+bottom-right meaning "Reset" on one screen and "leave" on another, and the test
+that should have guarded it was asserting the trap.
 
 `ci/test-recovery-menu.sh` builds and runs it twice, once plain and once with
 `-DCONFIG_IDF_TARGET_ESP32S3=1`, under `g++ -std=c++17 -Wall -Wextra -Werror`,

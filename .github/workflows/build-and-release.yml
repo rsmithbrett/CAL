@@ -49,6 +49,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # THE RELEASE DOES NOT PUBLISH OVER A FAILING HOST TEST. First step, before
+      # the core install, because it needs no toolchain and a failure here should
+      # cost seconds rather than the whole build.
+      #
+      # bench-cal.yml runs the same script, but only on pull requests. Work that
+      # reaches main by merge never re-ran it, and the test stopped linking on
+      # 2026-10-30 without anybody finding out: a stub kept a one-argument
+      # signature that production had grown a second argument to, and three
+      # releases published while the only automated test in this repository did
+      # not build. This step is what makes that impossible rather than unlikely.
+      - name: Test recovery gesture and actions on host
+        run: bash ci/test-recovery-menu.sh
+
       - name: Install arduino-cli
         uses: arduino/setup-arduino-cli@v2
 
