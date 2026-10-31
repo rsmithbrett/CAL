@@ -14,6 +14,7 @@
 
 #include "Actions.h"
 #include "Config.h"
+#include "ConfigRequest.h"
 #include "Display.h"
 #include "HeapRatchet.h"
 #include "Identity.h"
@@ -1349,6 +1350,12 @@ void pollTouch() {
   if (Motion::noteTouchAndShouldSwallow()) {
     return;
   }
+
+  // After the wake swallow above, so the tap that lights a dark panel is not
+  // counted toward the gesture - somebody waking a display is not asking for
+  // configuration. Before handleTap, because the sixth tap restarts the device
+  // from inside this call and the card underneath should not act on it as well.
+  ConfigRequest::noteTap(millis(), tap.x, tap.y);
 
   handleTap(tap);
 }

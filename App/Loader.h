@@ -13,6 +13,15 @@ namespace Loader {
 /// Never returns.
 [[noreturn]] void requestUpdate();
 
+/// Asks CAL to open its configuration menu, after six corner taps on a running
+/// display. Never returns.
+///
+/// Sets two flags, and both are needed. cfgmenu is what CAL reads to know it
+/// should open the menu; updateRequested is what makes CAL draw at all on this
+/// boot rather than handing the panel straight back, and without the panel up
+/// there is no touch for the menu rows to read. See CAL_TOUCH_RECOVERY_MENU.md.
+[[noreturn]] void requestConfigMenu();
+
 /// Forgets the locally stored device secret, then reboots into CAL (with the
 /// same update-requested flag requestUpdate() sets, so CAL does its own WiFi
 /// join rather than handing straight back to this same App) after the server

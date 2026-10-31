@@ -2314,9 +2314,18 @@ confirmations, Cancel, Back, menu expiry and `millis()` rollover on both timers;
 the live screens outlasting the 60-second menu timeout; GPIO paging, mode
 switching and counters surviving a page change; each action's persisted intent,
 secret removal or preservation, recorded restart cause, and the failure paths
-that must stop without restarting; and `Updater::Manifest::needsInstall()`
+that must stop without restarting; the menu opening with no gesture at the
+App's request, its idle clock running from that open, and a half-finished
+sequence not carrying across it; and `Updater::Manifest::needsInstall()`
 including a same-version forced reload. It prints `PASS:` and the controller's
 host-ABI size.
+
+The three `Controller::open` assertions were written after the code they cover,
+not before it. The last of them is the one that bites: drop the `step_` reset
+from `Controller::open` and three corner taps taken before the open still
+count, so three more after the menu closes reopen it with nobody asking. That
+mutation was pushed to a branch and run through `bench-cal.yml`, and the run is
+the evidence, not this paragraph.
 
 `ci/test-recovery-menu.sh` builds and runs it twice, once plain and once with
 `-DCONFIG_IDF_TARGET_ESP32S3=1`, under `g++ -std=c++17 -Wall -Wextra -Werror`,

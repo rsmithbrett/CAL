@@ -142,6 +142,40 @@ void stateTests() {
   assert(!c.visible()); // not on a QR screen
   c.reset(true);
   assert(!c.update(clockMs, true, 32, 30).tapped);
+
+  // THE APP'S REQUEST OPENS THE MENU WITH NO GESTURE. CAL calls Controller::open
+  // on the boot that follows six taps on the running App, having cleared cfgmenu
+  // first. See CAL_TOUCH_RECOVERY_MENU.md.
+  c.reset();
+  assert(!c.visible());
+  c.open(clockMs);
+  assert(c.visible() && c.screen() == Screen::Menu);
+  assert(tap(c, 40, 60).action == Action::WifiSetup); // rows live immediately
+
+  // The idle clock runs from the open, so a menu nobody touches still closes.
+  c.reset();
+  c.open(clockMs);
+  assert(c.update(clockMs + kMenuIdleMs, false, 0, 0).restore);
+  assert(!c.visible());
+
+  // A HALF-FINISHED GESTURE DOES NOT SURVIVE THE OPEN. Drop the step_ reset from
+  // Controller::open and the three taps below leave the counter at 3, so the
+  // three after the menu closes reach six and reopen it with nobody asking.
+  c.reset();
+  for (int i = 0; i < 3; ++i) {
+    clockMs += 200;
+    c.update(clockMs - 1, false, 0, 0);
+    c.update(clockMs, true, i % 2 ? 288 : 32, 30);
+  }
+  assert(!c.visible());
+  c.open(clockMs);
+  assert(tap(c, 260, 200).restore && !c.visible()); // Back
+  for (int i = 0; i < 3; ++i) {
+    clockMs += 200;
+    c.update(clockMs - 1, false, 0, 0);
+    c.update(clockMs, true, i % 2 ? 288 : 32, 30);
+  }
+  assert(!c.visible()); // three is not six, and the earlier three did not carry
 }
 
 void resetActions() {

@@ -114,6 +114,12 @@ bool holdBootForTouch() {
   }
 }
 
+void openMenu() {
+  begin();
+  controller.open(millis());
+  Display::showRecoveryMenu(controller.screen(), Identity::appReloadRequested());
+}
+
 void end() {
   enabled = false;
   controller.reset();

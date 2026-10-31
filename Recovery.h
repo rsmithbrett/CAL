@@ -31,6 +31,16 @@ InputResult poll(bool gestureAllowed = true);
 /// stop every boot of the one image that cannot be replaced except over the air.
 bool holdBootForTouch();
 
+/// Opens configuration directly, for the boot that follows six taps on the
+/// running App. The App sets cfgmenu and restarts; CAL clears the flag and calls
+/// this. Draws the menu, so the caller polls exactly as it does after
+/// holdBootForTouch() returns true.
+///
+/// The panel is already up on this boot because the App sets updreq alongside
+/// cfgmenu - see CAL_TOUCH_RECOVERY_MENU.md. This does not check that; begin()
+/// reads the touch through Display, which starts the panel on its own.
+void openMenu();
+
 // Caller closes any live portal first. Persists a request, selects factory,
 // then restarts. A storage/boot-selection failure stops with an explicit error.
 [[noreturn]] void execute(Action action);

@@ -21,6 +21,7 @@ constexpr const char* kKeyNetCount = "netcount";
 constexpr const char* kKeyAppVer = "appver";
 constexpr const char* kKeyUpdReq = "updreq";
 constexpr const char* kKeyAppReload = "appreload";
+constexpr const char* kKeyCfgMenu = "cfgmenu";
 constexpr const char* kKeyBootAtt = "bootatt";
 constexpr const char* kKeyProvForced = "provforced";
 // Phase 2 of the CAL-over-the-air design. A candidate CAL sitting in ota_0
@@ -195,6 +196,10 @@ void setUpdateRequested(bool requested) { prefs.putBool(kKeyUpdReq, requested); 
 bool appReloadRequested() { return prefs.getBool(kKeyAppReload, false); }
 
 void setAppReloadRequested(bool requested) { prefs.putBool(kKeyAppReload, requested); }
+
+bool configMenuRequested() { return prefs.getBool(kKeyCfgMenu, false); }
+
+void setConfigMenuRequested(bool requested) { prefs.putBool(kKeyCfgMenu, requested); }
 
 uint8_t bootAttempts() { return prefs.getUChar(kKeyBootAtt, 0); }
 

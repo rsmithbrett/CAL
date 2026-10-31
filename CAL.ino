@@ -525,6 +525,36 @@ void setup() {
                   "screen CAL still needs brings the panel up by itself");
   }
 
+  // SIX TAPS ON THE RUNNING APP LAND HERE. The App sets cfgmenu and restarts.
+  // It sets updreq alongside it, and that is what put this boot on the drawing
+  // path above rather than the quiet handover, so the panel is up and the rows
+  // can be touched. See CAL_TOUCH_RECOVERY_MENU.md.
+  //
+  // Cleared before the menu opens, not after. A restart or a power loss taken
+  // while it is up comes back to a normal boot; the other order reopens this
+  // menu on every boot until one of them finishes.
+  if (Identity::configMenuRequested()) {
+    Identity::setConfigMenuRequested(false);
+    if (Identity::configMenuRequested()) {
+      Journal::line("[recovery] cannot clear the configuration request - not opening it, "
+                    "because a request that will not clear reopens on every boot");
+    } else {
+      Journal::line("[recovery] configuration opened at the App's request");
+      Recovery::openMenu();
+      while (Recovery::visible()) {
+        Journal::poll();
+        const Recovery::InputResult input = Recovery::poll();
+        if (input.action != Recovery::Action::None) Recovery::execute(input.action);
+        if (input.restore) {
+          if (!Display::showBrandSplash()) Display::showNeutralSplash();
+        }
+        delay(10);
+      }
+      Recovery::end();
+      Journal::line("[recovery] configuration closed - the boot continues");
+    }
+  }
+
   // THE BOOT HOLD. A touch here stops the sequence while somebody keeps tapping,
   // and six corner taps open configuration. It runs only where CAL drew the
   // splash, because the other path deliberately leaves the panel untouched - no

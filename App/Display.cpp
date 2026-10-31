@@ -3561,31 +3561,47 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
 
     const int text = top + 9;
 
-    // The five columns, written as the edges they actually are. A name column
-    // takes its x as a left edge and a score or status column takes its x as a
-    // right edge, which is what Align does with it, so on the 320px panel they
-    // occupy 14..100, 100..126, 136..222, 222..248 and 250..306 inside the
-    // 14..306 the margins leave. Reading a right-aligned x as a left edge puts
-    // the home score at 248..274 and has it collide with the status; it does
-    // not, and the two sit 2px apart.
-    constexpr int kNameWidth = 86;
+    // THE FIVE COLUMNS ARE DERIVED FROM THE PANEL, NOT WRITTEN DOWN. They were
+    // literals offset from kCardMargin, which held only at 320px wide. On the
+    // 240px portrait panel homeScoreRight landed at 248, eight pixels past the
+    // glass, and the status width that subtracts it came out at 4 - so the
+    // status drew as a bare ellipsis across the home name's last eight pixels,
+    // and the kickoff time was not on the screen at all.
+    //
+    // A name column takes its x as a left edge and a score or status column
+    // takes its x as a right edge, which is what Align does with it.
     constexpr int kScoreWidth = 26;
     constexpr int kStatusWidth = 56;
-    const int awayNameLeft = kCardMargin + 4;
-    const int awayScoreRight = kCardMargin + 116;
-    const int homeNameLeft = kCardMargin + 126;
-    const int homeScoreRight = kCardMargin + 238;
-    const int statusRight = kContentRight() - 4;
+    constexpr int kColumnGap = 6;
+    constexpr int kMinNameWidth = 24;
 
-    // A game that has not started draws no score, so both score columns are
-    // empty in the one state where the status holds a clock time instead of
-    // FINAL or a period. "10:00 PM" is about 72px of FreeSansBold9pt7b against
-    // the 56 the column has, and it has been drawing as "10:00...". A scoreless
-    // row gives the status the home score's column and the gap beside it, 84px;
-    // a row with a score keeps 56 and does not move.
+    const int rowLeft = kCardMargin + 4;
+    const int rowRight = kContentRight() - 4;
+
+    // A game that has not started draws no score, so both score columns stand
+    // empty in the one state where the status holds a clock time. Those 26px
+    // each go to the names rather than sitting as a gap, which is what gets
+    // "Red Wings" and "Lightning" onto the 320px panel whole.
     const bool scoreless = row.awayScore[0] == '\0' && row.homeScore[0] == '\0';
-    const int statusWidth =
-        scoreless ? statusRight - (homeScoreRight - kScoreWidth) : kStatusWidth;
+    const int scoreWidth = scoreless ? 0 : kScoreWidth;
+
+    // Everything that is not a name, the three gaps between the four blocks
+    // included. What is left splits evenly between the two names. The floor
+    // keeps a name box drawable on a panel narrower than anything shipped.
+    const int fixedWidth = 2 * scoreWidth + kStatusWidth + 3 * kColumnGap;
+    const int shared = (rowRight - rowLeft - fixedWidth) / 2;
+    const int kNameWidth = shared > kMinNameWidth ? shared : kMinNameWidth;
+
+    const int awayNameLeft = rowLeft;
+    const int awayScoreRight = awayNameLeft + kNameWidth + scoreWidth;
+    const int homeNameLeft = awayScoreRight + kColumnGap;
+    const int homeScoreRight = homeNameLeft + kNameWidth + scoreWidth;
+    const int statusRight = rowRight;
+
+    // The status keeps its own column in every state now. A scoreless row used
+    // to borrow the home score's width here; the names absorb that slack
+    // instead, above, which is the whole point of deriving them.
+    const int statusWidth = kStatusWidth;
 
     // Away first, home second, which is how a scoreline is read aloud and what
     // the single-game card does.

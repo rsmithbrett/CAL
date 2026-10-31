@@ -114,6 +114,33 @@ elapsed time, including across the `millis()` rollover. The sequence is a
 convenience for a physically present operator, not an authentication boundary.
 The menu displays and logs no credentials.
 
+### Reaching it from a running App
+
+Six taps on a device that's already showing cards open the same menu. The App
+watches the same two corner zones, and on the sixth tap it sets `cfgmenu`
+alongside `updreq` and restarts.
+
+This is the way in that matters on a healthy device. The boot hold below covers
+a power-on, where CAL draws the splash and listens for 1,200 ms. It can't cover
+a software restart: that boot hands the panel to the App without `lcd.init()`,
+so `Display::readTouch()` tests `gPanelStarted` against a panel that was never
+started and returns false every time. A finger on a running device is the only
+contact CAL can act on, and the App is the binary holding it.
+
+`updreq` is what makes the menu operable rather than merely requested. It turns
+`mustContactServer()` true, which turns `appOwnsThePanelThisBoot()` false, which
+puts CAL back on the path that calls `Display::begin()`. The panel comes up, so
+touch reads, so the rows respond. Setting `cfgmenu` on its own would open a menu
+on a panel CAL never started.
+
+CAL reads `cfgmenu` once and clears it before acting, then opens Configuration
+without waiting for the gesture a second time. Clearing first means a restart
+taken while the menu is open returns to a normal boot rather than back here.
+
+Both binaries share the `cal` NVS namespace and always have, which is how
+`updreq` already travels from the App to CAL. The zones and the tap count come
+from `RecoveryState.h`, so the two binaries can't drift on what six taps means.
+
 ## The boot hold
 
 `Recovery::holdBootForTouch()` runs the same opening gesture on the startup
@@ -153,7 +180,7 @@ figure and says to suspect the touch controller.
 The hold is skipped on the one boot where the App owns the loading screen. That
 path leaves the panel untouched deliberately, with no `lcd.init()`, so there is
 no touch to read, and bringing the panel up would be the duplicate draw that
-path exists to avoid. See
+path exists to avoid. That boot is reached from the App instead, above. See
 [BOOT_SCREEN_OWNERSHIP.md](BOOT_SCREEN_OWNERSHIP.md).
 
 ## Portal and enrollment behavior

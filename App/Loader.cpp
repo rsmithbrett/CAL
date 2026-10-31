@@ -39,6 +39,18 @@ void requestUpdate() {
   bootFactoryAndRestart();
 }
 
+void requestConfigMenu() {
+  Identity::setConfigMenuRequested(true);
+  Identity::setUpdateRequested(true);
+  // Said rather than assumed. If NVS refused the write the device restarts into
+  // an ordinary boot and the menu never appears, and somebody watching the
+  // stream needs to be able to tell that from a gesture that was never seen.
+  Log::line(Identity::configMenuRequested()
+                ? "[loader] configuration menu requested - rebooting into CAL"
+                : "[loader] configuration menu request would not save - rebooting anyway");
+  bootFactoryAndRestart();
+}
+
 void returnToLoaderForReprovisioning() {
   // Deliberately does NOT call Identity::setProvisioningForced(true). That
   // flag exists for one reason - CAL.ino's BOOT-button gesture ("we moved it

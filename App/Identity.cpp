@@ -18,6 +18,7 @@ constexpr const char* kKeySecret = "secret";
 constexpr const char* kKeyNetCount = "netcount";
 constexpr const char* kKeyAppVer = "appver";
 constexpr const char* kKeyUpdReq = "updreq";
+constexpr const char* kKeyCfgMenu = "cfgmenu";
 constexpr const char* kKeyBootAtt = "bootatt";
 constexpr const char* kKeyProvForced = "provforced";
 constexpr const char* kKeyTotBoots = "totboots";
@@ -244,6 +245,10 @@ void setInstalledAppVersion(const String& version) {
 bool updateRequested() { return prefs.getBool(kKeyUpdReq, false); }
 
 void setUpdateRequested(bool requested) { prefs.putBool(kKeyUpdReq, requested); }
+
+bool configMenuRequested() { return prefs.getBool(kKeyCfgMenu, false); }
+
+void setConfigMenuRequested(bool requested) { prefs.putBool(kKeyCfgMenu, requested); }
 
 uint8_t bootAttempts() { return prefs.getUChar(kKeyBootAtt, 0); }
 

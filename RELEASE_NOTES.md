@@ -23,7 +23,27 @@ dated heading after.
 
 ## Unreleased
 
-Nothing yet.
+### Six taps on a display that is already running opens configuration - CAL and App
+
+Tap the top-left and top-right corners alternately, six times, on a display that is
+showing cards, and the configuration menu opens. The display restarts once on the way
+there, so give it a few seconds.
+
+Until now that menu could only be reached in the first 1.2 seconds after plugging the
+display in, while the startup screen was still up, and not at all on a display that had
+restarted itself. The menu is the same one either way: Wi-Fi setup, reset identity,
+reload the application, and diagnostics.
+
+### Team names and start times fit the scoreboard - App
+
+The scoreboard was cutting team names short, so the Blackhawks read as "Blackha..." and
+the Red Wings as "Red...". On a display standing on its end it was worse: the start
+times were pushed off the edge of the screen and drew as three dots on top of the team
+name next to them, so a row showed neither the full name nor when the game starts.
+
+Every column now sizes itself to the display it is on, and a game that has not started
+hands its two empty score columns to the team names. On a display lying flat that takes
+a name from 86 to 109 pixels, which fits every name that was being cut.
 
 ---
 

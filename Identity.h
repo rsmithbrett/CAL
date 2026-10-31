@@ -95,6 +95,17 @@ void setUpdateRequested(bool requested);
 bool appReloadRequested();
 void setAppReloadRequested(bool requested);
 
+/// Set by the application when six corner taps ask for configuration, and read
+/// once by CAL on the next boot. CAL clears it before the menu opens, so a
+/// restart taken while the menu is up comes back to a normal boot.
+///
+/// The application sets updateRequested alongside this one, and that is what
+/// makes the menu usable rather than merely asked for: without it CAL hands the
+/// panel over without lcd.init(), readTouch() reads a panel that was never
+/// started, and the rows would not respond. See CAL_TOUCH_RECOVERY_MENU.md.
+bool configMenuRequested();
+void setConfigMenuRequested(bool requested);
+
 /// Incremented by CAL immediately before handing control to the application,
 /// and cleared by the application once it reaches steady state. A value above
 /// the threshold means the installed application is not surviving boot, and CAL

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <ConfigGesture.h>
 
 // No Arduino or display dependency: the input state machine can be exercised
 // on a host, including clock wrap, held fingers and destructive confirmation.
@@ -59,7 +60,23 @@ constexpr Rect kCancel = {168, 180, 136, 44};
 constexpr Rect kGestureLeft = {0, 0, 64, 44};
 constexpr Rect kGestureRight = {256, 0, 64, 44};
 
-constexpr uint32_t kGestureWindowMs = 8000;
+// The App watches for the same gesture on a running display and asks CAL for
+// the menu by setting cfgmenu. It measures its corners from the panel it is on,
+// because it also runs on one standing on its end, so what the two binaries
+// share is the shape rather than these rectangles. These assertions are what
+// keep them the same shape - the same arrangement App/Motion.cpp uses to keep
+// its presence pin and PresenceInput.h from drifting apart.
+static_assert(kGestureLeft.w == ConfigGesture::kZoneWidth &&
+                  kGestureRight.w == ConfigGesture::kZoneWidth,
+              "CAL and App must agree how far in from an edge a corner reaches.");
+static_assert(kGestureLeft.h == ConfigGesture::kZoneHeight &&
+                  kGestureRight.h == ConfigGesture::kZoneHeight,
+              "CAL and App must agree how far down a corner reaches.");
+static_assert(kGestureLeft.x == 0, "The left corner starts at the left edge.");
+static_assert(kGestureRight.x + kGestureRight.w == 320,
+              "The right corner ends at the right edge of CAL's landscape panel.");
+
+constexpr uint32_t kGestureWindowMs = ConfigGesture::kWindowMs;
 constexpr uint32_t kMenuIdleMs = 60000;
 
 /// How long a live diagnostics screen may sit untouched. Generous rather than
@@ -154,6 +171,18 @@ class Controller {
     haveTap_ = false;
     gpioPage_ = 0;
     gpioAll_ = false;
+  }
+
+  /// Opens the menu with no gesture, for the boot where the App asked for it by
+  /// setting cfgmenu. The idle clock starts now, so a menu nobody touches closes
+  /// on kMenuIdleMs the same way a gesture-opened one does.
+  ///
+  /// step_ is cleared because a half-finished sequence from before would
+  /// otherwise still be counting when the menu closes.
+  void open(uint32_t now) {
+    screen_ = Screen::Menu;
+    step_ = 0;
+    lastActivity_ = now;
   }
 
   Screen screen() const { return screen_; }

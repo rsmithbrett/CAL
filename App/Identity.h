@@ -198,6 +198,16 @@ void setInstalledAppVersion(const String& version);
 bool updateRequested();
 void setUpdateRequested(bool requested);
 
+/// Asks CAL to open its configuration menu on the next boot. Set by the six
+/// corner taps in CardManager, alongside setUpdateRequested(true).
+///
+/// Both flags are needed and they do different jobs. This one tells CAL what to
+/// show; updateRequested is what puts CAL back on the path that calls
+/// Display::begin(), without which the panel is never started and the menu would
+/// have no touch to read. CAL clears this one before the menu opens.
+bool configMenuRequested();
+void setConfigMenuRequested(bool requested);
+
 /// Incremented by CAL immediately before handing control to the application,
 /// and cleared by the application once it reaches steady state. A value above
 /// the threshold means the installed application is not surviving boot, and CAL
