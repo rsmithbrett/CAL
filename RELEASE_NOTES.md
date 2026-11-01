@@ -23,6 +23,10 @@ dated heading after.
 
 ## Unreleased
 
+Nothing yet.
+
+## v2026.11.01.0003
+
 ### A game in progress shows what part of the game it's in - App
 
 On a scoreboard row for a game being played, the right-hand column says what part of
