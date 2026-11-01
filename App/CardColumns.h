@@ -88,7 +88,7 @@ constexpr int kBoardWidestPeriodTextWidth = 94;
 /// largest floor that still leaves the 240px panel room to hand a start time
 /// the 80px a start time measures. TEXT_LAYOUT_DESIGN.md section 15h has what
 /// it costs each name column at each panel width.
-constexpr int kBoardNameFloor = 31;
+constexpr int kBoardNameFloor = 56;
 
 /// How far in from each edge of the panel the first and last column edge sit, on
 /// top of kCardMargin.
