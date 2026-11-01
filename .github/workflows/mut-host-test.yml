@@ -68,6 +68,7 @@ jobs:
       # The byte counts, so a branch can be compared with another branch's run.
       # Both boards, both binaries.
       - name: Report the compiled sizes
+        id: sizes
         run: |
           set -euo pipefail
           for f in build/esp32.esp32.esp32/CAL.ino.bin \
@@ -80,3 +81,17 @@ jobs:
               printf 'SIZE missing %s\n' "$f"
             fi
           done
+          LABEL=sizes
+          for f in build/esp32.esp32.esp32/CAL.ino.bin \
+                   build/esp32.esp32.esp32s3/CAL.ino.bin \
+                   App/build/esp32.esp32.esp32/App.ino.bin \
+                   App/build/esp32.esp32.esp32s3/App.ino.bin; do
+            if [ -f "$f" ]; then LABEL="$LABEL-$(stat -c %s "$f")"; else LABEL="$LABEL-missing"; fi
+          done
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+          echo "$LABEL"
+      - name: Put the sizes in an artifact name
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.sizes.outputs.label }}
+          path: .github/workflows/mut-host-test.yml
