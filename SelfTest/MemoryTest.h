@@ -15,12 +15,16 @@ namespace MemoryTest {
 /// come from them.** `freeHeap*` now carries
 /// heap_caps_get_free_size(MALLOC_CAP_8BIT) and `maxAllocHeap*` carries
 /// heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) - see MemoryTest.cpp for
-/// the measurement showing the wrappers overstate by ~4x on this board. The
-/// names stay because they are the JSON keys in the self-test report the
-/// server already parses (SelfTestReportRequest), and the server must keep
-/// accepting reports from firmware up to six months old; renaming the wire
-/// field to match the improved source would break exactly that. Read them as
-/// "8-bit free" and "8-bit largest block" regardless of what they are called.
+/// the measurement showing the wrappers overstate by ~4x on this board. Read
+/// them as "8-bit free" and "8-bit largest block" regardless of what they are
+/// called.
+///
+/// These are this structure's own field names and not wire field names. The
+/// report's memory object carries freeHeapBeforeBytes, freeHeapAfterBytes,
+/// largestFreeBlockBeforeBytes and largestFreeBlockAfterBytes, which
+/// Report.cpp maps these onto - so renaming a field here costs a mapping line
+/// and nothing on the wire. The six-month compatibility mandate binds the
+/// server to field names it has published, not this sketch to its locals.
 struct AllocResult {
   uint32_t requestedBytes = 0;
   bool allocationSucceeded = false;

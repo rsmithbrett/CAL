@@ -2706,49 +2706,74 @@ of it.
 
 `Report.cpp` builds one JSON object per run, logs it in full to the remote
 debug stream unconditionally (so results are visible immediately even if the
-POST below fails or the endpoint isn't live yet), and makes a best-effort
-`POST /api/selftest/report` with the same `X-Device-Secret` header every
-other authenticated request uses. A non-200 response (or no route to the
-server at all) is logged clearly and never blocks or crashes the run — this
-sketch's server-side ingestion endpoint was being built concurrently by a
-separate session at the time this shipped, and a shape or path mismatch is
-expected to surface as a logged non-200 status, reconciled once both sides
-can compare notes, not as a crash.
+POST below fails), and makes a best-effort
+`POST /api/firmware/selftest/report` with the same `X-Device-Secret` header
+every other authenticated request uses. A non-200 response, or no route to the
+server at all, is logged and never blocks or crashes the run.
+
+The path and the shape are the server's `SelfTestReportRequest`, and the server
+test `SelfTestReportWireAgreementTests` holds them there: it reads this sketch's
+`Config.h` and `Report.cpp` off disk and compares the path and the top-level
+member names against that record. This sketch reads no discovery document the
+way CAL does, so a path here that the server does not map costs a reflash to
+correct, which is why the agreement is asserted rather than assumed.
 
 The shape, as implemented:
 
 ```json
 {
   "firmwareVersion": "selftest-1.0.0",
-  "screenTest": { "attempted": true, "passed": true, "detail": "fills=12ms text=8ms png=none-cached" },
-  "sdFormat": {
-    "attempted": true, "mountedBefore": true, "mountedAfter": true,
-    "formatSucceeded": true, "errorDetail": ""
+  "startedAtUtc": "2026-11-01T14:02:11Z",
+  "completedAtUtc": "2026-11-01T14:03:48Z",
+  "screen": { "passed": true, "durationMs": 1840, "detail": "fills=12ms text=8ms png=none-cached" },
+  "sdCard": {
+    "passed": true, "reformatAttempted": true, "reformatSucceeded": true,
+    "capacityBytesBeforeReformat": 31914983424, "durationMs": 20411,
+    "detail": "used 184320KB of 31166976KB at mount"
   },
-  "fileIo": [
-    { "sizeBytes": 2048, "writeSucceeded": true, "writeMs": 9, "readSucceeded": true, "readMs": 6, "verifySucceeded": true, "errorDetail": "" }
-  ],
-  "memoryLoad": [
-    { "requestedBytes": 2048, "allocationSucceeded": true, "freeHeapBefore": 210000, "freeHeapAfter": 207900, "maxAllocHeapBefore": 110000, "maxAllocHeapAfter": 108000 }
-  ],
-  "overallSummary": { "totalTestsRun": 11, "totalPassed": 11, "totalFailed": 0 }
+  "fileIo": {
+    "passed": true, "bytesWritten": 1116160, "bytesRead": 1116160,
+    "verifiedOk": true, "durationMs": 3127,
+    "detail": "2KB w=9ms r=6ms verified; 1024KB w=2810ms r=302ms verified"
+  },
+  "memory": {
+    "passed": true, "freeHeapBeforeBytes": 11340, "freeHeapAfterBytes": 11216,
+    "largestFreeBlockBeforeBytes": 6132, "largestFreeBlockAfterBytes": 6132,
+    "peakAllocatedBytes": 2048, "durationMs": 912,
+    "detail": "2KB ok block 6132->6132; 34KB FAILED block 6132->6132"
+  },
+  "notes": "11 checks, 11 passed, 0 failed"
 }
 ```
 
-`memoryLoad`'s `freeHeap*`/`maxAllocHeap*` keys are named after
+The contract takes one object per category where this sketch runs file I/O at
+four sizes and memory at six. Both collapse to one object carrying the totals,
+with the per-run figures in that object's `detail` string — free text the server
+stores and never parses, so a reader gets the breakdown and a query does not.
+`capacityBytesAfterReformat` is absent because this sketch measures capacity once
+at mount, and repeating that figure would assert a comparison nobody made.
+
+Both timestamps come from `Clock.cpp`, which syncs over SNTP before the suite
+runs. A run whose sync fails omits them rather than sending the epoch, because an
+absent `DateTimeOffset` binds to its own default on the server and a zero would
+be stored as an instant in year one. That sync is also what lets the POST
+validate the server's certificate chain: the check reads the certificate's
+validity window against the system clock, and an unsynced ESP32 starts at 1970,
+which puts every live certificate in the future.
+
+`AllocResult`'s `freeHeap*`/`maxAllocHeap*` fields are named after
 `ESP.getFreeHeap()`/`ESP.getMaxAllocHeap()` but no longer come from them. They
 now carry `heap_caps_get_free_size(MALLOC_CAP_8BIT)` and
 `heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)` — the wrappers were measured
 on this board reporting 49,960 free and 32,756 largest while `MALLOC_CAP_8BIT`
 actually held 11,340 free with a 6,132-byte largest block, so a self-test using
 them would have called a unit healthy on the same night its 5,686-byte decode
-could not allocate. The **keys** keep the old names deliberately: they are a wire
-contract with the server's `SelfTestReportRequest`, and the server has to keep
-accepting reports from firmware up to six months old, so renaming the field to
-match the better source would break precisely that guarantee. Read them as
-"8-bit free" and "8-bit largest block". The example values above are
-illustrative and predate the change — a real ESP32 in this fleet reports figures
-an order of magnitude smaller.
+could not allocate. Those are this sketch's own field names and not wire names:
+`Report.cpp` maps them onto `freeHeapBeforeBytes` and
+`largestFreeBlockBeforeBytes`, so renaming one here costs a mapping line and
+nothing on the wire. The six-month compatibility mandate binds the server to
+field names it has published, not this sketch to its locals. Read them as
+"8-bit free" and "8-bit largest block".
 
 The example's `png=none-cached` is also worth noting: `screenTest` still decodes
 a PNG by reading the whole file into RAM, which is **no longer what App does**
