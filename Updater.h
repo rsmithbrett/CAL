@@ -36,7 +36,14 @@ bool installApplication(const Service::Discovery& discovery, const Manifest& man
                         bool asCalCandidate = false);
 
 /// Caches the brand splash into LittleFS. Purely cosmetic and never fatal:
-/// failure leaves the neutral splash in place.
+/// failure leaves whatever was already cached in place, and a device with
+/// nothing cached shows the neutral splash.
+///
+/// The cached file is replaced only by a response body of `BrandSplash::kBytes`,
+/// so a proxy, a captive portal or a dropped connection cannot put its own
+/// answer where a working splash was. Clears a leftover `/brand.tmp` and a
+/// `/brand.565` of any other length on the way in, whether or not the discovery
+/// document names a brand asset.
 bool cacheBrandAssets(const Service::Discovery& discovery);
 
 /// Hands control to whatever is in `ota_0`. Records a boot attempt first, so an

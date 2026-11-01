@@ -23,7 +23,23 @@ dated heading after.
 
 ## Unreleased
 
-Nothing yet.
+### Your logo stays on the start-up screen - CAL
+
+A display that has been given a brand shows that brand's logo while it starts up, and
+it keeps a copy on the device so the logo is there before the device has reached the
+network. When it refreshed that copy, anything the network handed back was accepted: a
+hotel or cafe sign-in page, a company proxy, or a connection that cut out part-way
+through all answer with something that looks like a reply. The device wrote that over
+the logo it already had, and from then on it started up with the plain "Discover Around
+Me" wordmark. There was no way to get the logo back short of plugging the device into a
+computer.
+
+The device now checks that what came back is the whole picture before it replaces
+anything, and clears out a copy it can't use so the next refresh has room to put a good
+one in. A display that lost its logo this way gets it back on its own the next time it
+takes an update.
+
+Nothing to do, and nothing changes for a display with no brand assigned.
 
 ## v2026.11.01.0001
 
