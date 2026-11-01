@@ -55,6 +55,22 @@ both margins, the right-hand arrow was drawn on top of the row and read as the r
 spilling off its own card. They sit three pixels further out, in the margin, and
 nothing else moves.
 
+## v2026.11.01.0004
+
+Its published body on GitHub reads "Nothing yet." because **Unreleased** had been
+emptied into the section below a few minutes earlier, and nothing refills it on the
+way to a tag. The entry is here instead.
+
+The binaries are the same code as `v2026.11.01.0003`: the range between the two tags
+is this file and four lines. What they carry is described in that section.
+
+The App had not been registered since `v2026.10.30.0001` while four loader releases
+went out, so **this is the release that first put the App changes of 31 October and
+1 November on a display** - the six corner taps that open the configuration menu, and
+a game status column as wide as the string it holds. Eight displays took it over the
+air on 1 November. The loader in this release is not registered and will not be:
+it is byte-for-byte the loader of `v2026.11.01.0003`, which the fleet already runs.
+
 ## v2026.11.01.0003
 
 ### A game in progress shows what part of the game it's in - App
