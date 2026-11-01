@@ -2296,11 +2296,13 @@ would attempt the mount on the board that has no slot. The same trap
 [CAL_TOUCH_RECOVERY_MENU.md](CAL_TOUCH_RECOVERY_MENU.md) and
 [CAL_GPIO_DIAGNOSTICS.md](CAL_GPIO_DIAGNOSTICS.md).
 
-**This is the one part of this repository with a host-runnable test**, which is
-why it gets a section that is mostly about a test rather than mostly about a
-bench. `RecoveryState.h` has no Arduino or display dependency, so the input
-state machine compiles and runs on a workstation with a fake clock, a fake
-finger and stubbed NVS.
+**This was the one part of this repository with a host-runnable test, and there
+are four of them now**: `ci/test-recovery-menu.sh`, `ci/test-loader-order.sh`,
+`ci/test-config-request.sh` and `ci/test-card-columns.sh`. It still gets a
+section that is mostly about a test rather than mostly about a bench.
+`RecoveryState.h` has no Arduino or display dependency, so the input state
+machine compiles and runs on a workstation with a fake clock, a fake finger and
+stubbed NVS. The App's half of the same gesture is 16h.
 
 ### 16a. What runs, and where
 
@@ -2564,6 +2566,87 @@ check below is a person at a device.
   no assertion that the gaps are small enough for a finger; that is item 1 of
   the physical acceptance checks in the design document.
 
+### 16h. The App's half of the gesture, which had no coverage at all (2026-11-01)
+
+`App/ConfigRequest.cpp`, run by `ci/test-config-request.sh` against
+`tests/config-request-test.cpp`.
+
+**It had none of any kind until this, and it is the newest code in the shipped
+release.** `ci/test-recovery-menu.sh` compiles CAL's `Recovery.cpp` and nothing
+else, so `mut/m7-app-any-corner` - which made the App accept six taps in one
+corner instead of alternating - took the whole release gate green: the host
+test, both boards' `arduino-cli` compiles, all of it. Six taps anywhere in one
+corner would reboot a running display into the loader under somebody's hand.
+`bench-cal.yml` did not run either, because `App/ConfigRequest.cpp` was not in
+its path list. It is now, with `App/CardManager.cpp`, `App/CardColumns.h` and
+`App/Display.*` beside it.
+
+The production file is compiled as it ships, with stubs for the three functions
+it calls - `Display::screenWidth`, `Display::showStatus` and
+`Loader::requestConfigMenu` - and for `Log::line`. The Loader stub throws, which
+is how a case tells a sequence that reached the sixth tap from one that did not.
+`App/Display.h` and `App/Log.h` compile as they ship; both are declarations over
+`<Arduino.h>`, which `tests/config-request-stubs/` provides.
+
+**The counter has no reset and the test does not add one.** Every case opens with
+a tap in the middle of the panel, which is in neither corner, and setting the
+counter back to zero is the one thing production does with such a tap. Nothing
+else in the test touches it. A helper that tapped twice, or re-centred between
+taps, would reset the counter underneath a case meant to count to six - which is
+how a case on this exact code was announced as the one that bit before it had
+been measured, and the mutation passed.
+
+**Every case has a mutation behind it.** Each was pushed as its own branch and
+run through `.github/workflows/mut-host-test.yml`.
+
+| mutation | branch | run | result |
+|---|---|---|---|
+| Any corner counts: `expected = left \|\| right` | `mut/cr1-any-corner` | 41316902936 | fails at `:160`, six left taps open the menu |
+| Five taps are enough: `gStep < 5` | `mut/cr2-count-five` | 41316908040 | fails at `:181`, `kTaps - 1` taps open it |
+| A seventh is needed: `gStep < kTaps + 1` | `mut/cr9-ktaps-plus-one` | 41317318171 | fails at `:138`, six alternating taps open nothing |
+| `kTaps` 6 to 5 with the App counting to a literal 6 | `mut/cr3-ktaps-five` | 41316915282 | fails in CAL's test at `recovery-menu-test.cpp:51`, before this one runs |
+| A 1 ms bounce window | `mut/cr4-bounce-one` | 41316922592 | fails at `:214`, a whole sequence inside one bounce window opens the menu |
+| The window never expires | `mut/cr5-no-window` | 41316928948 | fails at `:274`, a sequence spanning `kWindowMs` opens it |
+| The window as an absolute comparison, `now >= gStarted + kWindowMs` | `mut/cr13-absolute-window` | 41317328980 | fails at `:390`, a sequence across the `millis()` wrap expires mid-way |
+| The right corner off a fixed 320 | `mut/cr6-fixed-320` | 41316933682 | fails at `:320`, the 240px panel's corner is nowhere |
+| A stray left tap discards the sequence: `gStep = 0` | `mut/cr7-stray-left-zero` | 41316940206 | fails at `:299`, five more taps no longer finish it |
+| A corner reaches 60px down | `mut/cr8-zone-height-60` | 41316946308 | fails at `:376`, a tap at `y = kZoneHeight` counts |
+| A corner reaches 70px in | `mut/cr10-zone-width-70` | 41317321105 | fails at `:366`, a tap at `x = kZoneWidth` counts |
+| Nothing drawn before the handover | `mut/cr11-no-status` | 41317323390 | fails at `:146`, the two recorded strings are one |
+| The counter cleared after the handover call | `mut/cr12-clear-after` | 41317610421 | fails at `:443`, the next tap hands over at once. See below |
+
+`mut/cr3-ktaps-five` is worth reading rather than skipping. It fails in step 3,
+not step 5: CAL's `open()` helper counts to a literal 6 and asserts the menu
+appears on index 5, so lowering the shared constant stops that test before this
+one is reached. The dedicated `kTaps`-driven case in CAL's test is at
+`recovery-menu-test.cpp:204`, and that is the one the design document's claim
+rests on. **So the count is pinned at exactly `kTaps` from both sides here -
+`mut/cr2-count-five` from below, `mut/cr9-ktaps-plus-one` from above - and this
+test's loops being written from the constant rather than from a 6 is visible in
+the source and is not demonstrated by a mutation.** Nothing in the repository can
+demonstrate it while CAL's helper loops carry literal sixes.
+
+**`mut/cr12-clear-after` passed the first time it was run, and that is the
+record worth keeping.** Run 41317326384 went green against a post-handover case
+written 100,000 ms after the handover. The gesture window's own expiry clears a
+stale counter on the next tap after 8,000 ms, so the case held whether or not
+production cleared the counter before handing over - a case announced as the one
+that bit, measured, and found unfailable. It now taps 100 ms after the sixth
+tap, inside that window, and run 41317610421 fails on it. The lesson is the
+general one: a case that reaches production through a reset of its own proves
+nothing about the thing it names.
+
+**What this does not cover.**
+
+- `App/CardManager.cpp` feeds the taps and nothing compiles it for a host, so
+  what reaches `noteTap()` is unasserted. The paging that shares those corners
+  is unasserted for the same reason.
+- `Display::screenWidth()` is stubbed, so the test says the corners follow
+  whatever the panel reports. That the panel reports 240 on a display standing
+  on its end is `Display::begin()`'s `kScreenW = lcd.width()`, and that is
+  device work.
+- Nothing here has been on glass. No device was flashed or commanded.
+
 ---
 
 ## 17. The panel's text state, and the function that left a scale behind (2026-11-01)
@@ -2586,20 +2669,20 @@ scaled face as though it were the plain one.
 TEXT_LAYOUT_DESIGN.md section 14 has the contract, the three-function table and
 the two tables of callers.
 
-### 17a. The gate, and the four mutations it was proven against
+### 17a. The gate, its two rules, and the mutations each was proven against
 
 `ci/check-text-state.sh`, called from `ci/build-firmware.sh` beside the two text
 greps there. It runs standalone in under a second, which matters: there is no
-host C++ compiler on this workstation, so `ci/test-recovery-menu.sh` cannot run
-here at all, and the only other thing that can is a twenty-minute `arduino-cli`
-build.
+host C++ compiler on this workstation, so none of the four host tests can run
+here, and the only other thing that can is a twenty-minute `arduino-cli` build.
 
 ```
 bash ci/check-text-state.sh
 ```
 
-Run against the code as it stood before the fix, it named `showStatus()` and
-exited 1. Four mutations, each run on this workstation:
+**Rule 1, the restore is not inside a branch.** Run against the code as it stood
+before the fix, it named `showStatus()` and exited 1. Four mutations, each run on
+this workstation:
 
 | mutation | gate |
 |---|---|
@@ -2612,6 +2695,35 @@ A fifth was tried and the gate passed it, correctly: moving `showFailure()`'s
 restore inside a branch. That function sets `setTextSize(1)` unconditionally for
 its own detail line, so the scale really is 1 on return and there was nothing to
 catch. It is recorded because it is the shape that looks like a miss and is not.
+
+**Rule 1 on its own is weaker than the property above it, measured rather than
+reasoned about (2026-11-01).** It compares two line numbers, so a function that
+sets a scale of 2, takes an early return, and restores at the bottom has its
+restore on the larger line number and passes clean. That is a path out with
+scale 2 selected, and it is the original `showStatus()` defect in a different
+arrangement. `App/Display.cpp` has eight public functions with real early
+returns and all eight are right today, which is why this was a gate that would
+not have caught the regression it exists to catch rather than a live defect.
+
+**Rule 2, no early return while a scale is selected.** Reading a function top to
+bottom, no `return` may stand between a line that selects a scale other than 1
+and the next line that puts 1 back. Comments are stripped first, so a sentence
+with the word "return" in it is not read as a path out.
+
+| mutation | branch | run | gate |
+|---|---|---|---|
+| `if (detail.length() == 0) return;` in `showStatus()` above the restore | `mut/ts1-early-return` | 41316980298 | fails, names `showStatus()` and the line that set the scale |
+
+Rule 1 passes that same branch, which is the point of it. `showMoonPhaseCard()`
+is the function already in the right shape: it restores before its early return,
+and rule 2 reads it as clean. The whole file passes both rules unchanged.
+
+**Neither rule models control flow, and section 14d of the design document now
+says so rather than leaving it to be found.** A restore inside a branch clears
+rule 2's flag for every `return` after it, so a function that restores under
+`if (a)` and returns under `if (b)` passes both rules and is wrong on the path
+where `a` is false. No function in the file has that shape today. Catching it
+needs the branch structure, and an `awk` over 6,700 lines is the wrong tool.
 
 **Restore with `git checkout -- App/Display.cpp` and `touch` the file
 afterwards.** A restored file keeps its old mtime, and an Arduino build then
@@ -2653,13 +2765,18 @@ what any screen looks like.
 shipped in `v2026.10.31.0002` and on the fleet now, replaced a per-state status
 width with a flat `kStatusWidth` of 56. The expression it replaced gave a
 scoreless row 84px on the landscape panel, and it existed because a start time is
-about 72px of `FreeSansBold9pt7b`. 72 into 56 does not go, and `Sans9` is the last
+78px of `FreeSansBold9pt7b`. 78 into 56 does not go, and `Sans9` is the last
 entry in `kSansTiers` with `roomBelow` at 0, so `layoutLine()` has no smaller face
 and no second line and falls through to an ellipsis.
 
+The 78 is measured. The comment this section was written from said "about 72px",
+and section 10d of TEXT_LAYOUT_DESIGN.md already held the real figures -
+`10:00 PM` is 77, `12:00 AM` is 78 - three hundred lines above the section that
+used the estimate. 15a has the re-measurement and the method.
+
 The release note for that release says start times now fit. On the landscape panel
 the column went the wrong way, 84 to 56. On the portrait panel it went 4 to 56,
-which is better and still short of 72. The same note's example of a name that was
+which is better and still short of 78. The same note's example of a name that was
 being cut, the Blackhawks, is a row that **has** scores, and that row's name column
 went 86 to 83 on the panel the note describes.
 
@@ -2668,13 +2785,20 @@ widths against both previous versions, and the two trades this fix makes.
 
 ### 18a. What a build checks, which is new
 
-`boardColumns(screenW, scoreless)` is `constexpr`, and twelve `static_assert`s
+`boardColumns(screenW, scoreless)` is `constexpr`, and fourteen `static_assert`s
 hold its output at 320 and at 240 in every build on both boards. That is the
-first automated coverage the scoreboard's geometry has had.
+first automated coverage the scoreboard's geometry has had. They live in
+`App/CardColumns.h` with the function; 18d is the move and the host run it made
+possible.
+
+**They evaluate the literals 320 and 240, so they speak for those two panels and
+for nothing else.** This section said the floor assertions would say something
+when a third board arrived; they cannot. 18d's sweep is what covers a width
+nobody has built.
 
 | mutation | build |
 |---|---|
-| `statusWidth = kBoardStatusWidth` - the shipped regression, put back | fails: `a scoreless row's status holds a start time, and '10:00 PM' is 72px`, at 320 and at 240 |
+| `statusWidth = kBoardStatusWidth` - the shipped regression, put back | fails: `a scoreless row's status holds a start time, and the widest is 78px`, at 320 and at 240 |
 | Charge a flat 56 to `fixedWidth` while drawing 80 - the double-spend `57df3d8` had | fails: `320 scoreless stays apart` and `240 scoreless stays apart`, the separation going to -12 |
 | `kBoardStatusWidth` 56 to 70, squeezing the names | fails: `a row with scores keeps the 83px name column of v2026.10.31.0002`, at 320 and at 240 |
 
@@ -2685,10 +2809,13 @@ rebuild, and the next run links the mutated object.
 
 ### 18b. What a build still does not prove
 
-A `static_assert` checks a column's width. It does not check that a string fits
-that column, because the only measurement in play, the 72px for `10:00 PM`, is
-this repository's own written figure and not something a compiler can call
-`textWidth()` for.
+A `static_assert` checks a column's width at the two widths written into it. It
+cannot walk a range, it cannot find where the `kBoardMinNameWidth` floor engages,
+and it cannot tell a column sized against a measurement from one trimmed down to
+it. 18d is those three. What no automated check in either repository can do is
+call `textWidth()`: the 78px for a start time is read off a glyph table by hand
+and written down, which is a model of `LGFXBase::text_width()` and not that
+function running.
 
 ### 18c. Known gaps, recorded rather than discovered later
 
@@ -2705,13 +2832,12 @@ this repository's own written figure and not something a compiler can call
   it has not been looked at. 57px at `FreeSansBold9pt7b` is roughly six
   characters, so a long club name on a portrait board will ellipsize where it
   did not before. The trade is deliberate and section 15c says why.
-- **No host test exists for `App/Display.cpp`, and this pass did not add one.**
-  That is a decision, not an oversight: the file's driver block names LovyanGFX,
-  so a host build needs either a compile seam or the column arithmetic moved into
-  a header of its own. Moving `boardColumns()` into one would give it a `g++`
-  test with no graphics dependency at all, and would be the right next step for
-  anybody adding the repository's second host target. The `constexpr` assertions
-  are what could be had without it.
+- **The column arithmetic now has a host test and the rest of `App/Display.cpp`
+  still does not.** The move this section called the right next step is done:
+  `boardColumns()`, the constants it reads and `kCardMargin` are in
+  `App/CardColumns.h`, which names no graphics library, and 18d is the `g++` test
+  over it. Everything else in `Display.cpp` is still behind the driver block,
+  which names LovyanGFX and a board pin map, and would need a fake `Canvas`.
 - Nothing compiles `CAL.ino`, so neither the `cfgmenu` block nor the condition
   that now gates it has host coverage. 16e items 8 and 9 are the only checks on
   either, and both need a device.
@@ -2720,3 +2846,62 @@ this repository's own written figure and not something a compiler can call
   power to a device inside a window of a few milliseconds.
 - Nothing on this change has been seen on glass. The gesture, the menu and both
   journal lines are unphotographed.
+
+### 18d. The host run, and what the move into a header cost (2026-11-01)
+
+`ci/test-card-columns.sh` compiles `App/CardColumns.h` with `g++` and runs
+`tests/card-columns-test.cpp`.
+
+**The move was possible and it cost four things, all small.** `boardColumns()`,
+`boardStatusLeft()`, `boardSeparation()`, `BoardColumns`, the five `kBoard*`
+constants and `kCardMargin` left `App/Display.cpp`'s unnamed namespace for
+`namespace CardColumns` in a header of their own, with their assertions.
+
+1. `kCardMargin` had to go with them, because the row is derived from it and the
+   figure has one home. It has 67 call sites in `Display.cpp` and no other file
+   reads it.
+2. `Display.cpp` carries `using namespace CardColumns;` at file scope so those
+   67 call sites, and the two `kBoardScoreWidth` sites outside the moved block,
+   read as they did. A `using`-directive rather than ten `using`-declarations,
+   on a header this small, named in a comment beside the include.
+3. The literal `4` in `rowLeft` and `rowRight` is now `kBoardRowInset`, so the
+   host test can assert the inset without writing a second copy of the figure.
+4. `kBoardStartTimeWidth` is `kBoardStartTimeTextWidth + kBoardStartTimeSlack`,
+   and `kBoardStateWordWidth` is new. All three are value-identical to what was
+   there, so nothing the panel draws moves.
+
+Nothing blocked it. The header needs no Arduino type, no font and no graphics
+call, which was already true of the arithmetic - it was simply in a file that
+could not be compiled anywhere.
+
+| mutation | branch | run | result |
+|---|---|---|---|
+| The start-time column trimmed to 79, keeping the 78px assertion satisfied | `mut/cc1-starttime-79` | 41316953004 | fails at `:82`, the column no longer carries its slack |
+| The home block starts where the away block ends | `mut/cc2-no-block-gap` | 41316958665 | fails at `:126`, two names with no gap between them |
+| The row runs to `kCardMargin` with no inset | `mut/cc3-no-row-inset` | 41316970437 | fails at `:101`, the 320px scoreless name column is 99 and not 97 |
+| The name floor raised to 30 | `mut/cc4-floor-thirty` | 41316974919 | fails at `:171`, the first width clear of the floor is 188 and not 176 |
+
+**All four pass the fourteen `static_assert`s.** That is the point of them: each
+one is a change the board builds would have accepted. The three mutations in 18a
+are the other half, and those stop the build instead.
+
+**What the host run found, which nothing else had.**
+
+- The separation is `2 * kBoardColumnGap` on an even panel width and one pixel
+  more on an odd one. Both shipped panels are even, so four assertions at those
+  two widths read as a floor and the thirteenth pixel never showed.
+  TEXT_LAYOUT_DESIGN.md 15c had the identity stated without it.
+- The first width whose name column clears the floor is 176 scoreless and 204
+  with scores, not the 174 and 202 the document named. Those two are where the
+  separation stops holding; the columns actually overlap below 162 and 190. Six
+  figures where the document had two.
+- The 78px measurement, and that the 56px column does not hold the periods a
+  provider sends. TEXT_LAYOUT_DESIGN.md 15g has those figures. That one is live
+  and is not fixed here, because widening the scored column takes pixels off two
+  name columns and the width it needs depends on a string the server sends.
+
+**What it does not cover.** It reads `boardColumns()` and nothing that calls it.
+`showSportsBoard()` is still behind the driver block, so what the row actually
+draws into those columns, and the `scoreless` expression that chooses between
+them, are both unasserted. TEXT_LAYOUT_DESIGN.md 15f is why that expression is
+the wrong input to begin with.

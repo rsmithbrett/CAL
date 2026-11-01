@@ -3586,10 +3586,11 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
 
     const int text = top + 9;
 
-    // A game that has not started draws no score, so both score columns stand
-    // empty in the one state whose status holds a start time. boardColumns()
-    // takes that state and the panel width and returns the five edges; its own
-    // remarks have the split and the properties a build checks.
+    // A row with no score on either side releases two score columns, and the
+    // status column spends what they release. boardColumns() takes that and the
+    // panel width and returns the five edges; its own remarks have the split,
+    // the properties a build checks, and why this is not the same question as
+    // whether the status holds a start time.
     const bool scoreless = row.awayScore[0] == '\0' && row.homeScore[0] == '\0';
     const BoardColumns columns = boardColumns(kScreenW, scoreless);
 
