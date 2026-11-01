@@ -1582,15 +1582,22 @@ TEST_PLAN.md section 18 has the mutations both halves were proven against.
 
 ### 15f. `scoreless` is not "the status holds a start time"
 
-The layout keys on whether both score strings are empty. Four states produce
-that, and only one of them wants an 80px column:
+The layout keys on whether both score strings are empty. `Sports.h` defaults
+both scores to `kNoScore` and `writeScore()` writes `""` for that, so a state
+the server sends no score with is scoreless whatever its status holds. Only one
+of the five wants an 80px column:
 
 | state | status | measured | column it gets |
 |---|---|---|---|
 | Scheduled | a start time | up to 78 | 80, which is right |
 | Postponed | `PPD` | 37 | 80, and both names pay 12px each on the 320 panel |
 | Unknown | `""` | 0 | 80, for nothing |
-| Live or Final with no score sent | `LIVE`, `FINAL`, a period | 41 to 112 | 80 |
+| Final with no score sent | `FINAL` | 55 | 80 |
+| Live with no score sent | `LIVE` or a period | 41 to 112 | 80 |
+
+The status widths above are measured. Which of those states actually arrives
+without scores is the server's choice and nothing here reads it; Postponed and
+Unknown are the two that plainly have no score to send.
 
 And the other direction, which costs more. `Sports.cpp`'s `writeScore()` writes
 each side independently from its own `kNoScore` sentinel, so a scheduled game
