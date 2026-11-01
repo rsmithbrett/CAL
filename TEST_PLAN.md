@@ -2469,3 +2469,152 @@ check below is a person at a device.
 - A tap landing between two rectangles does nothing, by construction. There is
   no assertion that the gaps are small enough for a finger; that is item 1 of
   the physical acceptance checks in the design document.
+
+---
+
+## 17. The panel's text state, and the function that left a scale behind (2026-11-01)
+
+`App/Display.cpp`. LovyanGFX keeps a selected face, datum and text scale until
+something sets them again, so whatever one screen leaves behind is what the next
+one draws in. `restoreDefaultTextState()` (named `restoreDefaultFont()` until
+this pass) put the face and the datum back at the end of every draw function and
+left the scale alone. `showStatus()` set a scale of 2 for its headline and put 1
+back only inside `if (detail.length() > 0)`, and `detail` defaults to `""`.
+
+`forceUpdateCheck()` in `App.ino` is the reachable path: it draws
+`showStatus("Already up to date", "")`, waits 1,500 ms, and calls
+`CardManager::redraw()`. `showSportsBoard()`, `showSportsCard()` and
+`showBannerCard()` set no scale of their own, so the card that comes back draws
+at 2. On the board that is 44px glyphs in 35px rows, because `sansTierIndex()`
+reads a `FontId` and cannot see a scale, so `layoutLine()`'s ladder measures the
+scaled face as though it were the plain one.
+
+TEXT_LAYOUT_DESIGN.md section 14 has the contract, the three-function table and
+the two tables of callers.
+
+### 17a. The gate, and the four mutations it was proven against
+
+`ci/check-text-state.sh`, called from `ci/build-firmware.sh` beside the two text
+greps there. It runs standalone in under a second, which matters: there is no
+host C++ compiler on this workstation, so `ci/test-recovery-menu.sh` cannot run
+here at all, and the only other thing that can is a twenty-minute `arduino-cli`
+build.
+
+```
+bash ci/check-text-state.sh
+```
+
+Run against the code as it stood before the fix, it named `showStatus()` and
+exited 1. Four mutations, each run on this workstation:
+
+| mutation | gate |
+|---|---|
+| Delete `showStatus()`'s `restoreDefaultTextState()` - the defect itself | fails, names `showStatus()` |
+| Nest that call inside `if (detail.length() > 0)` | fails, names `showStatus()` |
+| Add a new draw function that sets a scale of 2 and returns | fails, names the new function |
+| Empty `restoreDefaultTextState()` of its `setTextSize(1)`, keeping the name | fails on the first limb, by name |
+
+A fifth was tried and the gate passed it, correctly: moving `showFailure()`'s
+restore inside a branch. That function sets `setTextSize(1)` unconditionally for
+its own detail line, so the scale really is 1 on return and there was nothing to
+catch. It is recorded because it is the shape that looks like a miss and is not.
+
+**Restore with `git checkout -- App/Display.cpp` and `touch` the file
+afterwards.** A restored file keeps its old mtime, and an Arduino build then
+skips the rebuild and runs the mutated binary.
+
+### 17b. What a build proves, and what it does not
+
+A build proves the gate runs and the file compiles. It proves nothing about the
+panel. The gate reads source: it knows which function put the scale back, not
+what any screen looks like.
+
+### 17c. Known gaps, recorded rather than discovered later
+
+- **Nothing here has been on glass.** The defect was read out of the source, not
+  reproduced on a device, and the fix has not been photographed. No device was
+  flashed or commanded in this pass. The owner's photograph of a scoreboard with
+  wrong columns is consistent with this leak and does not establish it: the
+  geometry fix that shipped separately is in the same frame.
+- **The bench check.** Press BOOT on a device showing the sports board, with a
+  policy whose sport field is empty so no pill is drawn, and let
+  "Already up to date" clear. The board that comes back must have the same row
+  heights and column widths it had before the press. Then the same with a sport
+  set, which should look right either way, since `drawSportsPill()` sets a scale
+  of 1 before its own label. Photograph both.
+- **No assertion covers the rendering**, here or anywhere in this repository.
+  `Display.cpp` names LovyanGFX in one block and draws through its own `Canvas`
+  interface, so a fake canvas recording the state at each `drawString()` would
+  turn section 14a's tables into assertions. That has not been written, and it is
+  the only thing that would catch the next card to read a scale it did not set.
+- **Only the scale is gated.** The face and the datum have the same restore and
+  no check, because the private helpers that make up a card select a face
+  mid-card by design and a gate on those would fire on code that is right.
+
+---
+
+## 18. The scoreboard's status column, and the width it lost shipping (2026-11-01)
+
+`showSportsBoard()` in `App/Display.cpp`. The geometry rewrite in `57df3d8`,
+shipped in `v2026.10.31.0002` and on the fleet now, replaced a per-state status
+width with a flat `kStatusWidth` of 56. The expression it replaced gave a
+scoreless row 84px on the landscape panel, and it existed because a start time is
+about 72px of `FreeSansBold9pt7b`. 72 into 56 does not go, and `Sans9` is the last
+entry in `kSansTiers` with `roomBelow` at 0, so `layoutLine()` has no smaller face
+and no second line and falls through to an ellipsis.
+
+The release note for that release says start times now fit. On the landscape panel
+the column went the wrong way, 84 to 56. On the portrait panel it went 4 to 56,
+which is better and still short of 72. The same note's example of a name that was
+being cut, the Blackhawks, is a row that **has** scores, and that row's name column
+went 86 to 83 on the panel the note describes.
+
+TEXT_LAYOUT_DESIGN.md section 15 has the derivation, the table at both panel
+widths against both previous versions, and the two trades this fix makes.
+
+### 18a. What a build checks, which is new
+
+`boardColumns(screenW, scoreless)` is `constexpr`, and twelve `static_assert`s
+hold its output at 320 and at 240 in every build on both boards. That is the
+first automated coverage the scoreboard's geometry has had.
+
+| mutation | build |
+|---|---|
+| `statusWidth = kBoardStatusWidth` - the shipped regression, put back | fails: `a scoreless row's status holds a start time, and '10:00 PM' is 72px`, at 320 and at 240 |
+| Charge a flat 56 to `fixedWidth` while drawing 80 - the double-spend `57df3d8` had | fails: `320 scoreless stays apart` and `240 scoreless stays apart`, the separation going to -12 |
+| `kBoardStatusWidth` 56 to 70, squeezing the names | fails: `a row with scores keeps the 83px name column of v2026.10.31.0002`, at 320 and at 240 |
+
+All three were run on this workstation with `arduino-cli`, each stopping the build
+with no `Sketch uses` line. **Restore with `git checkout -- App/Display.cpp` and
+`touch` the file**: a restored file keeps its old mtime, Arduino skips the
+rebuild, and the next run links the mutated object.
+
+### 18b. What a build still does not prove
+
+A `static_assert` checks a column's width. It does not check that a string fits
+that column, because the only measurement in play, the 72px for `10:00 PM`, is
+this repository's own written figure and not something a compiler can call
+`textWidth()` for.
+
+### 18c. Known gaps, recorded rather than discovered later
+
+- **Nothing here has been on glass.** No device was flashed or commanded. The
+  regression was found by arithmetic against both versions of the code, and the
+  fix is checked by arithmetic.
+- **The bench check.** A scoreboard with at least one game that has not started,
+  on both boards. Read the start time off the glass whole, in landscape and in
+  portrait, and confirm no row's status is `10:00...`. Then a board of finished
+  games, and confirm the names are no shorter than the shipped release draws
+  them. Photograph all four.
+- **The portrait panel's scoreless names are 57px**, down from the 69 that
+  shipped. That is the start-time column's 24 extra pixels, split two ways, and
+  it has not been looked at. 57px at `FreeSansBold9pt7b` is roughly six
+  characters, so a long club name on a portrait board will ellipsize where it
+  did not before. The trade is deliberate and section 15c says why.
+- **No host test exists for `App/Display.cpp`, and this pass did not add one.**
+  That is a decision, not an oversight: the file's driver block names LovyanGFX,
+  so a host build needs either a compile seam or the column arithmetic moved into
+  a header of its own. Moving `boardColumns()` into one would give it a `g++`
+  test with no graphics dependency at all, and would be the right next step for
+  anybody adding the repository's second host target. The `constexpr` assertions
+  are what could be had without it.

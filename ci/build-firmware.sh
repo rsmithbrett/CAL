@@ -315,6 +315,20 @@ for RETIRED in drawTruncatedLeft drawRightJustified wrappedLeftText wrappedCente
   fi
 done
 
+# The third text gate. A card leaving a text scale selected hands it to the
+# next screen, which is how a scale of 2 set for a boot headline reached the
+# sports board. Its own script, beside check-partition-fit.sh, because it is an
+# awk over function bodies rather than one more grep and because it has to be
+# runnable on its own: there is no host compiler on the workstation this
+# firmware is written on, so ci/test-recovery-menu.sh cannot run there and this
+# check and the two above are what can be run in a second rather than in a
+# twenty-minute compile.
+#
+# Via bash explicitly, for the reason check-partition-fit.sh's own invocation
+# below gives: a script committed from a Windows filesystem does not reliably
+# carry its executable bit into git.
+bash ci/check-text-state.sh
+
 echo "==> Compiling CAL for the ESP32-2432S028"
 arduino-cli compile --fqbn "$FQBN" --libraries "$LIBRARIES_DIR" --export-binaries .
 

@@ -406,7 +406,7 @@ three separate times. There is no name left to call.
 **`maxLines` has no default.** A caller cannot get "as many lines as it takes"
 by omitting an argument. Declaring the budget is the price of drawing text.
 
-**Two CI gates, in `ci/build-firmware.sh`.** The compiler cannot catch a new
+**Three CI gates, in `ci/build-firmware.sh`.** The compiler cannot catch a new
 `lcd.drawString(someServerString, x, y)`, and the firmware has no unit test
 harness, so it is checked the only way it can be, which is the same way that
 script already checks that every public `Motion` entry point has a caller.
@@ -431,7 +431,11 @@ comment beside it saying why:
 The second gate refuses the four retired names by grep, so bringing one back
 fails the build rather than quietly reinstating the defect.
 
-Both are deliberately greps and nothing cleverer, in the same spirit as the
+The third gate is `ci/check-text-state.sh`, which holds every draw function to
+returning a text scale of 1. It arrived later than these two and section 14 has
+the defect it was written for.
+
+All three are deliberately greps and nothing cleverer, in the same spirit as the
 Motion gate: they do not know whether the text will fit, they know the
 difference between "went through the routine" and "did not", which is the
 failure that actually happened and the one worth a gate.
@@ -1228,3 +1232,238 @@ a non-ASCII byte reaches a face that cannot draw it; four of these shipped, and
 the only reason they are fixed is that somebody looked at a photograph of the
 moon card. A source scan over the string literals in `Display.cpp` would catch
 the next one and has not been written.
+
+---
+
+## 14. The panel's text state belongs to whoever changed it, 2026-11-01
+
+Everything above this section is about a string against a box. This one is about
+the three pieces of panel state the box is drawn in, and about the fact that
+LovyanGFX keeps all three until something sets them again. A card that leaves
+one of them changed hands it to the next, unrelated screen.
+
+### 14a. What the file already did, for two of the three
+
+`restoreDefaultFont()` put the panel's own face and a top-left datum back at the
+end of every card function, and its comment named the dependents: `showStatus()`
+and `showFailure()` set no face of their own and draw in whatever is selected.
+`layoutText()` does the same for the datum it sets, and says why - a leaked
+`top_right` would range the next thing somebody adds to the right rather than
+failing where it could be seen.
+
+Text scale had neither half. Nothing restored it, and most draw functions set
+`setTextSize(1)` at the top as though nothing would. Three functions select a
+scale of 2:
+
+| function | sets 2 at | returns at |
+|---|---|---|
+| `showStatus()` | the headline | **2, when `detail` is empty** |
+| `showFailure()` | the headline | 1, set for `whatToDo` |
+| `showClockDate()` | the hero | 1, set for the date line |
+
+`showStatus()`'s second `setTextSize(1)` sits inside `if (detail.length() > 0)`,
+and `detail` defaults to `""` in `Display.h`. Four call sites in `App.ino` pass
+it empty, and `forceUpdateCheck()` is the one that reaches a card: it draws
+`showStatus("Already up to date", "")`, waits 1,500 ms, and calls
+`CardManager::redraw()`. Whichever card was showing is redrawn with a scale of 2
+still selected.
+
+Three draw functions set no scale at all and so inherit that one:
+
+| function | what it depends on | when it bites |
+|---|---|---|
+| `showBannerCard()` | the strip text's scale | always |
+| `showSportsCard()` | the competition label, then the rows | when the server sends no sport, so no pill is drawn first |
+| `showSportsBoard()` | the competition label, then the four rows | the same |
+
+`drawSportsPill()` sets 1 before drawing its own label, which is why the two
+sports screens are only wrong when the pill is absent. `showAnnouncementCard()`
+and `showQrTextCard()` look like they belong on that list and do not:
+`drawCardBanner()` runs first on both and sets 1. `drawActionButtons()` is
+covered the same way by `drawOneButton()`.
+
+On the board the effect is geometric rather than cosmetic. `kSansTiers` is read
+by `FontId`, so `sansTierIndex()` cannot see a scale, and `layoutLine()`'s ladder
+runs on a `Sans9` face whose `fontHeight()` is 44 instead of 22, inside a 35px
+row. That is doubled glyphs in rows measured for single ones, which is a
+scoreboard with its columns wrong.
+
+### 14b. The contract
+
+**A draw function leaves the panel's text state as it found it: the panel's own
+face, a top-left datum, and a scale of 1.** `restoreDefaultFont()` is now
+`restoreDefaultTextState()` and puts back all three, so the twenty call sites
+that already asked for the first two get the third without moving. The two boot
+screens, which call no card helper, call it themselves.
+
+Restoring rather than requiring every function to set its own scale is the half
+this file already had a mechanism for, and it is what makes the three inheritors
+above correct rather than lucky. Text color is the one piece of state that works
+the other way and needs nothing: `layoutText()` sets it on every call, and the
+five raw `drawString()` sites set their own.
+
+CAL's root `Display.cpp` has none of this to fix. Every string there goes through
+`centeredText()`, `wrappedCenteredText()` or a screen's own `button`/`label`
+lambda, and each of those sets color, scale and datum before it draws.
+
+### 14c. The gate
+
+`ci/check-text-state.sh`, called from `ci/build-firmware.sh` beside the two
+greps in section 7:
+
+> No function in `App/Display.cpp` may return with a text scale other than 1
+> selected. A function that sets one must put 1 back, or call
+> `restoreDefaultTextState()`, at the function's own indentation rather than
+> inside a branch.
+
+The indentation is the whole point of the check. `showStatus()` did restore the
+scale, on the path where `detail` was non-empty, and a gate that accepted a
+`setTextSize(1)` anywhere in the body would have passed it. Two-space
+indentation is what "on every path out" looks like in this file.
+
+**The gate was proven to bite before the fix was accepted**, by deleting the
+restore from `showStatus()` and confirming the script names that function and
+exits 1. It is a grep and an `awk`, nothing cleverer, for the reason section 7
+gives: it does not know what the panel looks like, it knows the difference
+between a function that put the scale back and one that did not.
+
+### 14d. What this does not cover
+
+- **Nothing here has been on glass.** The defect was read out of the source and
+  the fix is a source change; no device has been flashed and no photograph of a
+  scoreboard taken before or after. The owner's photograph of wrong columns is
+  consistent with this and is not proof of it, since the geometry fix that
+  shipped separately is also in that frame.
+- **The host test cannot reach this.** `ci/test-recovery-menu.sh` is the only
+  host target in the repository and it compiles `Recovery.cpp` against stubs.
+  `Display.cpp` names LovyanGFX in one block and could be driven through its own
+  `Canvas` interface by a fake, which would turn section 14a's table into
+  assertions. That has not been written.
+- **The face and the datum are not gated**, only the scale. The private helpers
+  that make up a card - `drawCardBanner()`, `drawProseBody()`, `drawSportsPill()`,
+  `drawTideRow()`, `drawOneButton()` - select a face mid-card by design, so a
+  gate on those would need an allowlist of its own and would fire on code that
+  is right.
+
+---
+
+## 15. The scoreboard's status column, and the width it lost shipping, 2026-11-01
+
+`showSportsBoard()`. Four rows, each one two team names, two scores and a state.
+The state is `FINAL` or a period on a row that has scores and a start time on the
+one row that does not, and those two are not the same width.
+
+### 15a. What shipped, and what it cost
+
+Until `57df3d8` the five column edges were literals offset from `kCardMargin`,
+and the status width was computed per state:
+
+```cpp
+const int statusWidth =
+    scoreless ? statusRight - (homeScoreRight - kScoreWidth) : kStatusWidth;
+```
+
+That expression existed for a measured reason, in the comment beside it: a start
+time is about 72px of `FreeSansBold9pt7b` against the 56px the column holds on a
+row with scores, so a scoreless row took the home score's column and the gap
+beside it, 84px.
+
+`57df3d8` replaced the literals with widths derived from the panel, which the
+240px panel genuinely needed: `homeScoreRight` was a flat 248 there, eight pixels
+past the glass, and the status width that subtracted it came out at 4. In the
+same diff the per-state status width became `const int statusWidth =
+kStatusWidth;` and the 52px the two empty score columns gave up went to the names
+instead. On the landscape panel the scoreless status column went from 84 to 56.
+
+72 into 56 does not go, and nothing catches it. The status draws at
+`FontId::Sans9`, which is the last entry in `kSansTiers`, so `layoutLine()`'s
+ladder has no smaller face to drop to; `roomBelow` is 0, so it cannot take a
+second line either. It falls through to `layoutText()` in the 56px box it was
+asked for and ellipsizes, which is `10:00...` on the glass. That is the state the
+replaced expression was written to fix, and it shipped in `v2026.10.31.0002`.
+
+A second figure moved in the same diff. A row that **has** scores had an 86px
+name column at every panel width; derived, it is 83 on the 320px panel and 43 on
+the 240px one. The 240px figure is not a like-for-like loss, since that panel's
+old layout drew off the glass, but the 320px one is: the release note's own
+example, the Blackhawks reading as `Blackha...`, is a row with scores, and that
+row lost three pixels on the panel the note describes.
+
+### 15b. One scale, and the state as its only input
+
+`boardColumns(screenW, scoreless)` returns the five edges and the three widths.
+Both score columns stand empty in exactly the state whose status holds a start
+time, so that state is the only input the layout needs, and the width the score
+columns are not using is the width the status column needs:
+
+```cpp
+const int scoreWidth  = scoreless ? 0 : kBoardScoreWidth;    // 26
+const int statusWidth = scoreless ? kBoardStartTimeWidth     // 80
+                                  : kBoardStatusWidth;       // 56
+const int fixedWidth  = 2 * scoreWidth + statusWidth + 3 * kBoardColumnGap;
+const int shared      = (rowRight - rowLeft - fixedWidth) / 2;
+```
+
+The status width is **charged** to `fixedWidth` as well as drawn. That is the line
+that was missing: `57df3d8` charged a flat 56 and then let the names spend the
+52px the score columns released, so a scoreless row's names and its status column
+were both laying claim to the same pixels.
+
+80 rather than 72 because the 72 is a measurement written as "about 72px". Eight
+pixels is the slack on an approximate figure, not headroom for a longer string.
+
+Measured at both panel widths, against both versions it replaces:
+
+| panel | state | column | before `57df3d8` | `v2026.10.31.0002` | this change |
+|---|---|---|---|---|---|
+| 320 | scoreless | name | 86 | 109 | 97 |
+| 320 | scoreless | status | 84 | **56** | 80 |
+| 320 | scored | name | 86 | 83 | 83 |
+| 320 | scored | status | 56 | 56 | 56 |
+| 240 | scoreless | name | 86, off the glass | 69 | 57 |
+| 240 | scoreless | status | **4** | 56 | 80 |
+| 240 | scored | name | 86, off the glass | 43 | 43 |
+| 240 | scored | status | 56 | 56 | 56 |
+
+### 15c. Two trades, named rather than buried
+
+**A row with scores keeps 83px names, not the 86 it had before `57df3d8`.** Those
+three pixels, and nine more, are the separation between the home score's right
+edge and the status column's left edge. Substituting `shared` back gives
+`homeScoreRight = rowRight - statusWidth - 2 * kBoardColumnGap`, so that
+separation is 12px for any status width, score width and panel width. The old
+literal layout spent 2px there: a right-aligned `7` two pixels from a
+right-aligned `FINAL` reads as one token. Charging three gaps rather than two
+would hand the names back exactly the 86 they had and leave 6px between those two
+columns, and 83 with 12px of air is the better row.
+
+**A scoreless row on the 240px panel keeps 57px names, down from 69.** That is
+what the status column's 24 extra pixels cost, split two ways. A name ellipsized
+to `Lightn...` is still the team; a start time ellipsized to `10:00...` is not a
+time. The 320px panel pays 12 of the same pixels, 109 to 97, and 97 still clears
+the 86 that shipped before the rewrite.
+
+### 15d. The properties a build checks
+
+`boardColumns()` is `constexpr`, so the figures above are not a table somebody
+has to re-derive. Twelve `static_assert`s hold them at both shipped panel
+widths, in every build, on both boards:
+
+- The scoreless status column is at least 72px, at 320 and at 240. This is the
+  live regression, stated as a property.
+- A row with scores keeps the 83px and 43px name columns `v2026.10.31.0002`
+  shipped, so the next change to these constants cannot quietly shrink them
+  further.
+- The separation is at least `2 * kBoardColumnGap` in all four cases.
+- The status column's right edge is inside the content band at both widths,
+  which is where the literals put 248 on a 240px panel.
+- The `kBoardMinNameWidth` floor is clear at both widths. It has to be: the floor
+  clamps the name width and nothing clamps the edges derived from it, so below
+  174px scoreless and 202px with scores the home block crosses the status column.
+  No shipped panel is that narrow, which makes it latent rather than live, and
+  those two assertions are what will say so when a third board arrives.
+
+This is the only automated check the scoreboard's geometry has. Nothing in
+either repository compiles `Display.cpp` for a host, so a `constexpr` function and
+a `static_assert` are what a compiler can be made to check without one.
+TEST_PLAN.md section 18 has the mutation they were proven against.

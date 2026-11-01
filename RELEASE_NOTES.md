@@ -23,7 +23,35 @@ dated heading after.
 
 ## Unreleased
 
-Nothing yet.
+### Start times on the scoreboard, again - App
+
+The last release said start times fit the scoreboard. On a display lying flat they
+got smaller, not bigger: a game that hadn't started had 84 pixels for its start time
+before that release and 56 after it, and "10:00 PM" needs about 72. So a row that
+read "10:00..." before still reads "10:00..." now, and on a display standing on its
+end it never had the room either.
+
+A row with no score gives the space its two empty score columns are not using to the
+start time, which is what needs it, and splits what is left over between the two team
+names. On a display lying flat that is 80 pixels for the time and 97 for each name,
+against the 86 names had before any of this. On a display standing on its end the
+time gets the same 80 and each name gets 57, which is shorter than the 69 the last
+release gave it, so a long club name on an upright display may now end in three dots
+where it didn't. A name you can still recognise is worth more than a time you can't
+read.
+
+Nothing about a row that already has a score changes.
+
+### The screen after "Already up to date" draws at the right size - App
+
+Press the button on the back to check for an update, get "Already up to date", and the
+card that came back was drawn at twice the text size it should have been. On the
+scoreboard that put the rows and columns in the wrong places. It also affected the
+reminder strip card, and the scoreboard for any sport the website has not been taught
+to name.
+
+Any screen that says something and then hands the display back now hands back the text
+size with it.
 
 ---
 

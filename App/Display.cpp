@@ -109,7 +109,7 @@ class Colour {
 /// The faces a card can ask for. The driver's fontFor() maps each one to a font
 /// object, and nothing above that table names a font.
 ///
-/// PanelDefault is the panel's own bitmap face, which restoreDefaultFont() puts
+/// PanelDefault is the panel's own bitmap face, which restoreDefaultTextState() puts
 /// back; the four Sans tiers are the bold family the cards lay out in.
 enum class FontId : uint8_t {
   PanelDefault,
@@ -1542,16 +1542,24 @@ void drawCardBanner(const String& label, uint32_t bannerColour, int width) {
   layoutText(label, box, kBannerLabelInk, "card.banner", bannerColour);
 }
 
-// Every card-drawing function below switches to a bold sans GFX font
-// (fonts::FreeSansBold*); this puts the default bitmap font back before
-// returning, matching CYD-Dickey's own explicit `lcd.setFont(&fonts::Font0);
-// // restore the default -- other screens assume it` at the end of each of
-// its draw functions. Without this, showStatus()/showFailure() above -
-// which never call setFont themselves and assume whatever the default is -
-// would render in whatever bold font the last card left selected.
-void restoreDefaultFont() {
+// Puts the panel's text state back to the three defaults a draw function starts
+// from: the panel's own bitmap face, a top-left datum, and a scale of 1. Called
+// at the end of every draw function, matching CYD-Dickey's own explicit
+// `lcd.setFont(&fonts::Font0); // restore the default -- other screens assume
+// it` at the end of each of its draw functions.
+//
+// All three persist on the panel until something sets them again, so whatever
+// one screen leaves selected is what the next, unrelated one draws in. The
+// cards below switch to a bold sans GFX face (fonts::FreeSansBold*);
+// showStatus() and showFailure() set no face at all and read it from here.
+// showBannerCard(), showSportsCard() and showSportsBoard() set no scale and
+// read that from here, and a scale of 2 reaching the board puts 44px glyphs in
+// rows measured for 22px ones. TEXT_LAYOUT_DESIGN.md section 14 has the shape,
+// and ci/check-text-state.sh is the gate on it.
+void restoreDefaultTextState() {
   lcd.setFont(FontId::PanelDefault);
   lcd.setTextDatum(TextDatum::TopLeft);
+  lcd.setTextSize(1);
 }
 
 // The hand-drawn-degree-ring technique from the original centeredTemperature
@@ -2264,6 +2272,10 @@ bool readTouchRaw(int32_t& x, int32_t& y) {
 /// rather than at compile time, for the reason kChevronCentreY() gives.
 int16_t kBootTextWidth() { return static_cast<int16_t>(kScreenW - 16); }
 
+// Both screens draw their headline at a scale of 2 and hand the panel back at
+// the default, like every card function below. The detail line's own
+// setTextSize(1) is not that restore: `detail` defaults to "" in Display.h, so
+// that branch does not always run.
 void showStatus(const String& headline, const String& detail) {
   clear();
   lcd.setTextSize(2);
@@ -2275,6 +2287,7 @@ void showStatus(const String& headline, const String& detail) {
                             14, 3, Align::Centre};
     layoutText(detail, detailBox, muted(), "status.detail");
   }
+  restoreDefaultTextState();
 }
 
 void showFailure(const String& headline, const String& whatToDo) {
@@ -2286,6 +2299,7 @@ void showFailure(const String& headline, const String& whatToDo) {
   const TextBox detailBox{kContentCentreX(), static_cast<int16_t>(drew.bottom + 12), kBootTextWidth(), 14,
                           3, Align::Centre};
   layoutText(whatToDo, detailBox, muted(), "failure.whattodo");
+  restoreDefaultTextState();
 }
 
 void aircraftLogoZone(int16_t& x, int16_t& y, int16_t& w, int16_t& h) {
@@ -2686,7 +2700,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   }
 
   drawClock();
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 // The three status cards below (aircraft, listings, forecast) share one shape:
@@ -2710,7 +2724,7 @@ void showAircraftStatus(const String& headline, const String& detail, bool isPro
   }
 
   drawClock();
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 void showSunMoonCard(const String& sunriseText, const String& sunsetText, const String& detail) {
@@ -2867,7 +2881,7 @@ void showSunMoonCard(const String& sunriseText, const String& sunsetText, const 
                "sunmoon.detail", Align::Centre, kTransparentText);
   }
 
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 
@@ -3025,7 +3039,7 @@ void showTidesCard(const String& nextHighTideText, const String& nextLowTideText
              kContentWidth(), tide.heading, "tides.clock", Align::Centre,
              kTransparentText);
 
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 void showHomeValueCard(const String& address, const String& estimateText, const String& rangeText,
@@ -3281,7 +3295,7 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   noteContentOverrun("homevalue", drawComplianceAt + complianceHeight);
 
   drawClock();
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 namespace {
@@ -3324,6 +3338,113 @@ int drawSportsPill(int x, int y, const char* label, uint32_t fill, uint32_t ink,
 
   return width;
 }
+
+/// The column edges of one scoreboard row. A name column takes its x as a left
+/// edge and a score or status column takes its x as a right edge, which is what
+/// Align does with it.
+struct BoardColumns {
+  int awayNameLeft;
+  int awayScoreRight;
+  int homeNameLeft;
+  int homeScoreRight;
+  int statusRight;
+  int nameWidth;
+  int scoreWidth;
+  int statusWidth;
+};
+
+// A score column holds two digits. The status column holds FINAL or a period on
+// a row that has scores, and a start time on the one row that does not, and
+// those are different widths: "10:00 PM" measures about 72px of
+// FreeSansBold9pt7b against the 56 that fits FINAL, so the scoreless state
+// takes its own figure with 8px of slack.
+constexpr int kBoardScoreWidth = 26;
+constexpr int kBoardStatusWidth = 56;
+constexpr int kBoardStartTimeWidth = 80;
+constexpr int kBoardColumnGap = 6;
+constexpr int kBoardMinNameWidth = 24;
+
+/// Three blocks, all from one figure: whatever the row has left after the score
+/// and status columns splits evenly between the two names. Every edge is derived
+/// from the panel width, so a 240px panel lays out the same way a 320px one does
+/// instead of inheriting literals that held at one width.
+///
+/// The state a row is in reaches the layout as `scoreless` and nothing else. A
+/// game that has not started draws no score, so both score columns stand empty
+/// in exactly the state whose status holds a start time, and the width they are
+/// not using is what that column needs.
+///
+/// constexpr so the properties below are checked by every build on both panels.
+constexpr BoardColumns boardColumns(int screenW, bool scoreless) {
+  const int rowLeft = kCardMargin + 4;
+  const int rowRight = screenW - kCardMargin - 4;
+
+  const int scoreWidth = scoreless ? 0 : kBoardScoreWidth;
+  const int statusWidth = scoreless ? kBoardStartTimeWidth : kBoardStatusWidth;
+
+  // Everything that is not a name. Three column gaps for the two that sit
+  // between the three blocks: the third is what boardSeparation() below reads
+  // back out as the air between the home score and the status.
+  //
+  // The status width is charged here as well as drawn. Charging a fixed figure
+  // and drawing a wider one lets a scoreless row's names and its status column
+  // both spend the pixels the score columns released.
+  const int fixedWidth = 2 * scoreWidth + statusWidth + 3 * kBoardColumnGap;
+  const int shared = (rowRight - rowLeft - fixedWidth) / 2;
+  const int nameWidth = shared > kBoardMinNameWidth ? shared : kBoardMinNameWidth;
+
+  const int awayNameLeft = rowLeft;
+  const int awayScoreRight = awayNameLeft + nameWidth + scoreWidth;
+  const int homeNameLeft = awayScoreRight + kBoardColumnGap;
+  const int homeScoreRight = homeNameLeft + nameWidth + scoreWidth;
+
+  return BoardColumns{awayNameLeft, awayScoreRight, homeNameLeft, homeScoreRight,
+                      rowRight,     nameWidth,      scoreWidth,   statusWidth};
+}
+
+constexpr int boardStatusLeft(int screenW, bool scoreless) {
+  const BoardColumns columns = boardColumns(screenW, scoreless);
+  return columns.statusRight - columns.statusWidth;
+}
+
+/// What stands between the home block's right edge and the status column's
+/// left edge. Substituting `shared` back gives 2 * kBoardColumnGap for any
+/// status width, score width and panel width, which is why the two columns
+/// cannot be made to touch by changing one of those figures.
+constexpr int boardSeparation(int screenW, bool scoreless) {
+  return boardStatusLeft(screenW, scoreless) - boardColumns(screenW, scoreless).homeScoreRight;
+}
+
+// The two panel widths on the fleet, checked by every build on both boards.
+// Nothing in either repository compiles this file for a host, so these are the
+// only automated check the scoreboard's geometry has. The first pair is the
+// width a start time was drawing in; TEXT_LAYOUT_DESIGN.md section 15 has the
+// figures and TEST_PLAN.md section 18 the mutations they were proven against.
+static_assert(boardColumns(320, true).statusWidth >= 72,
+              "a scoreless row's status holds a start time, and '10:00 PM' is 72px");
+static_assert(boardColumns(240, true).statusWidth >= 72,
+              "a scoreless row's status holds a start time, and '10:00 PM' is 72px");
+static_assert(boardColumns(320, false).nameWidth >= 83,
+              "a row with scores keeps the 83px name column of v2026.10.31.0002");
+static_assert(boardColumns(240, false).nameWidth >= 43,
+              "a row with scores keeps the 43px name column of v2026.10.31.0002");
+
+// The separation holds only while the kBoardMinNameWidth floor is not engaged:
+// the floor clamps the name width and nothing clamps the edges derived from it,
+// so below 174px scoreless and 202px with scores the home block crosses the
+// status column. Both are under every panel the fleet has, and these two pairs
+// are what says so.
+static_assert(boardColumns(320, false).nameWidth > kBoardMinNameWidth, "320 clears the floor");
+static_assert(boardColumns(240, false).nameWidth > kBoardMinNameWidth, "240 clears the floor");
+static_assert(boardSeparation(320, true) >= 2 * kBoardColumnGap, "320 scoreless stays apart");
+static_assert(boardSeparation(320, false) >= 2 * kBoardColumnGap, "320 scored stays apart");
+static_assert(boardSeparation(240, true) >= 2 * kBoardColumnGap, "240 scoreless stays apart");
+static_assert(boardSeparation(240, false) >= 2 * kBoardColumnGap, "240 scored stays apart");
+
+// Right edge inside the content band at both widths, which is where the row of
+// literals this replaced put 248 on a 240px panel.
+static_assert(boardColumns(320, true).statusRight <= 320 - kCardMargin, "320 is on the glass");
+static_assert(boardColumns(240, true).statusRight <= 240 - kCardMargin, "240 is on the glass");
 
 }  // namespace
 
@@ -3483,7 +3604,7 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
              kContentWidth(), sport.muted, "sports.clock", Align::Centre,
              kTransparentText);
 
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ageText,
@@ -3561,60 +3682,25 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
 
     const int text = top + 9;
 
-    // THE FIVE COLUMNS ARE DERIVED FROM THE PANEL, NOT WRITTEN DOWN. They were
-    // literals offset from kCardMargin, which held only at 320px wide. On the
-    // 240px portrait panel homeScoreRight landed at 248, eight pixels past the
-    // glass, and the status width that subtracts it came out at 4 - so the
-    // status drew as a bare ellipsis across the home name's last eight pixels,
-    // and the kickoff time was not on the screen at all.
-    //
-    // A name column takes its x as a left edge and a score or status column
-    // takes its x as a right edge, which is what Align does with it.
-    constexpr int kScoreWidth = 26;
-    constexpr int kStatusWidth = 56;
-    constexpr int kColumnGap = 6;
-    constexpr int kMinNameWidth = 24;
-
-    const int rowLeft = kCardMargin + 4;
-    const int rowRight = kContentRight() - 4;
-
     // A game that has not started draws no score, so both score columns stand
-    // empty in the one state where the status holds a clock time. Those 26px
-    // each go to the names rather than sitting as a gap, which is what gets
-    // "Red Wings" and "Lightning" onto the 320px panel whole.
+    // empty in the one state whose status holds a start time. boardColumns()
+    // takes that state and the panel width and returns the five edges; its own
+    // remarks have the split and the properties a build checks.
     const bool scoreless = row.awayScore[0] == '\0' && row.homeScore[0] == '\0';
-    const int scoreWidth = scoreless ? 0 : kScoreWidth;
-
-    // Everything that is not a name, the three gaps between the four blocks
-    // included. What is left splits evenly between the two names. The floor
-    // keeps a name box drawable on a panel narrower than anything shipped.
-    const int fixedWidth = 2 * scoreWidth + kStatusWidth + 3 * kColumnGap;
-    const int shared = (rowRight - rowLeft - fixedWidth) / 2;
-    const int kNameWidth = shared > kMinNameWidth ? shared : kMinNameWidth;
-
-    const int awayNameLeft = rowLeft;
-    const int awayScoreRight = awayNameLeft + kNameWidth + scoreWidth;
-    const int homeNameLeft = awayScoreRight + kColumnGap;
-    const int homeScoreRight = homeNameLeft + kNameWidth + scoreWidth;
-    const int statusRight = rowRight;
-
-    // The status keeps its own column in every state now. A scoreless row used
-    // to borrow the home score's width here; the names absorb that slack
-    // instead, above, which is the whole point of deriving them.
-    const int statusWidth = kStatusWidth;
+    const BoardColumns columns = boardColumns(kScreenW, scoreless);
 
     // Away first, home second, which is how a scoreline is read aloud and what
     // the single-game card does.
     lcd.setFont(FontId::Sans9);
-    layoutLine(row.awayName, awayNameLeft, text, kNameWidth, sport.name,
+    layoutLine(row.awayName, columns.awayNameLeft, text, columns.nameWidth, sport.name,
                "board.away", Align::Left, kTransparentText);
-    layoutLine(row.homeName, homeNameLeft, text, kNameWidth, sport.name,
+    layoutLine(row.homeName, columns.homeNameLeft, text, columns.nameWidth, sport.name,
                "board.home", Align::Left, kTransparentText);
 
     lcd.setFont(FontId::Sans12);
-    layoutLine(row.awayScore, awayScoreRight, text - 2, kScoreWidth, sport.score,
+    layoutLine(row.awayScore, columns.awayScoreRight, text - 2, kBoardScoreWidth, sport.score,
                "board.away.score", Align::Right, kTransparentText);
-    layoutLine(row.homeScore, homeScoreRight, text - 2, kScoreWidth, sport.score,
+    layoutLine(row.homeScore, columns.homeScoreRight, text - 2, kBoardScoreWidth, sport.score,
                "board.home.score", Align::Right, kTransparentText);
 
     // The state, in the live colour only when the server says the game is on.
@@ -3622,7 +3708,7 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     // row somebody should look at is the one that catches the eye.
     if (row.status[0] != '\0') {
       lcd.setFont(FontId::Sans9);
-      layoutLine(row.status, statusRight, text, statusWidth,
+      layoutLine(row.status, columns.statusRight, text, columns.statusWidth,
                  row.isLive ? sport.liveFill : sport.muted,
                  "board.status", Align::Right, kTransparentText);
     }
@@ -3651,7 +3737,7 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
              kContentWidth(), sport.muted, "board.clock", Align::Centre,
              kTransparentText);
 
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 void showIssFlyoverCard(const String& distanceText, const String& directionText,
@@ -3682,7 +3768,7 @@ void showIssFlyoverCard(const String& distanceText, const String& directionText,
   }
 
   drawClock();
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 void showIssNextPassCard(const String& riseTimeText, const String& riseDirectionText,
@@ -3716,7 +3802,7 @@ void showIssNextPassCard(const String& riseTimeText, const String& riseDirection
   }
 
   drawClock();
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 // The Moon-phase card - the first "graphical style" card: an actual drawn
@@ -3971,7 +4057,7 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
                  Align::Centre, kTransparentText);
     }
 
-    restoreDefaultFont();
+    restoreDefaultTextState();
     return;
   }
 
@@ -4094,7 +4180,7 @@ void showMoonPhaseCard(const String& phaseName, double phase, double illuminated
                Align::Centre, kTransparentText);
   }
 
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 // The hero number and only the hero number - see Display.h's own remarks on
@@ -4175,7 +4261,7 @@ void showClockDate(const String& timeText, const String& dateText) {
     layoutText(dateText, oneLineAt12, muted(), "clockdate.date");
   }
 
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 // The announcement card: an admin's free text, filling most of the panel.
@@ -4220,7 +4306,7 @@ void showCalendarCard(const String& text, uint8_t itemNumber, uint8_t itemCount)
   }
 
   drawClock();
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 void showAnnouncementCard(const String& text) {
@@ -4244,7 +4330,7 @@ void showAnnouncementCard(const String& text) {
   }
 
   drawClock();
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 // The Banner / Banner Button themes - see Display.h's own remarks and
@@ -4275,7 +4361,7 @@ void showBannerCard(const String& text) {
   }
 
   drawClock();
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 // The QR card: a scannable code with an optional caption, ported from CAL's own
@@ -4344,7 +4430,7 @@ void showQrTextCard(const String& qrData, const String& caption) {
       layoutText(qrData, dataBox, muted(), "qr.failure.data");
     }
     drawClock();
-    restoreDefaultFont();
+    restoreDefaultTextState();
     return;
   }
 
@@ -4409,7 +4495,7 @@ void showQrTextCard(const String& qrData, const String& caption) {
   layoutText(qrData, dataBox, muted(), "qr.data");
 
   drawClock();
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 void showListingsCard(const String& address, const String& propertyType, int price,
@@ -4627,7 +4713,7 @@ void showListingsCard(const String& address, const String& propertyType, int pri
   }
 
   drawClock();
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 void showFeaturedListingCard(const String& title, const String& headline, const String& subhead,
@@ -4933,7 +5019,7 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   }
 
   drawClock();
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 void showListingsStatus(const String& headline, const String& detail, bool isProblem) {
@@ -4952,7 +5038,7 @@ void showListingsStatus(const String& headline, const String& detail, bool isPro
   }
 
   drawClock();
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 // "Now" for column 0 - it is the same day/period the hero above already
@@ -5599,7 +5685,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   }
 
   drawClock();
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 void showForecastStatus(const String& headline, const String& detail, bool isProblem) {
@@ -5618,7 +5704,7 @@ void showForecastStatus(const String& headline, const String& detail, bool isPro
   }
 
   drawClock();
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 void showNoContent(const String& headline, const String& detail) {
@@ -5635,7 +5721,7 @@ void showNoContent(const String& headline, const String& detail) {
   }
 
   drawClock();
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 void setContentBudget(bool hasActionButtons) {
@@ -5736,7 +5822,7 @@ void drawActionButtons(const String* labels, uint8_t count) {
     drawOneButton(i, count, labels[i], kButtonFill);
   }
   gDrawingChrome = false;
-  restoreDefaultFont();
+  restoreDefaultTextState();
 }
 
 void showButtonPressConfirmation() {
@@ -6937,7 +7023,7 @@ bool drawImageFromSd(const String& path) {
     // directions. See noteNoImageAvailable() for why.
     noteNoImageAvailable("no cached file to draw", path);
     releaseDecodeMemory();
-    restoreDefaultFont();
+    restoreDefaultTextState();
     return false;
   }
 
@@ -7024,7 +7110,7 @@ bool drawImageFromSd(const String& path) {
   // memory still leaves LovyanGFX's partial allocation behind, and that is
   // exactly the case where the memory is most needed back.
   releaseDecodeMemory();
-  restoreDefaultFont();
+  restoreDefaultTextState();
   return ok;
 }
 
@@ -7042,7 +7128,7 @@ bool drawImageFromBuffer(const uint8_t* data, size_t size) {
     // on it: the counter is only meaningful if this file decides what counts,
     // and "nobody gave me a picture" is not a card this device failed to draw.
     noteNoImageAvailable("drawImageFromBuffer called with no data", String("RAM buffer"));
-    restoreDefaultFont();
+    restoreDefaultTextState();
     return false;
   }
 
@@ -7141,7 +7227,7 @@ bool drawImageFromBuffer(const uint8_t* data, size_t size) {
   // devices with no card. Until one of those lands, a card-less device with PNG
   // assets will keep earning this restart honestly.
   noteDrawOutcome(ok);
-  restoreDefaultFont();
+  restoreDefaultTextState();
   return ok;
 }
 
