@@ -224,9 +224,7 @@ constexpr int boardSeparation(int screenW, bool scoreless) {
 /// not the panel width's: every status width in this file was even until one
 /// was measured off a string. TEXT_LAYOUT_DESIGN.md section 15c.
 constexpr int boardLeftoverPixel(int screenW, bool scoreless, int statusWidth) {
-  return (boardRowSpan(screenW) -
-          (2 * boardScoreWidth(scoreless) + statusWidth + 3 * kBoardColumnGap)) &
-         1;
+  return screenW & 1;
 }
 
 // The two panel widths on the fleet, checked by every build on both boards.
