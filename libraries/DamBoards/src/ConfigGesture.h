@@ -44,7 +44,7 @@ constexpr uint32_t kBounceMs = 100;
 /// stops at 44 because that is where CAL's first menu row begins: a seventh tap
 /// in the corner somebody has just tapped six times would otherwise land on Set
 /// up Wi-Fi, which is the one row with no confirmation behind it.
-constexpr int32_t kZoneWidth = 64;
+constexpr int32_t kZoneWidth = 63;
 constexpr int32_t kZoneHeight = 44;
 
 }  // namespace ConfigGesture
