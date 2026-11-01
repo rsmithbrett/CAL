@@ -1571,7 +1571,9 @@ it walks every width from 28 to 1024 in both states, so a third board's figure i
 already measured before the board exists.
 
 `boardColumns()` and the constants it reads live in `App/CardColumns.h`, where
-the assertions live with them, thirty-two of them since 15h. The header names no
+the assertions live with them: fourteen here, eighteen more in 15h and nine more
+in 15i, forty-one in all. The nine read the same two literals as the rest and
+carry the same limit this section gives for the first fourteen. The header names no
 graphics library, no font and no Arduino type, which is the whole reason it is
 a header: `Display.cpp` pulls in LovyanGFX and a board pin map, so while these
 figures were in that file they could only be compiled on the toolchain for one
@@ -1908,10 +1910,12 @@ shipped. The fifth state, a live game with no score
 sent, is the one that pays: `LIVE` at 41px gets the 109 too, and a period over
 78px goes below 97, down to 89 for `HALFTIME`.
 
-**Four rows of one board no longer share a column grid.** `boardColumnsFor()` is
-called inside the row loop, and every edge but the status column's right one is
-derived from the name width, so a row's own status string moves where the home
-name starts and where both score columns end. On a 320px panel with scores:
+**Four rows of one board no longer share a column grid, and section 15i is what
+put them back on one.** The rest of this subsection is what 15h shipped and what
+15i was written from; read it in the past tense. `boardColumnsFor()` was called
+inside the row loop, and every edge but the status column's right one is derived
+from the name width, so a row's own status string moved where the home name
+started and where both score columns ended. On a 320px panel with scores:
 
 | a row whose status is | status column | name | home name starts at | home score ends at |
 |---|---|---|---|---|
@@ -1925,20 +1929,23 @@ edges, on four rows of one card. **This was already true across `scoreless` and
 it was invisible**, because the rows it separated were the rows with no score
 digits to misalign: a fixture's 97px names and a finished game's 83 put their
 score columns in different places, and the fixture drew nothing in either. A
-live row has digits. A board of three finished games and one in progress now
-draws two ragged columns of numbers, and a mixed board is the ordinary case for
+live row has digits. A board of three finished games and one in progress drew
+two ragged columns of numbers, and a mixed board is the ordinary case for
 `sportsscores` rather than an edge.
 
-The status column's own right edge is the same on every row, which is the edge
+The status column's own right edge was the same on every row, which is the edge
 the status is aligned to, so the one column a reader scans down the right of the
-card still lines up. Nothing else does, and nothing has looked at it. A property
-cannot catch it either: `boardColumnsFor()` takes one row's state, and the host
-test holds the four grids above as figures rather than asserting they agree.
+card still lined up. Nothing else did, and nothing had looked at it. No property
+here could catch it either: `boardColumnsFor()` takes one row's state, and the
+host test held the four grids above as figures rather than asserting they agree.
 
-**Section 15i is what put the rows back on one grid**, and the four grids in the
-table above are what one board now picks between rather than what one board
-draws at once. The figures stand: they are what a row asks for on its own, and
-the board takes the widest of them.
+**The four grids in the table above are what one board picks the widest status
+of now**, rather than what one board draws at once. The figures stand as what a
+row asks for on its own, and the host test has a block that does assert the
+board's answer against them. What the board lands on is not always one of the
+four, because `scoreless` became the board's question: 15i's photographed 240px
+board lands on a 36px name while its four rows would each have asked for 43, 43,
+43 and 62.
 
 #### One more figure the row did not derive
 
@@ -2021,19 +2028,32 @@ already fixed, and the two it did not are the grid the four rows sit on and the
 navigation chevron drawn across one of them. Those two are this section.
 
 **What the photograph shows, and what `main` already does with it.** The device
-is eight releases behind, so most of what is in the frame is `57df3d8`'s five
-literal column edges on a panel they were never measured for. `homeScoreRight`
-was a flat 248 on a 240px panel, eight pixels past the glass, which is the away
-score clipped at the right edge and the two in-progress rows' home scores off
-the panel entirely. `homeNameLeft` was 136 with an 86px name column, so
-`Hurricanes` at 94px drew from 136 to 230 straight through `FINAL`, which the
-status draws right-aligned at 226. `Capitals` at 70px ran 136 to 206 and `P1`
-at 22px right-aligned on 226 runs 205 to 226, so the two strings met with
-nothing between them. All three are the panel width written down as literals, and
-`57df3d8` replaced the literals with widths derived from it: on the 240px panel
-with scores the row now runs 14, 83, 89, 158, 226 with a 43px name column and 12
-pixels of air between the home block and the status. Nothing in those three
-reaches `main`.
+is eight releases behind, so most of what is in the frame is the five literal
+column edges `f2ae104` wrote and `57df3d8` deleted, on a panel they were never
+measured for.
+
+`homeScoreRight` was a flat 248 on a 240px panel, eight pixels past the glass.
+A two-digit score at `Sans12` is 26px right-aligned on that, so it ran 221 to
+248 and the glass cut it at 239; a one-digit score ran 235 to 248 and lost
+better than half. That is the clipped digit on the top row. Which score it is
+is the second thing the photograph gets to say and the code does not: away is
+drawn first and home second, and `awayScoreRight` was 126, 114 pixels inside the
+glass. The clipped digit is a **home** score.
+
+`homeNameLeft` was 136 with an 86px name column, so the home name's box ran 136
+to 222 while the scored row's status box ran 170 to 226 and its score box 221
+to 248. Three boxes over the same pixels. `Hurricanes` measures 94 and does not
+overrun its box, because `layoutLine()` has no face below `Sans9` and no second
+line and falls through to an ellipsis at 86px, ending at 222. It is the boxes
+that overlapped, not the string: `FINAL` right-aligned on 226 occupies 171 to
+226 and the ellipsized name is drawn through it. `Capitals` measures 70, fits
+its box whole and ends at 206, and `P1` at 22px right-aligned on 226 starts at
+204, so those two met with nothing between them for the same reason.
+
+All of that is the panel width written down as literals, and `57df3d8` replaced
+the literals with widths derived from it: on the 240px panel with scores the row
+now runs 14, 83, 89, 158, 226 with a 43px name column and 12 pixels of air
+between the home block and the status. None of it reaches `main`.
 
 **The fourth is live and `main` makes it worse.** 15h's own "Four rows of one
 board no longer share a column grid" wrote it down: `boardColumnsFor()` is
@@ -2136,8 +2156,12 @@ On most cards nothing is drawn at the very edge of the band and the overlap was
 invisible. `showSportsBoard()` fills a rounded rect across the whole band on
 every row, so on that card the chevron is drawn onto the fill, in `muted()`
 rather than in the card's own ink, and reads as the row overrunning itself. The
-chevrons are centred on `kScreenH / 2`, which in profile is 160 and lands inside
-the third row's 156..207, so it is that row every time and not a selection.
+chevrons are centred on `kScreenH / 2`, which is 160 in profile, so they are on
+the same two rows of every board rather than on a selected one. The body runs
+`centre` plus or minus `kChevronHalfHeight`, 148 to 172, and the rows are 100 to
+151 and 156 to 207, so four pixels of it sat on the second row's card as well as
+on the third's. In landscape the body is 108 to 132 against rows 79 to 110 and
+114 to 145, which is three pixels on the second and the rest on the third.
 
 The inset is a named figure now, and the relationship is what a build checks:
 

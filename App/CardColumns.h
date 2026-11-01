@@ -19,8 +19,11 @@
 /// has the derivation, TEST_PLAN.md section 18 the mutations.
 ///
 /// The status column's width comes from the string it holds. Section 15h is the
-/// shape and section 15g is what the fixed width cut. The board takes the
-/// widest its rows ask for and lays every row on it, which is section 15i.
+/// shape and section 15g is what the fixed width cut. The board gives its
+/// status column the width its widest string asks for and lays every row on
+/// the one grid that leaves, which is section 15i. That grid is not always one
+/// of the grids its rows would have asked for on their own, because `scoreless`
+/// is the board's question and not a row's.
 ///
 /// Nothing here reads App/Display.cpp, so the arguments the draw path hands
 /// these functions are checked by ci/check-board-columns-call.sh instead, a
@@ -208,8 +211,11 @@ constexpr BoardColumns boardColumnsFor(int screenW, bool scoreless, int statusWi
                       rowRight,     nameWidth,      scoreWidth,   statusWidth};
 }
 
-/// The row with the status width its state asks for. The draw path measures the
-/// string instead and calls boardColumnsFor() above.
+/// The row with the status width its state asks for, which is what a row would
+/// take if it were the only one on the card. Nothing on the draw path calls it:
+/// showSportsBoard() measures the board's strings and calls
+/// boardColumnsForBoard() below, and what reads this are the assertions at the
+/// bottom of this file and the host test.
 ///
 /// Its own name rather than a two-argument overload of that one. An int converts
 /// to bool without a diagnostic, so `boardColumns(240, measuredWidth)` written
@@ -234,8 +240,10 @@ constexpr BoardColumns boardColumns(int screenW, bool scoreless) {
 /// caller can fold the measurements and convert once. The host sweep asserts
 /// that rather than leaving it as the reason this remark gives.
 ///
-/// TEXT_LAYOUT_DESIGN.md section 15i, and 15h's table of what a row asks for on
-/// its own, which is what the board now picks the widest of.
+/// TEXT_LAYOUT_DESIGN.md section 15i. 15h's table is what each row would have
+/// asked for alone; the board picks the widest status of them, and then
+/// re-derives the rest from its own `scoreless`, so the grid it lands on need
+/// not be any row's.
 constexpr BoardColumns boardColumnsForBoard(int screenW, bool scoreless,
                                             int widestStatusTextWidth) {
   return boardColumnsFor(screenW, scoreless,

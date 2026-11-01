@@ -54,6 +54,7 @@ read_function() {
 
 BOARD=$(read_function showSportsBoard)
 WIDEST=$(read_function widestBoardStatus)
+NOSCORES=$(read_function boardHasNoScores)
 
 if [ -z "$BOARD" ]; then
   say "showSportsBoard() not found, so nothing below checked anything."
@@ -64,6 +65,21 @@ if [ -z "$WIDEST" ]; then
   say "widestBoardStatus() not found, so the measurement below checked nothing."
   exit 1
 fi
+
+if [ -z "$NOSCORES" ]; then
+  say "boardHasNoScores() not found, so the score state below checked nothing."
+  exit 1
+fi
+
+# A fold's body read as text: the whole of it, rather than the one line that
+# names the field. Naming the line and not the loop leaves the bound, the seed
+# and the return free, and each of those draws a wrong board on its own - the
+# bound reading row 0 only, the seed starting at the ceiling, the return
+# throwing the fold away. `tr` first, so a wrapped line reads the same as one
+# that fits.
+has() {
+  printf '%s\n' "$1" | tr -d ' \n' | grep -q "$2"
+}
 
 # The face, selected on the line before the fold that measures, so the
 # measurement cannot be taken under whatever the previous card left behind.
@@ -90,12 +106,55 @@ if ! printf '%s\n' "$WIDEST" | tr -d ' \n' | grep -q 'lcd\.textWidth(rows\[i\]\.
        the status, so the status is what it is sized against."
 fi
 
-# And the fold keeps the widest of them. Narrowest is a board sized against a
-# string it does not hold, which ellipsizes every other row's status; the host
-# test reads App/CardColumns.h and cannot see which way this comparison runs.
-if ! printf '%s\n' "$WIDEST" | tr -d ' \n' | grep -q 'if(measured>widest)'; then
+# And the fold keeps the widest of them, over every row, from nothing, and hands
+# back what it found. Narrowest is a board sized against a string it does not
+# hold; `i < 1` is a board sized on row 0; a seed above zero is a board pinned
+# at whatever the seed asks for; returning anything else throws the fold away.
+# The host test reads App/CardColumns.h and can see none of the four.
+if ! has "$WIDEST" 'if(measured>widest)'; then
   say "widestBoardStatus() does not keep the larger measurement. Every row of the board draws
        into one column, so the column is sized against the widest string on the card."
+fi
+
+if ! has "$WIDEST" 'for(uint8_ti=0;i<count;++i)'; then
+  say "widestBoardStatus() does not fold over every row. The column the board draws is the one
+       its widest string asks for, which needs all of them read."
+fi
+
+if ! has "$WIDEST" 'intwidest=0;' || ! has "$WIDEST" 'returnwidest;'; then
+  say "widestBoardStatus() does not start at 0 and return what it found. A seed above zero
+       pins every board at that width and a different return throws the fold away."
+fi
+
+# No second branch. The three checks above all pass on a fold that writes
+# `widest` in an else as well, which keeps the last row's measurement with the
+# `>` still sitting there in the text. A four-line fold has one branch, so
+# saying there is no other is cheaper than reading the shape of this one.
+if has "$WIDEST" 'else'; then
+  say "widestBoardStatus() has a branch other than the one keeping the larger measurement.
+       An else that also writes widest keeps the last row's string with the > still in place."
+fi
+
+# The board's score state, the same way. Its body is read by nothing else: no
+# host test compiles App/Display.cpp, and four single-token changes to it each
+# release both 26px score columns on a board that is drawing digits.
+#
+# The predicate is `||` and not `&&`, which is the rule App/CardColumns.h states
+# in prose beside boardScoreWidth(): a game that reported one side's score is
+# not scoreless.
+if ! has "$NOSCORES" "rows\[i\]\.awayScore\[0\]!='\\\\0'||rows\[i\]\.homeScore\[0\]!='\\\\0'"; then
+  say "boardHasNoScores() does not test both score strings with ||. A row that reported one
+       side is not scoreless, so one of them being non-empty is what answers the question."
+fi
+
+if ! has "$NOSCORES" 'for(uint8_ti=0;i<count;++i)'; then
+  say "boardHasNoScores() does not read every row. One game under way gives the whole board a
+       score column, so a row the fold skips is a column the board does not draw."
+fi
+
+if ! has "$NOSCORES" 'returnfalse;' || ! has "$NOSCORES" 'returntrue;'; then
+  say "boardHasNoScores() does not return false on a row with a score and true at the end.
+       The polarity is what picks the score columns, and nothing else reads this function."
 fi
 
 # The layout: the panel it is on, the board's own score state, and the widest
@@ -141,6 +200,56 @@ fi
 if printf '%s\n' "$BOARD" | sed 's|//.*$||' | grep -q 'kBoardScoreWidth'; then
   say "showSportsBoard() reads kBoardScoreWidth. The score columns are columns.scoreWidth,
        which is 0 on a board where no row reported a score; the constant is 26 always."
+fi
+
+# And each of the five fields draws into its own column. Working out the grid
+# correctly and then drawing the home name at the away name's edge, or the
+# status into the name's width, is a wrong row that every other check here
+# passes: they all read how `columns` is built and none read how it is spent.
+for pair in \
+  'row.awayName,columns.awayNameLeft,text,columns.nameWidth,:the away name' \
+  'row.homeName,columns.homeNameLeft,text,columns.nameWidth,:the home name' \
+  'row.awayScore,columns.awayScoreRight,text-2,columns.scoreWidth,:the away score' \
+  'row.homeScore,columns.homeScoreRight,text-2,columns.scoreWidth,:the home score' \
+  'row.status,columns.statusRight,text,columns.statusWidth,:the status'; do
+  want=${pair%%:*}
+  what=${pair##*:}
+  if ! has "$BOARD" "layoutLine($(printf '%s' "$want" | sed 's/[][\.*^$]/\\&/g')"; then
+    say "$what is not drawn at its own edge and its own width. The grid is worked out once and
+       spent five times, and a field drawn into another field's column is a wrong row with
+       every figure in App/CardColumns.h correct."
+  fi
+done
+
+# The face the status is DRAWN in, which is the other half of measuring it in
+# the face it draws in. The check further up reads the setFont before the
+# measurement; measured in Sans9 and drawn in Sans12 is exactly the failure the
+# remarks at the top of this file say it exists to prevent, and until this it
+# was not read.
+if ! printf '%s\n' "$BOARD" | awk '
+  /^[[:space:]]*(\/\/|$)/                   { next }
+  /layoutLine\(row\.status,/ && previous ~ /lcd\.setFont\(FontId::Sans9\);/ { found = 1 }
+  { previous = $0 }
+  END                                       { exit found ? 0 : 1 }
+'; then
+  say "the line before showSportsBoard()'s 'layoutLine(row.status,' is not
+       lcd.setFont(FontId::Sans9);. The status is measured in Sans9 and has to be drawn in it,
+       or the column holds a string of a different width than the one it was sized for."
+fi
+
+# The chevrons sit the same distance in from each edge. The static_assert in
+# App/Display.cpp bounds the inset from above, which is what keeps the body off
+# the card; it says nothing about the two tips agreeing, so a right tip written
+# without the -1 is a pixel nearer the glass than the left one with nothing
+# firing.
+NAV=$(read_function drawNavAffordances)
+if [ -z "$NAV" ]; then
+  say "drawNavAffordances() not found, so the chevron tips below checked nothing."
+elif ! has "$NAV" 'leftTipX=kChevronInset;' ||
+     ! has "$NAV" 'rightTipX=kScreenW-1-kChevronInset;'; then
+  say "the chevron tips are not kChevronInset and kScreenW - 1 - kChevronInset. Both bodies
+       stand in the margin at the same distance from the glass, and the -1 is what makes the
+       right one symmetric with the left."
 fi
 
 if [ "$FAIL" -ne 0 ]; then

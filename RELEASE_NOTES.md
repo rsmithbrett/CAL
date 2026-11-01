@@ -28,16 +28,19 @@ dated heading after.
 `v2026.11.01.0003` gave each row of a scoreboard a right-hand column as wide as its
 own text needed, and said in its own note that a board stops lining its rows up: the
 scores and the second team name sat in different places on a row for a finished game
-and a row for one in progress, by up to 48 pixels. A board of three finished games and
-one being played is what a Saturday afternoon looks like, so that was most boards.
+and a row for one being played. On a display lying flat that is up to 22 pixels on the
+team name and 44 on the score between those two rows, and up to 48 and 96 across every
+state a row can be in. A board of three finished games and one being played is what a
+Saturday afternoon looks like, so that was most boards.
 
 A board now works out one set of columns and draws all four rows on it. Whatever the
 widest right-hand text on the card needs is what every row of that card gives it, so
 the scores sit in one column down the page and so do the team names. A card where
 every game has finished is unchanged. A card holding one long period name gives up
-some width on every row instead of on one: on a display standing on its end the names
-go from 43 pixels to 36 on a board with a start time on it, and to 31 on one showing
-"HALFTIME". Lying flat, from 83 to 76 and to 63.
+some width on every row instead of on one, and how much depends on the text: on a
+display standing on its end the names go from 43 pixels to 36 on a board whose
+longest right-hand text is a "7:00 PM", and to the 31-pixel floor for a "10:00 AM" or
+a "HALFTIME". Lying flat the names start at 83 and go to 76, 71 and 63 for those three.
 
 A game that hasn't started now keeps a space for its score instead of spreading into
 it, so a blank sits under the digits above rather than that row's team name shifting

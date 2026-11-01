@@ -3231,7 +3231,9 @@ is the check for those, and there has not been one.
   figures; no property can say they agree, because the function takes one row.
   **A board mixing finished games with one in progress is the photograph this
   change needs**, and it is the ordinary case for `sportsscores` rather than an
-  edge.
+  edge. **18f closed this**, from exactly that photograph: the board folds its
+  rows and lays all four on one grid, and the four figures above are what it
+  picks the widest of.
 - **The text-scale coupling is new and the gate does not cover it.** This is the
   first place in `App/Display.cpp` where the panel's text scale changes a
   *layout* rather than a glyph size: `textWidth()` multiplies by `size_x`, so a
@@ -3303,7 +3305,7 @@ reads it.
 
 | mutation | result |
 |---|---|
-| `boardColumnsForBoard()` ignores its measurement and asks for `kBoardStatusWidth`, a fixed column instead of the board's | exit 1, a compile error on five of the nine: both 320px `HALFTIME` figures, both 240px name-floor figures and the 320px start-time figure. The two `FINAL` figures and the two score-column figures are silent, which is the point of them: a board of state words is meant to draw exactly what the fleet draws |
+| `boardColumnsForBoard()` ignores its measurement and asks for `kBoardStatusWidth`, a fixed column instead of the board's | exit 1, a compile error on five of the nine: both 320px `HALFTIME` figures, both 240px name-floor figures and the 320px start-time figure. The two `FINAL` figures and the two score-column figures do not fire, which is the point of them: a board of state words is meant to draw exactly what the fleet draws |
 | `widestBoardStatus()` keeps the narrowest measurement, which is `<` for `>` | `ci/check-board-columns-call.sh` fails on the comparison check. No host test reads `App/Display.cpp`, so the gate is the only thing that can see which way that comparison runs, and the check exists because of this mutation |
 | `boardColumnsForBoard()` drops its `scoreless` argument and passes `false`, so a board of four scheduled games draws score columns | exit 1, on `a board of scheduled games draws no score column`, and on nothing else |
 | `kChevronInset` raised to 4, which puts the chevron body back on the card | exit 1 on the `static_assert` beside it. **Verified** against `g++` over a standalone translation unit holding `kChevronWidth`, `kChevronInset` and the assertion, and **Inferred** for the `arduino-cli` build, which evaluates the same expression |
@@ -3344,16 +3346,109 @@ The ESP32 figure for `origin/main` from CI, 18e's table, is 1,579,920 against a
 stock core. The two are not comparable and the local figure is here as a record
 of what was built, not as a delta.
 
+**CI ran both halves and both passed.** `mut-host-test.yml` triggers on
+`test/**`, so the commit went up a second time on `test/scoreboard-one-grid`
+with `[full-gate]` in the message, run **41356255370**. `host-test` passed all
+six steps, including `ci/check-board-columns-call.sh`, which settles the awk and
+line-ending questions a local run cannot. `full-gate` passed `ci/build-firmware.sh`,
+which is CAL and the App on the ESP32 and the ESP32-S3 against the stock core,
+so the forty-one `static_assert`s in `App/CardColumns.h` and the one in
+`App/Display.cpp` are evaluated on both boards by a build that is not this
+workstation's. Read off the runs and jobs endpoints with `curl`, because `gh`
+hangs here. **Verified.**
+
+### 18f-i. Three reviews, and the twenty-one mutations the first gate missed
+
+Three agents read the change, one on the figures against the design document,
+one adversarial, one on integration. Each one found something the other two did
+not.
+
+**The figures came back clean and the prose did not.** The correctness reviewer
+reimplemented `LGFXBase::text_width()` and the whole column arithmetic from the
+prose alone and diffed against the header over every width 28 to 1024 in both
+states: identical everywhere, every figure in 15i and all nine new assertions
+re-derived, and all six glyph widths 15i quotes reproduced along with
+twenty-five control figures from 9b, 10d, 15a and 15g. That is a sixth agreeing
+model of `text_width()`. What it found instead was six wrong sentences, all
+fixed here: 15i credited `57df3d8` with literals it deleted rather than
+`f2ae104` which added them; it called the clipped digit an away score when
+`awayScoreRight` was 126 and only the home column reached past the glass; it had
+`Hurricanes` drawing to 230 when `layoutLine()` has no face below `Sans9` and
+ellipsizes it to 222, so the defect is three boxes over the same pixels rather
+than a string overrunning one; it put the chevron on the third row when the body
+spans 148 to 172 and catches four pixels of the second; 15d still said
+thirty-two assertions; and `RELEASE_NOTES.md` quoted a 48px spread for a pair of
+rows whose spread is 22, and a 36px name for every start time when 36 is
+`7:00 PM`'s and `10:00 AM` gets the floor.
+
+**The adversarial reviewer applied fifty-four mutations and the `cmp` gate fired
+seven times**, twice because `\Q...\E` swallowed a `\r\n` and four times because
+a `'\0'` replacement wrote a real NUL byte. Each of those would have read as a
+test that does not bite. `App/CardColumns.h` held against all twenty-six cut at
+it. `App/Display.cpp` was the hole: thirteen caught and **sixteen survivors**,
+in four groups. `boardHasNoScores()`'s body was read by nothing at all, since no
+host test compiles `Display.cpp` and the gate named only its call site.
+`widestBoardStatus()` had its three lines read and not how they compose, so the
+loop bound, the seed, the return and an added `else` all survived.
+`showSportsBoard()`'s five `layoutLine()` calls were unread, so the home name
+drawn at the away name's edge, the status painted over the home score and the
+status given the name column's width all passed. And the `setFont` before the
+status is **drawn** was unread, so measured in `Sans9` and drawn in `Sans12`
+survived, which the gate's own header names as the thing it exists to prevent.
+
+`ci/check-board-columns-call.sh` grew eleven checks for those, and every one was
+proven against the mutation that motivated it:
+
+| survivor | now caught by |
+|---|---|
+| `boardHasNoScores()` returns `true` on a scored row, or `false` at the end | the return-polarity check |
+| its loop reads row 0 only | the loop-bound check |
+| its `||` becomes `&&`, or the home-side test is deleted | the predicate check, which is the rule `boardScoreWidth()` states in prose |
+| `widestBoardStatus()` reads row 0 only | the loop-bound check |
+| its seed is 300, or it returns 0 | the seed-and-return check |
+| it gains an `else` that keeps the last row's measurement | the no-second-branch check, since the other three pass on that one |
+| the home name at `columns.awayNameLeft` | the five per-field draw checks |
+| the status at `columns.homeScoreRight`, or in `columns.nameWidth` | the same |
+| the away score in `columns.nameWidth` | the same |
+| the status drawn in `Sans12` | the drawn-face check |
+| the right chevron tip loses its `- 1`, or a tip is hardcoded | the chevron-tip check |
+
+Sixteen of sixteen, run against copies outside the tree with the gate's `TARGET`
+repointed, each gated on `cmp` and on a NUL-byte count. Two controls: a no-match
+pattern reports `NOT APPLIED` rather than passing, and a comment-only edit
+survives, so the gate is not over-fitted to the text it reads. **Verified.**
+
+**The integration reviewer found nothing reaching CAL and one thing worth
+naming.** Nothing in the diff touches the root sketch, there is no second copy
+of any constant it changes, the touch hit-testing reads none of the chevron
+figures, `flashNavEdge()`'s strip still contains the chevron at both positions,
+and no card other than the scoreboard draws where the chevron now sits. The one
+`static_assert` covers both chevrons rather than the left, because the `- 1` in
+the right tip makes the two inequalities identical. `SportsBoardRow` is
+byte-for-byte unchanged and the server holds no firmware layout constant
+anywhere. What it named: a provider's `Period` text is uncapped server-side, so
+the blast radius of that one wire field went from one row to four even though
+the field did not change. It is bounded by the device's 8-character cut and by
+`kBoardNameFloor`, so nothing can leave the glass.
+
 ### 18g. What 18f does not cover
 
-- **Nothing has been on glass.** Every figure is arithmetic or a `g++` run. The
-  one thing only a photograph can answer is whether the chevrons at a 2px inset
-  clear the bezel on a cased device, and whether 36px names on a 240px board
-  read as a table or as four rows of ellipses.
+- **Nothing has been on glass.** Every figure is arithmetic, a `g++` run or a
+  compile. The one thing only a photograph can answer is whether the chevrons at
+  a 2px inset clear the bezel on a cased device, and whether 36px names on a
+  240px board read as a table or as four rows of ellipses.
 - **No host test compiles `App/Display.cpp`.** It names LovyanGFX and a board
-  pin map. `ci/check-board-columns-call.sh` is a text gate over the call and the
-  folds, and it knows the arguments are the right arguments, not that the
-  drawing is right.
+  pin map. `ci/check-board-columns-call.sh` is a text gate over the call, the
+  two folds and the five draw calls, and it knows the arguments are the right
+  arguments, not that the drawing is right. Twenty-one text checks and four
+  not-found guards are not a test of that function; they are twenty-one
+  single-token changes that now cost somebody a red build instead of a
+  photograph.
+- **`kChevronInset` is bounded from above and not from below.** 2 down to 0
+  compiles clean, and 0 puts the chevron's tip on the first column of glass. The
+  gate holds the two tips symmetric about the margins but nothing holds the
+  inset itself at 2, because what the right figure is depends on a bezel no
+  assertion can see.
 - **The chevron change reaches every card, not just the scoreboard.** It was
   read against the scoreboard, which is the only card that fills the content
   band to its edge on every row. No other card was looked at, in a screenshot or
@@ -3365,6 +3460,17 @@ of what was built, not as a delta.
   grid and a device without lays four, from one `sportsscores` response. Nothing
   on the wire changed and no field was added, so the 6-month compatibility gate
   is untouched.
+- **The portrait row has a second line it does not use, and this did not take
+  it.** `kRowHeight` is `(kAgeY - kRowTop) / kMaxRows`, which is 56 on the
+  240x320 panel against 35 in landscape, and the row draws one 22px line at
+  `top + 9` either way. 212 pixels of width hold four text columns on that
+  panel and the names get 36 of them; 56 pixels of height hold two lines and the
+  row uses one. Putting the status, or the second team, on a line of its own in
+  profile is the change that would give a portrait name its width back, and it
+  is a layout this section did not attempt. `kBoardRowInset` is the other figure
+  left alone: the status column's right edge sits 3px inside the card's, which
+  reads as flush beside the chevron and still reads tight without it, and moving
+  it moves every figure in 15h's two tables.
 ---
 
 ## 19. The brand splash's one length, at both ends (2026-11-01)
