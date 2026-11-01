@@ -29,7 +29,7 @@ namespace ConfigGesture {
 
 /// Corner taps, alternating, starting top-left. Six is long enough that nobody
 /// reaches it by handling the device and short enough to do with one thumb.
-constexpr uint8_t kTaps = 6;
+constexpr uint8_t kTaps = 5;
 
 /// All six land inside this or the sequence is abandoned and starts over.
 constexpr uint32_t kWindowMs = 8000;
