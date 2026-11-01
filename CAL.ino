@@ -763,7 +763,7 @@ void setup() {
   // The survivor could not retry, because it did not believe anything was wrong.
   const bool haveApp = Updater::haveBootableApplication();
   const bool needsInstall = manifest.needsInstall(Identity::installedAppVersion(),
-                                                  haveApp, reloadRequested);
+                                                  haveApp);
 
   // Five inputs, so the journal distinguishes "the manifest could not be fetched"
   // from "the server has no current build marked" from "the build the server
