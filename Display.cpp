@@ -34,6 +34,7 @@
 #include "CalQr.h"
 
 #include "Display.h"
+#include "BrandSplash.h"
 #include <PresenceInput.h>
 // wrappedCenteredText() says when it has ellipsized. A boot screen whose
 // message was cut is exactly the kind of thing nobody notices until a
@@ -59,13 +60,6 @@ LGFX lcd;
 
 constexpr int kScreenW = 320;
 constexpr int kScreenH = 240;
-
-// Cached brand splash, written by the updater after the device authenticates.
-// Raw RGB565 at a fixed size: the server prepares assets for the hardware, so
-// the device needs no image decoder and no scaler.
-constexpr const char* kBrandSplashPath = "/brand.565";
-constexpr int kBrandW = 240;
-constexpr int kBrandH = 120;
 
 constexpr uint32_t kBg = 0x000000u;
 constexpr uint32_t kInk = 0xFFFFFFu;
@@ -337,33 +331,44 @@ void showNeutralSplash() {
 // this runs but showBrandSplash() needs it cleared at exactly the same point
 // it always was.
 bool drawBrandImage(int y0) {
-  if (!LittleFS.exists(kBrandSplashPath)) {
+  if (!LittleFS.exists(BrandSplash::kPath)) {
     return false;
   }
 
-  File f = LittleFS.open(kBrandSplashPath, "r");
+  File f = LittleFS.open(BrandSplash::kPath, "r");
   if (!f) {
     return false;
   }
 
-  const size_t expected = static_cast<size_t>(kBrandW) * kBrandH * 2;
-  if (f.size() != expected) {
-    // A truncated or wrong-sized asset is discarded rather than rendered as
-    // garbage across the screen.
+  const size_t size = f.size();
+  if (!BrandSplash::storedSizeIsWholeAsset(size)) {
+    // Refused rather than rendered as garbage across the screen, and removed
+    // rather than left where it is. A file of the wrong length is refused again
+    // on every boot, and the one thing on the device that replaces it is a
+    // refresh that runs only when CAL contacts the server - which a healthy
+    // device starting normally does not do. Removing it here is what lets a
+    // device that took a wrong-length body get its branding back on its own.
     f.close();
+    const bool removed = LittleFS.remove(BrandSplash::kPath);
+    Journal::printf("[display] cached splash is %u bytes not %u - removed (%s)",
+                    static_cast<unsigned>(size),
+                    static_cast<unsigned>(BrandSplash::kBytes), removed ? "ok" : "FAILED");
     return false;
   }
 
   // Streamed a row at a time. A full-screen buffer would be 150KB and this
   // device has no PSRAM; one row is 480 bytes.
-  static uint16_t row[kBrandW];
-  const int x0 = (kScreenW - kBrandW) / 2;
-  for (int y = 0; y < kBrandH; ++y) {
+  static uint16_t row[BrandSplash::kWidth];
+  const int x0 = (kScreenW - BrandSplash::kWidth) / 2;
+  for (int y = 0; y < BrandSplash::kHeight; ++y) {
     if (f.read(reinterpret_cast<uint8_t*>(row), sizeof(row)) != sizeof(row)) {
+      // Left in place: the size above matched, so a read that comes up short is
+      // the filesystem failing rather than the wrong file, and removing a good
+      // asset over a transient error costs a download.
       f.close();
       return false;
     }
-    lcd.pushImage(x0, y0 + y, kBrandW, 1, row);
+    lcd.pushImage(x0, y0 + y, BrandSplash::kWidth, 1, row);
   }
   f.close();
   return true;

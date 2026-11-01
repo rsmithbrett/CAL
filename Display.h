@@ -30,6 +30,10 @@ void showNeutralSplash();
 
 /// The cached brand splash, if one was previously downloaded and stored. Falls
 /// back to the neutral splash when absent. Returns false if nothing was cached.
+///
+/// A cached file whose size is not `BrandSplash::kBytes` is removed rather than
+/// drawn, so a device that took a wrong-length body is branded again once the
+/// updater has refreshed it.
 bool showBrandSplash();
 
 /// A single line of status with an optional detail line beneath it. Used for
