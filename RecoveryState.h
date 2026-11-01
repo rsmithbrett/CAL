@@ -239,7 +239,7 @@ class Controller {
         step_ = left ? 1 : 0;
         started_ = now;
       }
-      if (step_ == 6) {
+      if (step_ == 5) {
         step_ = 0;
         screen_ = Screen::Menu;
         lastActivity_ = now;
