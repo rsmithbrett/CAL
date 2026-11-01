@@ -41,6 +41,17 @@ takes an update.
 
 Nothing to do, and nothing changes for a display with no brand assigned.
 
+### The start-up screens are light, like the rest of the display - CAL
+
+The screens a display shows while it starts up were white writing on a black panel,
+which made the start of a boot look like a different product from everything after it.
+They are now dark writing on white, the same way the display looks once it is running.
+The setup codes you scan with a phone are unchanged.
+
+A display that has a brand logo keeps the copy it already has until it next takes an
+update, and that copy was made for the old black screens, so its logo sits on a dark
+block until the refresh reaches it.
+
 ## v2026.11.01.0001
 
 ### Start times on the scoreboard, again - App
