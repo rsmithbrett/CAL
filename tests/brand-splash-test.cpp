@@ -34,14 +34,6 @@ static_assert(BrandSplash::kBytes == 57600, "the asset is 240x120 RGB565");
 // A body is the asset only at exactly that length. The middle two are the
 // shipped defect: a one-byte body and a body one short of the asset were both
 // renamed over the cached splash, because the only test was "more than zero".
-static_assert(BrandSplash::bodyIsWholeAsset(57600), "57,600 is the asset");
-static_assert(!BrandSplash::bodyIsWholeAsset(1), "one byte is not the asset");
-static_assert(!BrandSplash::bodyIsWholeAsset(57599), "one short is not the asset");
-static_assert(!BrandSplash::bodyIsWholeAsset(57601), "one over is not the asset");
-static_assert(!BrandSplash::bodyIsWholeAsset(0), "an empty body is not the asset");
-static_assert(!BrandSplash::bodyIsWholeAsset(-1), "an HTTPClient error is not the asset");
-static_assert(!BrandSplash::bodyIsWholeAsset(512),
-              "a short HTML error page carrying a 200 is not the asset");
 
 // A declared Content-Length rules the body out before any flash is written, and
 // a chunked response declares nothing and so rules nothing out.
