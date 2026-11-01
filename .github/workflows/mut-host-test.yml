@@ -1,0 +1,79 @@
+name: Mutation host test
+
+# Adversarial-review harness. Runs the host tests the release gate runs, on a
+# push to a mut/** or test/** branch, so a mutation can be measured without a
+# token to dispatch bench-cal.yml with. Never publishes anything and never runs
+# on main. Carried on throwaway branches only.
+on:
+  push:
+    branches:
+      - 'mut/**'
+      - 'test/**'
+
+permissions:
+  contents: read
+
+jobs:
+  host-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Each step is guarded by hashFiles, so a mutation branch cut from a
+      # commit that predates one of these scripts runs the rest rather than
+      # failing on a missing file - which would read as the mutation being
+      # caught.
+      - name: Test recovery gesture and actions on host
+        if: ${{ hashFiles('ci/test-recovery-menu.sh') != '' }}
+        run: bash ci/test-recovery-menu.sh
+      - name: Test the loader's NVS write order on host
+        if: ${{ hashFiles('ci/test-loader-order.sh') != '' }}
+        run: bash ci/test-loader-order.sh
+      - name: Test the App's configuration-menu gesture on host
+        if: ${{ hashFiles('ci/test-config-request.sh') != '' }}
+        run: bash ci/test-config-request.sh
+      - name: Test the scoreboard's column arithmetic on host
+        if: ${{ hashFiles('ci/test-card-columns.sh') != '' }}
+        run: bash ci/test-card-columns.sh
+      - name: Check the panel's text state
+        if: ${{ hashFiles('ci/check-text-state.sh') != '' }}
+        run: bash ci/check-text-state.sh
+
+  full-gate:
+    # The arduino-cli half of the release gate, for mutations that only a real
+    # compile could catch, and for reading a byte count off a branch. Opted into
+    # by the commit message so an ordinary mutation costs a minute rather than
+    # fifteen.
+    if: ${{ contains(github.event.head_commit.message, '[full-gate]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Test recovery gesture and actions on host
+        if: ${{ hashFiles('ci/test-recovery-menu.sh') != '' }}
+        run: bash ci/test-recovery-menu.sh
+      - name: Test the loader's NVS write order on host
+        if: ${{ hashFiles('ci/test-loader-order.sh') != '' }}
+        run: bash ci/test-loader-order.sh
+      - name: Test the App's configuration-menu gesture on host
+        if: ${{ hashFiles('ci/test-config-request.sh') != '' }}
+        run: bash ci/test-config-request.sh
+      - name: Test the scoreboard's column arithmetic on host
+        if: ${{ hashFiles('ci/test-card-columns.sh') != '' }}
+        run: bash ci/test-card-columns.sh
+      - name: Compile against production toolchain and check real partitions
+        run: bash ci/build-firmware.sh
+      # The byte counts, so a branch can be compared with another branch's run.
+      # Both boards, both binaries.
+      - name: Report the compiled sizes
+        run: |
+          set -euo pipefail
+          for f in build/esp32.esp32.esp32/CAL.ino.bin \
+                   build/esp32.esp32.esp32s3/CAL.ino.bin \
+                   App/build/esp32.esp32.esp32/App.ino.bin \
+                   App/build/esp32.esp32.esp32s3/App.ino.bin; do
+            if [ -f "$f" ]; then
+              printf 'SIZE %s %s\n' "$(stat -c %s "$f")" "$f"
+            else
+              printf 'SIZE missing %s\n' "$f"
+            fi
+          done

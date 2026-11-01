@@ -15,6 +15,17 @@ on:
       - "App/Loader.cpp"
       - "App/Loader.h"
       - "App/Identity.h"
+      # The App's half of the configuration gesture, the file that feeds it
+      # taps, and the scoreboard columns the second host test reads. Without
+      # these, a change to the gesture ran no CI at all on a pull request: the
+      # mutation that made the App accept six taps in one corner touched only
+      # App/ConfigRequest.cpp.
+      - "App/ConfigRequest.cpp"
+      - "App/ConfigRequest.h"
+      - "App/CardManager.cpp"
+      - "App/CardColumns.h"
+      - "App/Display.cpp"
+      - "App/Display.h"
       - "Provisioning.cpp"
       - "Identity.cpp"
       - "Identity.h"
@@ -43,6 +54,12 @@ jobs:
 
       - name: Test the loader's NVS write order on host
         run: bash ci/test-loader-order.sh
+
+      - name: Test the App's configuration-menu gesture on host
+        run: bash ci/test-config-request.sh
+
+      - name: Test the scoreboard's column arithmetic on host
+        run: bash ci/test-card-columns.sh
 
       - name: Compile against production toolchain and check real partitions
         run: bash ci/build-firmware.sh
