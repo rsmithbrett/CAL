@@ -62,6 +62,9 @@ jobs:
       - name: Test recovery gesture and actions on host
         run: bash ci/test-recovery-menu.sh
 
+      - name: Test the loader's NVS write order on host
+        run: bash ci/test-loader-order.sh
+
       - name: Install arduino-cli
         uses: arduino/setup-arduino-cli@v2
 

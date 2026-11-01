@@ -11,12 +11,20 @@
 /// restarting. Both arrive at the same menu, and a reader who changes the tap
 /// count here changes it for both. See CAL_TOUCH_RECOVERY_MENU.md.
 ///
+/// That last sentence was not true until kTaps and kBounceMs had a second
+/// consumer. The App compared against both; CAL counted to a 6 and debounced on
+/// a 100 written into RecoveryState.h, so either figure here could change and
+/// CAL would carry on wanting the old gesture. Both are now read there as well,
+/// and tests/recovery-menu-test.cpp drives CAL's counter and bounce window from
+/// these names so a change that reaches one binary and not the other fails.
+///
 /// Rectangles live in RecoveryState.h rather than here, because CAL's are
 /// asserted against its own menu rows and that geometry means nothing to the
 /// App. What is shared is the shape of the gesture: how many taps, in what
-/// corners, inside what window. RecoveryState.h asserts its rectangles agree
-/// with the figures below, the same way App/Motion.cpp asserts its presence pin
-/// agrees with PresenceInput.h.
+/// corners, inside what window. RecoveryState.h reads the count, the bounce
+/// window and the window length from here, and asserts its rectangles agree
+/// with the corner size below, the same way App/Motion.cpp asserts its presence
+/// pin agrees with PresenceInput.h.
 namespace ConfigGesture {
 
 /// Corner taps, alternating, starting top-left. Six is long enough that nobody

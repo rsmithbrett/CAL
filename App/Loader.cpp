@@ -40,8 +40,21 @@ void requestUpdate() {
 }
 
 void requestConfigMenu() {
-  Identity::setConfigMenuRequested(true);
+  // updreq first, cfgmenu second, and the order is what a power cut between the
+  // two commits leaves behind. The boot partition is still ota_0 until
+  // bootFactoryAndRestart() below, so an interrupted pair comes back running
+  // this same App with whichever flag landed first.
+  //
+  // updreq alone is a request CAL clears: Updater::installApplication() clears
+  // it after an install, and CAL.ino clears it on the branch where the server
+  // confirms the installed version is current. cfgmenu alone is cleared by
+  // nothing here - the App never reads it, and CAL is the only writer of false
+  // - so it waits through every App boot until some later boot runs CAL, and
+  // that boot opens configuration at a device nobody is standing at, holds the
+  // boot for kMenuIdleMs, and leaves Reset identity one tap and one
+  // confirmation away. See CAL_TOUCH_RECOVERY_MENU.md.
   Identity::setUpdateRequested(true);
+  Identity::setConfigMenuRequested(true);
   // Said rather than assumed. If NVS refused the write the device restarts into
   // an ordinary boot and the menu never appears, and somebody watching the
   // stream needs to be able to tell that from a gesture that was never seen.

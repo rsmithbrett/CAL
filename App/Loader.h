@@ -19,7 +19,11 @@ namespace Loader {
 /// Sets two flags, and both are needed. cfgmenu is what CAL reads to know it
 /// should open the menu; updateRequested is what makes CAL draw at all on this
 /// boot rather than handing the panel straight back, and without the panel up
-/// there is no touch for the menu rows to read. See CAL_TOUCH_RECOVERY_MENU.md.
+/// there is no touch for the menu rows to read.
+///
+/// updateRequested is written first, because it is the one CAL clears on its own
+/// if power is lost between the two commits. See CAL_TOUCH_RECOVERY_MENU.md and
+/// the .cpp.
 [[noreturn]] void requestConfigMenu();
 
 /// Forgets the locally stored device secret, then reboots into CAL (with the

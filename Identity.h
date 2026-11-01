@@ -96,13 +96,17 @@ bool appReloadRequested();
 void setAppReloadRequested(bool requested);
 
 /// Set by the application when six corner taps ask for configuration, and read
-/// once by CAL on the next boot. CAL clears it before the menu opens, so a
-/// restart taken while the menu is up comes back to a normal boot.
+/// once by CAL on the next boot. CAL clears it whether or not it opens the menu,
+/// so a restart taken while the menu is up comes back to a normal boot and a
+/// request that arrives on a boot CAL draws nothing on does not wait for the
+/// next one.
 ///
-/// The application sets updateRequested alongside this one, and that is what
-/// makes the menu usable rather than merely asked for: without it CAL hands the
-/// panel over without lcd.init(), readTouch() reads a panel that was never
-/// started, and the rows would not respond. See CAL_TOUCH_RECOVERY_MENU.md.
+/// The application sets updateRequested first and this second, and
+/// updateRequested is what makes the menu usable rather than merely asked for:
+/// without it CAL hands the panel over without lcd.init(), readTouch() reads a
+/// panel that was never started, and the rows would not respond. CAL.ino opens
+/// the menu only where it drew, for that reason. See
+/// CAL_TOUCH_RECOVERY_MENU.md.
 bool configMenuRequested();
 void setConfigMenuRequested(bool requested);
 

@@ -525,19 +525,32 @@ void setup() {
                   "screen CAL still needs brings the panel up by itself");
   }
 
-  // SIX TAPS ON THE RUNNING APP LAND HERE. The App sets cfgmenu and restarts.
-  // It sets updreq alongside it, and that is what put this boot on the drawing
-  // path above rather than the quiet handover, so the panel is up and the rows
-  // can be touched. See CAL_TOUCH_RECOVERY_MENU.md.
+  // SIX TAPS ON THE RUNNING APP LAND HERE. The App sets updreq, then cfgmenu,
+  // and restarts. updreq is what put this boot on the drawing path above rather
+  // than the quiet handover, so the panel is up and the rows can be touched. See
+  // CAL_TOUCH_RECOVERY_MENU.md.
   //
   // Cleared before the menu opens, not after. A restart or a power loss taken
   // while it is up comes back to a normal boot; the other order reopens this
   // menu on every boot until one of them finishes.
+  //
+  // THE MENU OPENS ONLY WHERE CAL DREW, which is the condition the boot hold
+  // below runs under. On the quiet path there was no lcd.init(), and
+  // Display::readTouch() returns gPanelStarted && getTouch(), so it reads false
+  // and starts nothing: begin() consumes no finger, showRecoveryMenu() then
+  // brings the panel up under an already-open menu, and the first poll reads a
+  // finger resting on the glass as a rising edge on kMenuRows[0], which is Set
+  // up Wi-Fi. The request is cleared either way, because the App neither reads
+  // it nor writes false and a request left standing here waits through every
+  // later boot.
   if (Identity::configMenuRequested()) {
     Identity::setConfigMenuRequested(false);
     if (Identity::configMenuRequested()) {
       Journal::line("[recovery] cannot clear the configuration request - not opening it, "
                     "because a request that will not clear reopens on every boot");
+    } else if (appDrawsTheLoadingScreen) {
+      Journal::line("[recovery] configuration was requested on a boot where the panel stays "
+                    "untouched - cleared without opening it");
     } else {
       Journal::line("[recovery] configuration opened at the App's request");
       Recovery::openMenu();

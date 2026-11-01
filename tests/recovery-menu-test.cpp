@@ -126,22 +126,6 @@ void stateTests() {
   const auto expired = c.update(clockMs, true, 200, 200);
   assert(expired.restore && expired.action == Action::None && !c.visible());
 
-  // Unsigned elapsed time works through millis() rollover for both timers.
-  c.reset(); clockMs = std::numeric_limits<uint32_t>::max() - 500;
-  open(c);
-  clockMs += kMenuIdleMs;
-  assert(c.update(clockMs, false, 0, 0).restore);
-  c.reset(); clockMs = std::numeric_limits<uint32_t>::max() - 1000;
-  tap(c, 32, 30);
-  tap(c, 288, 30, kGestureWindowMs);
-  assert(!c.visible());
-
-  // Zones exclude the centre, bottom, out-of-bounds points and right edge.
-  for (const auto& row : kMenuRows) {
-    assert(row.contains(row.x, row.y));
-    assert(!row.contains(row.x + row.w, row.y));
-    assert(!row.contains(row.x, row.y + row.h));
-  }
   c.reset();
   for (int i = 0; i < 6; ++i) {
     clockMs += 200;
@@ -190,6 +174,71 @@ void stateTests() {
     c.update(clockMs, true, i % 2 ? 32 : 288, 30);
   }
   assert(!c.visible()); // three is not six, and the earlier three did not carry
+
+  // THE EXACT EDGES OF BOTH CORNER ZONES, AS LITERALS. The static_asserts in
+  // RecoveryState.h prove no zone overlaps a button. They say nothing about
+  // where an edge sits while it overlaps nothing, and every other tap in this
+  // file lands at 32 or 288, deep inside. Reading the edges from ConfigGesture
+  // here would not help: both rectangles are asserted equal to those constants,
+  // so a case built from the constant moves with any change to it. 63, 256 and
+  // 43 are written out because they are the geometry that shipped.
+  c.reset();
+  for (int i = 0; i < 6; ++i) tap(c, i % 2 ? 256 : 63, 43);
+  assert(c.visible()); // the last pixel inside each corner still opens it
+  c.reset();
+  for (int i = 0; i < 6; ++i) tap(c, i % 2 ? 256 : 64, 30);
+  assert(!c.visible()); // one column right of the left corner is outside it
+  c.reset();
+  for (int i = 0; i < 6; ++i) tap(c, i % 2 ? 255 : 32, 30);
+  assert(!c.visible()); // one column left of the right corner is outside it
+  c.reset();
+  for (int i = 0; i < 6; ++i) tap(c, i % 2 ? 288 : 32, 44);
+  assert(!c.visible()); // the row where kMenuRows[0] begins is outside both
+
+  // CAL'S COUNTER, DRIVEN FROM THE SHARED CONSTANT. kTaps is what the App counts
+  // to and what Controller::update() counts to, and this is the case that holds
+  // the two together: one tap short of kTaps must not open the menu and the next
+  // one must. A CAL that counted to a figure of its own would fail it as soon as
+  // kTaps read anything else.
+  c.reset();
+  for (int i = 0; i < ConfigGesture::kTaps - 1; ++i) tap(c, i % 2 ? 288 : 32, 30);
+  assert(!c.visible());
+  tap(c, (ConfigGesture::kTaps - 1) % 2 ? 288 : 32, 30);
+  assert(c.visible());
+
+  // The bounce window, from ConfigGesture for the same reason. Contacts one
+  // millisecond inside it are one finger bouncing and supply no taps; contacts
+  // exactly kBounceMs apart are taps and six of them open the menu.
+  c.reset();
+  for (int i = 0; i < 6; ++i) tap(c, i % 2 ? 288 : 32, 30, ConfigGesture::kBounceMs - 1);
+  assert(!c.visible());
+  c.reset();
+  for (int i = 0; i < 6; ++i) tap(c, i % 2 ? 288 : 32, 30, ConfigGesture::kBounceMs);
+  assert(c.visible());
+
+  // A MENU OPENED BEFORE THE CLOCK WRAPPED AND LEFT ALONE ACROSS IT.
+  // Controller::open takes its time as an argument, which is what puts
+  // lastActivity_ on the far side of the wrap from now, so the idle subtraction
+  // here actually spans the boundary. The case this replaces reached the
+  // boundary by tapping, which carried the clock 1,200 ms past it before the
+  // menu opened and left an ordinary subtraction behind.
+  c.reset();
+  const uint32_t beforeWrap = std::numeric_limits<uint32_t>::max() - 500;
+  c.open(beforeWrap);
+  assert(!c.update(beforeWrap + kMenuIdleMs - 1, false, 0, 0).restore);
+  assert(c.update(beforeWrap + kMenuIdleMs, false, 0, 0).restore);
+  assert(!c.visible());
+
+  // THE GESTURE WINDOW ACROSS THE WRAP, with the expiring tap in the corner the
+  // sequence is expecting, so the counter can only be cleared by the window. The
+  // case this replaces put that tap in the wrong corner, which resets the counter
+  // by itself and holds whether or not the window expired.
+  c.reset();
+  clockMs = std::numeric_limits<uint32_t>::max() - 2000;
+  tap(c, 32, 30);        // step 1, started before the wrap
+  tap(c, 288, 30, 9000); // the expected corner, past the window, after the wrap
+  for (int i = 0; i < 4; ++i) tap(c, i % 2 ? 288 : 32, 30);
+  assert(!c.visible()); // the window expired, so this is four taps and not six
 }
 
 void resetActions() {

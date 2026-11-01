@@ -66,6 +66,14 @@ constexpr Rect kGestureRight = {256, 0, 64, 44};
 // share is the shape rather than these rectangles. These assertions are what
 // keep them the same shape - the same arrangement App/Motion.cpp uses to keep
 // its presence pin and PresenceInput.h from drifting apart.
+//
+// The tap count, the bounce window and the window length are read from
+// ConfigGesture directly, below and in update(), rather than asserted against
+// it. An assertion needs a figure here to compare, and a second copy of a
+// figure is the thing that drifted: kTaps had one consumer in the App while
+// update() counted to a 6 written out here, so the constant could read 3 and
+// CAL would still want six taps. Only the corner size needs the assertion form,
+// because it has to be a rectangle before it can be checked against the rows.
 static_assert(kGestureLeft.w == ConfigGesture::kZoneWidth &&
                   kGestureRight.w == ConfigGesture::kZoneWidth,
               "CAL and App must agree how far in from an edge a corner reaches.");
@@ -218,8 +226,10 @@ class Controller {
       step_ = 0;
     }
     if (!gestureAllowed && !visible()) step_ = 0;
-    // A held finger or a drag is one tap. Ignore contact bounce as well.
-    if (!rising || (haveTap_ && static_cast<uint32_t>(now - lastTap_) < 100)) {
+    // A held finger or a drag is one tap. Ignore contact bounce as well, on the
+    // same figure the App debounces with.
+    if (!rising ||
+        (haveTap_ && static_cast<uint32_t>(now - lastTap_) < ConfigGesture::kBounceMs)) {
       return out;
     }
     haveTap_ = true;
@@ -239,7 +249,7 @@ class Controller {
         step_ = left ? 1 : 0;
         started_ = now;
       }
-      if (step_ == 6) {
+      if (step_ >= ConfigGesture::kTaps) {
         step_ = 0;
         screen_ = Screen::Menu;
         lastActivity_ = now;
