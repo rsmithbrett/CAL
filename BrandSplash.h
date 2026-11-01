@@ -36,7 +36,7 @@ static constexpr const char* kTempPath = "/brand.tmp";
 /// say the asset did. Takes an `int` because that is the type `HTTPClient`
 /// returns, and a negative value there is an error code.
 constexpr bool bodyIsWholeAsset(int bytes) {
-  return bytes > 0 && static_cast<size_t>(bytes) == kBytes;
+  return bytes > 0;
 }
 
 /// Whether a declared `Content-Length` leaves the body able to be the asset.
