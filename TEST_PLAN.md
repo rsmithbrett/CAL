@@ -2723,6 +2723,92 @@ this repository's own written figure and not something a compiler can call
 
 ---
 
+## 19. The brand splash's one length, at both ends (2026-11-01)
+
+`Updater::cacheBrandAssets()` tested its write with `written <= 0`, so any 200
+response carrying one byte or more was renamed over `/brand.565`: the good
+splash removed, the response put in its place, and the journal reporting a
+cached byte count. `Display::drawBrandImage()` then refused the file on size
+every boot and left it on flash, so the device showed the neutral wordmark with
+no route back without a cable.
+
+The length is now one constant, `BrandSplash::kBytes`, read by the write and by
+the draw. `ci/test-brand-splash.sh` is the host test.
+
+### 19a. The host test
+
+```
+bash ci/test-brand-splash.sh
+```
+
+No stubs: `BrandSplash.h` includes only `<stddef.h>`. The truth table is
+asserted twice over, as `static_assert` and again at runtime, so a widened
+predicate stops the compile on any toolchain and also prints a `Failed!` line
+under a runner.
+
+| Check | What it pins |
+|---|---|
+| `bodyIsWholeAsset(57600)` | the asset is accepted |
+| `bodyIsWholeAsset(1)`, `(512)`, `(57599)`, `(57601)` | a short error page, a dropped body and an oversized one are all refused |
+| `bodyIsWholeAsset(0)`, `(-1)` | an empty body and an `HTTPClient` error code are refused |
+| `declaredLengthCouldBeAsset(512)`, `(0)` | a stated `Content-Length` that is not the asset stops the run before any flash write |
+| `declaredLengthCouldBeAsset(-1)` | a chunked response states no length, so it proceeds to the write |
+| `storedSizeIsWholeAsset(512)`, `(0)`, `(115200)` | a file already on flash at the wrong length is not kept |
+
+### 19b. The mutations, and what each one did
+
+Run on this workstation with `xtensa-esp32-elf-g++ -fsyntax-only`, the cross
+compiler from the pinned core, because there is no native `g++` here. Each one
+restored with the file's mtime refreshed afterwards.
+
+| Mutation | Result |
+|---|---|
+| `bodyIsWholeAsset` back to `return bytes > 0` - the shipped test | 4 assertions fail: `one byte is not the asset`, `one short`, `one over`, `a short HTML error page carrying a 200` |
+| `declaredLengthCouldBeAsset` to `return true` | 2 assertions fail, `a stated 512 cannot be the asset` and `a stated 0`, plus an unused-parameter error under `-Werror` |
+| `storedSizeIsWholeAsset` to `return true` | 3 assertions fail, covering an empty, a short and a doubled stored file |
+
+The first mutation is the shipped defect exactly, and the cases it fails are the
+four a captive portal, a proxy and a dropped connection produce.
+
+### 19c. The bench check, which has not been run
+
+1. **A short body replaces nothing.** Point a device's `brandAssetPath` at a
+   route serving 512 bytes of HTML under a 200 on a device that already has a
+   good splash. Expect the journal line `wrote 512 bytes not 57600 -
+   discarded, the cached splash stands`, the branded splash still on the glass
+   on the next boot, and no `/brand.tmp` left on the partition.
+2. **A stated wrong length costs no write.** Same, with a `Content-Length`
+   header. Expect `Content-Length 512 is not 57600` and no `wrote` line at all.
+3. **A poisoned device heals.** Put a 512-byte `/brand.565` on a device by hand,
+   then boot it. Expect the neutral wordmark, `cached splash is 512 bytes not
+   57600 - removed (ok)` from whichever end ran first, and the branded splash
+   back on the boot after the next refresh.
+4. **A chunked response still works.** Serve the asset without a
+   `Content-Length`. Expect `cached 57600 bytes`.
+
+Photograph 1 and 3.
+
+### 19d. Known gaps, recorded rather than discovered later
+
+- **Nothing here has been on glass, and no device was flashed or commanded.**
+  The defect was found by reading, and the fix is checked by compilation and
+  arithmetic.
+- **The host test covers the decision, not the filesystem sequence.** That
+  `LittleFS.remove()` and `rename()` are not reached when the length is refused
+  is read off the source. `Updater.cpp` pulls in `ArduinoJson`, `HTTPClient`,
+  `Update`, `mbedtls` and four ESP-IDF headers, so a host build of that
+  translation unit needs a stub set larger than the thing it would test. The
+  predicate was moved into a header of its own for exactly the reason section
+  18c gives for `boardColumns()`.
+- **`Display::drawBrandImage()`'s unlink is a patch, not a commit.** The CAL
+  `Display.cpp` was held by another pass; the change is written out in that
+  pass's report. Until it lands, a poisoned device heals only on a boot where
+  `mustContactServer()` is true, which a healthy device starting normally is not.
+- **No measurement of the per-boot cost on a device.** The handshake count and
+  the 115,200-byte partition peak are read off the partition table and the
+  source, not off a running unit.
+---
+
 ## 20. CAL's screens on a white panel (2026-11-01)
 
 CAL's loader screens changed from white-on-black to black-on-white, matching the

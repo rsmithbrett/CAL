@@ -13,6 +13,7 @@
 #include <mbedtls/sha256.h>
 
 #include "BootDiag.h"
+#include "BrandSplash.h"
 #include "Config.h"
 #include "Display.h"
 #include "Identity.h"
@@ -21,8 +22,6 @@
 
 namespace Updater {
 namespace {
-
-constexpr const char* kBrandSplashPath = "/brand.565";
 
 /// Both numbers, never just the free figure.
 ///
@@ -378,7 +377,52 @@ bool installApplication(const Service::Discovery& discovery, const Manifest& man
   return true;
 }
 
+/// Removes a cached splash the display will not draw, and any leftover
+/// download.
+///
+/// `Display::drawBrandImage()` refuses a `/brand.565` whose size is not
+/// `BrandSplash::kBytes` and falls back to the neutral wordmark. Nothing used to
+/// remove the file it refused, so a device that had taken a wrong-length body
+/// held it, refused it again on every boot, and had no route back without a
+/// cable. Removing it here means the next refresh writes into an empty slot.
+///
+/// `/brand.tmp` goes on the same pass. A reset part-way through a write, or a
+/// `rename()` that refused, leaves it holding up to 57,600 bytes of a
+/// 196,608-byte partition with nothing in either binary that would collect it.
+///
+/// Runs before the no-path check below, so a device whose brand assignment was
+/// withdrawn still gets its flash cleaned up.
+static void pruneUnusableBrandFiles() {
+  if (LittleFS.exists(BrandSplash::kTempPath)) {
+    const bool removed = LittleFS.remove(BrandSplash::kTempPath);
+    Journal::printf("[brand] leftover %s removed (%s)", BrandSplash::kTempPath,
+                    removed ? "ok" : "FAILED");
+  }
+
+  if (!LittleFS.exists(BrandSplash::kPath)) {
+    return;
+  }
+
+  File cached = LittleFS.open(BrandSplash::kPath, "r");
+  if (!cached) {
+    return;
+  }
+  const size_t size = cached.size();
+  cached.close();
+
+  if (BrandSplash::storedSizeIsWholeAsset(size)) {
+    return;
+  }
+
+  const bool removed = LittleFS.remove(BrandSplash::kPath);
+  Journal::printf("[brand] cached splash is %u bytes not %u - removed (%s)",
+                  static_cast<unsigned>(size), static_cast<unsigned>(BrandSplash::kBytes),
+                  removed ? "ok" : "FAILED");
+}
+
 bool cacheBrandAssets(const Service::Discovery& discovery) {
+  pruneUnusableBrandFiles();
+
   if (discovery.brandAssetPath.length() == 0) {
     Journal::line("[brand] discovery named no brand asset path - skipped, and this is "
                   "normal for a device not yet assigned to a brand");
@@ -408,10 +452,25 @@ bool cacheBrandAssets(const Service::Discovery& discovery) {
     return false;
   }
 
-  // Written to a temporary name and renamed on success, so an interrupted
-  // download cannot leave a half-written splash that renders as noise.
-  const char* tmp = "/brand.tmp";
-  File f = LittleFS.open(tmp, "w");
+  // The length the display will accept, tested against what the response says
+  // about itself before any of it reaches flash. A stated length that is not
+  // the asset is what a proxy, a captive portal or a CDN serving its own error
+  // page under a 200 produces, and refusing here costs no flash write at all.
+  // A chunked response states nothing, so it proceeds to the write.
+  const int declared = http.getSize();
+  if (!BrandSplash::declaredLengthCouldBeAsset(declared)) {
+    Journal::printf("[brand] Content-Length %d is not %u - splash not refreshed (cosmetic)",
+                    declared, static_cast<unsigned>(BrandSplash::kBytes));
+    http.end();
+    return false;
+  }
+
+  // Written to a temporary name and renamed once the whole asset has arrived.
+  // Two separate jobs: the rename keeps a part-written file off the panel, and
+  // the length test below keeps a body that arrived complete at the wrong
+  // length from replacing a splash that works. The rename alone does not do the
+  // second one - a short body is not a part-written file.
+  File f = LittleFS.open(BrandSplash::kTempPath, "w");
   if (!f) {
     Journal::line("[brand] could not open /brand.tmp for writing (cosmetic)");
     http.end();
@@ -422,16 +481,18 @@ bool cacheBrandAssets(const Service::Discovery& discovery) {
   f.close();
   http.end();
 
-  if (written <= 0) {
-    Journal::printf("[brand] wrote %d bytes - discarding the temporary file (cosmetic)",
-                    written);
-    LittleFS.remove(tmp);
+  // `writeToStream()` returns a count, so a dropped connection and a short
+  // error page both arrive as a positive number smaller than the asset.
+  if (!BrandSplash::bodyIsWholeAsset(written)) {
+    Journal::printf("[brand] wrote %d bytes not %u - discarded, the cached splash stands",
+                    written, static_cast<unsigned>(BrandSplash::kBytes));
+    LittleFS.remove(BrandSplash::kTempPath);
     return false;
   }
 
-  LittleFS.remove(kBrandSplashPath);
-  const bool renamed = LittleFS.rename(tmp, kBrandSplashPath);
-  Journal::printf("[brand] cached %d bytes to %s (rename %s)", written, kBrandSplashPath,
+  LittleFS.remove(BrandSplash::kPath);
+  const bool renamed = LittleFS.rename(BrandSplash::kTempPath, BrandSplash::kPath);
+  Journal::printf("[brand] cached %d bytes to %s (rename %s)", written, BrandSplash::kPath,
                   renamed ? "ok" : "FAILED");
   return renamed;
 }

@@ -65,6 +65,9 @@ jobs:
       - name: Test the loader's NVS write order on host
         run: bash ci/test-loader-order.sh
 
+      - name: Test the brand splash length on host
+        run: bash ci/test-brand-splash.sh
+
       - name: Install arduino-cli
         uses: arduino/setup-arduino-cli@v2
 
