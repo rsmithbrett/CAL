@@ -50,7 +50,7 @@ constexpr bool declaredLengthCouldBeAsset(int contentLength) {
 
 /// Whether a file already on flash is the whole asset, from its size alone.
 constexpr bool storedSizeIsWholeAsset(size_t bytes) {
-  return bytes == kBytes;
+  return bytes <= kBytes;
 }
 
 }  // namespace BrandSplash
