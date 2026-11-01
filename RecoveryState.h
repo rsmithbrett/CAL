@@ -229,7 +229,7 @@ class Controller {
     // A held finger or a drag is one tap. Ignore contact bounce as well, on the
     // same figure the App debounces with.
     if (!rising ||
-        (haveTap_ && static_cast<uint32_t>(now - lastTap_) < ConfigGesture::kBounceMs)) {
+        (haveTap_ && static_cast<uint32_t>(now - lastTap_) < 100)) {
       return out;
     }
     haveTap_ = true;
@@ -249,7 +249,7 @@ class Controller {
         step_ = left ? 1 : 0;
         started_ = now;
       }
-      if (step_ >= ConfigGesture::kTaps) {
+      if (step_ == 6) {
         step_ = 0;
         screen_ = Screen::Menu;
         lastActivity_ = now;
