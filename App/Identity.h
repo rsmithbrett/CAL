@@ -199,12 +199,18 @@ bool updateRequested();
 void setUpdateRequested(bool requested);
 
 /// Asks CAL to open its configuration menu on the next boot. Set by the six
-/// corner taps in CardManager, alongside setUpdateRequested(true).
+/// corner taps, through Loader::requestConfigMenu(), which writes
+/// setUpdateRequested(true) first and this second.
 ///
 /// Both flags are needed and they do different jobs. This one tells CAL what to
 /// show; updateRequested is what puts CAL back on the path that calls
 /// Display::begin(), without which the panel is never started and the menu would
-/// have no touch to read. CAL clears this one before the menu opens.
+/// have no touch to read. CAL clears this one before the menu opens, and opens
+/// the menu only on a boot where it drew.
+///
+/// Nothing in the App reads this flag and nothing in the App writes false, so an
+/// interrupted pair that stored this one and not updateRequested would latch.
+/// App/Loader.cpp carries the order and why.
 bool configMenuRequested();
 void setConfigMenuRequested(bool requested);
 

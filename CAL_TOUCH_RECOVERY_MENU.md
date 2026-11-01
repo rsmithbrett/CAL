@@ -117,8 +117,8 @@ The menu displays and logs no credentials.
 ### Reaching it from a running App
 
 Six taps on a device that's already showing cards open the same menu. The App
-watches the same two corner zones, and on the sixth tap it sets `cfgmenu`
-alongside `updreq` and restarts.
+watches the same two corner zones, and on the sixth tap it sets `updreq`, then
+`cfgmenu`, then selects the factory partition and restarts.
 
 This is the way in that matters on a healthy device. The boot hold below covers
 a power-on, where CAL draws the splash and listens for 1,200 ms. It can't cover
@@ -133,13 +133,44 @@ puts CAL back on the path that calls `Display::begin()`. The panel comes up, so
 touch reads, so the rows respond. Setting `cfgmenu` on its own would open a menu
 on a panel CAL never started.
 
+**`updreq` is written first, and the order is what survives a power cut.** The
+two flags are separate NVS commits with a restart after them, so a device that
+loses power between them comes back with the first one stored, the second one
+not, and the boot partition still pointing at the App because it was never
+changed. `updreq` on its own is a request CAL absorbs on the next boot that runs
+it: `Updater::installApplication()` clears it after an install, and `CAL.ino`
+clears it on the branch where the server confirms the installed version is
+already current. `cfgmenu` on its own is the state nothing clears. The App never
+reads it, CAL is the only writer of false, and so it waits through every App
+boot until some later boot runs CAL, which then opens a menu nobody asked for at
+a device nobody is standing at, holds that boot for up to 60 seconds, and leaves
+Reset identity one tap and one confirmation away. Writing `updreq` first means
+the state a power cut can leave behind is always the one CAL already clears.
+
 CAL reads `cfgmenu` once and clears it before acting, then opens Configuration
 without waiting for the gesture a second time. Clearing first means a restart
 taken while the menu is open returns to a normal boot rather than back here.
 
+**It opens the menu only on a boot where it drew**, which is the condition the
+boot hold runs under and for the same reason. The quiet path never calls
+`lcd.init()`, and `Display::readTouch()` returns `gPanelStarted && getTouch()`,
+so on an unstarted panel it reads false and starts nothing. `begin()` there
+consumes no finger, `showRecoveryMenu()` then brings the panel up underneath an
+already-open menu, and the first poll after that reads a finger resting on the
+glass as a rising edge and delivers a tap wherever that finger is.
+`kMenuRows[0]` is Set up Wi-Fi, the row with no confirmation behind it. On the
+ordinary path `updreq` keeps that boot loud and the gate costs nothing; it's
+there for a `cfgmenu` that arrived without one. The request is cleared either
+way, and the journal says which of the two happened.
+
 Both binaries share the `cal` NVS namespace and always have, which is how
-`updreq` already travels from the App to CAL. The zones and the tap count come
-from `RecoveryState.h`, so the two binaries can't drift on what six taps means.
+`updreq` already travels from the App to CAL. The shape of the gesture comes
+from `libraries/DamBoards/src/ConfigGesture.h`, which both binaries compile
+against: the tap count, the bounce window, the window length and how far a
+corner reaches. `RecoveryState.h` reads the count, the bounce window and the
+window length from there and asserts its own rectangles against the corner size.
+Its rectangles stay where they are, because they're asserted against CAL's menu
+rows and that geometry means nothing to the App.
 
 ## The boot hold
 
@@ -283,13 +314,25 @@ hardware/NVS/display stubs and tests the actual state machine and manifest
 install decision:
 
 - Six taps, wrong order, outside taps, five taps, timeout and disabled entry.
+- The last pixel inside each corner zone and the first pixel outside it, as
+  literals, because both rectangles are asserted equal to `ConfigGesture`'s
+  corner size and a case built from the constant would move with it.
+- The tap count and the bounce window driven from `ConfigGesture`, so a figure
+  that reaches one binary and not the other fails here.
 - Held/dragged fingers, bounce and the finger present when setup begins.
-- Both confirmations, Cancel, Back, inactivity expiry and timer rollover.
-- Shared button boundaries and production menu-render handoff.
+- Both confirmations, Cancel, Back, inactivity expiry, and both timers across a
+  rollover the subtraction actually spans.
+- Production menu-render handoff.
 - Each action's persisted intent, secret preservation/removal and restart cause.
 - Missing factory and failed persistence without a successful restart.
 - Same-version forced reload, normal update/missing App, invalid manifest and
   no configured release.
+
+Then `bash ci/test-loader-order.sh`, which compiles production `App/Loader.cpp`
+the same way and records every `Identity` write in sequence. It asserts that
+`requestConfigMenu()` commits `updreq` before `cfgmenu` and selects the factory
+partition after both, and it covers the other two callers of
+`bootFactoryAndRestart()`.
 
 **The geometry is proved by `static_assert` in `RecoveryState.h`, not by that
 host run.** Both corner zones against all three menu rows, the Diagnostics
@@ -301,8 +344,9 @@ must outlast the hold. They cost nothing, need no host compiler, and run in
 every `arduino-cli` build of both boards, which is the point: the host check
 they stand in for compared each rectangle only against its own x/y/w/h, which
 holds for any rectangle and any half-open `contains()`, so every boundary
-mutation passed it. That check is still in the file and still passes; the
-guarantee now lives in the assertions.
+mutation passed it. That check has been retired. The assertions carry the
+overlaps, and the corner-edge cases listed above carry where an edge sits while
+it overlaps nothing, which no assertion here can say.
 
 `holdBootForTouch()` has no host coverage. It drives `millis()`, `delay()` and
 `Display::readTouch()` in a loop, and the test's `delay()` stub throws to stand

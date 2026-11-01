@@ -12,6 +12,9 @@ on:
       - "GpioMonitor.h"
       - "libraries/DamBoards/**"
       - "App/Motion.cpp"
+      - "App/Loader.cpp"
+      - "App/Loader.h"
+      - "App/Identity.h"
       - "Provisioning.cpp"
       - "Identity.cpp"
       - "Identity.h"
@@ -37,6 +40,9 @@ jobs:
 
       - name: Test recovery gesture and actions on host
         run: bash ci/test-recovery-menu.sh
+
+      - name: Test the loader's NVS write order on host
+        run: bash ci/test-loader-order.sh
 
       - name: Compile against production toolchain and check real partitions
         run: bash ci/build-firmware.sh

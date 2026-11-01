@@ -5,7 +5,10 @@
 namespace Recovery {
 
 // Enable only while a setup screen is being serviced. begin() consumes any
-// finger already on the glass; entering the menu needs six new taps.
+// finger already on the glass, so entering the menu needs six new taps - on a
+// panel that is up. It reads Display::readTouch(), which is
+// gPanelStarted && getTouch() and so reads false before anything has drawn,
+// consuming nothing.
 void begin();
 void end();
 bool visible();
@@ -36,9 +39,14 @@ bool holdBootForTouch();
 /// this. Draws the menu, so the caller polls exactly as it does after
 /// holdBootForTouch() returns true.
 ///
-/// The panel is already up on this boot because the App sets updreq alongside
-/// cfgmenu - see CAL_TOUCH_RECOVERY_MENU.md. This does not check that; begin()
-/// reads the touch through Display, which starts the panel on its own.
+/// CALL THIS ONLY ON A BOOT WHERE CAL ALREADY DREW, and CAL.ino carries that
+/// condition. begin() runs first and reads Display::readTouch(), which is
+/// gPanelStarted && getTouch() and returns false on an unstarted panel without
+/// starting it, so a finger already on the glass is not consumed. The panel then
+/// comes up inside showRecoveryMenu() below, under an open menu, and the first
+/// poll reads that finger as a rising edge and delivers a tap wherever it is
+/// resting. The App sets updreq alongside cfgmenu, which is what normally
+/// satisfies the condition - see CAL_TOUCH_RECOVERY_MENU.md.
 void openMenu();
 
 // Caller closes any live portal first. Persists a request, selects factory,
