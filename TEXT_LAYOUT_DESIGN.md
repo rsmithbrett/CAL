@@ -1292,7 +1292,7 @@ scoreboard with its columns wrong.
 
 **A draw function leaves the panel's text state as it found it: the panel's own
 face, a top-left datum, and a scale of 1.** `restoreDefaultFont()` is now
-`restoreDefaultTextState()` and puts back all three, so the twenty call sites
+`restoreDefaultTextState()` and puts back all three, so the thirty call sites
 that already asked for the first two get the third without moving. The two boot
 screens, which call no card helper, call it themselves.
 
@@ -1312,20 +1312,41 @@ lambda, and each of those sets color, scale and datum before it draws.
 greps in section 7:
 
 > No function in `App/Display.cpp` may return with a text scale other than 1
-> selected. A function that sets one must put 1 back, or call
-> `restoreDefaultTextState()`, at the function's own indentation rather than
-> inside a branch.
+> selected.
 
-The indentation is the whole point of the check. `showStatus()` did restore the
+That is the property. The script enforces it with two rules, neither of which
+is a control-flow model, and the wording above is earned only by having both.
+
+**Rule 1, the restore is not inside a branch.** A function that sets a scale
+other than 1 must put 1 back, by `lcd.setTextSize(1);` or
+`restoreDefaultTextState();`, at the function's own two-space indentation,
+after the last place it set the other scale. `showStatus()` did restore the
 scale, on the path where `detail` was non-empty, and a gate that accepted a
 `setTextSize(1)` anywhere in the body would have passed it. Two-space
-indentation is what "on every path out" looks like in this file.
+indentation is what "not inside a branch" looks like in this file.
 
-**The gate was proven to bite before the fix was accepted**, by deleting the
-restore from `showStatus()` and confirming the script names that function and
-exits 1. It is a grep and an `awk`, nothing cleverer, for the reason section 7
-gives: it does not know what the panel looks like, it knows the difference
-between a function that put the scale back and one that did not.
+**Rule 2, no early return while a scale is selected.** Reading a function top to
+bottom, no `return` may stand between a line that selects a scale other than 1
+and the next line that puts 1 back.
+
+Rule 1 on its own is weaker than the property, and that gap was measured rather
+than reasoned about: it compares two line numbers, so a function that sets 2,
+takes an early return, and restores at the bottom has a restore on the larger
+line number and passes. That shape is the original `showStatus()` defect in a
+different arrangement, and it is a path out with scale 2 selected. Rule 2 is
+what closes it. `showMoonPhaseCard()` is the function in the file that already
+has the right shape: it restores before its early return, and rule 2 reads it as
+clean.
+
+**Both rules were proven to bite.** Rule 1 by deleting the restore from
+`showStatus()` and confirming the script names that function and exits 1. Rule 2
+by putting `if (detail.length() == 0) return;` into `showStatus()` above the
+restore, which rule 1 passes and rule 2 names. TEST_PLAN.md section 17a records
+the branches and the runs.
+
+It is a grep and two `awk`s, nothing cleverer, for the reason section 7 gives:
+it does not know what the panel looks like, it knows the difference between a
+function that put the scale back and one that did not.
 
 ### 14d. What this does not cover
 
@@ -1334,11 +1355,28 @@ between a function that put the scale back and one that did not.
   scoreboard taken before or after. The owner's photograph of wrong columns is
   consistent with this and is not proof of it, since the geometry fix that
   shipped separately is also in that frame.
-- **The host test cannot reach this.** `ci/test-recovery-menu.sh` is the only
-  host target in the repository and it compiles `Recovery.cpp` against stubs.
-  `Display.cpp` names LovyanGFX in one block and could be driven through its own
-  `Canvas` interface by a fake, which would turn section 14a's table into
-  assertions. That has not been written.
+- **Neither rule models control flow, and a branch defeats rule 2.** A restore
+  inside an `if` clears rule 2's flag for every `return` after it, so
+
+  ```cpp
+  lcd.setTextSize(2);
+  if (a) { restoreDefaultTextState(); }
+  if (b) return;                        // reachable with 2 selected when !a
+  lcd.setTextSize(1);
+  ```
+
+  passes both rules and is wrong. Rule 1 passes it too, because the restore at
+  the bottom is on the larger line number. Catching it needs the branch
+  structure, and an `awk` over 6,700 lines is the wrong tool for that. No
+  function in the file has this shape today.
+- **The host tests cannot reach this.** There are four host targets now -
+  `ci/test-recovery-menu.sh`, `ci/test-loader-order.sh`,
+  `ci/test-config-request.sh` and `ci/test-card-columns.sh` - and none of them
+  compiles `Display.cpp`. `Display.cpp` names LovyanGFX in one block and could
+  be driven through its own `Canvas` interface by a fake, which would turn
+  section 14a's table into assertions. That has not been written. Section 15d
+  records what did come out of that file into a header a host compiler can
+  build.
 - **The face and the datum are not gated**, only the scale. The private helpers
   that make up a card - `drawCardBanner()`, `drawProseBody()`, `drawSportsPill()`,
   `drawTideRow()`, `drawOneButton()` - select a face mid-card by design, so a
@@ -1368,6 +1406,26 @@ time is about 72px of `FreeSansBold9pt7b` against the 56px the column holds on a
 row with scores, so a scoreless row took the home score's column and the gap
 beside it, 84px.
 
+**The 72 is an estimate, it is 6px low, and section 10d of this document already
+had the real figure.** 10d reads "`10:00 PM` is 77 and `12:00 AM` is 78", from
+the audit that built section 9b's method. Section 15 was written against the
+comment's "about 72px" instead, three hundred lines below a measurement of the
+same string in the same face.
+
+Re-measured here off the vendored `FreeSansBold9pt7b` glyph table by 9b's
+method, to confirm 10d rather than to replace it: the widest string
+`formatTimeOfDay()` can produce is 78px, which is a two-digit hour with `AM`
+rather than `PM`, because `A` advances 13 and `P` advances 12. The method
+reproduces every 12pt figure written into this document - `Sunrise` 89, `Sunset`
+81, `Est. value` 112, `$400K - $450K` 161, `$9999K - $99999K` 200 - to the
+pixel. That is a fifth agreeing model of `LGFXBase::text_width()`, and it is
+still a model.
+
+The 80 this change picked clears 78, so nothing is broken by the estimate. What
+changed is the arithmetic behind it: `kBoardStartTimeWidth` is now
+`kBoardStartTimeTextWidth + kBoardStartTimeSlack`, 78 plus 2, and the slack is
+2px on a measured figure rather than the 8 an estimate was carrying.
+
 `57df3d8` replaced the literals with widths derived from the panel, which the
 240px panel genuinely needed: `homeScoreRight` was a flat 248 there, eight pixels
 past the glass, and the status width that subtracted it came out at 4. In the
@@ -1375,7 +1433,7 @@ same diff the per-state status width became `const int statusWidth =
 kStatusWidth;` and the 52px the two empty score columns gave up went to the names
 instead. On the landscape panel the scoreless status column went from 84 to 56.
 
-72 into 56 does not go, and nothing catches it. The status draws at
+78 into 56 does not go, and nothing catches it. The status draws at
 `FontId::Sans9`, which is the last entry in `kSansTiers`, so `layoutLine()`'s
 ladder has no smaller face to drop to; `roomBelow` is 0, so it cannot take a
 second line either. It falls through to `layoutText()` in the 56px box it was
@@ -1389,12 +1447,16 @@ old layout drew off the glass, but the 320px one is: the release note's own
 example, the Blackhawks reading as `Blackha...`, is a row with scores, and that
 row lost three pixels on the panel the note describes.
 
-### 15b. One scale, and the state as its only input
+### 15b. One scale, and the scores as its only input
 
 `boardColumns(screenW, scoreless)` returns the five edges and the three widths.
-Both score columns stand empty in exactly the state whose status holds a start
-time, so that state is the only input the layout needs, and the width the score
-columns are not using is the width the status column needs:
+`scoreless` is `row.awayScore[0] == '\0' && row.homeScore[0] == '\0'`, and it is
+the only input the layout takes beyond the panel width, because it is where the
+pixels come from: two empty score columns release what the status column spends.
+
+**It is not the same thing as "the status holds a start time", and this section
+said it was.** Section 15f has the two directions that come apart and what
+keying on the status instead would take.
 
 ```cpp
 const int scoreWidth  = scoreless ? 0 : kBoardScoreWidth;    // 26
@@ -1409,8 +1471,8 @@ that was missing: `57df3d8` charged a flat 56 and then let the names spend the
 52px the score columns released, so a scoreless row's names and its status column
 were both laying claim to the same pixels.
 
-80 rather than 72 because the 72 is a measurement written as "about 72px". Eight
-pixels is the slack on an approximate figure, not headroom for a longer string.
+80 rather than 78 because two pixels is the slack on a measured figure, not
+headroom for a longer string. 15a has where the 78 comes from.
 
 Measured at both panel widths, against both versions it replaces:
 
@@ -1453,11 +1515,13 @@ the 86 that shipped before the rewrite.
 ### 15d. The properties a build checks
 
 `boardColumns()` is `constexpr`, so the figures above are not a table somebody
-has to re-derive. Twelve `static_assert`s hold them at both shipped panel
+has to re-derive. Fourteen `static_assert`s hold them at both shipped panel
 widths, in every build, on both boards:
 
-- The scoreless status column is at least 72px, at 320 and at 240. This is the
-  live regression, stated as a property.
+- The scoreless status column is at least `kBoardStartTimeTextWidth`, at 320 and
+  at 240. This is the live regression, stated as a property.
+- The scored status column is at least `kBoardStateWordWidth`, the 55px `FINAL`
+  measures, at both widths.
 - A row with scores keeps the 83px and 43px name columns `v2026.10.31.0002`
   shipped, so the next change to these constants cannot quietly shrink them
   further.
@@ -1467,11 +1531,17 @@ widths, in every build, on both boards:
 - The `kBoardMinNameWidth` floor is clear at both widths. It has to be: the floor
   clamps the name width and nothing clamps the edges derived from it, so below
   174px scoreless and 202px with scores the separation stops holding. No shipped
-  panel is that narrow, which makes it latent rather than live, and those two
-  assertions are what will say so when a third board arrives.
+  panel is that narrow, which makes it latent rather than live.
+
+**None of the fourteen will say anything when a third board arrives.** They
+evaluate the literals 320 and 240 and nothing else, so a 272px panel compiles
+them all clean whatever it does to the row. That claim was in this section and it
+was wrong. `tests/card-columns-test.cpp` is what covers a width nobody has built:
+it walks every width from 28 to 1024 in both states, so a third board's figure is
+already measured before the board exists.
 
 `boardColumns()` and the constants it reads live in `App/CardColumns.h`, where
-the twelve assertions live with them. The header names no graphics library, no
+the fourteen assertions live with them. The header names no graphics library, no
 font and no Arduino type, which is the whole reason it is a header: `Display.cpp`
 pulls in LovyanGFX and a board pin map, so while these figures were in that file
 they could only be compiled on the toolchain for one of the two boards.
@@ -1482,7 +1552,7 @@ and a second copy of it is the thing that drifts.
 
 `ci/test-card-columns.sh` compiles that header with `g++` and runs
 `tests/card-columns-test.cpp`. It is not a replacement for the assertions, which
-run in every board build and need no host compiler. It is the three things an
+run in every board build and need no host compiler. It is the four things an
 assertion at a fixed width can't say:
 
 - **The table in 15b, as equalities.** The assertions hold the name columns at or
@@ -1502,11 +1572,78 @@ assertion at a fixed width can't say:
   two columns actually meet at 162 and 190, and below those they're drawn through
   each other. None of those six figures is a thing a `static_assert` at 320 and
   240 could have reported.
-- **Whether a measured string fits the column drawn for it.** This is 18b's gap,
-  as far as a host can close it. The 72px for `10:00 PM` is this repository's
-  written figure and not something a compiler can call `textWidth()` for, so
-  `kBoardStartTimeWidth` is written as `kBoardStartTimeTextWidth +
-  kBoardStartTimeSlack` and the host run reads both names. A status column
-  trimmed to 73 clears the 72px assertion and fails here.
+- **Whether a column keeps the slack it is written to carry.** The assertion
+  holds the start-time column at the 78px the widest start time measures. The
+  host run holds it at 78 plus the 2px of slack, which is the difference between
+  a column sized against a measurement and one trimmed down to it: a status
+  width of 79 clears the assertion and fails here.
 
 TEST_PLAN.md section 18 has the mutations both halves were proven against.
+
+### 15f. `scoreless` is not "the status holds a start time"
+
+The layout keys on whether both score strings are empty. Four states produce
+that, and only one of them wants an 80px column:
+
+| state | status | measured | column it gets |
+|---|---|---|---|
+| Scheduled | a start time | up to 78 | 80, which is right |
+| Postponed | `PPD` | 37 | 80, and both names pay 12px each on the 320 panel |
+| Unknown | `""` | 0 | 80, for nothing |
+| Live or Final with no score sent | `LIVE`, `FINAL`, a period | 41 to 112 | 80 |
+
+And the other direction, which costs more. `Sports.cpp`'s `writeScore()` writes
+each side independently from its own `kNoScore` sentinel, so a scheduled game
+with one side's score reported is **not** scoreless. Its status is still a start
+time, and it is handed the 56px column, which is the regression 15a is about,
+arriving through a different door. Nothing has been seen doing this, and it needs
+only a provider that reports a 0 for a game that has not started.
+
+**What it should key on is the status string's own state.** Two shapes would do
+it. One: `SportsBoardRow` carries the flag, set by `Sports.cpp` where the state
+enum still exists, and `boardColumns()` takes that instead of `scoreless` — the
+pixels would still come from the empty score columns, so a row would have to
+report both. Two: the status column asks for what its own string measures,
+clamped between `kBoardStateWordWidth` and `kBoardStartTimeWidth`, which needs a
+`textWidth()` call on the draw path and takes the figure out of a `constexpr`
+and out of reach of both the assertions and the host test.
+
+Neither is written. Both change what the panel draws, so neither belongs in a
+pass that is adding tests, and the first one changes a struct two files share.
+The reasoning in this section and in `App/CardColumns.h` now says what the code
+does rather than claiming the two states are the same.
+
+### 15g. The 56px column does not hold a period, and a live row draws one
+
+**Section 10d already says this**, in one sentence at the end of its table: "A
+live row's `6TH INN` is 74 against 56 and is still cut." Section 15 then went on
+to describe the 56px column as the width that holds `FINAL` or a period. The
+figures, re-measured on the same glyph table by 15a's method:
+
+| string | measured | fits 56 |
+|---|---|---|
+| `PPD` | 37 | yes |
+| `LIVE` | 41 | yes |
+| `90+3'` | 46 | yes |
+| `FINAL` | 55 | yes, by 1px |
+| `6TH INN` | 74 | no |
+| `4TH QTR` | 79 | no |
+| `HALFTIME` | 94 | no |
+| `2ND PERIOD` | 112 | no |
+
+A live game's status is `game.period`, the provider's own progress text, and
+`SportsBoardRow::kMaxStatus` holds 15 characters of it. A live game normally has
+scores, so it takes the 56px column, and the status draws at `FontId::Sans9`
+with `roomBelow` 0 — no smaller face and no second line, so it ellipsizes. `6TH
+INN` reads as `6TH...` on the glass. That is the same failure 15a is about, on
+the other branch of the same ternary, and `6TH INN` is the example this document
+and `App/Display.h:470` both use for what the field holds.
+
+**It is live and it is not fixed here.** Widening the scored column takes pixels
+off two name columns that a release note was written about, and the width it
+would need depends on a string the server sends rather than on anything in this
+repository, so it is the measure-and-clamp shape in 15f rather than a new
+constant. `App/CardColumns.h` now says the 56 is sized against a state word and
+not against a period, which is what it does, and
+`tests/card-columns-test.cpp` holds it at or above the 55px `FINAL` measures. No
+assertion claims it holds a period, because it does not.
