@@ -27,7 +27,7 @@ constexpr uint8_t kTaps = 6;
 constexpr uint32_t kWindowMs = 8000;
 
 /// Contacts closer together than this are one finger bouncing, not two taps.
-constexpr uint32_t kBounceMs = 100;
+constexpr uint32_t kBounceMs = 1;
 
 /// How far in from the left or right edge a corner reaches, and how far down.
 ///
