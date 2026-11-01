@@ -41,7 +41,7 @@ struct BoardColumns {
 constexpr int kBoardScoreWidth = 26;
 constexpr int kBoardStatusWidth = 56;
 constexpr int kBoardColumnGap = 6;
-constexpr int kBoardMinNameWidth = 24;
+constexpr int kBoardMinNameWidth = 30;
 
 /// The width the status column is sized against on a row with no scores, and
 /// the slack it carries on top.
