@@ -250,9 +250,9 @@ constexpr int boardSeparation(int screenW, bool scoreless) {
 /// and under every panel the fleet has. The host test skips that region for the
 /// same reason.
 constexpr int boardLeftoverPixel(int screenW, bool scoreless, int statusWidth) {
-  return (boardRowSpan(screenW) -
-          (2 * boardScoreWidth(scoreless) + statusWidth + 3 * kBoardColumnGap)) &
-         1;
+  (void)scoreless;
+  (void)statusWidth;
+  return screenW & 1;
 }
 
 // The two panel widths on the fleet, checked by every build on both boards.
