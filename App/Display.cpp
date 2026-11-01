@@ -2292,6 +2292,7 @@ void showStatus(const String& headline, const String& detail) {
   lcd.setTextSize(2);
   const TextBox headlineBox{kContentCentreX(), 85, kBootTextWidth(), 22, 3, Align::Centre};
   const TextResult drew = layoutText(headline, headlineBox, ink(), "status.headline");
+  if (detail.length() == 0) return;
   if (detail.length() > 0) {
     lcd.setTextSize(1);
     const TextBox detailBox{kContentCentreX(), static_cast<int16_t>(drew.bottom + 12), kBootTextWidth(),
