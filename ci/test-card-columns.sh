@@ -15,4 +15,14 @@ trap 'rm -rf "$TEST_BUILD_DIR"' EXIT
   -IApp \
   tests/card-columns-test.cpp -o "$TEST_BUILD_DIR/card-columns-test"
 echo "==> Scoreboard column arithmetic"
-"$TEST_BUILD_DIR/card-columns-test"
+# The binary's own PASS line is what says it ran, rather than its exit status.
+# See the same lines in ci/test-config-request.sh.
+OUTPUT=$("$TEST_BUILD_DIR/card-columns-test")
+echo "$OUTPUT"
+case "$OUTPUT" in
+  "PASS: scoreboard columns"*) ;;
+  *)
+    echo "ERROR: the column test exited 0 without printing its PASS line." >&2
+    exit 1
+    ;;
+esac

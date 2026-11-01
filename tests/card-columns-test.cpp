@@ -17,9 +17,11 @@
 //     174 and 202 as the widths the separation stops holding at; the first
 //     width whose name column is clear of the floor is 176 and 204, because the
 //     even split truncates.
-//   - Whether the figures this repository has measured for a string fit the
-//     column drawn for that string. A static_assert reads 72px against a
-//     column of 80 and passes a column of 73 just as happily.
+//   - Whether a column keeps the slack it is written to carry. The header
+//     asserts the start-time column holds the 78px the widest start time
+//     measures; this asserts it holds that plus the 2px of slack, which is the
+//     difference between a column sized against a measurement and one trimmed
+//     down to it.
 //
 // TEST_PLAN.md section 18d has the mutations each case was proven against.
 
@@ -38,6 +40,7 @@ using CardColumns::kBoardRowInset;
 using CardColumns::kBoardScoreWidth;
 using CardColumns::kBoardStartTimeSlack;
 using CardColumns::kBoardStartTimeTextWidth;
+using CardColumns::kBoardStateWordWidth;
 using CardColumns::kBoardStatusWidth;
 using CardColumns::kCardMargin;
 
@@ -66,6 +69,28 @@ int firstWidthClearOfFloor(bool scoreless) {
 }  // namespace
 
 int main() {
+  // --- what a column has to hold --------------------------------------------
+  //
+  // First, because this is the one thing in this file that reads a measurement
+  // of a string rather than an arithmetic property of a width.
+  //
+  // The widest start time is 78px of FreeSansBold9pt7b and the column carries
+  // 2px of slack on top. Reading both names apart is what separates a column
+  // trimmed towards the measurement from one that still has its slack: a status
+  // width of 79 clears the header's assertion and fails here.
+  for (const int width : {320, 240}) {
+    assert(boardColumns(width, true).statusWidth >=
+           kBoardStartTimeTextWidth + kBoardStartTimeSlack);
+    // A row with scores draws a state word there. FINAL is 55px and the column
+    // is 56. It is not sized for a period, and the periods a provider sends do
+    // not fit it - see the header and TEXT_LAYOUT_DESIGN.md section 15g.
+    assert(boardColumns(width, false).statusWidth == kBoardStatusWidth);
+    assert(boardColumns(width, false).statusWidth >= kBoardStateWordWidth);
+    // And two digits of score.
+    assert(boardColumns(width, false).scoreWidth == kBoardScoreWidth);
+    assert(boardColumns(width, true).scoreWidth == 0);
+  }
+
   // --- the table in TEXT_LAYOUT_DESIGN.md section 15b ------------------------
   //
   // The four rows of the "this change" column, as equalities rather than as
@@ -81,24 +106,6 @@ int main() {
   assert(boardColumns(240, true).statusWidth == 80);
   assert(boardColumns(240, false).nameWidth == 43);
   assert(boardColumns(240, false).statusWidth == 56);
-
-  // --- what a column has to hold --------------------------------------------
-  //
-  // A scoreless row's status is a start time, measured in this repository at
-  // about 72px of FreeSansBold9pt7b, and the column carries the slack on that
-  // approximation as well. Reading both names is what separates a column that
-  // has been trimmed towards the measurement from one that still has its slack:
-  // 73 clears the header's 72px assertion and fails here.
-  for (const int width : {320, 240}) {
-    assert(boardColumns(width, true).statusWidth >=
-           kBoardStartTimeTextWidth + kBoardStartTimeSlack);
-    // A row with scores draws FINAL or a period there, which is the 56 the
-    // column has always been.
-    assert(boardColumns(width, false).statusWidth == kBoardStatusWidth);
-    // And two digits of score.
-    assert(boardColumns(width, false).scoreWidth == kBoardScoreWidth);
-    assert(boardColumns(width, true).scoreWidth == 0);
-  }
 
   // --- the sweep ------------------------------------------------------------
   for (int width = 2 * (kCardMargin + kBoardRowInset); width <= kWidestSweep; ++width) {
@@ -156,10 +163,10 @@ int main() {
   // --- where the floor engages ----------------------------------------------
   //
   // Below these widths the floor clamps the name column and the edges derived
-  // from it carry on shrinking, so the home block walks into the status column.
-  // The design document names 174 and 202, which is where the separation stops
-  // being 2 * kBoardColumnGap. The first width whose name column is clear of the
-  // floor is two wider in each case, because the leftover pixels are split with
+  // from it carry on shrinking, so the home block walks towards the status
+  // column. 174 and 202 are where the separation stops being
+  // 2 * kBoardColumnGap. The first width whose name column is clear of the floor
+  // is two wider in each case, because the leftover pixels are split with
   // integer division and 49 pixels of leftover still give a 24px name.
   assert(firstWidthClearOfFloor(true) == 176);
   assert(firstWidthClearOfFloor(false) == 204);

@@ -18,4 +18,16 @@ trap 'rm -rf "$TEST_BUILD_DIR"' EXIT
   App/ConfigRequest.cpp tests/config-request-test.cpp \
   -o "$TEST_BUILD_DIR/config-request-test"
 echo "==> App configuration-menu gesture"
-"$TEST_BUILD_DIR/config-request-test"
+# The binary's own PASS line is what says it ran, rather than its exit status. A
+# main() that returned without reaching an assertion exits 0 as happily as one
+# that passed every case, and a gate that reads the status cannot tell them
+# apart.
+OUTPUT=$("$TEST_BUILD_DIR/config-request-test")
+echo "$OUTPUT"
+case "$OUTPUT" in
+  "PASS: config-request gesture"*) ;;
+  *)
+    echo "ERROR: the gesture test exited 0 without printing its PASS line." >&2
+    exit 1
+    ;;
+esac
