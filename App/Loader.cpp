@@ -53,8 +53,8 @@ void requestConfigMenu() {
   // that boot opens configuration at a device nobody is standing at, holds the
   // boot for kMenuIdleMs, and leaves Reset identity one tap and one
   // confirmation away. See CAL_TOUCH_RECOVERY_MENU.md.
-  Identity::setUpdateRequested(true);
   Identity::setConfigMenuRequested(true);
+  Identity::setUpdateRequested(true);
   // Said rather than assumed. If NVS refused the write the device restarts into
   // an ordinary boot and the menu never appears, and somebody watching the
   // stream needs to be able to tell that from a gesture that was never seen.
