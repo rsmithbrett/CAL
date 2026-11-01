@@ -113,7 +113,7 @@ constexpr BoardColumns boardColumns(int screenW, bool scoreless) {
 
   const int awayNameLeft = rowLeft;
   const int awayScoreRight = awayNameLeft + nameWidth + scoreWidth;
-  const int homeNameLeft = awayScoreRight + kBoardColumnGap;
+  const int homeNameLeft = awayScoreRight;
   const int homeScoreRight = homeNameLeft + nameWidth + scoreWidth;
 
   return BoardColumns{awayNameLeft, awayScoreRight, homeNameLeft, homeScoreRight,
