@@ -3357,7 +3357,7 @@ so the forty-one `static_assert`s in `App/CardColumns.h` and the one in
 workstation's. Read off the runs and jobs endpoints with `curl`, because `gh`
 hangs here. **Verified.**
 
-### 18f-i. Three reviews, and the twenty-one mutations the first gate missed
+### 18f-i. Three reviews, and the sixteen mutations the first gate missed
 
 Three agents read the change, one on the figures against the design document,
 one adversarial, one on integration. Each one found something the other two did
