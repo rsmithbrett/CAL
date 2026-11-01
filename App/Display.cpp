@@ -3599,8 +3599,8 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     // textWidth() reads whichever face is current.
     lcd.setFont(FontId::Sans9);
     const BoardColumns columns =
-        boardColumns(kScreenW, scoreless,
-                     boardStatusWidthFor(kScreenW, scoreless, lcd.textWidth(row.status)));
+        boardColumnsFor(kScreenW, scoreless,
+                        boardStatusWidthFor(kScreenW, scoreless, lcd.textWidth(row.status)));
 
     // Away first, home second, which is how a scoreline is read aloud and what
     // the single-game card does.
