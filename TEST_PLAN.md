@@ -2591,7 +2591,7 @@ is how a case tells a sequence that reached the sixth tap from one that did not.
 **The counter has no reset and the test does not add one.** Every case opens with
 a tap in the middle of the panel, which is in neither corner, and setting the
 counter back to zero is the one thing production does with such a tap. Nothing
-else in the test touches it. A helper that tapped twice, or re-centred between
+else in the test touches it. A helper that tapped twice, or re-centered between
 taps, would reset the counter underneath a case meant to count to six - which is
 how a case on this exact code was announced as the one that bit before it had
 been measured, and the mutation passed.

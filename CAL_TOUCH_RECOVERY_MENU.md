@@ -124,7 +124,7 @@ watches the same two corner zones, and on the sixth tap it sets `updreq`, then
 `App/CardManager.cpp` is what feeds it: every tap goes to
 `ConfigRequest::noteTap()` with the coordinates `Touch::poll` reported, before
 the card deck decides what else the tap meant. Corner taps also page the deck
-left and right, and that's deliberate — paging is reversible and visible, and
+left and right, and that's deliberate - paging is reversible and visible, and
 the alternative is a dead zone on a card somebody is reading.
 
 **The App's corners come off the panel it's running on, not off a 320.**
@@ -383,7 +383,7 @@ The counter, the window start and the last-tap time are file statics with no
 reset, and the test does not add one. Each case opens with a tap in the middle
 of the panel instead, which is in neither corner, and setting the counter back
 to zero is the one thing production does with a tap in neither corner. Nothing
-else in the test touches it: a helper that tapped twice, or re-centred between
+else in the test touches it: a helper that tapped twice, or re-centered between
 taps, would reset the counter underneath a case meant to count to six.
 
 **The geometry is proved by `static_assert` in `RecoveryState.h`, not by that

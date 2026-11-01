@@ -47,7 +47,7 @@ struct HandedOver {};
 /// does with a tap in neither corner.
 ///
 /// atTime() is the only function here that calls production, and it delivers
-/// exactly one tap. A helper that tapped twice, or that re-centred between
+/// exactly one tap. A helper that tapped twice, or that re-centered between
 /// taps, would reset the counter underneath a case meant to count to six, which
 /// is how a case that could not fail was once read as one that bit.
 class Seq {
@@ -101,7 +101,7 @@ class Seq {
 };
 
 /// Clears what the stubs recorded. The counter inside production is cleared by
-/// the next Seq's centring tap.
+/// the next Seq's centering tap.
 void clearRecord() {
   gHandovers = 0;
   gShown.clear();
@@ -412,7 +412,7 @@ int main() {
   // Two things about the shape of this case, and both of them are the case
   // working rather than decoration.
   //
-  // Not a Seq, because a centring tap would clear the counter this is reading.
+  // Not a Seq, because a centering tap would clear the counter this is reading.
   //
   // And inside the gesture window the handover left behind. Written 100,000 ms
   // later, the window expiry clears a stale counter on the next tap all by

@@ -1601,7 +1601,7 @@ only a provider that reports a 0 for a game that has not started.
 
 **What it should key on is the status string's own state.** Two shapes would do
 it. One: `SportsBoardRow` carries the flag, set by `Sports.cpp` where the state
-enum still exists, and `boardColumns()` takes that instead of `scoreless` — the
+enum still exists, and `boardColumns()` takes that instead of `scoreless`. The
 pixels would still come from the empty score columns, so a row would have to
 report both. Two: the status column asks for what its own string measures,
 clamped between `kBoardStateWordWidth` and `kBoardStartTimeWidth`, which needs a
@@ -1634,7 +1634,8 @@ figures, re-measured on the same glyph table by 15a's method:
 A live game's status is `game.period`, the provider's own progress text, and
 `SportsBoardRow::kMaxStatus` holds 15 characters of it. A live game normally has
 scores, so it takes the 56px column, and the status draws at `FontId::Sans9`
-with `roomBelow` 0 — no smaller face and no second line, so it ellipsizes. `6TH
+with `roomBelow` 0, so there is no smaller face and no second line and it
+ellipsizes. `6TH
 INN` reads as `6TH...` on the glass. That is the same failure 15a is about, on
 the other branch of the same ternary, and `6TH INN` is the example this document
 and `App/Display.h:470` both use for what the field holds.
