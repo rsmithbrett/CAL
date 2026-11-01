@@ -56,7 +56,7 @@ constexpr int kBoardMinNameWidth = 24;
 /// host test reads both names.
 constexpr int kBoardStartTimeTextWidth = 78;
 constexpr int kBoardStartTimeSlack = 2;
-constexpr int kBoardStartTimeWidth = kBoardStartTimeTextWidth + kBoardStartTimeSlack;
+constexpr int kBoardStartTimeWidth = 79;
 
 /// What the 56px column on a row with scores is sized against. "FINAL" measures
 /// 55px on the same table.
