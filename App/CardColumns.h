@@ -140,7 +140,7 @@ constexpr int boardDefaultStatusWidth(bool scoreless) {
 constexpr int boardMaxStatusWidth(int screenW, bool scoreless) {
   const int fromNames = boardRowSpan(screenW) - 2 * boardScoreWidth(scoreless) -
                         3 * kBoardColumnGap - 2 * kBoardNameFloor;
-  return fromNames > kBoardStatusWidth ? fromNames : kBoardStatusWidth;
+  return fromNames;
 }
 
 /// The status column for a status that measures `measuredTextWidth` pixels in
