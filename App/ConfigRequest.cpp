@@ -25,9 +25,6 @@ void noteTap(uint32_t now, int32_t x, int32_t y) {
   gHaveTap = true;
   gLastTap = now;
 
-  if (gStep && static_cast<uint32_t>(now - gStarted) >= ConfigGesture::kWindowMs) {
-    gStep = 0;
-  }
 
   // THE CORNERS COME OFF THE PANEL IN USE, not off a fixed 320. A display
   // standing on its end is 240 across, and its top-right corner is at 176
