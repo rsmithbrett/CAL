@@ -69,6 +69,9 @@ void clearSecret() {
 
 namespace Log {
 void line(const char*) {}
+// Recorded in the same sequence as the flag writes, so the assertions below
+// pin where it sits: bootFactoryAndRestart() selects the partition and then
+// flushes, which is the last thing to happen before esp_restart().
 void flushNow() { writes.push_back("flush"); }
 }  // namespace Log
 
@@ -81,8 +84,8 @@ int main() {
   // current. cfgmenu alone is cleared by nothing in the App, so it waits through
   // every later App boot and then opens configuration at an unattended device.
   run(&Loader::requestConfigMenu);
-  const std::vector<std::string> expected = {"updreq=1", "cfgmenu=1", "flush",
-                                             "boot=factory"};
+  const std::vector<std::string> expected = {"updreq=1", "cfgmenu=1", "boot=factory",
+                                             "flush"};
   assert(writes == expected);
   assert(writes[0] == "updreq=1" && writes[1] == "cfgmenu=1");
   assert(updateRequestedFlag && configMenuFlag && secretHeld);
@@ -96,12 +99,12 @@ int main() {
   // The other two paths through bootFactoryAndRestart(), so a change to the
   // shared tail is measured against all three callers.
   run(&Loader::requestUpdate);
-  assert(writes == std::vector<std::string>({"updreq=1", "flush", "boot=factory"}));
+  assert(writes == std::vector<std::string>({"updreq=1", "boot=factory", "flush"}));
   assert(!configMenuFlag);
 
   run(&Loader::returnToLoaderForReprovisioning);
   assert(writes ==
-         std::vector<std::string>({"secret=cleared", "updreq=1", "flush", "boot=factory"}));
+         std::vector<std::string>({"secret=cleared", "updreq=1", "boot=factory", "flush"}));
   assert(!secretHeld && !configMenuFlag);
 
   // A missing factory partition restarts anyway rather than hanging, and the
