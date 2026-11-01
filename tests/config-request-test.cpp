@@ -407,8 +407,19 @@ int main() {
   // Production clears its counter before calling Loader, so the seventh tap in
   // the corner somebody has just tapped six times counts as a first tap and
   // nothing more. On a device the restart makes that moot; here it is what says
-  // the clearing happens before the call rather than after it. Deliberately not
-  // a Seq: a centring tap would clear the counter this case is reading.
+  // the clearing happens before the call rather than after it.
+  //
+  // Two things about the shape of this case, and both of them are the case
+  // working rather than decoration.
+  //
+  // Not a Seq, because a centring tap would clear the counter this is reading.
+  //
+  // And inside the gesture window the handover left behind. Written 100,000 ms
+  // later, the window expiry clears a stale counter on the next tap all by
+  // itself, so the case held whether or not production cleared it - and
+  // mut/cr12-clear-after, which moves the clear to after the handover call,
+  // passed. Run 41317326384 is that, recorded because it is what an unfailable
+  // case looks like from the outside.
   clearRecord();
   {
     Seq s(1800000);
@@ -417,12 +428,20 @@ int main() {
     assert(gHandovers == 1);
   }
   {
-    uint32_t now = 1900000;
-    for (unsigned i = 0; i < kTaps - 1; ++i) {
-      ConfigRequest::noteTap(now, (i % 2) == 0 ? 10 : 310, 10);
+    uint32_t now = 1800700;  // 100 after the sixth tap, 7,400 inside the window
+    bool restartedEarly = false;
+    unsigned i = 0;
+    for (; i < kTaps - 1; ++i) {
+      try {
+        ConfigRequest::noteTap(now, (i % 2) == 0 ? 10 : 310, 10);
+      } catch (const HandedOver&) {
+        restartedEarly = true;
+        break;
+      }
       now += kBounce;
     }
-    assert(gHandovers == 1);  // still the one, so the counter had been cleared
+    assert(!restartedEarly);  // a counter left at kTaps would hand over at once
+    assert(gHandovers == 1);
     bool restarted = false;
     try {
       ConfigRequest::noteTap(now, 310, 10);
