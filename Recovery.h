@@ -5,7 +5,10 @@
 namespace Recovery {
 
 // Enable only while a setup screen is being serviced. begin() consumes any
-// finger already on the glass; entering the menu needs six new taps.
+// finger already on the glass, so entering the menu needs six new taps - on a
+// panel that is up. It reads Display::readTouch(), which is
+// gPanelStarted && getTouch() and so reads false before anything has drawn,
+// consuming nothing.
 void begin();
 void end();
 bool visible();

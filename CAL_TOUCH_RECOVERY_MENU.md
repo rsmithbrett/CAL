@@ -314,13 +314,25 @@ hardware/NVS/display stubs and tests the actual state machine and manifest
 install decision:
 
 - Six taps, wrong order, outside taps, five taps, timeout and disabled entry.
+- The last pixel inside each corner zone and the first pixel outside it, as
+  literals, because both rectangles are asserted equal to `ConfigGesture`'s
+  corner size and a case built from the constant would move with it.
+- The tap count and the bounce window driven from `ConfigGesture`, so a figure
+  that reaches one binary and not the other fails here.
 - Held/dragged fingers, bounce and the finger present when setup begins.
-- Both confirmations, Cancel, Back, inactivity expiry and timer rollover.
-- Shared button boundaries and production menu-render handoff.
+- Both confirmations, Cancel, Back, inactivity expiry, and both timers across a
+  rollover the subtraction actually spans.
+- Production menu-render handoff.
 - Each action's persisted intent, secret preservation/removal and restart cause.
 - Missing factory and failed persistence without a successful restart.
 - Same-version forced reload, normal update/missing App, invalid manifest and
   no configured release.
+
+Then `bash ci/test-loader-order.sh`, which compiles production `App/Loader.cpp`
+the same way and records every `Identity` write in sequence. It asserts that
+`requestConfigMenu()` commits `updreq` before `cfgmenu` and selects the factory
+partition after both, and it covers the other two callers of
+`bootFactoryAndRestart()`.
 
 **The geometry is proved by `static_assert` in `RecoveryState.h`, not by that
 host run.** Both corner zones against all three menu rows, the Diagnostics
@@ -332,8 +344,9 @@ must outlast the hold. They cost nothing, need no host compiler, and run in
 every `arduino-cli` build of both boards, which is the point: the host check
 they stand in for compared each rectangle only against its own x/y/w/h, which
 holds for any rectangle and any half-open `contains()`, so every boundary
-mutation passed it. That check is still in the file and still passes; the
-guarantee now lives in the assertions.
+mutation passed it. That check has been retired. The assertions carry the
+overlaps, and the corner-edge cases listed above carry where an edge sits while
+it overlaps nothing, which no assertion here can say.
 
 `holdBootForTouch()` has no host coverage. It drives `millis()`, `delay()` and
 `Display::readTouch()` in a loop, and the test's `delay()` stub throws to stand
