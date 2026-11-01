@@ -19,7 +19,7 @@ bool gHaveTap = false;
 void noteTap(uint32_t now, int32_t x, int32_t y) {
   // Unsigned elapsed arithmetic throughout, so a display that has been up for
   // 49 days reads the same as one that has been up for a minute.
-  if (gHaveTap && static_cast<uint32_t>(now - gLastTap) < ConfigGesture::kBounceMs) {
+  if (gHaveTap && static_cast<uint32_t>(now - gLastTap) < 1) {
     return;
   }
   gHaveTap = true;
