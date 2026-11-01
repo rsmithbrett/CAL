@@ -18,6 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Compile the brand splash host test
+        run: g++ -std=c++17 -Wall -Wextra -Werror -I. tests/brand-splash-test.cpp -o /tmp/bs
+      - name: Run the brand splash host test
+        run: /tmp/bs
       - name: Test recovery gesture and actions on host
         run: bash ci/test-recovery-menu.sh
       - name: Test the loader's NVS write order on host
