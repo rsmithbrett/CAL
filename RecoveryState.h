@@ -216,13 +216,13 @@ class Controller {
     wasDown_ = down;
     const bool live = screen_ == Screen::PresenceTest || screen_ == Screen::GpioMonitor;
     const uint32_t idleLimit = live ? kDiagnosticsIdleMs : kMenuIdleMs;
-    if (visible() && static_cast<uint32_t>(now - lastActivity_) >= idleLimit) {
+    if (visible() && static_cast<int64_t>(now) - static_cast<int64_t>(lastActivity_) >= idleLimit) {
       screen_ = Screen::Closed;
       step_ = 0;
       out.restore = true;
       return out;  // The touch at expiry cannot also press a restored screen.
     }
-    if (step_ && static_cast<uint32_t>(now - started_) >= kGestureWindowMs) {
+    if (step_ && static_cast<int64_t>(now) - static_cast<int64_t>(started_) >= kGestureWindowMs) {
       step_ = 0;
     }
     if (!gestureAllowed && !visible()) step_ = 0;
