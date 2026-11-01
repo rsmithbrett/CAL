@@ -45,7 +45,7 @@ constexpr bool bodyIsWholeAsset(int bytes) {
 /// which declares no length and therefore rules nothing out. A length that is
 /// stated and wrong rules the body out before any flash is written.
 constexpr bool declaredLengthCouldBeAsset(int contentLength) {
-  return contentLength < 0 || static_cast<size_t>(contentLength) == kBytes;
+  return contentLength <= static_cast<int>(kBytes);
 }
 
 /// Whether a file already on flash is the whole asset, from its size alone.
