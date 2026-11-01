@@ -19,13 +19,14 @@
 /// has the derivation, TEST_PLAN.md section 18 the mutations.
 ///
 /// The status column's width comes from the string it holds. Section 15h is the
-/// shape and section 15g is what the fixed width cut.
+/// shape and section 15g is what the fixed width cut. The board takes the
+/// widest its rows ask for and lays every row on it, which is section 15i.
 ///
 /// Nothing here reads App/Display.cpp, so the arguments the draw path hands
 /// these functions are checked by ci/check-board-columns-call.sh instead, a
-/// text gate over four lines of that file. TEST_PLAN.md section 18e has the
-/// five single-token changes to those lines that each drew a wrong row with
-/// nothing in this file firing.
+/// text gate over showSportsBoard() and the fold that feeds it. TEST_PLAN.md
+/// sections 18e and 18f have the single-token changes to those lines that each
+/// drew a wrong board with nothing in this file firing.
 namespace CardColumns {
 
 constexpr int kCardMargin = 10;
@@ -221,6 +222,26 @@ constexpr BoardColumns boardColumns(int screenW, bool scoreless) {
   return boardColumnsFor(screenW, scoreless, boardDefaultStatusWidth(scoreless));
 }
 
+/// The one grid every row of a board draws into.
+///
+/// `scoreless` is the board's rather than a row's: true only when no row of it
+/// reported either score. One game under way gives all four rows a score
+/// column, and a row with no score of its own draws nothing into it.
+///
+/// `widestStatusTextWidth` is the widest any of the board's statuses measures,
+/// not the widest column any of them asks for. boardStatusWidthFor() does not
+/// fall as its measurement rises, so those two are the same column and the
+/// caller can fold the measurements and convert once. The host sweep asserts
+/// that rather than leaving it as the reason this remark gives.
+///
+/// TEXT_LAYOUT_DESIGN.md section 15i, and 15h's table of what a row asks for on
+/// its own, which is what the board now picks the widest of.
+constexpr BoardColumns boardColumnsForBoard(int screenW, bool scoreless,
+                                            int widestStatusTextWidth) {
+  return boardColumnsFor(screenW, scoreless,
+                         boardStatusWidthFor(screenW, scoreless, widestStatusTextWidth));
+}
+
 constexpr int boardStatusLeftFor(int screenW, bool scoreless, int statusWidth) {
   const BoardColumns columns = boardColumnsFor(screenW, scoreless, statusWidth);
   return columns.statusRight - columns.statusWidth;
@@ -367,5 +388,42 @@ static_assert(boardColumnsFor(320, true, boardMaxStatusWidth(320, true)).nameWid
 static_assert(boardColumnsFor(240, true, boardMaxStatusWidth(240, true)).nameWidth ==
                   kBoardNameFloor,
               "240 scoreless holds the name floor at its ceiling");
+
+// The board's own grid, as the figures TEXT_LAYOUT_DESIGN.md section 15i writes
+// down. Each one is the grid a whole board lands on when its widest status
+// measures what the argument says, which is what every row of it then draws
+// into.
+//
+// Literals on the right rather than the same call written twice.
+// boardColumnsForBoard() is boardColumnsFor() over boardStatusWidthFor(), so an
+// assertion built from those two reads its own definition back and reports
+// nothing about either figure.
+static_assert(boardColumnsForBoard(320, false, kBoardWidestPeriodTextWidth).nameWidth == 63,
+              "a 320px board holding a HALFTIME gives all four rows 63px names");
+static_assert(boardColumnsForBoard(320, false, kBoardWidestPeriodTextWidth).homeNameLeft == 109,
+              "and starts every home name at 109");
+static_assert(boardColumnsForBoard(240, false, kBoardWidestPeriodTextWidth).nameWidth ==
+                  kBoardNameFloor,
+              "a 240px board holding a HALFTIME stands every row on the name floor");
+static_assert(boardColumnsForBoard(320, false, kBoardStartTimeTextWidth).nameWidth == 71,
+              "a 320px board holding the widest start time gives 71px names");
+static_assert(boardColumnsForBoard(240, false, kBoardStartTimeTextWidth).nameWidth ==
+                  kBoardNameFloor,
+              "a 240px board holding the widest start time stands on the floor too");
+
+// A board of state words costs its names nothing, which is the other half of
+// the trade: the figures v2026.10.31.0002 shipped stand on every row of it.
+static_assert(boardColumnsForBoard(320, false, kBoardStateWordWidth).nameWidth == 83,
+              "four FINALs on a 320px board draw the 83px name column the fleet draws");
+static_assert(boardColumnsForBoard(240, false, kBoardStateWordWidth).nameWidth == 43,
+              "four FINALs on a 240px board draw the 43px name column the fleet draws");
+
+// A board where no row reported a score releases both score columns, on every
+// row of it. The board's scoreless, not a row's.
+static_assert(boardColumnsForBoard(320, true, kBoardStartTimeTextWidth).scoreWidth == 0,
+              "a board of scheduled games draws no score column");
+static_assert(boardColumnsForBoard(320, false, kBoardStartTimeTextWidth).scoreWidth ==
+                  kBoardScoreWidth,
+              "one game under way gives every row of the board a score column");
 
 }  // namespace CardColumns

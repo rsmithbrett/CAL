@@ -32,6 +32,7 @@
 
 using CardColumns::boardColumns;
 using CardColumns::boardColumnsFor;
+using CardColumns::boardColumnsForBoard;
 using CardColumns::BoardColumns;
 using CardColumns::boardDefaultStatusWidth;
 using CardColumns::boardLeftoverPixel;
@@ -238,13 +239,14 @@ int main() {
   assert(boardMaxStatusWidth(320, false) == 160);
   assert(boardMaxStatusWidth(240, true) == 132);
 
-  // --- what four rows of one board no longer share --------------------------
+  // --- what a row asks for on its own ---------------------------------------
   //
-  // boardColumnsFor() is called per row, so a row's status string now moves the
-  // home name's left edge and both score columns. Four rows with scores on a
-  // 320px panel, by what their status measures, and the figures they land on.
-  // Recorded rather than described, so a later change that puts the rows back on
-  // one grid has to come through this block and section 15h.
+  // boardColumnsFor() takes one row's status, so what it returns is what that
+  // row would take if it were the only one on the card. Four rows with scores
+  // on a 320px panel, by what their status measures, and the four grids they
+  // ask for. Until section 15i they were four grids one board drew at once;
+  // they are what the board picks the widest of now, and the figures are the
+  // same either way.
   {
     const int statuses[] = {0, kBoardStateWordWidth, kBoardPeriodTextWidth,
                             kBoardWidestPeriodTextWidth};
@@ -271,6 +273,119 @@ int main() {
         320, false, boardStatusWidthFor(320, false, kBoardWidestPeriodTextWidth));
     assert(widest.homeNameLeft - narrowest.homeNameLeft == 48);
     assert(widest.homeScoreRight - narrowest.homeScoreRight == 96);
+  }
+
+  // --- four rows of one board are one table ---------------------------------
+  //
+  // TEXT_LAYOUT_DESIGN.md section 15i. boardColumnsForBoard() takes the board's
+  // own scoreless and the widest status any of its rows measures, and every row
+  // draws into what it returns. The 48px and 96px drift the block above records
+  // is what a board used to carry; here it is zero, read the same way.
+  {
+    // The four statuses of the 320px board above, laid on one grid. Every row
+    // lands where the widest of them asked to land, which is the HALFTIME row's
+    // 109, 103 and 198.
+    const int statuses[] = {0, kBoardStateWordWidth, kBoardPeriodTextWidth,
+                            kBoardWidestPeriodTextWidth};
+    int widestStatus = 0;
+    for (const int measured : statuses) {
+      if (measured > widestStatus) widestStatus = measured;
+    }
+    const BoardColumns grid = boardColumnsForBoard(320, false, widestStatus);
+    assert(grid.homeNameLeft == 109);
+    assert(grid.awayScoreRight == 103);
+    assert(grid.homeScoreRight == 198);
+    assert(grid.nameWidth == 63);
+    assert(grid.statusWidth == 96);
+
+    // And the grid is the narrowest-named of the four a row could have asked
+    // for, met by exactly the row that asked for it. Not a restatement of the
+    // fold: it reads the board's answer against boardColumnsFor()'s, which is
+    // the function the loop used to call, so a board that took the first row's
+    // string or the last one's fails here.
+    int metTheBoard = 0;
+    for (const int measured : statuses) {
+      const BoardColumns own =
+          boardColumnsFor(320, false, boardStatusWidthFor(320, false, measured));
+      assert(own.nameWidth >= grid.nameWidth);
+      assert(own.statusWidth <= grid.statusWidth);
+      if (own.nameWidth == grid.nameWidth) ++metTheBoard;
+    }
+    assert(metTheBoard == 1);
+
+    // The photographed board, both panels. FINAL at 55, P1 at 22 twice and a
+    // 7:00 PM start time at 67, measured off the vendored FreeSansBold9pt7b
+    // table by section 15a's method, which reproduces every 9pt figure in that
+    // document to the pixel. One row has scores, so the board is not scoreless
+    // and all four rows draw a score column.
+    const int photographed[] = {kBoardStateWordWidth, 22, 22, 67};
+    int widestPhotographed = 0;
+    for (const int measured : photographed) {
+      if (measured > widestPhotographed) widestPhotographed = measured;
+    }
+    assert(widestPhotographed == 67);
+
+    const BoardColumns narrow = boardColumnsForBoard(240, false, widestPhotographed);
+    assert(narrow.statusWidth == 69);
+    assert(narrow.nameWidth == 36);
+    assert(narrow.homeNameLeft == 82);
+    assert(narrow.homeScoreRight == 144);
+    assert(narrow.scoreWidth == kBoardScoreWidth);
+
+    const BoardColumns wide = boardColumnsForBoard(320, false, widestPhotographed);
+    assert(wide.statusWidth == 69);
+    assert(wide.nameWidth == 76);
+
+    // A board of state words costs its names nothing at either width, which is
+    // the other half of the trade.
+    assert(boardColumnsForBoard(320, false, kBoardStateWordWidth).nameWidth == 83);
+    assert(boardColumnsForBoard(240, false, kBoardStateWordWidth).nameWidth == 43);
+
+    // A board where no row reported a score releases both score columns on
+    // every row of it, and one that did gives every row one. The board's
+    // scoreless, not a row's.
+    assert(boardColumnsForBoard(240, true, kBoardStartTimeTextWidth).scoreWidth == 0);
+    assert(boardColumnsForBoard(240, true, kBoardStartTimeTextWidth).nameWidth == 57);
+    assert(boardColumnsForBoard(240, false, kBoardStartTimeTextWidth).scoreWidth ==
+           kBoardScoreWidth);
+    assert(boardColumnsForBoard(240, false, kBoardStartTimeTextWidth).nameWidth ==
+           kBoardNameFloor);
+  }
+
+  // --- the fold runs over the strings, not over the columns ------------------
+  //
+  // boardColumnsForBoard() takes the widest measurement rather than the widest
+  // column, which is only the same thing while boardStatusWidthFor() does not
+  // fall as its measurement rises. The draw path folds four ints and converts
+  // once on the strength of that, so it is asserted rather than reasoned about
+  // in a remark.
+  //
+  // Both halves, at every swept width and in both states: the function is
+  // monotonic, and the column the widest string asks for is the widest column
+  // any of the strings asks for.
+  for (int width = 2 * (kCardMargin + kBoardRowInset); width <= kWidestSweep; ++width) {
+    for (const bool scoreless : {true, false}) {
+      int previous = boardStatusWidthFor(width, scoreless, 0);
+      for (int measured = 1; measured <= 320; ++measured) {
+        const int current = boardStatusWidthFor(width, scoreless, measured);
+        assert(current >= previous);
+        previous = current;
+      }
+
+      // The eight measured widths the sweep below reads, as a board. 300 is
+      // past the ceiling at every width, so the last two agree there and
+      // disagree below it, which is the case a `>=` would have missed.
+      const int measured[] = {0, 55, 56, 57, 74, 78, 94, 300};
+      int widestMeasured = 0;
+      int widestColumn = 0;
+      for (const int m : measured) {
+        if (m > widestMeasured) widestMeasured = m;
+        const int column = boardStatusWidthFor(width, scoreless, m);
+        if (column > widestColumn) widestColumn = column;
+      }
+      assert(boardStatusWidthFor(width, scoreless, widestMeasured) == widestColumn);
+      assert(boardColumnsForBoard(width, scoreless, widestMeasured).statusWidth == widestColumn);
+    }
   }
 
   // --- the sweep ------------------------------------------------------------
@@ -419,7 +534,9 @@ int main() {
   }
 
   std::cout << "PASS: scoreboard columns - the design document's two tables, the measured "
-               "status column and its ceiling, what four rows of one board no longer share, "
-               "the separation identity at every width up to "
-            << kWidestSweep << " over eight status widths, and the floor's boundaries\n";
+               "status column and its ceiling, what a row asks for on its own, the one grid "
+               "four rows of a board share, the fold over the strings at every width up to "
+            << kWidestSweep
+            << " in both states, the separation identity over eight status widths, and the "
+               "floor's boundaries\n";
 }

@@ -1935,6 +1935,11 @@ card still lines up. Nothing else does, and nothing has looked at it. A property
 cannot catch it either: `boardColumnsFor()` takes one row's state, and the host
 test holds the four grids above as figures rather than asserting they agree.
 
+**Section 15i is what put the rows back on one grid**, and the four grids in the
+table above are what one board now picks between rather than what one board
+draws at once. The figures stand: they are what a row asks for on its own, and
+the board takes the widest of them.
+
 #### One more figure the row did not derive
 
 `showSportsBoard()` drew both score columns at the `kBoardScoreWidth` constant
@@ -2007,3 +2012,147 @@ And in the host run, which walks 28 to 1024 in both states twice:
   that column has to come here and say so.
 
 TEST_PLAN.md section 18e has the mutations.
+
+### 15i. Four rows of one board are one table, 2026-11-01
+
+A photograph of a portrait CYD running `v2026.10.30.0001` came back with four
+things wrong on one NHL board. Two of them the geometry rewrite in `57df3d8`
+already fixed, and the two it did not are the grid the four rows sit on and the
+navigation chevron drawn across one of them. Those two are this section.
+
+**What the photograph shows, and what `main` already does with it.** The device
+is eight releases behind, so most of what is in the frame is `57df3d8`'s five
+literal column edges on a panel they were never measured for. `homeScoreRight`
+was a flat 248 on a 240px panel, eight pixels past the glass, which is the away
+score clipped at the right edge and the two in-progress rows' home scores off
+the panel entirely. `homeNameLeft` was 136 with an 86px name column, so
+`Hurricanes` at 94px drew from 136 to 230 straight through `FINAL`, which the
+status draws right-aligned at 226. `Capitals` at 70px ran 136 to 206 and `P1`
+at 22px right-aligned on 226 runs 205 to 226, so the two strings met with
+nothing between them. All three are the panel width written down as literals, and
+`57df3d8` replaced the literals with widths derived from it: on the 240px panel
+with scores the row now runs 14, 83, 89, 158, 226 with a 43px name column and 12
+pixels of air between the home block and the status. Nothing in those three
+reaches `main`.
+
+**The fourth is live and `main` makes it worse.** 15h's own "Four rows of one
+board no longer share a column grid" wrote it down: `boardColumnsFor()` is
+called inside the row loop, so a row's own status string moves where its home
+name starts and where both of its score columns end. The photographed board is
+`FINAL` at 55px, `P1` at 22 twice and a `7:00 PM` start time at 67 on a row with
+no scores, and on `main` at 240px that is three rows on one grid and the fourth
+on another:
+
+| row | status | measured | score columns | status column | name | home name at | home score ends at |
+|---|---|---|---|---|---|---|---|
+| `Jets` / `Hurricanes` | `FINAL` | 55 | 26 | 56 | 43 | 89 | 158 |
+| `Wild` / `Capitals` | `P1` | 22 | 26 | 56 | 43 | 89 | 158 |
+| `Mammoth` / `Flyers` | `P1` | 22 | 26 | 56 | 43 | 89 | 158 |
+| `Oilers` / `Rangers` | `7:00 PM` | 67 | 0 | 69 | 62 | 82 | 144 |
+
+7px between two home-name edges and 14px between two home-score edges, on four
+rows of one card. A board of mixed states is what `sportsscores` sends on an
+ordinary afternoon, not an edge.
+
+#### One grid, folded before the loop
+
+`showSportsBoard()` reduces the rows to two figures and lays the whole board on
+one set of edges:
+
+```cpp
+const bool scoreless = boardHasNoScores(rows, count);
+const BoardColumns columns =
+    boardColumnsForBoard(kScreenW, scoreless, widestBoardStatus(rows, count));
+```
+
+`boardHasNoScores()` is false the moment any row reports either side.
+`widestBoardStatus()` selects `FontId::Sans9` and keeps the largest
+`textWidth(rows[i].status)`, because `textWidth()` reads whichever face is
+current and the status draws in that one. Both run under the `kMaxRows` clamp,
+over the rows that will be drawn: a fifth row the card drops would otherwise
+widen a column nothing draws into.
+
+`boardColumnsForBoard()` is `boardColumnsFor()` over `boardStatusWidthFor()`,
+the same two calls 15h put in the loop, under one name so the draw path has one
+thing to call and `ci/check-board-columns-call.sh` has one thing to read.
+
+**The widest string, not the widest column.** `boardStatusWidthFor()` never
+falls as its measurement rises: 0 asks for 0, 1 through 56 ask for 56, and above
+that it is the measurement plus the slack under a ceiling that doesn't depend on
+the measurement at all. So the widest column any row of the board asks for is
+the column its widest string asks for, and the fold can run over the
+measurements and convert once. The host sweep asserts the monotonicity rather
+than leaving it as the reason this paragraph gives.
+
+**One row with a score gives every row a score column.** `scoreless` means no
+row of the board reported either side, which is a different question from the
+one 15h's `scoreless` asked about a row. A board with one game under way draws
+26px of score column on all four rows, and the three scheduled rows draw nothing
+into theirs, because an empty string draws nothing. That is what a column is: a
+scheduled row's blank cell under three rows of digits is the table working, and
+a scheduled row with 26 extra pixels of name is the table coming apart.
+
+#### What it costs, as the figures
+
+One long status now costs every name on the board, where it used to cost one.
+The floor it can drive them to is the same `kBoardNameFloor` a single row
+already reached, so no name goes anywhere a row couldn't already go; what
+changed is how many rows go there together. The photographed board at 240px, and
+the worst case a provider can send at both widths:
+
+| panel | board | widest status | status column | name per row | against 15h's per-row names |
+|---|---|---|---|---|---|
+| 240 | the photograph | `7:00 PM`, 67 | 69 | 36 | 43, 43, 43, 62 |
+| 240 | four `FINAL`s | 55 | 56 | 43 | 43 unchanged |
+| 240 | one `HALFTIME` | 94 | 80, cut | 31 | 43, 43, 43, 31 |
+| 320 | the photograph | `7:00 PM`, 67 | 69 | 76 | 83, 83, 83, 102 |
+| 320 | one `HALFTIME` | 94 | 96 | 63 | 83, 83, 83, 63 |
+
+The 240px row of the photograph is the trade stated plainly: three names go from
+43 to 36 so that four rows of digits line up. `Hurricanes` is 94px and was
+already cut at 43, so what those seven pixels buy is the column, not a word.
+
+**`HALFTIME` on a 240px panel is still cut**, for 15h's reason and no new one:
+the ceiling there is 80 because 96 would put the names at 24 and the clamp
+engages. It now cuts on a board rather than on a row, which is the same string
+in the same column.
+
+**Nothing on the wire changes.** `SportsBoardRow` and `Sports::Game` are
+byte-for-byte what they were, the fold reads two fields the row already carries,
+and a device without this draws the same payload on per-row grids. The 6-month
+compatibility gate is untouched because no field was added, removed or
+reinterpreted.
+
+#### The nav chevrons stood on the card
+
+The same frame shows the right-hand chevron crossing the third row's rounded
+card. `drawNavAffordances()` drew its left tip at x=5 and its right at
+`kScreenW - 6`, and the chevron is 7px wide, so the two bodies occupied 5..12 and
+`kScreenW - 13`..`kScreenW - 6`. The content band starts at `kCardMargin`, 10,
+and ends at `kScreenW - kCardMargin - 1`, so both chevrons reached 3px into the
+band at either end.
+
+On most cards nothing is drawn at the very edge of the band and the overlap was
+invisible. `showSportsBoard()` fills a rounded rect across the whole band on
+every row, so on that card the chevron is drawn onto the fill, in `muted()`
+rather than in the card's own ink, and reads as the row overrunning itself. The
+chevrons are centred on `kScreenH / 2`, which in profile is 160 and lands inside
+the third row's 156..207, so it is that row every time and not a selection.
+
+The inset is a named figure now, and the relationship is what a build checks:
+
+```cpp
+constexpr int kChevronInset = 2;
+static_assert(kChevronInset + kChevronWidth < kCardMargin,
+              "the chevron body stands in the margin, clear of any card");
+```
+
+2 is the largest inset that keeps the whole 7px body inside a 10px margin with a
+pixel to spare at the glass. The left body runs 2..9 and the right
+`kScreenW - 10`..`kScreenW - 3`, which is 230..237 on the portrait panel,
+symmetric about the two margins, and the card runs 10..229. The chevrons sit
+3px further out than they did and nothing else moves. Whether 2px of glass is
+far enough in to clear the bezel on a cased device is the one thing here that a
+photograph has to answer.
+
+TEST_PLAN.md section 18f has the mutations and what they caught.

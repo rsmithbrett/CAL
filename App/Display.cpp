@@ -911,6 +911,16 @@ constexpr uint32_t kConfirmInk = 0xFFFFFFu;
 // touch zones without competing with the card for attention.
 constexpr int kChevronHalfHeight = 12;
 constexpr int kChevronWidth = 7;
+
+// How far in from the glass the tip of a chevron sits. The whole body stands in
+// the margin, clear of the content band every card draws into: the tips were at
+// 5 and kScreenW - 6, which put three pixels of each chevron inside the band.
+// On most cards nothing is drawn that close to the edge; showSportsBoard()
+// fills a rounded rect across the whole band on every row, so there it was
+// drawn onto the card in the wrong ink. TEXT_LAYOUT_DESIGN.md section 15i.
+constexpr int kChevronInset = 2;
+static_assert(kChevronInset + kChevronWidth < kCardMargin,
+              "the chevron body stands in the margin, clear of any card");
 /// Vertically centred on whatever the panel is. A function rather than a
 /// constant because kScreenH is now written at boot, and a namespace-scope
 /// constant would capture 240 before begin() ever ran.
@@ -3511,6 +3521,46 @@ void showSportsCard(const char* homeName, const String& homeScore, const char* a
   restoreDefaultTextState();
 }
 
+namespace {
+
+/// The widest status string on a board, in the face the status draws in.
+///
+/// The face is selected here rather than taken from whatever the previous card
+/// left set, because textWidth() reads whichever one is current. An empty
+/// status measures 0 and asks the column for nothing.
+///
+/// What the board hands boardColumnsForBoard(): the widest string rather than
+/// the widest column, which is the same column because boardStatusWidthFor()
+/// does not fall as its measurement rises. TEXT_LAYOUT_DESIGN.md section 15i.
+int widestBoardStatus(const SportsBoardRow* rows, uint8_t count) {
+  int widest = 0;
+  lcd.setFont(FontId::Sans9);
+  for (uint8_t i = 0; i < count; ++i) {
+    const int measured = lcd.textWidth(rows[i].status);
+    if (measured > widest) {
+      widest = measured;
+    }
+  }
+  return widest;
+}
+
+/// Whether the board released both score columns, which needs every row of it
+/// to have reported neither side.
+///
+/// A row's own question in section 15h and the board's here. One game under way
+/// gives all four rows a score column, and the rows with no score draw nothing
+/// into theirs, which is what keeps the digits in one column down the card.
+bool boardHasNoScores(const SportsBoardRow* rows, uint8_t count) {
+  for (uint8_t i = 0; i < count; ++i) {
+    if (rows[i].awayScore[0] != '\0' || rows[i].homeScore[0] != '\0') {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
 void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ageText,
                      const char* sportLabel, const char* competitionLabel) {
   // The same two palettes the single-game card uses, so the two read as one
@@ -3577,6 +3627,18 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     count = kMaxRows;
   }
 
+  // One set of column edges for the whole board, so four rows of it read as a
+  // table rather than as four rows that happen to be on one card. The two folds
+  // run under the clamp above, over the rows that will be drawn: a fifth row's
+  // status would otherwise widen a column nothing draws into.
+  //
+  // What the board spends on its status column it takes off every name on it,
+  // down to the floor boardMaxStatusWidth() is derived from. boardColumnsForBoard()
+  // and TEXT_LAYOUT_DESIGN.md section 15i have the figures and the trade.
+  const bool scoreless = boardHasNoScores(rows, count);
+  const BoardColumns columns =
+      boardColumnsForBoard(kScreenW, scoreless, widestBoardStatus(rows, count));
+
   for (uint8_t i = 0; i < count; ++i) {
     const SportsBoardRow& row = rows[i];
     const int top = kRowTop + i * kRowHeight;
@@ -3586,34 +3648,20 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
 
     const int text = top + 9;
 
-    // A row with no score on either side releases two score columns, and the
-    // status column spends what they release. boardColumnsFor() takes that, the
-    // panel width and the status width and returns the five edges; its own
-    // remarks have the split and the properties a build checks.
-    const bool scoreless = row.awayScore[0] == '\0' && row.homeScore[0] == '\0';
-
-    // The status column's width comes from the string it holds, measured in the
-    // face the status draws in. A state word that fits the 56px column keeps
-    // it; a start time or a period asks for what it measures, up to the ceiling
-    // the name floor sets. The font is selected before the measurement because
-    // textWidth() reads whichever face is current.
-    lcd.setFont(FontId::Sans9);
-    const BoardColumns columns =
-        boardColumnsFor(kScreenW, scoreless,
-                        boardStatusWidthFor(kScreenW, scoreless, lcd.textWidth(row.status)));
-
     // Away first, home second, which is how a scoreline is read aloud and what
     // the single-game card does.
+    lcd.setFont(FontId::Sans9);
     layoutLine(row.awayName, columns.awayNameLeft, text, columns.nameWidth, sport.name,
                "board.away", Align::Left, kTransparentText);
     layoutLine(row.homeName, columns.homeNameLeft, text, columns.nameWidth, sport.name,
                "board.home", Align::Left, kTransparentText);
 
-    // columns.scoreWidth rather than kBoardScoreWidth: the same 26 on a row that
-    // has scores, and 0 on a row that has none. The constant was the one figure
-    // in this loop the row did not derive, so a block laid out for no score
-    // column could still have 26px of digits drawn into it, through a team
-    // name. An empty score string draws nothing at either width.
+    // columns.scoreWidth rather than kBoardScoreWidth: the same 26 on a board
+    // that has scores, and 0 on a board where no row reported one. The constant
+    // was the one figure in this loop the layout did not derive, so a block laid
+    // out for no score column could still have 26px of digits drawn into it,
+    // through a team name. A row with no score of its own draws nothing into the
+    // column the board gave it.
     lcd.setFont(FontId::Sans12);
     layoutLine(row.awayScore, columns.awayScoreRight, text - 2, columns.scoreWidth, sport.score,
                "board.away.score", Align::Right, kTransparentText);
@@ -5778,13 +5826,13 @@ void drawNavAffordances(bool canReverse) {
   // chevrons marks both shapes.
   const uint32_t reverseColour = canReverse ? muted() : bg();
 
-  const int leftTipX = 5;
+  const int leftTipX = kChevronInset;
   lcd.drawLine(leftTipX + kChevronWidth, kChevronCentreY() - kChevronHalfHeight, leftTipX,
                kChevronCentreY(), reverseColour);
   lcd.drawLine(leftTipX, kChevronCentreY(), leftTipX + kChevronWidth,
                kChevronCentreY() + kChevronHalfHeight, reverseColour);
 
-  const int rightTipX = kScreenW - 6;
+  const int rightTipX = kScreenW - 1 - kChevronInset;
   lcd.drawLine(rightTipX - kChevronWidth, kChevronCentreY() - kChevronHalfHeight, rightTipX,
                kChevronCentreY(), muted());
   lcd.drawLine(rightTipX, kChevronCentreY(), rightTipX - kChevronWidth,

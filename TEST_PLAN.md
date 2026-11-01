@@ -3257,6 +3257,114 @@ is the check for those, and there has not been one.
   the layout, and its "five fields of a row at fixed x positions" is false twice
   over. `App/Display.h`'s own remark says so; neither of those documents is in
   this repository and neither was touched.
+
+### 18f. Four rows of one board are one table (2026-11-01)
+
+`boardColumnsForBoard()` in `App/CardColumns.h`, and the two folds in
+`App/Display.cpp` that feed it. 18e put the status width on the row's own string
+and left `boardColumnsFor()` inside the row loop, so a row's status moved its own
+home name and both of its score columns; a board of three finished games and one
+in progress drew two ragged columns of digits. The board takes one grid now.
+TEXT_LAYOUT_DESIGN.md section 15i is the design and 15h's "Four rows of one
+board no longer share a column grid" is the defect.
+
+**The source is a photograph, and half of what it shows is already fixed.** A
+portrait CYD running `v2026.10.30.0001` shows four things: `Hurricanes` drawn
+through `FINAL` with a score clipped at the right edge; the navigation chevron
+across the third row's card; `Capitals` and `P1` touching with both in-progress
+rows' home scores missing; and four rows on different grids. The first and the
+third are one cause, `57df3d8`'s five literal column edges on a 240px panel they
+were never measured for, and that is in `v2026.10.31.0002`: the home score
+column's right edge was a flat 248 on a 240px panel, which is the clipped digit
+and the two missing ones, and the home name column ran from 136 to 230 across a
+status right-aligned on 226. Traced in the code at both versions and
+**Verified** there rather than on a device, since the photographed build is
+eight releases behind and no device has been flashed with either. The second and
+the fourth are what this section fixes.
+
+**The key assertion failed first, against `main`.** Before any of this change
+existed, `tests/card-columns-test.cpp` got the property as four rows of one
+320px board having one `homeNameLeft`, written against `main`'s own
+`boardColumnsFor()`. `ci/test-card-columns.sh` printed
+`Assertion failed: c.homeNameLeft == first.homeNameLeft, file
+tests/card-columns-test.cpp, line 285` and no `PASS` line. The mutation was
+gated on `cmp` against a byte-for-byte copy taken before the edit, and the file
+was restored from that copy and `touch`ed afterwards. **Verified**, locally, on
+this workstation's `g++ 16.2.0`.
+
+The assertions that shipped are stronger than that one: the board's figures at
+both panel widths, the grid being the narrowest-named of the four its rows could
+have asked for and met by exactly one of them, and the fold itself.
+
+Nine `static_assert`s join the thirty-two already there, and the forty-one run
+in every `arduino-cli` build of both boards and in `ci/test-card-columns.sh`.
+A tenth is in `App/Display.cpp`, on the chevron inset, where only a board build
+reads it.
+
+| mutation | result |
+|---|---|
+| `boardColumnsForBoard()` ignores its measurement and asks for `kBoardStatusWidth`, a fixed column instead of the board's | exit 1, a compile error on five of the nine: both 320px `HALFTIME` figures, both 240px name-floor figures and the 320px start-time figure. The two `FINAL` figures and the two score-column figures are silent, which is the point of them: a board of state words is meant to draw exactly what the fleet draws |
+| `widestBoardStatus()` keeps the narrowest measurement, which is `<` for `>` | `ci/check-board-columns-call.sh` fails on the comparison check. No host test reads `App/Display.cpp`, so the gate is the only thing that can see which way that comparison runs, and the check exists because of this mutation |
+| `boardColumnsForBoard()` drops its `scoreless` argument and passes `false`, so a board of four scheduled games draws score columns | exit 1, on `a board of scheduled games draws no score column`, and on nothing else |
+| `kChevronInset` raised to 4, which puts the chevron body back on the card | exit 1 on the `static_assert` beside it. **Verified** against `g++` over a standalone translation unit holding `kChevronWidth`, `kChevronInset` and the assertion, and **Inferred** for the `arduino-cli` build, which evaluates the same expression |
+| `showSportsBoard()` declares `const BoardColumns columns` inside the row loop again, which is where 18e left it | `ci/check-board-columns-call.sh` exit 1, on `'const BoardColumns columns =' is not declared at showSportsBoard()'s own scope`. Nothing else fires: the call still reads `boardColumnsForBoard(kScreenW, scoreless, widestBoardStatus(rows, count))`, so the indentation is the only thing that can see it |
+| the two folds moved above `count = kMaxRows;` | `ci/check-board-columns-call.sh` exit 1, on the ordering check |
+
+The six in the table were each cut against a copy of the file in a scratch
+directory and run by pointing the compiler's include path or the gate's
+`TARGET` at that copy, so the tree was never mutated and nothing had to be
+restored into it. Each one was gated on `cmp` against the unmutated copy first.
+The red proof above is the one that was cut into the tree, and it was restored
+from a byte-for-byte copy and `touch`ed.
+
+**The gate caught one of its own.** The first cut of the in-loop mutation used
+`\n` in a `perl` pattern against a working-tree file that is CRLF, so the
+removal half matched nothing and only the insertion half landed. `cmp` said the
+file had changed, the mutant held both declarations, and the gate passed on the
+one still at function scope. That is exactly the shape the gate is meant to
+catch going the other way, and it is why `cmp` saying "changed" is not the same
+as "the mutation I meant landed": the second cut used `\r?\n` and the gate
+failed. Restoring a file by `git checkout --` also keeps its old mtime, so a
+mutation cut into the tree needs a `touch` afterwards or the next
+`arduino-cli` run links the mutant; nothing here was cut into the tree.
+
+**The board build is this workstation's, which is the overlaid core.** CI builds
+stock, so a local binary and a CI binary of the same commit are not the same
+thing, and no size delta against `origin/main` was measured because that would
+be a second forty-minute build of a tree nothing else needs.
+`arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs
+--libraries ../libraries` over `App/` reports `Sketch uses 1578727 bytes (80%)`
+and `Global variables use 115140 bytes (35%)`, with no errors and no warnings in
+the log, read off the log rather than off the exit code. That run is what
+evaluates the forty-one `static_assert`s in `App/CardColumns.h` and the one in
+`App/Display.cpp` on a real board target; the ESP32-S3 was not built locally and
+compiles the same two headers, which is **Inferred**.
+
+The ESP32 figure for `origin/main` from CI, 18e's table, is 1,579,920 against a
+stock core. The two are not comparable and the local figure is here as a record
+of what was built, not as a delta.
+
+### 18g. What 18f does not cover
+
+- **Nothing has been on glass.** Every figure is arithmetic or a `g++` run. The
+  one thing only a photograph can answer is whether the chevrons at a 2px inset
+  clear the bezel on a cased device, and whether 36px names on a 240px board
+  read as a table or as four rows of ellipses.
+- **No host test compiles `App/Display.cpp`.** It names LovyanGFX and a board
+  pin map. `ci/check-board-columns-call.sh` is a text gate over the call and the
+  folds, and it knows the arguments are the right arguments, not that the
+  drawing is right.
+- **The chevron change reaches every card, not just the scoreboard.** It was
+  read against the scoreboard, which is the only card that fills the content
+  band to its edge on every row. No other card was looked at, in a screenshot or
+  otherwise.
+- **`SPORTS_CARDS_V2_GENERIC_DESIGN.md` is in the other repository and is
+  further behind than 18e left it.** `App/Display.h`'s remark now says what the
+  five positions are; that document still says they are fixed.
+- **A rollout draws the same payload two ways.** A device with this lays one
+  grid and a device without lays four, from one `sportsscores` response. Nothing
+  on the wire changed and no field was added, so the 6-month compatibility gate
+  is untouched.
 ---
 
 ## 19. The brand splash's one length, at both ends (2026-11-01)
