@@ -3346,16 +3346,21 @@ The ESP32 figure for `origin/main` from CI, 18e's table, is 1,579,920 against a
 stock core. The two are not comparable and the local figure is here as a record
 of what was built, not as a delta.
 
-**CI ran both halves and both passed.** `mut-host-test.yml` triggers on
-`test/**`, so the commit went up a second time on `test/scoreboard-one-grid`
-with `[full-gate]` in the message, run **41356255370**. `host-test` passed all
-six steps, including `ci/check-board-columns-call.sh`, which settles the awk and
-line-ending questions a local run cannot. `full-gate` passed `ci/build-firmware.sh`,
-which is CAL and the App on the ESP32 and the ESP32-S3 against the stock core,
-so the forty-one `static_assert`s in `App/CardColumns.h` and the one in
+**CI ran both halves twice and both passed both times.** `mut-host-test.yml`
+triggers on `test/**`, so the tree went up on `test/scoreboard-one-grid` with
+`[full-gate]` in the message: run **41356255370** before the three reviews and
+run **41358639192** after them, the second carrying the eleven checks 18f-i
+added. In each, `host-test` passed all six steps, including
+`ci/check-board-columns-call.sh`, which settles the awk and line-ending
+questions a local run cannot, and `full-gate` passed `ci/build-firmware.sh`,
+which is CAL and the App on the ESP32 and the ESP32-S3 against the stock core.
+So the forty-one `static_assert`s in `App/CardColumns.h` and the one in
 `App/Display.cpp` are evaluated on both boards by a build that is not this
 workstation's. Read off the runs and jobs endpoints with `curl`, because `gh`
 hangs here. **Verified.**
+
+The two commits after that are prose in this file and in
+TEXT_LAYOUT_DESIGN.md and have no CI run of their own.
 
 ### 18f-i. Three reviews, and the sixteen mutations the first gate missed
 
