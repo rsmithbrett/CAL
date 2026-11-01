@@ -51,11 +51,11 @@ void noteTap(uint32_t now, int32_t x, int32_t y) {
   if (gStep < ConfigGesture::kTaps) {
     return;
   }
-  gStep = 0;
 
   Log::line("[config] six corner taps - asking CAL for the configuration menu");
   Display::showStatus("Configuration", "Restarting to open it.");
   Loader::requestConfigMenu();  // never returns
+  gStep = 0;
 }
 
 }  // namespace ConfigRequest
