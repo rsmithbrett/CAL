@@ -190,6 +190,72 @@ void stateTests() {
     c.update(clockMs, true, i % 2 ? 32 : 288, 30);
   }
   assert(!c.visible()); // three is not six, and the earlier three did not carry
+
+  // THE EXACT EDGES OF BOTH CORNER ZONES, AS LITERALS. The static_asserts in
+  // RecoveryState.h prove no zone overlaps a button; they say nothing about
+  // where an edge sits while it overlaps nothing, so a zone shrunk by one pixel
+  // passed every one of them and passed this file as well - the taps above land
+  // at 32 and 288, deep inside. Reading the edges from ConfigGesture here would
+  // not help: both rectangles are asserted equal to those constants, so a
+  // mutation that moves the constant moves this case with it. 63, 256 and 43
+  // are written out because they are the geometry that shipped.
+  c.reset();
+  for (int i = 0; i < 6; ++i) tap(c, i % 2 ? 256 : 63, 43);
+  assert(c.visible()); // the last pixel inside each corner still opens it
+  c.reset();
+  for (int i = 0; i < 6; ++i) tap(c, i % 2 ? 256 : 64, 30);
+  assert(!c.visible()); // one column right of the left corner is outside it
+  c.reset();
+  for (int i = 0; i < 6; ++i) tap(c, i % 2 ? 255 : 32, 30);
+  assert(!c.visible()); // one column left of the right corner is outside it
+  c.reset();
+  for (int i = 0; i < 6; ++i) tap(c, i % 2 ? 288 : 32, 44);
+  assert(!c.visible()); // the row where kMenuRows[0] begins is outside both
+
+  // CAL'S COUNTER, MEASURED AGAINST THE SHARED CONSTANT. ConfigGesture.h says a
+  // reader who changes kTaps changes the gesture for both binaries. Nothing made
+  // that true: the App compares against kTaps and CAL against a 6 written into
+  // RecoveryState.h, so the constant could read 3 and CAL would still want six.
+  // One tap short must not open it and the next one must.
+  c.reset();
+  for (int i = 0; i < ConfigGesture::kTaps - 1; ++i) tap(c, i % 2 ? 288 : 32, 30);
+  assert(!c.visible());
+  tap(c, (ConfigGesture::kTaps - 1) % 2 ? 288 : 32, 30);
+  assert(c.visible());
+
+  // The bounce window, from the same constant and for the same reason: CAL
+  // compares against a literal 100. Contacts one millisecond inside it are one
+  // finger bouncing; contacts exactly kBounceMs apart are taps.
+  c.reset();
+  for (int i = 0; i < 6; ++i) tap(c, i % 2 ? 288 : 32, 30, ConfigGesture::kBounceMs - 1);
+  assert(!c.visible());
+  c.reset();
+  for (int i = 0; i < 6; ++i) tap(c, i % 2 ? 288 : 32, 30, ConfigGesture::kBounceMs);
+  assert(c.visible());
+
+  // A MENU OPENED BEFORE THE CLOCK WRAPPED AND LEFT ALONE ACROSS IT. The wrap
+  // case above cannot fail: six taps of 200ms carry the clock past the boundary
+  // before the menu opens, so its last activity is already on the near side and
+  // the subtraction is an ordinary one - written as a signed difference it still
+  // passes. Controller::open takes the time as an argument, which is what puts
+  // lastActivity_ on the far side of the wrap from now.
+  c.reset();
+  const uint32_t beforeWrap = std::numeric_limits<uint32_t>::max() - 500;
+  c.open(beforeWrap);
+  assert(!c.update(beforeWrap + kMenuIdleMs - 1, false, 0, 0).restore);
+  assert(c.update(beforeWrap + kMenuIdleMs, false, 0, 0).restore);
+  assert(!c.visible());
+
+  // THE GESTURE WINDOW ACROSS THE WRAP, with the expiring tap in the corner the
+  // sequence is expecting. The case above taps the wrong corner, which resets the
+  // counter by itself and would pass whether the window expired or not - the same
+  // near-miss the open-clears-the-sequence case had.
+  c.reset();
+  clockMs = std::numeric_limits<uint32_t>::max() - 2000;
+  tap(c, 32, 30);        // step 1, started before the wrap
+  tap(c, 288, 30, 9000); // the expected corner, past the window, after the wrap
+  for (int i = 0; i < 4; ++i) tap(c, i % 2 ? 288 : 32, 30);
+  assert(!c.visible()); // the window expired, so this is four taps and not six
 }
 
 void resetActions() {
