@@ -329,6 +329,13 @@ done
 # carry its executable bit into git.
 bash ci/check-text-state.sh
 
+# The fourth. The scoreboard's status column takes its width from the string it
+# holds, and App/CardColumns.h's thirty-two static_asserts and the host sweep
+# over them read none of App/Display.cpp, so the four arguments the draw path
+# hands that arithmetic are the one part of the layout with nothing checking
+# them. Its own script for the same reason as the gate above.
+bash ci/check-board-columns-call.sh
+
 echo "==> Compiling CAL for the ESP32-2432S028"
 arduino-cli compile --fqbn "$FQBN" --libraries "$LIBRARIES_DIR" --export-binaries .
 

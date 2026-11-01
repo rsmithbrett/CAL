@@ -37,6 +37,9 @@ jobs:
       - name: Check the panel's text state
         if: ${{ hashFiles('ci/check-text-state.sh') != '' }}
         run: bash ci/check-text-state.sh
+      - name: Check the scoreboard's call into the column arithmetic
+        if: ${{ hashFiles('ci/check-board-columns-call.sh') != '' }}
+        run: bash ci/check-board-columns-call.sh
 
   full-gate:
     # The arduino-cli half of the release gate, for mutations that only a real
