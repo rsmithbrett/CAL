@@ -38,7 +38,7 @@ void noteTap(uint32_t now, int32_t x, int32_t y) {
   const bool left = high && x < ConfigGesture::kZoneWidth;
   const bool right = high && x >= Display::screenWidth() - ConfigGesture::kZoneWidth;
 
-  const bool expected = (gStep % 2 == 0) ? left : right;
+  const bool expected = left || right;
   if (expected) {
     if (gStep == 0) gStarted = now;
     ++gStep;
