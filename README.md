@@ -2834,10 +2834,46 @@ compile in and no way to know at flash time what it would be.
 So CAL shows a neutral splash on first boot, and after it has authenticated it
 caches server-supplied brand assets into LittleFS and shows those on subsequent
 boots. Assets are stored as raw RGB565 at a fixed 240×120 — the server prepares
-them for this exact panel, so the device carries no image decoder and no scaler,
-and a wrong-sized file is discarded rather than rendered as noise. The splash is
-streamed a row at a time (480 bytes) because a full-screen buffer would be
-150 KB on a board with no PSRAM.
+them for this exact panel, so the device carries no image decoder and no scaler.
+The splash is streamed a row at a time (480 bytes) because a full-screen buffer
+would be 150 KB on a board with no PSRAM.
+
+### One length, checked at both ends
+
+240×120 RGB565 is 57,600 bytes exactly. `BrandSplash.h` carries that figure and
+the file name, and both halves of the brand path read it from there rather than
+each holding its own copy: `Updater::cacheBrandAssets()` on the way in and
+`Display::drawBrandImage()` on the way out.
+
+**The write refuses a body that is not 57,600 bytes.** A 200 response is not
+proof the body is the asset. A captive portal, a proxy or a CDN answers 200 with
+an HTML error page, and a connection dropped part-way through the body leaves
+`writeToStream()` returning a short count rather than a negative one. Before
+this check, any body of one byte or more was renamed over `/brand.565`, which
+removed a working splash and put the error page where it had been. The
+temp-then-rename sequence does not cover that case: it keeps a half-written file
+off the panel, and a short body that arrived complete is not half-written.
+`Content-Length` is checked first where the response states one, so the usual
+bad answer costs no flash write at all.
+
+**The draw removes a stored file it will not use.** `drawBrandImage()` compared
+`f.size()` against 57,600 and returned false, which fell back to the neutral
+wordmark correctly and left the file sitting on flash. A device that had taken a
+bad body kept it, refused it again on every boot, and had no route back without
+a cable. It now unlinks the file it rejects, so the next refresh writes into an
+empty slot and the boot after that is branded again.
+
+Both ends, because neither one alone covers the fleet. The write-time check is
+the only place that can stop a good file being deleted. The draw-time unlink is
+the only thing that reaches a device already holding a bad one, because
+`cacheBrandAssets()` runs only on a boot where CAL contacts the server, and
+`mustContactServer()` is false on a healthy device starting normally, so a
+poisoned unit that healed only through the write path would wait for its next
+update to get its branding back.
+
+`/brand.tmp` is pruned on the way in too. A reset part-way through a write, or a
+`rename()` that refuses, used to strand 57,600 bytes on a 196,608-byte partition
+with nothing in either binary that would remove it.
 
 The QR code's target URL is server-supplied for the same reason. It may point at
 an agent's own vanity address that redirects onward to the service, or at the
@@ -6791,7 +6827,12 @@ disqualifying:
 - The partition is not as empty as it looks. `brand.565` is 240x120 RGB565 =
   57,600 bytes, and `Updater::cacheBrandAssets()` holds `/brand.tmp` and
   `/brand.565` simultaneously during a refresh - 115,200 bytes of a 196,608-byte
-  partition, before LittleFS metadata.
+  partition, before LittleFS metadata. Those two names are the only files either
+  binary writes to this partition, so 115,200 bytes is the whole occupancy at
+  its peak and not a floor that something else sits on top of.
+  `cacheBrandAssets()` removes a leftover `/brand.tmp` before it starts, so the
+  57,600 bytes a reset part-way through a write used to strand are given back
+  rather than held until the next refresh happens to reuse the name.
 
 **The `coredump` partition.** Tempting: 65,536 bytes, and nothing in this
 repository writes it. But something does. The core's own `sdkconfig` for the
@@ -6973,7 +7014,7 @@ requested" is a line rather than a silence.
 | `synchroniseTime()` | The epoch obtained, or the timeout, and the plausibility check that rejected it |
 | `fetchDiscovery()` | Heap before TLS, `Tls::configure()` result, HTTP status (negative values are `HTTPC_ERROR_*`), JSON parse result, every path the document resolved to |
 | `awaitKeyAssignment()` | Enrollment state **on change only**, plus the backoff interval |
-| `cacheBrandAssets()` | Skipped-because-no-path, or the byte count written |
+| `cacheBrandAssets()` | Leftovers pruned, skipped-because-no-path, the `Content-Length` or byte count refused against the expected 57,600, or the byte count written |
 | `fetchManifest()` | `ok` / `isConfigured` / version / size / SHA prefix |
 | The install decision | All three inputs, so "already current" is distinguishable from "server said nothing is configured" |
 | `installApplication()` | See below |

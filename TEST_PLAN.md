@@ -3257,3 +3257,266 @@ is the check for those, and there has not been one.
   the layout, and its "five fields of a row at fixed x positions" is false twice
   over. `App/Display.h`'s own remark says so; neither of those documents is in
   this repository and neither was touched.
+---
+
+## 19. The brand splash's one length, at both ends (2026-11-01)
+
+`Updater::cacheBrandAssets()` tested its write with `written <= 0`, so any 200
+response carrying one byte or more was renamed over `/brand.565`: the good
+splash removed, the response put in its place, and the journal reporting a
+cached byte count. `Display::drawBrandImage()` then refused the file on size
+every boot and left it on flash, so the device showed the neutral wordmark with
+no route back without a cable.
+
+The length is now one constant, `BrandSplash::kBytes`, read by the write and by
+the draw. `ci/test-brand-splash.sh` is the host test.
+
+### 19a. The host test
+
+```
+bash ci/test-brand-splash.sh
+```
+
+No stubs: `BrandSplash.h` includes only `<stddef.h>`. The truth table is
+asserted twice over, as `static_assert` and again at runtime, so a widened
+predicate stops the compile on any toolchain and also prints a `Failed!` line
+under a runner.
+
+| Check | What it pins |
+|---|---|
+| `bodyIsWholeAsset(57600)` | the asset is accepted |
+| `bodyIsWholeAsset(1)`, `(512)`, `(57599)`, `(57601)` | a short error page, a dropped body and an oversized one are all refused |
+| `bodyIsWholeAsset(0)`, `(-1)` | an empty body and an `HTTPClient` error code are refused |
+| `declaredLengthCouldBeAsset(512)`, `(0)` | a stated `Content-Length` that is not the asset stops the run before any flash write |
+| `declaredLengthCouldBeAsset(-1)` | a chunked response states no length, so it proceeds to the write |
+| `storedSizeIsWholeAsset(512)`, `(0)`, `(115200)` | a file already on flash at the wrong length is not kept |
+
+### 19b. The mutations, and what each one did
+
+Run on this workstation with `xtensa-esp32-elf-g++ -fsyntax-only`, the cross
+compiler from the pinned core, because there is no native `g++` here. Each one
+restored with the file's mtime refreshed afterwards.
+
+| Mutation | Result |
+|---|---|
+| `bodyIsWholeAsset` back to `return bytes > 0` - the shipped test | 4 assertions fail: `one byte is not the asset`, `one short`, `one over`, `a short HTML error page carrying a 200` |
+| `declaredLengthCouldBeAsset` to `return true` | 2 assertions fail, `a stated 512 cannot be the asset` and `a stated 0`, plus an unused-parameter error under `-Werror` |
+| `storedSizeIsWholeAsset` to `return true` | 3 assertions fail, covering an empty, a short and a doubled stored file |
+
+The first mutation is the shipped defect exactly, and the cases it fails are the
+four a captive portal, a proxy and a dropped connection produce.
+
+### 19c. The bench check, which has not been run
+
+1. **A short body replaces nothing.** Point a device's `brandAssetPath` at a
+   route serving 512 bytes of HTML under a 200 on a device that already has a
+   good splash. Expect the journal line `wrote 512 bytes not 57600 -
+   discarded, the cached splash stands`, the branded splash still on the glass
+   on the next boot, and no `/brand.tmp` left on the partition.
+2. **A stated wrong length costs no write.** Same, with a `Content-Length`
+   header. Expect `Content-Length 512 is not 57600` and no `wrote` line at all.
+3. **A poisoned device heals.** Put a 512-byte `/brand.565` on a device by hand,
+   then boot it. Expect the neutral wordmark, `cached splash is 512 bytes not
+   57600 - removed (ok)` from whichever end ran first, and the branded splash
+   back on the boot after the next refresh.
+4. **A chunked response still works.** Serve the asset without a
+   `Content-Length`. Expect `cached 57600 bytes`.
+
+Photograph 1 and 3.
+
+### 19d. Known gaps, recorded rather than discovered later
+
+- **Nothing here has been on glass, and no device was flashed or commanded.**
+  The defect was found by reading, and the fix is checked by compilation and
+  arithmetic.
+- **The host test covers the decision, not the filesystem sequence.** That
+  `LittleFS.remove()` and `rename()` are not reached when the length is refused
+  is read off the source. `Updater.cpp` pulls in `ArduinoJson`, `HTTPClient`,
+  `Update`, `mbedtls` and four ESP-IDF headers, so a host build of that
+  translation unit needs a stub set larger than the thing it would test. The
+  predicate was moved into a header of its own for exactly the reason section
+  18c gives for `boardColumns()`.
+- **`Display::drawBrandImage()`'s unlink is a patch, not a commit.** The CAL
+  `Display.cpp` was held by another pass; the change is written out in that
+  pass's report. Until it lands, a poisoned device heals only on a boot where
+  `mustContactServer()` is true, which a healthy device starting normally is not.
+- **No measurement of the per-boot cost on a device.** The handshake count and
+  the 115,200-byte partition peak are read off the partition table and the
+  source, not off a running unit.
+---
+
+## 20. CAL's screens on a white panel (2026-11-01)
+
+CAL's loader screens changed from white-on-black to black-on-white, matching the
+App's day theme. `BOOT_SCREEN_OWNERSHIP.md` section 12 is the palette contract
+and says what each colour has to satisfy.
+
+**Nothing below has been seen on glass.** A compile says the constants resolve,
+and that is all it says. Every colour here was chosen against a contrast
+calculation and a photograph of a different screen, so the whole of this section
+is a list of things a person has to look at, and the entries flagged as risks are
+the ones the arithmetic could not settle.
+
+**What makes a step fail.** Text you cannot read at arm's length, text the same
+colour as what it sits on, a stroke or outline that has disappeared, a filled bar
+you cannot tell from an empty one, or any black rectangle with an edge in the
+middle of a white screen. Photograph every step, pass or fail, because the pass
+photographs are the record that the screen was looked at.
+
+### 20a. The three risks, looked at first
+
+1. **The cached brand frame does not recolour itself, and this is the one that
+   bites.** `/brand.565` is a raw RGB565 bitmap with one ground baked into its
+   pixels, and the server lane is changing it to composite onto white. A device
+   only refetches it in `Updater::cacheBrandAssets()` at `CAL.ino:693`, and a
+   healthy device never reaches that line: the `if (!contactServer)` block above
+   it hands over to the App and returns. So a working device keeps its
+   black-ground frame on the new white panel, which is a black rectangle with a
+   visible edge in the middle of the splash, and it keeps it until it next takes
+   an update. That can be weeks. The size guard added alongside this change does
+   not help, because a recoloured frame is the same 57,600 bytes as the old one.
+   Look at a device that has a cached frame and has not updated since, and treat
+   what it shows as the thing most households would see first. Whether the frame
+   needs a version or a hash in the manifest so a ground change forces a refetch
+   is a server-lane question this list cannot answer.
+2. **The wordmark's blue.** `kAccent` (`0x2A78D6`) carries "Around Me" under
+   "Discover" on the neutral splash, at text size 4 standalone and size 3 as the
+   status backdrop. It measures 4.42:1 on white, and this panel renders white with
+   a blue cast, which narrows the gap further. A photograph of a real unit on
+   2026-10-23 is why `showConnected` stopped using accent blue on white for
+   reading text. The wordmark is display type rather than reading text, which is
+   why it stayed. Read it from across a room. If it reads as blue on pale blue,
+   the change is one constant.
+3. **The amber.** `kWarn` (`0xEDA100`) measures 2.17:1 on white, the largest
+   single regression in the swap. It draws the "Reset identity" row, both
+   confirmation headings, the Reset and Reload buttons, every `showFailure`
+   headline, and "Do not unplug" at text size 1. It is unchanged because the App
+   keeps the same amber outside its own day/night swap and already draws it on a
+   white panel, and one amber across the handover is worth more than CAL being
+   right alone. Read "Do not unplug" first, since size 1 is the hardest case.
+   `0xB45309` measures 5.02:1 and is the replacement if it fails.
+
+### 20b. A provisioned device, powered on
+
+4. **The cached brand splash.** Power a device that has a `/brand.565` on flash.
+   See 20a item 1 for why this is the step that matters most and why it will not
+   look right until the device has refetched. Once it has, the logo sits on white
+   with no visible frame edge. Photograph it before and after an update cycle.
+5. **A poisoned frame heals itself.** Separate from the recolour. Write a file of
+   the wrong length to `/brand.565`, boot, and confirm the journal reports the
+   size and the removal and the screen falls back to the wordmark. Boot again and
+   confirm the journal no longer mentions it, which is what proves the file was
+   removed rather than refused twice.
+6. **The neutral splash.** A device with no cached frame falls back to the
+   two-line wordmark. "Discover" is `kInk`, "Around Me" is `kAccent`, "starting"
+   is `kMuted` at size 2. All three legible, and see 20a item 2.
+7. **The status ladder.** Watch a whole boot without touching it. "Looking for
+   known networks", "Connecting to WiFi", "Checking the time", "Contacting
+   service", then "Starting" with a version under it. Each draws the splash
+   backdrop above it, so check the wordmark or logo and the status text together
+   rather than one at a time. Headlines are `kInk` at size 2, details `kMuted` at
+   size 1, and `kMuted` at size 1 on white is the hardest reading case after the
+   amber.
+8. **The handover.** The moment CAL hands to the App, watch for a flash. Both
+   grounds are now `0xFFFFFF` and both inks `0x000000`, so there should be no
+   visible change in the panel's white at the swap. A flash means the two binaries
+   disagree on a value and section 12.1 is broken.
+
+### 20c. Setting up a device that has no network
+
+9. **The Wi-Fi join QR.** Erase identity or start an unprovisioned unit. The
+   screen shows a QR, "Scan to join WiFi", the network name under it, and an
+   "Open http://..." line at the bottom. The QR's own light card is `kQrLight`
+   and its modules `kQrDark`, which do not come from the theme, so the code
+   itself should look exactly as it did. What changed is that the card's edge is
+   no longer visible against the panel. **Scan it with a phone.** The quiet zone
+   is two modules inside the card and the panel now extends it, so scanning
+   should be unaffected or better, and this step is what proves it.
+10. **The joined screen.** Join the access point with a phone. `showConnected`
+    draws "Connected" at size 3 with a detail line under it, then "Choose your
+    WiFi" once the portal is open. This screen used to be the only one drawn dark
+    on light, and that inversion was how somebody across a room knew the join had
+    worked without reading it. Every screen is dark on light now, so look at
+    whether the join still reads as an event from a distance. If it does not,
+    that is a design question for the setup flow rather than a defect here.
+11. **The registration QR.** A device the server has not claimed shows the
+    enrollment QR with a server-written caption. The caption wraps to three lines
+    when there is no subcaption and two when there is, so check nothing is cut
+    mid-word and the fallback URL at the bottom is typeable. `kInk` at size 1 for
+    the fallback is the line somebody types by hand.
+12. **The service-provided QR, and "Waiting for setup".** The screens a
+    claimed-but-unconfigured device sits on. Server-supplied wording, so read them
+    for wrapping as well as colour.
+
+### 20d. The recovery menu and the diagnostics screens
+
+13. **The hold prompts.** Hold BOOT through startup. "Keep holding BOOT to set up
+    WiFi" with "Release now to cancel" under it, then the identity-erase prompt on
+    a longer hold. Both are `showStatus` over the splash backdrop.
+14. **The menu.** Reach the configuration menu by the touch gesture. Five rows,
+    each a rounded outline with its label in the same colour as the outline: "Set
+    up Wi-Fi" and "Diagnostics" in `kInk`, "Reset identity" in `kWarn`, row 3 in
+    `kInk` as "Reload application" or `kWarn` as "Cancel reload", and "Back" in
+    `kMuted`. Check every outline is visible and the `kMuted` Back button has not
+    faded into the panel. Photograph the menu in both states of row 3.
+15. **Both confirmation screens.** Tap "Reset identity", then back out and tap
+    "Reload application". Heading in `kWarn`, a body paragraph in `kInk` at size 2
+    over six lines, a `kWarn` action button and a `kMuted` Cancel. The identity
+    paragraph is 125 characters and the length is load-bearing, so confirm it
+    still ends in a full sentence and has not ellipsized.
+16. **The presence sensor screen.** Diagnostics, then "Presence sensor". On a
+    board with a mapped sensor the signal line reads "Signal HIGH" in `kActive`
+    (`0x2E7D32`, the App's green) or "Signal LOW" in `kMuted`, with a bar below
+    whose outline is `kMuted` and whose fill is `kActive`. Trigger the sensor and
+    confirm the filled bar is unmistakable against the unfilled outline. Then the
+    history row of twelve small bars at the bottom, which is the subtlest thing on
+    any CAL screen: `kActive` for a high reading, `kMuted` for a low one, and
+    `kTrack` (`0xE0E0E0`) for a slot with no reading at all. `kTrack` is meant to
+    be nearly invisible and the slot it marks must not look filled. Its
+    predecessor was near-black, which on a white panel would have read as the most
+    filled bar in the row, so this is the one place in the swap where a wrong
+    colour inverts a meaning rather than dimming it.
+17. **The presence screen on a Panellan.** That board maps no fixed sensor pin, so
+    the same screen shows "No sensor input mapped", "Panellan ESP32-S3" in `kInk`,
+    and two `kMuted` lines under it, with the bar drawn as an empty outline.
+    Confirm the empty outline is visible.
+18. **The GPIO monitor.** Diagnostics, then "GPIO monitor". Both modes, and page
+    through all pages of each. Per row: the pin number at size 2 in `kInk`, or in
+    `kActive` for two seconds after a change, a value and a HIGH/LOW beside it, a
+    small bar whose outline is `kMuted` and whose fill follows the row colour, and
+    a `kMuted` line under it. Toggle a pin and confirm the colour change is
+    visible, because `kActive` and `kInk` are both dark on white where before one
+    was a bright green against black. This is the step most likely to show that
+    two dark colours no longer read as different. Also check the "Changes" and
+    "All pins" mode button, Previous, Back and Next, all `kMuted` outlines with
+    `kInk` labels at size 1.
+
+### 20e. Updating, and failing
+
+19. **The update progress screen.** Offer an update the device can take and watch
+    `showUpdateProgress`. "Updating" at size 3 in `kInk`, the version in `kMuted`
+    at size 1, a progress bar outlined `kMuted` and filled `kAccent`, a percentage
+    in `kMuted`, and "Do not unplug" in `kWarn` at size 1. The `kAccent` fill is a
+    solid block rather than text so its 4.42:1 is ample, but see 20a item 3 for the
+    amber line beneath it. Catch it part-filled, not only at 0 and 100, since a
+    partly filled bar is what proves the fill reads against the outline.
+20. **A failure screen.** Easiest to reach by pulling the network during the boot,
+    which lands on `showFailure` through `haltWithFailure`. Headline in `kWarn` at
+    size 2 over up to three lines, with a `kMuted` size 1 instruction under it. The
+    amber headline and the grey instruction are the two weakest contrasts in the
+    change sitting on one screen, which is why this is the last step rather than an
+    afterthought.
+
+### 20f. What this section does not cover
+
+- **The SelfTest sketch is a separate binary and keeps its own dark palette.**
+  `SelfTest/Display.cpp` has its own `kBg`/`kInk`/`kMuted`/`kPass`/`kFail`/`kWarn`
+  and is not part of CAL's loader. It was read and deliberately left alone. If the
+  product look is meant to reach it too, that is its own change with its own bench
+  pass.
+- **No host test covers any of this.** There is no native `g++` on this
+  workstation and nothing compiles `CAL.ino` outside `arduino-cli`, so a colour
+  constant has no automated coverage of any kind. The contrast ratios in section
+  12.3 were computed by hand and are arithmetic, not a test.
+- **No device has been touched.** Every step above is a human at a bench with a
+  powered unit, and none of them has been performed.

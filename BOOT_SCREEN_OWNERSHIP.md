@@ -520,3 +520,129 @@ backoff counter was inferred rather than queried.
 **Device 17 cannot take this over the air**, for exactly the reason the change
 exists, and needs a wired flash. Displays not yet deadlocked can take it
 normally, since CAL performs the install and CAL never touches the PNG decoder.
+
+---
+
+## 12. The loader's palette, and the audit a colour change owes
+
+Before 2026-11-01 nothing in this repository wrote down what CAL's screen
+colours were or what they had to satisfy. The values sat in `Display.cpp`'s
+anonymous namespace with a line of comment each, and the only record that one
+screen inverted was a remark half-way down the file above the wrong function.
+That gap is what this section closes, because the next person flipping a colour
+needs to know an audit exists.
+
+### 12.1 One ground, and it is white
+
+CAL draws dark on light. `kBg` is the panel, `kInk` is text and strokes on it,
+`kMuted` is text and strokes that rank below `kInk`.
+
+The values are the App's day theme, taken deliberately rather than chosen:
+
+| constant  | value      | role                                |
+|-----------|------------|-------------------------------------|
+| `kBg`     | `0xFFFFFF` | the panel, and every text cell fill |
+| `kInk`    | `0x000000` | primary text and strokes            |
+| `kMuted`  | `0x707070` | secondary text, outlines, tracks    |
+
+`App/Display.cpp`'s `kBgDay`/`kInkDay`/`kMutedDay` are the same three numbers.
+They must stay the same three numbers. A household watches CAL hand over to the
+App in the middle of a boot, and two different whites across that handover is
+visible as a flash on the glass. If the App's day values move, these move with
+them.
+
+### 12.2 Why the loader has no night mode
+
+The App swaps between a day and a night pair through `bg()`/`ink()`/`muted()`,
+driven by `gIsDaytime`, which `setEnvironment()` sets from check-in data. CAL
+cannot have that, for two reasons that are independent of each other.
+
+CAL draws its first screen before it has a network. `CAL.ino` puts the splash up
+at the top of the ladder and does not reach the service until well below it, so
+at the moment CAL needs a theme there is nothing that could have told it which
+one. A loader that guessed would be wrong half the time.
+
+The stronger reason is the cached frame. `/brand.565` is a raw RGB565 bitmap the
+server composites and the device stores on flash, so it has exactly one ground
+baked into its pixels. A loader with a night mode would draw a white-ground
+frame on a black panel, which is a white rectangle floating in the middle of the
+screen. The frame's ground and the panel's ground are one decision, and it is
+made on the server.
+
+So CAL has one ground, and `kBg` is a constant rather than a function.
+
+### 12.3 What a colour has to satisfy
+
+Any colour drawn as text on `kBg` has to reach 4.5:1 against it. Ratios, for
+reference, against white:
+
+| colour    | value      | vs white | drawn as                        |
+|-----------|------------|----------|---------------------------------|
+| `kInk`    | `0x000000` |    21.0  | text, strokes                   |
+| `kMuted`  | `0x707070` |     4.95 | text, outlines                  |
+| `kAccent` | `0x2A78D6` |     4.42 | the wordmark, the progress fill |
+| `kWarn`   | `0xEDA100` |     2.17 | warnings                        |
+| `kActive` | `0x2E7D32` |     5.13 | a signal reading high           |
+| `kTrack`  | `0xE0E0E0` |     1.32 | an empty slot, never text       |
+
+Two of those do not clear 4.5:1 and both are deliberate.
+
+`kAccent` carries the two-line wordmark at text size 3 and 4, and fills the
+update progress bar. It is display type and a solid block, not reading text, and
+its ratio barely moved in the swap: it was 4.76:1 on the old black ground and is
+4.42:1 on white, because it was always a mid-tone. It stays, and section 12.5
+lists it as something to look at.
+
+`kWarn` is the App's amber and the App keeps it outside its own day/night swap,
+on the stated grounds that amber reads against either ground. The App already
+draws it as headline text on its white day panel. CAL matching that is worth
+more than CAL being right alone, so the value stays and the measurement is
+recorded here instead of being argued away. `0xB45309`, the App's deeper amber,
+measures 5.02:1 and is the replacement if the bench says the lighter one does
+not read.
+
+`kTrack` is the one colour whose job is to be nearly invisible. It marks a slot
+in the presence history that holds no reading, and it sits 1.32:1 off the panel
+the way its predecessor sat 1.29:1 off the black one. A colour that passed the
+text threshold here would read as a filled slot and invert the meaning of the
+row.
+
+### 12.4 The QR codes are outside the palette
+
+`showQr()` paints its own light card and its own dark modules from values named
+`kQrLight` and `kQrDark`, which are white and black and do not come from `kBg`
+and `kInk`. A QR has to be dark-on-light whatever the panel does, and wiring it
+to the theme constants is how a future inversion would quietly stop every phone
+in the building from scanning it. The quiet zone is two modules inside the card,
+so on a white panel the card's edge stops being visible while the quiet zone
+itself is intact and effectively wider than before.
+
+### 12.5 What a colour change owes
+
+A compile proves nothing about legibility, and this repository has no device in
+the loop. So a change to any value in 12.1 or 12.3 carries the bench list in
+`TEST_PLAN.md` section 20, which names every screen CAL can draw in the order a
+person reaches them. The list is the deliverable, not the diff.
+
+Three things on it are worth naming here because they are not obvious from the
+code:
+
+- **A ground change does not reach the cached frame on its own.** The frame is
+  refetched in `Updater::cacheBrandAssets()` at `CAL.ino:693`, and a healthy
+  device never gets there: the `if (!contactServer)` block above it draws
+  "Starting", calls `bootApplication()` and returns, so a normal boot opens no
+  socket in CAL at all. The frame is refreshed about once per update cycle. A
+  device therefore keeps a black-ground frame on a white panel until it next
+  takes an update, which can be weeks, and the size guard in `drawBrandImage()`
+  does not catch it because a recoloured frame is the same length as the old
+  one. Whether the manifest needs a hash or a version on that asset, so a ground
+  change forces a refetch, is a server-side question and it is open.
+- `showConnected()` used to be the only screen drawn dark on light, and that
+  inversion was the signal that a phone had joined, readable from across a room
+  without reading a word. Every screen is dark on light now, so that signal is
+  gone. Nothing replaces it yet, and whether it needs replacing is a question
+  for whoever owns the setup flow.
+- The 2026-10-24 defect where glyph cells filled with `kBg` painted black bars
+  across `showConnected`'s white screen cannot happen any more. There is one
+  ground, so a cell fill and the panel are the same colour by construction
+  rather than by a parameter somebody has to pass.

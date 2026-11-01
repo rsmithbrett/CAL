@@ -34,6 +34,7 @@
 #include "CalQr.h"
 
 #include "Display.h"
+#include "BrandSplash.h"
 #include <PresenceInput.h>
 // wrappedCenteredText() says when it has ellipsized. A boot screen whose
 // message was cut is exactly the kind of thing nobody notices until a
@@ -60,26 +61,59 @@ LGFX lcd;
 constexpr int kScreenW = 320;
 constexpr int kScreenH = 240;
 
-// Cached brand splash, written by the updater after the device authenticates.
-// Raw RGB565 at a fixed size: the server prepares assets for the hardware, so
-// the device needs no image decoder and no scaler.
-constexpr const char* kBrandSplashPath = "/brand.565";
-constexpr int kBrandW = 240;
-constexpr int kBrandH = 120;
+// The panel is white and text is dark on it. These three are the App's day
+// theme - kBgDay, kInkDay and kMutedDay in App/Display.cpp - and taking that
+// file's numbers rather than choosing a white and a black here is what keeps
+// the handover from loader to App off the glass. BOOT_SCREEN_OWNERSHIP.md
+// section 12 is the contract, including why the loader has one ground where the
+// App swaps between two.
+constexpr uint32_t kBg = 0xFFFFFFu;
+constexpr uint32_t kInk = 0x000000u;
+constexpr uint32_t kMuted = 0x707070u;
 
-constexpr uint32_t kBg = 0x000000u;
-constexpr uint32_t kInk = 0xFFFFFFu;
-constexpr uint32_t kMuted = 0x9A9A9Au;
+// The wordmark, and the update bar's fill. It reads 4.42:1 on white against the
+// 4.76:1 it had on black, because it is a mid-tone against either, and it draws
+// display type at text size 3 and 4 and one solid block. Nothing at reading size
+// uses it.
 constexpr uint32_t kAccent = 0x2A78D6u;
+
+// Warnings. The App's amber, which that file also keeps outside its day/night
+// swap, so one amber crosses the handover. It reads 2.17:1 on white, the lowest
+// figure in this palette, recorded in section 12.3 and in TEST_PLAN.md's bench
+// list rather than argued away.
 constexpr uint32_t kWarn = 0xEDA100u;
 
-// White, for the one screen that inverts. Named rather than written inline so the
-// page-style guard and anybody reading the palette can see there are two grounds.
-constexpr uint32_t kPaper = 0xFFFFFFu;
+// A sensor reading high, and a GPIO row that changed in the last two seconds.
+// The App's green. The 0x38C878 this replaces was picked to carry against black
+// and reads 2.16:1 on white; this reads 5.13:1, and it is drawn as text as well
+// as fill.
+constexpr uint32_t kActive = 0x2E7D32u;
 
-// Near-black, for text on kPaper. Not pure black: a hair of blue sits better against
-// a ground this panel renders slightly blue anyway.
-constexpr uint32_t kSlate = 0x101828u;
+// A slot in the presence history holding no reading. The one value here meant to
+// sit almost on the panel, at 1.32:1, where the near-black it replaces sat
+// 1.29:1 off the black ground. A colour meeting the text threshold would read as
+// a filled slot and invert what the row says.
+constexpr uint32_t kTrack = 0xE0E0E0u;
+
+// showQr()'s own two values, deliberately not kBg and kInk. A QR has to be dark
+// on light whatever the panel does, and reading these from the palette is how a
+// later change of ground would stop every phone in the building scanning it.
+constexpr uint32_t kQrLight = 0xFFFFFFu;
+constexpr uint32_t kQrDark = 0x000000u;
+
+// A colour equal to the ground draws nothing. That is the defect this file has
+// already produced once, in the opposite direction, when glyph cells filled with
+// a black kBg painted bars across a white screen on 2026-10-24. These hold the
+// palette apart at compile time, where the old arrangement relied on nobody
+// editing one constant without reading the rest.
+static_assert(kInk != kBg, "Primary text must differ from the panel.");
+static_assert(kMuted != kBg, "Secondary text must differ from the panel.");
+static_assert(kAccent != kBg, "The wordmark must differ from the panel.");
+static_assert(kWarn != kBg, "Warning text must differ from the panel.");
+static_assert(kActive != kBg, "A high reading must differ from the panel.");
+static_assert(kActive != kInk, "A high reading must differ from ordinary text.");
+static_assert(kTrack != kInk, "An empty slot must differ from a drawn one.");
+static_assert(kQrDark != kQrLight, "A QR's modules must differ from its card.");
 
 void clear() {
   lcd.fillScreen(kBg);
@@ -188,10 +222,11 @@ void centeredText(const String& text, int y, uint32_t colour, uint8_t size) {
 //      board whose largest contiguous block decides whether TLS can open.
 constexpr size_t kWrapLineBytes = 128;
 
-// background defaults to kBg, because every caller but one draws on the dark panel.
-// It is a parameter at all because showConnected draws on kPaper, and this function
-// used to fill each glyph cell with kBg regardless - which on a white screen painted
-// the text as solid black bars. Seen on a real unit 2026-10-24.
+// background fills each glyph cell, and every caller draws on kBg, so that is the
+// default and no caller passes anything else. It stays a parameter for a screen
+// that departs from the one ground: this function used to fill the cells with kBg
+// regardless, which on the one screen then drawn on white painted the text as
+// solid black bars, seen on a real unit 2026-10-24.
 int wrappedCenteredText(const String& text, int y, uint32_t colour, uint8_t size,
                         int lineHeight, int maxLines, uint32_t background = kBg) {
   lcd.setTextColor(colour, background);
@@ -337,33 +372,44 @@ void showNeutralSplash() {
 // this runs but showBrandSplash() needs it cleared at exactly the same point
 // it always was.
 bool drawBrandImage(int y0) {
-  if (!LittleFS.exists(kBrandSplashPath)) {
+  if (!LittleFS.exists(BrandSplash::kPath)) {
     return false;
   }
 
-  File f = LittleFS.open(kBrandSplashPath, "r");
+  File f = LittleFS.open(BrandSplash::kPath, "r");
   if (!f) {
     return false;
   }
 
-  const size_t expected = static_cast<size_t>(kBrandW) * kBrandH * 2;
-  if (f.size() != expected) {
-    // A truncated or wrong-sized asset is discarded rather than rendered as
-    // garbage across the screen.
+  const size_t size = f.size();
+  if (!BrandSplash::storedSizeIsWholeAsset(size)) {
+    // Refused rather than rendered as garbage across the screen, and removed
+    // rather than left where it is. A file of the wrong length is refused again
+    // on every boot, and the one thing on the device that replaces it is a
+    // refresh that runs only when CAL contacts the server - which a healthy
+    // device starting normally does not do. Removing it here is what lets a
+    // device that took a wrong-length body get its branding back on its own.
     f.close();
+    const bool removed = LittleFS.remove(BrandSplash::kPath);
+    Journal::printf("[display] cached splash is %u bytes not %u - removed (%s)",
+                    static_cast<unsigned>(size),
+                    static_cast<unsigned>(BrandSplash::kBytes), removed ? "ok" : "FAILED");
     return false;
   }
 
   // Streamed a row at a time. A full-screen buffer would be 150KB and this
   // device has no PSRAM; one row is 480 bytes.
-  static uint16_t row[kBrandW];
-  const int x0 = (kScreenW - kBrandW) / 2;
-  for (int y = 0; y < kBrandH; ++y) {
+  static uint16_t row[BrandSplash::kWidth];
+  const int x0 = (kScreenW - BrandSplash::kWidth) / 2;
+  for (int y = 0; y < BrandSplash::kHeight; ++y) {
     if (f.read(reinterpret_cast<uint8_t*>(row), sizeof(row)) != sizeof(row)) {
+      // Left in place: the size above matched, so a read that comes up short is
+      // the filesystem failing rather than the wrong file, and removing a good
+      // asset over a transient error costs a download.
       f.close();
       return false;
     }
-    lcd.pushImage(x0, y0 + y, kBrandW, 1, row);
+    lcd.pushImage(x0, y0 + y, BrandSplash::kWidth, 1, row);
   }
   f.close();
   return true;
@@ -407,14 +453,6 @@ void showStatus(const String& headline, const String& detail) {
   }
 }
 
-// THE ONE SCREEN DRAWN DARK-ON-LIGHT, and it is deliberate. Every other screen
-// here is light text on the product's near-black panel. This one inverts so that
-// a household glancing up from their phone can tell at a distance that the join
-// worked, without reading a word of it.
-//
-// Shown while a phone is associated to the setup access point. Provisioning swaps
-// back to the join code the moment the last station leaves, so the screen always
-// says which of the two things the person should be doing.
 // LovyanGFX already drives touch; Recovery adds the gesture and release tracking.
 bool readTouch(int32_t& x, int32_t& y) {
   return gPanelStarted && lcd.getTouch(&x, &y);
@@ -483,8 +521,7 @@ void showPresenceTest(const PresenceTest::State& reading, uint32_t now, bool sup
   lcd.fillRect(0, 38, kScreenW, 20, kBg);
   lcd.fillRect(42, 70, 236, 14, kBg);
   lcd.fillRect(0, 94, kScreenW, 64, kBg);
-  constexpr uint32_t green = 0x38C878u;
-  const uint32_t signalColour = supported && reading.high ? green : kMuted;
+  const uint32_t signalColour = supported && reading.high ? kActive : kMuted;
   centeredText(!supported ? "No sensor input mapped"
                          : !reading.hasReading ? "Waiting for reading"
                                                : reading.high ? "Signal HIGH" : "Signal LOW",
@@ -493,7 +530,7 @@ void showPresenceTest(const PresenceTest::State& reading, uint32_t now, bool sup
   // or a confidence percentage. Unsupported boards show an unfilled outline.
   lcd.drawRect(40, 68, 240, 18, kMuted);
   if (supported && reading.hasReading && reading.high) {
-    lcd.fillRect(42, 70, 236, 14, green);
+    lcd.fillRect(42, 70, 236, 14, kActive);
   }
   if (supported && reading.hasReading) {
     centeredText("GPIO35: " + String(reading.mv) + " mV", 96, kInk, 2);
@@ -504,7 +541,10 @@ void showPresenceTest(const PresenceTest::State& reading, uint32_t now, bool sup
                  148, kMuted, 1);
     for (uint8_t i = 0; i < PresenceTest::kHistorySize; ++i) {
       const uint8_t value = reading.historyAt(i);
-      lcd.fillRect(40 + i * 5, 164, 4, 10, value == 2 ? green : value == 1 ? kMuted : 0x202020u);
+      // Three ranks: a high reading, a low one, and a slot with no reading in it.
+      // kTrack is the faint one, so an empty slot does not read as a filled bar.
+      lcd.fillRect(40 + i * 5, 164, 4, 10,
+                   value == 2 ? kActive : value == 1 ? kMuted : kTrack);
     }
     centeredText("Recent signal: last 12 seconds", 177, kMuted, 1);
   } else if (!supported) {
@@ -582,7 +622,7 @@ void showGpioMonitor(const GpioMonitor::State& state, bool allPins, uint8_t page
       changedMs = event.when; changed = true; changes = state.input(pin)->changes;
     }
     const int y = 50 + row * 33;
-    const uint32_t colour = changed && static_cast<uint32_t>(now - changedMs) < 2000 ? 0x38C878u : kInk;
+    const uint32_t colour = changed && static_cast<uint32_t>(now - changedMs) < 2000 ? kActive : kInk;
     snprintf(text, sizeof(text), "GPIO %u", pin);
     label(text, 16, y, 2, colour);
     const GpioMonitor::Kind kind = GpioMonitor::kind(pin);
@@ -602,20 +642,28 @@ void showGpioMonitor(const GpioMonitor::State& state, bool allPins, uint8_t page
   }
 }
 
+// Drawn while a phone is associated to the setup access point. Provisioning swaps
+// back to the join code the moment the last station leaves, so the screen always
+// says which of the two things the person should be doing.
+//
+// This was the one screen drawn dark on light, with a white ground and a
+// near-black ink of its own, and the inversion was what told a household across
+// the room that the join had worked without their reading a word. Every screen is
+// dark on light now, so it draws from the palette like the rest and the two extra
+// constants are gone. Size 3 against the status screens' size 2 is what is left
+// setting it apart, and whether that carries the same distance is on
+// TEST_PLAN.md's bench list rather than settled here.
+//
+// Both lines take kInk, the detail a size smaller rather than a lighter tone,
+// because kMuted at size 1 on white is the weakest reading case in the palette
+// and this is the screen somebody reads at arm's length.
 void showConnected(const String& headline, const String& detail) {
   startPanel();
-  lcd.fillScreen(kPaper);
+  clear();
 
-  // kInk is white and would vanish here. Both lines are the accent blue, the
-  // detail a size smaller rather than a lighter colour, because there is no
-  // muted tone that stays legible on white at size 1 on this panel.
-  // kSlate, not kAccent. The panel carries a blue cast - kBg is pure black and
-  // photographs as deep blue - so white comes out pale blue and accent-blue text on
-  // it is blue on blue. Near-black against that ground is a far wider gap, and this
-  // is the screen somebody reads at arm's length across a room.
-  const int headlineLines = wrappedCenteredText(headline, 80, kSlate, 3, 30, 2, kPaper);
+  const int headlineLines = wrappedCenteredText(headline, 80, kInk, 3, 30, 2);
   if (detail.length() > 0) {
-    wrappedCenteredText(detail, 80 + headlineLines * 30 + 16, kSlate, 2, 22, 3, kPaper);
+    wrappedCenteredText(detail, 80 + headlineLines * 30 + 16, kInk, 2, 22, 3);
   }
 }
 
@@ -661,12 +709,15 @@ void showQr(const String& url, const String& caption, const String& subCaption,
   const int x0 = (kScreenW - side) / 2;
   const int y0 = 12;
 
-  lcd.fillRect(x0, y0, side, side, 0xFFFFFFu);
+  // The card carries the two-module quiet zone inside it. On a white panel its
+  // edge stops being visible while the quiet zone stays intact and the panel
+  // extends it, so the code a phone sees is unchanged or has more margin.
+  lcd.fillRect(x0, y0, side, side, kQrLight);
   for (uint8_t y = 0; y < qr.size; ++y) {
     for (uint8_t x = 0; x < qr.size; ++x) {
       if (qrcode_getModule(&qr, x, y)) {
         lcd.fillRect(x0 + (x + quiet) * scale, y0 + (y + quiet) * scale, scale,
-                     scale, 0x000000u);
+                     scale, kQrDark);
       }
     }
   }
@@ -680,10 +731,11 @@ void showQr(const String& url, const String& caption, const String& subCaption,
   const int captionLines = subCaption.length() > 0 ? 2 : 3;
   y += wrappedCenteredText(caption, y, kInk, 2, 22, captionLines) * 22;
   if (subCaption.length() > 0) {
-    // The network name, which somebody matches against a list on a phone.
-    // kAccent is blue and this panel is blue: a photograph of a real unit on
-    // 2026-10-23 showed the name, and the address below it, as the two least
-    // readable things on a screen whose whole job is to be read off.
+    // The network name, which somebody matches against a list on a phone. kInk
+    // rather than kAccent: a photograph of a real unit on 2026-10-23 showed the
+    // name, and the address below it, as the two least readable things on a
+    // screen whose whole job is to be read off, and accent blue is the weaker
+    // of the two colours against either ground.
     y += wrappedCenteredText(subCaption, y, kInk, 2, 22, 2) * 22;
   }
   // The Wi-Fi QR payload only joins a network; the setup URL is separate.
@@ -691,7 +743,7 @@ void showQr(const String& url, const String& caption, const String& subCaption,
   //
   // kInk, not kMuted. This is the fallback for a phone that does not open the
   // portal by itself, so it is the one thing here somebody types by hand, and
-  // grey on blue at size 1 is not typeable.
+  // kMuted at size 1 is the weakest reading case in the palette.
   wrappedCenteredText(fallbackText.length() > 0 ? fallbackText : url,
                       y, kInk, 1, 14, 2);
 }

@@ -30,6 +30,10 @@ void showNeutralSplash();
 
 /// The cached brand splash, if one was previously downloaded and stored. Falls
 /// back to the neutral splash when absent. Returns false if nothing was cached.
+///
+/// A cached file whose size is not `BrandSplash::kBytes` is removed rather than
+/// drawn, so a device that took a wrong-length body is branded again once the
+/// updater has refreshed it.
 bool showBrandSplash();
 
 /// A single line of status with an optional detail line beneath it. Used for
@@ -46,9 +50,12 @@ void showFailure(const String& headline, const String& whatToDo);
 void showQr(const String& payload, const String& caption, const String& subCaption = "",
             const String& fallbackText = "");
 
-/// Shown while a phone is joined to the setup access point: dark-on-light, so the
-/// join reads as having worked from across a room. Provisioning swaps back to the
-/// join code when the last station leaves.
+/// Shown while a phone is joined to the setup access point. Provisioning swaps
+/// back to the join code when the last station leaves.
+///
+/// Was the one screen drawn dark on light, back when the rest were light on black
+/// and that inversion was what carried the join across a room. Every screen is
+/// dark on light now, and a larger headline is what distinguishes this one.
 void showConnected(const String& headline, const String& detail = "");
 
 /// Coordinates follow the displayed rotation. Recovery owns edge detection.

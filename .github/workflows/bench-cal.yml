@@ -29,6 +29,7 @@ on:
       - "Provisioning.cpp"
       - "Identity.cpp"
       - "Identity.h"
+      - "BrandSplash.h"
       - "Display.cpp"
       - "Display.h"
       - "Updater.cpp"
@@ -60,6 +61,8 @@ jobs:
 
       - name: Test the scoreboard's column arithmetic on host
         run: bash ci/test-card-columns.sh
+      - name: Test the brand splash length on host
+        run: bash ci/test-brand-splash.sh
 
       - name: Compile against production toolchain and check real partitions
         run: bash ci/build-firmware.sh

@@ -416,11 +416,14 @@ for (int y = 0; y < kBrandH; ++y) {
 }
 ```
 
-240×120 raw RGB565 from `/brand.565` (`CAL/Display.cpp:30-34`), 120 iterations of
-a 480-byte read followed by a `pushImage`, with a **static** row buffer that
-never touches the allocator, and a whole-file size check that discards a
-truncated asset rather than rendering noise. `README.md:2203-2207` records the
-same design.
+240×120 raw RGB565 from `/brand.565` (`CAL/BrandSplash.h` holds the name and the
+length), 120 iterations of a 480-byte read followed by a `pushImage`, with a
+**static** row buffer that never touches the allocator, and a whole-file size
+check that refuses an asset of any other length rather than rendering noise, and
+unlinks it so the next refresh has somewhere to write. The same 57,600 bytes is
+tested on the way in, where `Updater::cacheBrandAssets()` will not rename a
+response body of the wrong length over a splash that works. README's *Branding
+and the QR target* records the same design.
 
 So the format, the byte order, the chunked-`pushImage` pattern and the
 static-buffer discipline are all already proven on this exact panel. **The one
@@ -862,9 +865,11 @@ adds at most one cluster per file — noise.
 
 1. **Do not extend full-screen RGB565 to CAL's LittleFS brand asset.** The
    `spiffs` partition is 196,608 bytes (`App/partitions.csv`); a 320×240 raw
-   asset would take 78% of it. CAL's 240×120 format (57,600 bytes) is already
-   the right size for where it lives, and `CAL/Display.cpp:30-34` should stay as
-   it is.
+   asset would take 78% of it, and a refresh holds the new copy and the old one
+   at the same time, so the real figure to clear is twice the asset. CAL's
+   240×120 format (57,600 bytes) peaks at 115,200 of the 196,608 and is already
+   the right size for where it lives. `CAL/BrandSplash.h` is the one place the
+   figure lives, and changing it changes both the write and the draw.
 2. **RGB565 is an SD-only format.** The no-card fallback path
    (`Assets::fetchToRam()` → `drawRam()`, `App/Assets.h:130-176`) holds the whole
    asset in RAM, and 153,600 bytes is not available on a device with 11,340 free.
