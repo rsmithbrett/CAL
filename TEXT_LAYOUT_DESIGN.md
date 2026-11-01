@@ -2025,7 +2025,7 @@ TEST_PLAN.md section 18e has the mutations.
 A photograph of a portrait CYD running `v2026.10.30.0001` came back with four
 things wrong on one NHL board. Two of them the geometry rewrite in `57df3d8`
 already fixed, and the two it did not are the grid the four rows sit on and the
-navigation chevron drawn across one of them. Those two are this section.
+navigation chevron drawn across two of their cards. Those two are this section.
 
 **What the photograph shows, and what `main` already does with it.** The device
 is eight releases behind, so most of what is in the frame is the five literal
@@ -2055,7 +2055,7 @@ the literals with widths derived from it: on the 240px panel with scores the row
 now runs 14, 83, 89, 158, 226 with a 43px name column and 12 pixels of air
 between the home block and the status. None of it reaches `main`.
 
-**The fourth is live and `main` makes it worse.** 15h's own "Four rows of one
+**The grid is live and `main` makes it worse.** 15h's own "Four rows of one
 board no longer share a column grid" wrote it down: `boardColumnsFor()` is
 called inside the row loop, so a row's own status string moves where its home
 name starts and where both of its score columns end. The photographed board is
