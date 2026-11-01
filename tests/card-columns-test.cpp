@@ -32,16 +32,25 @@
 
 using CardColumns::boardColumns;
 using CardColumns::BoardColumns;
+using CardColumns::boardDefaultStatusWidth;
+using CardColumns::boardLeftoverPixel;
+using CardColumns::boardMaxStatusWidth;
+using CardColumns::boardScoreWidth;
 using CardColumns::boardSeparation;
 using CardColumns::boardStatusLeft;
+using CardColumns::boardStatusWidthFor;
 using CardColumns::kBoardColumnGap;
 using CardColumns::kBoardMinNameWidth;
+using CardColumns::kBoardNameFloor;
+using CardColumns::kBoardPeriodTextWidth;
 using CardColumns::kBoardRowInset;
 using CardColumns::kBoardScoreWidth;
 using CardColumns::kBoardStartTimeSlack;
 using CardColumns::kBoardStartTimeTextWidth;
 using CardColumns::kBoardStateWordWidth;
+using CardColumns::kBoardStatusSlack;
 using CardColumns::kBoardStatusWidth;
+using CardColumns::kBoardWidestPeriodTextWidth;
 using CardColumns::kCardMargin;
 
 namespace {
@@ -106,6 +115,115 @@ int main() {
   assert(boardColumns(240, true).statusWidth == 80);
   assert(boardColumns(240, false).nameWidth == 43);
   assert(boardColumns(240, false).statusWidth == 56);
+
+  // --- the column a measured status gets ------------------------------------
+  //
+  // TEXT_LAYOUT_DESIGN.md section 15h. The layout used to pick the status width
+  // from the row's score strings and then draw the status string into it; it
+  // picks the width from the string now, and these are the two rows that were
+  // cut before it did.
+  //
+  // Both of these fail against the shipped layout, which handed every row with
+  // scores a flat 56.
+  for (const int width : {320, 240}) {
+    for (const bool scoreless : {true, false}) {
+      // 15g: a live game's period, on a row that has scores and on one that
+      // does not. "6TH INN" is 74px.
+      assert(boardStatusWidthFor(width, scoreless, kBoardPeriodTextWidth) >=
+             kBoardPeriodTextWidth);
+      // 15f: a scheduled game that reported one side's score is not scoreless,
+      // and its status is still a start time. The widest is 78px.
+      assert(boardStatusWidthFor(width, scoreless, kBoardStartTimeTextWidth) >=
+             kBoardStartTimeTextWidth);
+    }
+  }
+
+  // The state's own default widths, which are what the two-argument form and
+  // the header's assertions read.
+  assert(boardDefaultStatusWidth(true) == kBoardStartTimeTextWidth + kBoardStartTimeSlack);
+  assert(boardDefaultStatusWidth(false) == kBoardStatusWidth);
+  assert(boardScoreWidth(true) == 0);
+  assert(boardScoreWidth(false) == kBoardScoreWidth);
+
+  // The three rules in 15h, read at the boundaries between them rather than in
+  // the middle of each. 55 asks for 56, 56 asks for 56, 57 asks for 59, and an
+  // empty status asks for nothing because nothing is drawn there.
+  for (const int width : {320, 240}) {
+    for (const bool scoreless : {true, false}) {
+      assert(boardStatusWidthFor(width, scoreless, 0) == 0);
+      assert(boardStatusWidthFor(width, scoreless, kBoardStateWordWidth) == kBoardStatusWidth);
+      assert(boardStatusWidthFor(width, scoreless, kBoardStatusWidth) == kBoardStatusWidth);
+      assert(boardStatusWidthFor(width, scoreless, kBoardStatusWidth + 1) ==
+             kBoardStatusWidth + 1 + kBoardStatusSlack);
+      // And the slack is the first thing a ceiling spends, not an allowance on
+      // top of it.
+      assert(boardStatusWidthFor(width, scoreless, kBoardStartTimeTextWidth) <=
+             kBoardStartTimeTextWidth + kBoardStatusSlack);
+    }
+  }
+
+  // An empty status hands the names the whole row.
+  assert(boardColumns(320, false, 0).nameWidth == 111);
+  assert(boardColumns(240, false, 0).nameWidth == 71);
+  assert(boardColumns(320, true, 0).nameWidth == 137);
+  assert(boardColumns(240, true, 0).nameWidth == 97);
+
+  // Section 15h's table, as equalities: the status width a measured string gets
+  // and the name column left beside it, at both panel widths in both states.
+  struct MeasuredRow {
+    int width;
+    bool scoreless;
+    int measured;
+    int statusWidth;
+    int nameWidth;
+  };
+  const MeasuredRow kMeasured[] = {
+      {320, false, 37, 56, 83},   // PPD
+      {320, false, 55, 56, 83},   // FINAL
+      {320, false, 67, 69, 76},   // 7:30 PM, on a row that reported one score
+      {320, false, 74, 76, 73},   // 6TH INN
+      {320, false, 78, 80, 71},   // 12:00 AM
+      {320, false, 80, 82, 70},   // 3RD QTR
+      {320, false, 94, 96, 63},   // HALFTIME
+      {320, true, 37, 56, 109},   // PPD, which used to take the 80px column
+      {320, true, 78, 80, 97},    // 12:00 AM
+      {320, true, 94, 96, 89},    // HALFTIME
+      {240, false, 37, 56, 43},   // PPD
+      {240, false, 55, 56, 43},   // FINAL
+      {240, false, 67, 69, 36},   // 7:30 PM
+      {240, false, 74, 76, 33},   // 6TH INN
+      {240, false, 78, 80, 31},   // 12:00 AM, on the name floor
+      {240, false, 80, 80, 31},   // 3RD QTR, at the ceiling with no slack left
+      {240, false, 94, 80, 31},   // HALFTIME, cut - see below
+      {240, true, 37, 56, 69},    // PPD
+      {240, true, 78, 80, 57},    // 12:00 AM
+      {240, true, 94, 96, 49},    // HALFTIME
+  };
+  for (const MeasuredRow& row : kMeasured) {
+    const int statusWidth = boardStatusWidthFor(row.width, row.scoreless, row.measured);
+    assert(statusWidth == row.statusWidth);
+    assert(boardColumns(row.width, row.scoreless, statusWidth).nameWidth == row.nameWidth);
+  }
+
+  // The one row the column still does not hold: "HALFTIME" at 94px on a 240px
+  // panel that has scores. The ceiling there is 80, because 96 would put the
+  // names at 23 and kBoardMinNameWidth is 24. Asserted as the gap it is, so a
+  // change that closes it has to come through this line and section 15h.
+  assert(boardMaxStatusWidth(240, false) == 80);
+  assert(boardStatusWidthFor(240, false, kBoardWidestPeriodTextWidth) <
+         kBoardWidestPeriodTextWidth);
+  // The other three combinations do hold it.
+  assert(boardStatusWidthFor(320, false, kBoardWidestPeriodTextWidth) >=
+         kBoardWidestPeriodTextWidth);
+  assert(boardStatusWidthFor(320, true, kBoardWidestPeriodTextWidth) >=
+         kBoardWidestPeriodTextWidth);
+  assert(boardStatusWidthFor(240, true, kBoardWidestPeriodTextWidth) >=
+         kBoardWidestPeriodTextWidth);
+
+  // The ceilings in 15h's own table.
+  assert(boardMaxStatusWidth(320, true) == 212);
+  assert(boardMaxStatusWidth(320, false) == 160);
+  assert(boardMaxStatusWidth(240, true) == 132);
 
   // --- the sweep ------------------------------------------------------------
   for (int width = 2 * (kCardMargin + kBoardRowInset); width <= kWidestSweep; ++width) {
@@ -197,7 +315,59 @@ int main() {
     }
   }
 
-  std::cout << "PASS: scoreboard columns - the design document's table, the separation "
-               "identity at every width up to "
-            << kWidestSweep << ", the floor's boundaries and the start time's slack\n";
+  // --- the sweep again, with the status width coming from a string -----------
+  //
+  // The same range and the same properties, over eight measured widths rather
+  // than the state's own two. Three of the eight give an odd status width,
+  // which is what the separation identity needed: every status width in the
+  // header was even until one was measured off a glyph table, so the leftover
+  // pixel read as the panel width's own parity and section 15c said it was.
+  // boardLeftoverPixel() is that parity read off the row's leftover instead.
+  for (int width = 2 * (kCardMargin + kBoardRowInset); width <= kWidestSweep; ++width) {
+    for (const bool scoreless : {true, false}) {
+      const int ceiling = boardMaxStatusWidth(width, scoreless);
+
+      // No panel width can produce a column narrower than the one the fleet
+      // draws, which is what stops the ceiling's arithmetic going negative on a
+      // narrow board and taking the status column with it.
+      assert(ceiling >= kBoardStatusWidth);
+
+      // A column at the ceiling leaves the name floor standing exactly, which
+      // is what the ceiling is derived from. Only where the names set it: below
+      // that the ceiling is the kBoardStatusWidth clamp and the narrower
+      // kBoardMinNameWidth floor is the one in play.
+      if (ceiling > kBoardStatusWidth) {
+        assert(boardColumns(width, scoreless, ceiling).nameWidth == kBoardNameFloor);
+      }
+
+      for (const int measured : {0, 55, 56, 57, 74, 78, 94, 300}) {
+        const int statusWidth = boardStatusWidthFor(width, scoreless, measured);
+        assert(statusWidth == 0 || statusWidth >= kBoardStatusWidth);
+        assert(statusWidth <= ceiling);
+
+        const BoardColumns c = boardColumns(width, scoreless, statusWidth);
+        assert(c.statusWidth == statusWidth);
+        assert(c.nameWidth >= kBoardMinNameWidth);
+        assert(c.awayNameLeft == kCardMargin + kBoardRowInset);
+        assert(c.statusRight == width - kCardMargin - kBoardRowInset);
+        assert(c.homeNameLeft - c.awayScoreRight == kBoardColumnGap);
+
+        if (c.nameWidth <= kBoardMinNameWidth) continue;
+
+        const int asked =
+            2 * c.nameWidth + 2 * c.scoreWidth + c.statusWidth + 3 * kBoardColumnGap;
+        const int band = c.statusRight - c.awayNameLeft;
+        assert(asked <= band);
+        assert(band - asked == boardLeftoverPixel(width, scoreless, statusWidth));
+        assert(boardSeparation(width, scoreless, statusWidth) ==
+               2 * kBoardColumnGap + boardLeftoverPixel(width, scoreless, statusWidth));
+        assert(boardStatusLeft(width, scoreless, statusWidth) > c.homeScoreRight);
+        assert(c.statusRight <= width - kCardMargin);
+      }
+    }
+  }
+
+  std::cout << "PASS: scoreboard columns - the design document's two tables, the measured "
+               "status column and its ceiling, the separation identity at every width up to "
+            << kWidestSweep << " over eight status widths, and the floor's boundaries\n";
 }

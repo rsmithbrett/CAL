@@ -3588,15 +3588,22 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
 
     // A row with no score on either side releases two score columns, and the
     // status column spends what they release. boardColumns() takes that and the
-    // panel width and returns the five edges; its own remarks have the split,
-    // the properties a build checks, and why this is not the same question as
-    // whether the status holds a start time.
+    // panel width and returns the five edges; its own remarks have the split
+    // and the properties a build checks.
     const bool scoreless = row.awayScore[0] == '\0' && row.homeScore[0] == '\0';
-    const BoardColumns columns = boardColumns(kScreenW, scoreless);
+
+    // The status column's width comes from the string it holds, measured in the
+    // face the status draws in. A state word that fits the 56px column keeps
+    // it; a start time or a period asks for what it measures, up to the ceiling
+    // the name floor sets. The font is selected before the measurement because
+    // textWidth() reads whichever face is current.
+    lcd.setFont(FontId::Sans9);
+    const BoardColumns columns =
+        boardColumns(kScreenW, scoreless,
+                     boardStatusWidthFor(kScreenW, scoreless, lcd.textWidth(row.status)));
 
     // Away first, home second, which is how a scoreline is read aloud and what
     // the single-game card does.
-    lcd.setFont(FontId::Sans9);
     layoutLine(row.awayName, columns.awayNameLeft, text, columns.nameWidth, sport.name,
                "board.away", Align::Left, kTransparentText);
     layoutLine(row.homeName, columns.homeNameLeft, text, columns.nameWidth, sport.name,

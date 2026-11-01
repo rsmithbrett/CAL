@@ -55,18 +55,40 @@ constexpr int kBoardMinNameWidth = 24;
 /// measurement has to say which of the two it is taking the pixels from. The
 /// host test reads both names.
 constexpr int kBoardStartTimeTextWidth = 78;
-constexpr int kBoardStartTimeSlack = 2;
+constexpr int kBoardStatusSlack = 2;
+constexpr int kBoardStartTimeSlack = kBoardStatusSlack;
 constexpr int kBoardStartTimeWidth = kBoardStartTimeTextWidth + kBoardStartTimeSlack;
 
 /// What the 56px column on a row with scores is sized against. "FINAL" measures
 /// 55px on the same table.
 ///
-/// It is not sized against a period. The period is whatever progress text the
-/// provider sent, up to the 15 characters SportsBoardRow::kMaxStatus holds, and
-/// "6TH INN" is 74px, "4TH QTR" 79 and "HALFTIME" 94. Those do not fit and are
-/// ellipsized. TEXT_LAYOUT_DESIGN.md section 15g has the figures and what
-/// changing it would cost.
+/// It is the floor the measured width in boardStatusWidthFor() below starts
+/// from, and not a figure a period fits: the period is whatever progress text
+/// the provider sent, and "6TH INN" is 74px, "4TH QTR" 79 and "HALFTIME" 94.
+/// TEXT_LAYOUT_DESIGN.md section 15g has the figures.
 constexpr int kBoardStateWordWidth = 55;
+
+/// Two periods off the same glyph table, for the properties below to read.
+///
+/// "6TH INN" at 74px is the example TEXT_LAYOUT_DESIGN.md and Display.h both
+/// use for what the status field holds. "HALFTIME" at 94px is the widest period
+/// that can reach the panel at all: Sports::kMaxPeriodLength is 8 and
+/// CheckIn.cpp's copyBoundedMarked() cuts what the provider sent down to it, so
+/// "2ND PERIOD" arrives as "2ND P..." at 66px rather than as the 112px section
+/// 15g measures.
+constexpr int kBoardPeriodTextWidth = 74;
+constexpr int kBoardWidestPeriodTextWidth = 94;
+
+/// The narrowest a name column gets once the status column is taking its width
+/// from the string it holds.
+///
+/// A choice about which column pays rather than a measurement, and the only
+/// figure here that is one. It sits 7px clear of kBoardMinNameWidth, where the
+/// clamp below engages and the separation identity stops holding, and it is the
+/// largest floor that still leaves the 240px panel room to hand a start time
+/// the 80px a start time measures. TEXT_LAYOUT_DESIGN.md section 15h has what
+/// it costs each name column at each panel width.
+constexpr int kBoardNameFloor = 31;
 
 /// How far in from each edge of the panel the first and last column edge sit, on
 /// top of kCardMargin.
@@ -92,13 +114,57 @@ constexpr int kBoardRowInset = 4;
 /// TEXT_LAYOUT_DESIGN.md section 15f says what keying on the status instead
 /// would take.
 ///
+/// The two score columns a row gets, which is where the status column's pixels
+/// come from.
+constexpr int boardScoreWidth(bool scoreless) { return scoreless ? 0 : kBoardScoreWidth; }
+
+/// The pixels between the row's first column edge and its last.
+constexpr int boardRowSpan(int screenW) {
+  return (screenW - kCardMargin - kBoardRowInset) - (kCardMargin + kBoardRowInset);
+}
+
+/// The status width a row's state asks for before anything measures its string.
+/// What the two-argument boardColumns() below uses, and what the assertions at
+/// the bottom of this file read.
+constexpr int boardDefaultStatusWidth(bool scoreless) {
+  return scoreless ? kBoardStartTimeWidth : kBoardStatusWidth;
+}
+
+/// The widest status column a row can be given: whatever leaves both name
+/// columns at or above kBoardNameFloor, and never under the kBoardStatusWidth
+/// the fleet already draws.
+///
+/// Nothing else bounds it. A ceiling sized against a string would be a guess at
+/// the provider's vocabulary, and the widest eight characters the glyph table
+/// holds is 144px, so the names are what says no.
+constexpr int boardMaxStatusWidth(int screenW, bool scoreless) {
+  const int fromNames = boardRowSpan(screenW) - 2 * boardScoreWidth(scoreless) -
+                        3 * kBoardColumnGap - 2 * kBoardNameFloor;
+  return fromNames > kBoardStatusWidth ? fromNames : kBoardStatusWidth;
+}
+
+/// The status column for a status that measures `measuredTextWidth` pixels in
+/// the face it draws in.
+///
+/// An empty status asks for nothing, because nothing is drawn there. A status
+/// that fits the 56px column keeps the 56px column, so a state word costs the
+/// names no pixels. Anything wider asks for its own width plus the slack, up to
+/// boardMaxStatusWidth().
+///
+/// This is what reaches both doors in TEXT_LAYOUT_DESIGN.md sections 15f and
+/// 15g: a start time on a row that reported one score, and a live game's period
+/// on a row that reported both. Section 15h has the before-and-after widths and
+/// what the name columns pay for them.
+constexpr int boardStatusWidthFor(int, bool scoreless, int) {
+  return boardDefaultStatusWidth(scoreless);
+}
+
 /// constexpr so the properties below are checked by every build on both panels.
-constexpr BoardColumns boardColumns(int screenW, bool scoreless) {
+constexpr BoardColumns boardColumns(int screenW, bool scoreless, int statusWidth) {
   const int rowLeft = kCardMargin + kBoardRowInset;
   const int rowRight = screenW - kCardMargin - kBoardRowInset;
 
-  const int scoreWidth = scoreless ? 0 : kBoardScoreWidth;
-  const int statusWidth = scoreless ? kBoardStartTimeWidth : kBoardStatusWidth;
+  const int scoreWidth = boardScoreWidth(scoreless);
 
   // Everything that is not a name. Three column gaps for the two that sit
   // between the three blocks: the third is what boardSeparation() below reads
@@ -120,17 +186,43 @@ constexpr BoardColumns boardColumns(int screenW, bool scoreless) {
                       rowRight,     nameWidth,      scoreWidth,   statusWidth};
 }
 
-constexpr int boardStatusLeft(int screenW, bool scoreless) {
-  const BoardColumns columns = boardColumns(screenW, scoreless);
+/// The row with the status width its state asks for. The draw path measures the
+/// string instead and calls the three-argument form above.
+constexpr BoardColumns boardColumns(int screenW, bool scoreless) {
+  return boardColumns(screenW, scoreless, boardDefaultStatusWidth(scoreless));
+}
+
+constexpr int boardStatusLeft(int screenW, bool scoreless, int statusWidth) {
+  const BoardColumns columns = boardColumns(screenW, scoreless, statusWidth);
   return columns.statusRight - columns.statusWidth;
+}
+
+constexpr int boardStatusLeft(int screenW, bool scoreless) {
+  return boardStatusLeft(screenW, scoreless, boardDefaultStatusWidth(scoreless));
 }
 
 /// What stands between the home block's right edge and the status column's
 /// left edge. Substituting `shared` back gives 2 * kBoardColumnGap for any
-/// status width, score width and panel width, which is why the two columns
+/// status width, score width and panel width, plus the one pixel the even split
+/// cannot divide when the row's leftover is odd, which is why the two columns
 /// cannot be made to touch by changing one of those figures.
+constexpr int boardSeparation(int screenW, bool scoreless, int statusWidth) {
+  return boardStatusLeft(screenW, scoreless, statusWidth) -
+         boardColumns(screenW, scoreless, statusWidth).homeScoreRight;
+}
+
 constexpr int boardSeparation(int screenW, bool scoreless) {
-  return boardStatusLeft(screenW, scoreless) - boardColumns(screenW, scoreless).homeScoreRight;
+  return boardSeparation(screenW, scoreless, boardDefaultStatusWidth(scoreless));
+}
+
+/// The pixels the even split could not divide between the two names. They land
+/// in the separation above, and whose parity they carry is the row's leftover,
+/// not the panel width's: every status width in this file was even until one
+/// was measured off a string. TEXT_LAYOUT_DESIGN.md section 15c.
+constexpr int boardLeftoverPixel(int screenW, bool scoreless, int statusWidth) {
+  return (boardRowSpan(screenW) -
+          (2 * boardScoreWidth(scoreless) + statusWidth + 3 * kBoardColumnGap)) &
+         1;
 }
 
 // The two panel widths on the fleet, checked by every build on both boards.
