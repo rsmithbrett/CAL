@@ -158,7 +158,7 @@ constexpr int boardMaxStatusWidth(int screenW, bool scoreless) {
 constexpr int boardStatusWidthFor(int screenW, bool scoreless, int measuredTextWidth) {
   if (measuredTextWidth <= 0) { return 0; }
   if (measuredTextWidth <= kBoardStatusWidth) { return kBoardStatusWidth; }
-  const int want = measuredTextWidth + kBoardStatusSlack;
+  const int want = measuredTextWidth;
   const int ceiling = boardMaxStatusWidth(screenW, scoreless);
   return want < ceiling ? want : ceiling;
 }
