@@ -34,7 +34,7 @@ void noteTap(uint32_t now, int32_t x, int32_t y) {
   // rather than 256; reading the width here is what puts both corners where the
   // person tapping sees them. RecoveryState.h asserts CAL's own rectangles are
   // the same width and height as the figures used here.
-  const bool high = y < ConfigGesture::kZoneHeight;
+  const bool high = y < 60;
   const bool left = high && x < ConfigGesture::kZoneWidth;
   const bool right = high && x >= Display::screenWidth() - ConfigGesture::kZoneWidth;
 
