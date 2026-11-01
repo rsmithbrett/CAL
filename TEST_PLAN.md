@@ -2306,6 +2306,18 @@ stubbed NVS. The App's half of the same gesture is 16h.
 
 ### 16a. What runs, and where
 
+Four scripts, each building and running one host target:
+`ci/test-recovery-menu.sh` (CAL's `Recovery.cpp`, once per board),
+`ci/test-loader-order.sh` (`App/Loader.cpp`), `ci/test-config-request.sh`
+(`App/ConfigRequest.cpp`, 16h) and `ci/test-card-columns.sh`
+(`App/CardColumns.h`, 18d). The last three run once rather than once per board,
+because nothing in them is behind a target macro. All four are in the release
+gate and the pull-request bench, and all four are in
+`.github/workflows/mut-host-test.yml`, which runs them on a push to a `mut/**`
+or `test/**` branch so a mutation can be measured without a token to dispatch
+the bench with. None of them can run on this workstation: there is no host C++
+compiler here.
+
 `tests/recovery-menu-test.cpp` links against production `Recovery.cpp` with
 stubs for touch, drawing, NVS, the partition table and `esp_restart()`. Its
 `main()` runs the state machine checks, the presence and GPIO sampling models,
@@ -2372,8 +2384,9 @@ shipped.
 
 ### 16b. The release is gated on this test
 
-`build-and-release.yml` runs `ci/test-recovery-menu.sh` and
-`ci/test-loader-order.sh` as its first two steps, so a failing host test stops
+`build-and-release.yml` runs `ci/test-recovery-menu.sh`,
+`ci/test-loader-order.sh`, `ci/test-config-request.sh` and
+`ci/test-card-columns.sh` as its first four steps, so a failing host test stops
 the release rather than being reported after it. Before
 that, `bench-cal.yml` was the only runner and it fires on pull requests alone.
 Work that reached main by merge never re-ran it, and on 2026-10-30 the test
@@ -2601,19 +2614,19 @@ run through `.github/workflows/mut-host-test.yml`.
 
 | mutation | branch | run | result |
 |---|---|---|---|
-| Any corner counts: `expected = left \|\| right` | `mut/cr1-any-corner` | 41316902936 | fails at `:160`, six left taps open the menu |
-| Five taps are enough: `gStep < 5` | `mut/cr2-count-five` | 41316908040 | fails at `:181`, `kTaps - 1` taps open it |
-| A seventh is needed: `gStep < kTaps + 1` | `mut/cr9-ktaps-plus-one` | 41317318171 | fails at `:138`, six alternating taps open nothing |
-| `kTaps` 6 to 5 with the App counting to a literal 6 | `mut/cr3-ktaps-five` | 41316915282 | fails in CAL's test at `recovery-menu-test.cpp:51`, before this one runs |
-| A 1 ms bounce window | `mut/cr4-bounce-one` | 41316922592 | fails at `:214`, a whole sequence inside one bounce window opens the menu |
-| The window never expires | `mut/cr5-no-window` | 41316928948 | fails at `:274`, a sequence spanning `kWindowMs` opens it |
-| The window as an absolute comparison, `now >= gStarted + kWindowMs` | `mut/cr13-absolute-window` | 41317328980 | fails at `:390`, a sequence across the `millis()` wrap expires mid-way |
-| The right corner off a fixed 320 | `mut/cr6-fixed-320` | 41316933682 | fails at `:320`, the 240px panel's corner is nowhere |
-| A stray left tap discards the sequence: `gStep = 0` | `mut/cr7-stray-left-zero` | 41316940206 | fails at `:299`, five more taps no longer finish it |
-| A corner reaches 60px down | `mut/cr8-zone-height-60` | 41316946308 | fails at `:376`, a tap at `y = kZoneHeight` counts |
-| A corner reaches 70px in | `mut/cr10-zone-width-70` | 41317321105 | fails at `:366`, a tap at `x = kZoneWidth` counts |
-| Nothing drawn before the handover | `mut/cr11-no-status` | 41317323390 | fails at `:146`, the two recorded strings are one |
-| The counter cleared after the handover call | `mut/cr12-clear-after` | 41317610421 | fails at `:443`, the next tap hands over at once. See below |
+| Any corner counts: `expected = left \|\| right` | `mut/cr1-any-corner` | 41318519919 | fails at `:180`, six left taps open the menu |
+| Five taps are enough: `gStep < 5` | `mut/cr2-count-five` | 41318535527 | fails at `:203`, `kTaps - 1` taps open it |
+| A seventh is needed: `gStep < kTaps + 1` | `mut/cr9-ktaps-plus-one` | 41318588915 | fails at `:158`, six alternating taps open nothing |
+| `kTaps` 6 to 5 with the App counting to a literal 6 | `mut/cr3-ktaps-five` | 41318542838 | fails in CAL's test at `recovery-menu-test.cpp:51`, before this one runs |
+| A 1 ms bounce window | `mut/cr4-bounce-one` | 41318553709 | fails at `:236`, a whole sequence inside one bounce window opens the menu |
+| The window never expires | `mut/cr5-no-window` | 41318568515 | fails at `:297`, a sequence spanning `kWindowMs` opens it |
+| The window as an absolute comparison, `now >= gStarted + kWindowMs` | `mut/cr13-absolute-window` | 41318616195 | fails at `:416`, a sequence across the `millis()` wrap expires mid-way |
+| The right corner off a fixed 320 | `mut/cr6-fixed-320` | 41318574810 | fails at `:343`, the 240px panel's corner is nowhere |
+| A stray left tap discards the sequence: `gStep = 0` | `mut/cr7-stray-left-zero` | 41318579869 | fails at `:322`, five more taps no longer finish it |
+| A corner reaches 60px down | `mut/cr8-zone-height-60` | 41318584533 | fails at `:401`, a tap at `y = kZoneHeight` counts |
+| A corner reaches 70px in | `mut/cr10-zone-width-70` | 41318594041 | fails at `:390`, a tap at `x = kZoneWidth` counts |
+| Nothing drawn before the handover | `mut/cr11-no-status` | 41318597134 | fails at `:166`, the two recorded strings are one |
+| The counter cleared after the handover call | `mut/cr12-clear-after` | 41318602893 | fails at `:470`, the next tap hands over at once. See below |
 
 `mut/cr3-ktaps-five` is worth reading rather than skipping. It fails in step 3,
 not step 5: CAL's `open()` helper counts to a literal 6 and asserts the menu
@@ -2632,9 +2645,16 @@ written 100,000 ms after the handover. The gesture window's own expiry clears a
 stale counter on the next tap after 8,000 ms, so the case held whether or not
 production cleared the counter before handing over - a case announced as the one
 that bit, measured, and found unfailable. It now taps 100 ms after the sixth
-tap, inside that window, and run 41317610421 fails on it. The lesson is the
+tap, inside that window, and run 41318602893 fails on it. The lesson is the
 general one: a case that reaches production through a reset of its own proves
 nothing about the thing it names.
+
+**Every case that says the menu did not open also says the machine would
+have.** A negative assertion holds just as well when production has stopped
+reading taps for a reason the case knows nothing about, which is the shape
+`mut/cr12-clear-after` exposed. The seven cases asserting no handover each end
+with a sequence that does open the menu, delivered after the negative assertion
+so it cannot mask what that was reading.
 
 **What this does not cover.**
 
@@ -2712,7 +2732,7 @@ with the word "return" in it is not read as a path out.
 
 | mutation | branch | run | gate |
 |---|---|---|---|
-| `if (detail.length() == 0) return;` in `showStatus()` above the restore | `mut/ts1-early-return` | 41316980298 | fails, names `showStatus()` and the line that set the scale |
+| `if (detail.length() == 0) return;` in `showStatus()` above the restore | `mut/ts1-early-return` | 41318684486 | fails, names `showStatus()` and the line that set the scale |
 
 Rule 1 passes that same branch, which is the point of it. `showMoonPhaseCard()`
 is the function already in the right shape: it restores before its early return,
@@ -2874,12 +2894,30 @@ Nothing blocked it. The header needs no Arduino type, no font and no graphics
 call, which was already true of the arithmetic - it was simply in a file that
 could not be compiled anywhere.
 
+**The byte delta is zero, on both boards and both binaries.** Read off two
+`arduino-cli` runs of the same workflow, one on `origin/main` and one on this
+branch, because CI builds stock and a local binary of the same commit is a
+different thing:
+
+| binary | `origin/main`, run 41318078896 | this branch |
+|---|---|---|
+| `CAL.ino.bin`, ESP32 | 1,375,712 | 1,375,712 |
+| `CAL.ino.bin`, ESP32-S3 | 1,306,656 | 1,306,656 |
+| `App.ino.bin`, ESP32 | 1,579,856 | 1,579,856 |
+| `App.ino.bin`, ESP32-S3 | 1,476,576 | 1,476,576 |
+
+Which is what a pass that adds tests should read. `kBoardStartTimeWidth` is the
+same 80 whether it is written as 80 or as 78 plus 2, the `using`-directive
+resolves at compile time, and a `constexpr` in a header has the internal linkage
+it had in an unnamed namespace. The ESP32 figure is 95.42% of the binding
+1,441,792-byte field factory ceiling, unchanged.
+
 | mutation | branch | run | result |
 |---|---|---|---|
-| The start-time column trimmed to 79, keeping the 78px assertion satisfied | `mut/cc1-starttime-79` | 41316953004 | fails at `:82`, the column no longer carries its slack |
-| The home block starts where the away block ends | `mut/cc2-no-block-gap` | 41316958665 | fails at `:126`, two names with no gap between them |
-| The row runs to `kCardMargin` with no inset | `mut/cc3-no-row-inset` | 41316970437 | fails at `:101`, the 320px scoreless name column is 99 and not 97 |
-| The name floor raised to 30 | `mut/cc4-floor-thirty` | 41316974919 | fails at `:171`, the first width clear of the floor is 188 and not 176 |
+| The start-time column trimmed to 79, keeping the 78px assertion satisfied | `mut/cc1-starttime-79` | 41318623049 | fails at `:82`, the column no longer carries its slack |
+| The home block starts where the away block ends | `mut/cc2-no-block-gap` | 41318630908 | fails at `:126`, two names with no gap between them |
+| The row runs to `kCardMargin` with no inset | `mut/cc3-no-row-inset` | 41318653767 | fails at `:101`, the 320px scoreless name column is 99 and not 97 |
+| The name floor raised to 30 | `mut/cc4-floor-thirty` | 41318668854 | fails at `:171`, the first width clear of the floor is 188 and not 176 |
 
 **All four pass the fourteen `static_assert`s.** That is the point of them: each
 one is a change the board builds would have accepted. The three mutations in 18a
