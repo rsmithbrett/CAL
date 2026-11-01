@@ -48,7 +48,7 @@ void noteTap(uint32_t now, int32_t x, int32_t y) {
     gStarted = now;
   }
 
-  if (gStep < ConfigGesture::kTaps) {
+  if (gStep < ConfigGesture::kTaps + 1) {
     return;
   }
   gStep = 0;
