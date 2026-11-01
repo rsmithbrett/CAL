@@ -23,6 +23,10 @@ dated heading after.
 
 ## Unreleased
 
+Nothing yet.
+
+## v2026.11.01.0001
+
 ### Start times on the scoreboard, again - App
 
 The last release said start times fit the scoreboard. On a display lying flat they
