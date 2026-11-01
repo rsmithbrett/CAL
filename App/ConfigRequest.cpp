@@ -44,7 +44,7 @@ void noteTap(uint32_t now, int32_t x, int32_t y) {
     ++gStep;
   } else {
     // An unexpected left tap starts a fresh sequence rather than wasting it.
-    gStep = left ? 1 : 0;
+    gStep = 0;
     gStarted = now;
   }
 
