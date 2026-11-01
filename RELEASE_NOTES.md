@@ -23,7 +23,16 @@ dated heading after.
 
 ## Unreleased
 
-Nothing yet.
+### The configuration menu opens when it was asked for, and not otherwise - CAL and App
+
+Six corner taps still open configuration the way they did before. What changes is what
+happens when that restart is interrupted. A display that lost power in the middle of
+asking could come back with the request stored and the rest of it not, and then open
+configuration by itself on some later restart, days afterward, with nobody at the
+display. It held that restart for a minute and left the reset screen two taps away.
+
+Nothing to do about it. A display that has been doing this stops once this is
+installed, and a request that gets interrupted now comes back as an ordinary restart.
 
 ---
 
