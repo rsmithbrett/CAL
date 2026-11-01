@@ -1,0 +1,35 @@
+name: Mutation host test
+
+# Adversarial-review harness. Runs the same host test the release gate runs, on
+# a push to a mut/** branch, so a mutation can be measured without a token to
+# dispatch bench-cal.yml with. Never publishes anything and never runs on main.
+on:
+  push:
+    branches:
+      - 'mut/**'
+      - 'test/**'
+
+permissions:
+  contents: read
+
+jobs:
+  host-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test recovery gesture and actions on host
+        run: bash ci/test-recovery-menu.sh
+
+  full-gate:
+    # The arduino-cli half of the release gate, for mutations that only a real
+    # compile could catch. Opted into by the commit message so an ordinary
+    # mutation costs a minute rather than fifteen.
+    if: ${{ contains(github.event.head_commit.message, '[full-gate]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Test recovery gesture and actions on host
+        run: bash ci/test-recovery-menu.sh
+      - name: Compile against production toolchain and check real partitions
+        run: bash ci/build-firmware.sh
