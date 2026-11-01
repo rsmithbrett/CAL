@@ -37,6 +37,6 @@ constexpr uint32_t kBounceMs = 100;
 /// in the corner somebody has just tapped six times would otherwise land on Set
 /// up Wi-Fi, which is the one row with no confirmation behind it.
 constexpr int32_t kZoneWidth = 64;
-constexpr int32_t kZoneHeight = 44;
+constexpr int32_t kZoneHeight = 45;
 
 }  // namespace ConfigGesture

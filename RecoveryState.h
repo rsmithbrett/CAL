@@ -57,8 +57,8 @@ constexpr Rect kCancel = {168, 180, 136, 44};
 /// six times, landed on row 0. Row 0 is Set up Wi-Fi, the one row with no
 /// confirmation screen, so one stray contact rebooted the device, forced its
 /// portal and left an open setup AP broadcasting until the abandonment timeout.
-constexpr Rect kGestureLeft = {0, 0, 64, 44};
-constexpr Rect kGestureRight = {256, 0, 64, 44};
+constexpr Rect kGestureLeft = {0, 0, 64, 45};
+constexpr Rect kGestureRight = {256, 0, 64, 45};
 
 // The App watches for the same gesture on a running display and asks CAL for
 // the menu by setting cfgmenu. It measures its corners from the panel it is on,
