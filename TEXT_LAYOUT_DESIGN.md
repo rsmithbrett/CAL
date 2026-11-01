@@ -1075,9 +1075,16 @@ shrinks under a face that didn't:
 
 `board.status`'s 135 is the largest single figure and the ladder doesn't touch
 it, because it is 9pt already. `SPORTS_CARDS_DESIGN.md` section 11 is what
-addresses that one, by giving the column 84px instead of 56 on a row whose
+addressed that one, by giving the column 84px instead of 56 on a row whose
 scores are blank: `10:00 PM` is 77 and `12:00 AM` is 78. A live row's `6TH INN`
-is 74 against 56 and is still cut.
+was 74 against 56 and was cut.
+
+**Both of those figures have moved since, and the 84 in that other
+repository's document is two revisions behind.** Section 15a re-measured the
+start-time column to 78 plus 2, and section 15h took the width off the status
+string instead, so `6TH INN` gets 76 and there is no fixed figure in that column
+to be behind. The two sentences above stand as where the period's truncation was
+first written down, which is what 15g cites them for.
 
 ### 10e. What this leaves
 
@@ -1468,9 +1475,9 @@ said it was.** Section 15f has the two directions that come apart.
 section's table are no longer the ones a row gets: the column asks for what its
 own string measures and `scoreless` decides only the score columns and the
 ceiling. The two-argument `boardColumns(screenW, scoreless)` below is still in
-the header, still returns the figures in this table, and is what the fourteen
-assertions and the host test read, so the table stays as the state's default
-width. 15h has the measured before-and-after.
+the header, still returns the figures in this table, and is what the original
+fourteen assertions and the host test read, so the table stays as the state's
+default width. 15h has the measured before-and-after.
 
 ```cpp
 const int scoreWidth  = scoreless ? 0 : kBoardScoreWidth;    // 26
@@ -1558,15 +1565,17 @@ widths, in every build, on both boards:
 **None of the fourteen will say anything when a third board arrives.** They
 evaluate the literals 320 and 240 and nothing else, so a 272px panel compiles
 them all clean whatever it does to the row. That claim was in this section and it
-was wrong. `tests/card-columns-test.cpp` is what covers a width nobody has built:
+was wrong. The eighteen 15h adds read the same two literals and have the same
+limit. `tests/card-columns-test.cpp` is what covers a width nobody has built:
 it walks every width from 28 to 1024 in both states, so a third board's figure is
 already measured before the board exists.
 
 `boardColumns()` and the constants it reads live in `App/CardColumns.h`, where
-the fourteen assertions live with them. The header names no graphics library, no
-font and no Arduino type, which is the whole reason it is a header: `Display.cpp`
-pulls in LovyanGFX and a board pin map, so while these figures were in that file
-they could only be compiled on the toolchain for one of the two boards.
+the assertions live with them, thirty-two of them since 15h. The header names no
+graphics library, no font and no Arduino type, which is the whole reason it is
+a header: `Display.cpp` pulls in LovyanGFX and a board pin map, so while these
+figures were in that file they could only be compiled on the toolchain for one
+of the two boards.
 `kCardMargin` moved with them, because it is the figure the row is derived from
 and a second copy of it is the thing that drifts.
 
@@ -1609,13 +1618,13 @@ both scores to `kNoScore` and `writeScore()` writes `""` for that, so a state
 the server sends no score with is scoreless whatever its status holds. Only one
 of the five wants an 80px column:
 
-| state | status | measured | column it gets |
-|---|---|---|---|
-| Scheduled | a start time | up to 78 | 80, which is right |
-| Postponed | `PPD` | 37 | 80, and both names pay 12px each on the 320 panel |
-| Unknown | `""` | 0 | 80, for nothing |
-| Final with no score sent | `FINAL` | 55 | 80 |
-| Live with no score sent | `LIVE` or a period | 41 to 112 | 80 |
+| state | status | measured | column it got | column it gets, since 15h |
+|---|---|---|---|---|
+| Scheduled | a start time | up to 78 | 80, which is right | 80 |
+| Postponed | `PPD` | 37 | 80, and both names pay 12px each on the 320 panel | 56 |
+| Unknown | `""` | 0 | 80, for nothing | 0 |
+| Final with no score sent | `FINAL` | 55 | 80 | 56 |
+| Live with no score sent | `LIVE` or a period | 41 to 112 | 80 | 56, or the period plus 2 |
 
 The status widths above are measured. Which of those states actually arrives
 without scores is the server's choice and nothing here reads it; Postponed and
@@ -1637,22 +1646,32 @@ clamped between `kBoardStateWordWidth` and `kBoardStartTimeWidth`, which needs a
 `textWidth()` call on the draw path and takes the figure out of a `constexpr`
 and out of reach of both the assertions and the host test.
 
-**The second is written, in section 15h**, with one change to the shape as this
-section described it: the clamp's ceiling is not `kBoardStartTimeWidth`. A
-ceiling of 80 would still cut `HALFTIME`, which is the half of the defect
-section 15g is about, so the ceiling is derived from a name floor instead and
-the whole figure stays `constexpr`. 15h has why the flag shape was not taken and
-what the measured column does to both name columns.
+**The second is written, in section 15h**, and three things about that
+description turned out differently. The clamp's floor is `kBoardStatusWidth`,
+56, not `kBoardStateWordWidth`'s 55, because a string that fits the column the
+fleet already draws should not move it; an empty status is a third case below
+both and gets nothing. The ceiling is not `kBoardStartTimeWidth` either: a
+ceiling of 80 would still cut `HALFTIME`, which is the half of the defect 15g is
+about, so it is derived from a name floor instead. And the figure did not leave
+`constexpr`. Only the `textWidth()` call is on the draw path, and what it hands
+over is one int, so `boardStatusWidthFor()` and the layout it feeds are both
+still read by the assertions and by the host test. 15h has why the flag shape
+was not taken and what the measured column does to both name columns.
 
-Both rows of the table above are fixed by it. A postponed row's `PPD` asks for
-56 rather than taking 80, which hands the 320px panel's names back the 109 they
-had before the start-time column was widened; a row whose state the server did
-not send asks for nothing at all, because nothing is drawn there.
+**Four of the five rows above move**, and three of the four improve. A postponed
+row's `PPD` and a finished row's `FINAL` ask for 56 rather than taking 80, which
+hands the 320px panel's names back the 109 they had before the start-time column
+was widened; a row whose state the server did not send asks for nothing at all,
+because nothing is drawn there, and its names get the whole row. The fifth, a
+live row with no score sent, is the one that can go either way: `LIVE` at 41
+gives the names 109, and a period over 78px takes them below the 97 they have
+now. The other direction in the paragraph above - a start time on a row that
+reported one score - gets its 80px at both panel widths.
 
 ### 15g. The 56px column does not hold a period, and a live row draws one
 
-**Section 10d already says this**, in one sentence at the end of its table: "A
-live row's `6TH INN` is 74 against 56 and is still cut." Section 15 then went on
+**Section 10d already said this**, in one sentence at the end of its table: "A
+live row's `6TH INN` was 74 against 56 and was cut." Section 15 then went on
 to describe the 56px column as the width that holds `FINAL` or a period. The
 figures, re-measured on the same glyph table by 15a's method:
 
@@ -1677,14 +1696,16 @@ INN` reads as `6TH...` on the glass. That is the same failure 15a is about, on
 the other branch of the same ternary, and `6TH INN` is the example this document
 and `App/Display.h:470` both use for what the field holds.
 
-**It is live and it is not fixed here.** Widening the scored column takes pixels
-off two name columns that a release note was written about, and the width it
-would need depends on a string the server sends rather than on anything in this
+**It was live, and section 15h is the fix.** Widening the scored column takes
+pixels off two name columns that a release note was written about, and the width
+it needs depends on a string the server sends rather than on anything in this
 repository, so it is the measure-and-clamp shape in 15f rather than a new
-constant. `App/CardColumns.h` now says the 56 is sized against a state word and
-not against a period, which is what it does, and
-`tests/card-columns-test.cpp` holds it at or above the 55px `FINAL` measures. No
-assertion claims it holds a period, because it does not.
+constant. The pass that wrote this section added tests and changed nothing the
+panel draws: `App/CardColumns.h` said the 56 was sized against a state word and
+not against a period, `tests/card-columns-test.cpp` held it at or above the 55px
+`FINAL` measures, and no assertion claimed it held a period. 15h is where the
+column stops being 56 at all, and the table above is the set of strings it is
+measured against.
 
 **`2ND PERIOD` is in the table above and cannot reach the panel.** It is ten
 characters. `Sports::kMaxPeriodLength` is 8, and `CheckIn.cpp` copies the
@@ -1704,18 +1725,23 @@ status string is what it's picked from now.
 
 ```cpp
 const int statusWidth = boardStatusWidthFor(kScreenW, scoreless, lcd.textWidth(row.status));
-const BoardColumns columns = boardColumns(kScreenW, scoreless, statusWidth);
+const BoardColumns columns = boardColumnsFor(kScreenW, scoreless, statusWidth);
 ```
 
 `boardStatusWidthFor()` is three rules and no table:
 
 - An empty status asks for nothing. Nothing is drawn there, and the two names
   split the lot.
-- A status that already fits the 56px column keeps the 56px column. `FINAL`,
-  `PPD`, `LIVE` and every short period cost the names not one pixel, so a scored
-  row looks exactly as `v2026.10.31.0002` drew it unless its status didn't fit.
+- Otherwise, a status that fits the 56px column keeps the 56px column. `FINAL`,
+  `PPD`, `LIVE` and every short period cost the names not one pixel, so a row
+  with scores and a state word in it draws exactly as `v2026.10.31.0002` drew
+  it, in all eight of its figures.
 - Anything wider asks for its own measured width plus the 2px of slack, up to a
   ceiling.
+
+The three read in that order and the first one owns zero, so the second is true
+of every width from 1 to 56 and not of 0: an empty status also "fits" 56 and
+still gets nothing.
 
 `scoreless` is still an argument, and it still means both score strings are
 empty. It no longer picks the status width. It picks the two score columns, and
@@ -1765,18 +1791,41 @@ field to a struct `Sports.cpp` and `Display.cpp` share, and the measured shape
 adds nothing to either.
 
 Nothing on the wire changes. `textWidth()` reads a string the row already
-carries.
+carries, and `Sports::Game` and `SportsBoardRow` are both byte-for-byte what
+they were, which is the cost the flag shape would have paid and this one does
+not. What does change across the fleet during a rollout is that the same payload
+lays out differently on either side of it: a longer period widens the column on
+a device that has this and ellipsizes on one that has not.
+
+#### What the measurement depends on
+
+`LGFXBase::text_width()` multiplies its answer by the panel's current text scale,
+so a row measured under a scale of 2 would ask for twice the pixels. The ceiling
+caps what it can get, so the row still draws inside the glass, but the names
+would pay for nothing. This is the first thing in this file where that scale
+changes a layout rather than only a glyph size, and section 14 is what stands
+behind it: 14b is the contract that every draw function puts 1 back, and 14d is
+clear that `ci/check-text-state.sh` reads indentation and early returns rather
+than control flow, so it is a check and not a proof. What the gate does not read
+at all is the face, so `showSportsBoard()` selects `FontId::Sans9` before
+measuring rather than relying on what the previous row left behind.
 
 #### What a row draws, before and after
 
 Measured off the vendored `FreeSansBold9pt7b` glyph table by 15a's method,
 which reproduces all five of this document's 12pt figures and all eight of
-15g's 9pt ones to the pixel. "Before" is `v2026.10.31.0002` and
-`v2026.11.01.0001`, which draw these rows identically.
+15g's 9pt ones to the pixel.
+
+**"Before" is `v2026.11.01.0001`**, which is what the fleet draws. For the
+thirteen rows **with scores** it is also `v2026.10.31.0002`, which drew those
+identically; for the thirteen scoreless rows it is not, because 15b's own table
+records `v2026.10.31.0002` charging a flat 56 there and drawing 109px names at
+320 and 69 at 240. Those two figures come back in the "after" column, which is
+what the last paragraph of this section is about.
 
 | panel | state | status | measured | name before | status before | name after | status after |
 |---|---|---|---|---|---|---|---|
-| 320 | with scores | nothing sent | 0 | 83 | 56 | **111** | 0 |
+| 320 | with scores | nothing sent | 0 | 83 | 56 | 111 | 0 |
 | 320 | with scores | `PPD` | 37 | 83 | 56 | 83 | 56 |
 | 320 | with scores | `FINAL` | 55 | 83 | 56 | 83 | 56 |
 | 320 | with scores | `7:30 PM` | 67 | 83 | 56 cut | **76** | 69 |
@@ -1803,57 +1852,154 @@ which reproduces all five of this document's 12pt figures and all eight of
 | 240 | scoreless | `3RD QTR` | 80 | 57 | 80 | **56** | 82 |
 | 240 | scoreless | `HALFTIME` | 94 | 57 | 80 cut | **49** | 96 |
 
-Every figure in bold is a name column narrower than the row drew before, and
-every one of them bought a status column that holds its string.
+Every figure in bold is a name column narrower than the row drew before. Every
+one of them bought a status column that holds its string, except the last row
+with scores on the 240px panel, where the 12 pixels bought a column that still
+cuts `HALFTIME`. The rows in that panel's `12:00 AM`, `3RD QTR` and `HALFTIME`
+lines all read 31 because 31 is the floor and 80 is the ceiling it sets.
 
 #### What a reader loses, said rather than left to be found
 
 **A name column goes below what `v2026.10.31.0002` draws on any row whose
-status didn't fit its column.** On the 320px panel a live row's names go from 83
-to between 63 and 76, depending on the period. On the 240px panel they go from
-43 to between 31 and 36. The release note for `v2026.10.31.0002` was written
-about those name columns, and its own example is a row with scores reading
-`Blackha...`; that row's status is `FINAL`, so it draws at 83 exactly as it did,
-and only a game in progress pays.
+status didn't fit its column.** The rule, rather than a range: the names split
+whatever the row has left, so a name column is
+`(rowBudget - statusWidth) / 2`, and `statusWidth` is the string's own width
+plus 2 once it passes 56. The bounds that follow:
+
+| panel | state | names while the status fits 56 | narrowest the ceiling allows | over the strings this document measures |
+|---|---|---|---|---|
+| 320 | with scores | 83, unchanged | 31 | 81 at a 57px status, 73 for `6TH INN`, 63 for `HALFTIME`, 61 for `OVERTIME` |
+| 320 | scoreless | 109, up from 97 | 31 | 107, 99, 89, 87 for the same four |
+| 240 | with scores | 43, unchanged | 31 | 41, 33, 31, 31 |
+| 240 | scoreless | 69, up from 57 | 31 | 67, 59, 49, 47 |
+
+The narrowest a name column gets is 31, wherever the ceiling is the one the
+names set. On the 320px panel with scores that needs a status measuring 157px,
+which is more than the 144 the widest eight characters in the glyph table make,
+so nothing the server can send reaches it there. On the 240px panel with scores
+anything from 77px up lands on it, which is most of the periods in 15g.
+
+Below 216px with scores and 164px scoreless the ceiling is the
+`kBoardStatusWidth` clamp instead, and 31 stops being the floor: a 200px panel
+with scores draws 24px names, which is `kBoardMinNameWidth` and not this
+section's figure. No board is that narrow. The host test guards the equality
+with `ceiling > kBoardStatusWidth` for exactly that reason.
+
+The release note for `v2026.10.31.0002` was written about those name columns,
+and its own example is a row with scores reading `Blackha...`; that row's status
+is `FINAL`, so it draws at 83 exactly as it did, and only a game in progress
+pays.
 
 **`HALFTIME` is still cut on the 240px panel.** 94px needs a 96px column, the
-ceiling there is 80, and reaching 96 would put the names at 23, under
-`kBoardMinNameWidth`, where the clamp engages and the home block walks into the
-status column. That row has 212px for two names, two scores and a status, and it
-hasn't got the pixels. The 320px panel holds every period the eight-character
+ceiling there is 80, and reaching 96 would put the names at 24, which is
+`kBoardMinNameWidth`, where the clamp engages and the separation falls to 10
+against 15c's 12. Not an overlap: the home block and the status column touch at
+a panel width of 230 and cross below it, so a 240px panel asking for 96 draws a
+row that is wrong by 2px of air rather than one drawn through itself. That row
+has 212px for two names, two scores and a status, and it hasn't got the pixels. The 320px panel holds every period the eight-character
 buffer can carry.
 
-**Four of the five scoreless states get names back.** 15f called the 80px
-column on a `PPD` or an empty status pixels spent for nothing. They are not
-spent any more, so the 320px panel's scoreless names run 109 or 137 rather than
-97, which is above the 109 `v2026.10.31.0002` shipped and the 86 before it.
+**Three of the five scoreless states get names back, and the fourth can go
+either way.** 15f called the 80px column on a `PPD` or an empty status pixels
+spent for nothing. They are not spent any more, so a `PPD` or a `FINAL` with no
+score sent draws 109px names on the 320px panel against the 97 it draws now,
+and an empty status draws 137. That 109 is exactly what `v2026.10.31.0002`
+shipped. The fifth state, a live game with no score
+sent, is the one that pays: `LIVE` at 41px gets the 109 too, and a period over
+78px goes below 97, down to 89 for `HALFTIME`.
+
+**Four rows of one board no longer share a column grid.** `boardColumnsFor()` is
+called inside the row loop, and every edge but the status column's right one is
+derived from the name width, so a row's own status string moves where the home
+name starts and where both score columns end. On a 320px panel with scores:
+
+| a row whose status is | status column | name | home name starts at | home score ends at |
+|---|---|---|---|---|
+| nothing | 0 | 111 | 157 | 294 |
+| `FINAL` | 56 | 83 | 129 | 238 |
+| `6TH INN` | 76 | 73 | 119 | 218 |
+| `HALFTIME` | 96 | 63 | 109 | 198 |
+
+48px between the first and last home-name edge, 96px between the home-score
+edges, on four rows of one card. **This was already true across `scoreless` and
+it was invisible**, because the rows it separated were the rows with no score
+digits to misalign: a fixture's 97px names and a finished game's 83 put their
+score columns in different places, and the fixture drew nothing in either. A
+live row has digits. A board of three finished games and one in progress now
+draws two ragged columns of numbers, and a mixed board is the ordinary case for
+`sportsscores` rather than an edge.
+
+The status column's own right edge is the same on every row, which is the edge
+the status is aligned to, so the one column a reader scans down the right of the
+card still lines up. Nothing else does, and nothing has looked at it. A property
+cannot catch it either: `boardColumnsFor()` takes one row's state, and the host
+test holds the four grids above as figures rather than asserting they agree.
+
+#### One more figure the row did not derive
+
+`showSportsBoard()` drew both score columns at the `kBoardScoreWidth` constant
+rather than at `columns.scoreWidth`, which is the same 26 on a row with scores
+and 0 on a row without. On every row the fleet draws that is the same figure, so
+nothing moves; what it was, was the one width in the loop that did not come from
+the row, which is how a block laid out for no score column could still have 26px
+of digits drawn into it, through a team name. It reads `columns.scoreWidth` now.
+An empty score string draws nothing at either width, so a scoreless row is
+unchanged.
 
 #### What a build and a host run check
 
-`boardColumns(screenW, scoreless, statusWidth)` is the three-argument form and
-is still `constexpr`, so is `boardStatusWidthFor()`. Only the `textWidth()` call
-is on the draw path, and what it hands over is one int. The two-argument
-`boardColumns(screenW, scoreless)` is unchanged, returns the state's default
-width, and is what all fourteen existing assertions and every existing case in
-`tests/card-columns-test.cpp` read, so nothing in 15b through 15e moved.
+`boardColumnsFor(screenW, scoreless, statusWidth)` and `boardStatusWidthFor()`
+are both `constexpr`. Only the `textWidth()` call is on the draw path, and what
+it hands over is one int. `boardColumns(screenW, scoreless)` still returns the
+state's default width and is what all fourteen existing assertions and every
+existing case in `tests/card-columns-test.cpp` read, so none of the figures in
+15b through 15e moved; 15c's parity paragraph and 15d's assertion count are the
+prose that did.
 
-New assertions, at both shipped widths:
+`boardColumnsFor` is a separate name rather than a two-argument overload's
+sibling. An int converts to bool with no diagnostic, so
+`boardColumns(240, measuredWidth)` written by somebody reaching for the measured
+form would compile, discard the measurement and return the scoreless layout, and
+every assertion here and every case in the host test would pass, because none of
+them reads the draw path.
 
-- A status at the 74px `6TH INN` measures gets a column that holds it, with
-  scores and without, at 320 and at 240.
-- A status at the 78px widest start time gets a column that holds it on a row
-  **with** scores, which is 15f's door stated as a property.
-- `FINAL` and `PPD` leave the name column at the 83 and 43 the fleet draws.
-- The ceiling never falls below `kBoardStatusWidth`, so no panel width can make
-  a column narrower than the one that shipped.
+Eighteen new assertions, at both shipped widths:
 
-And in the host run, which walks 28 to 1024 in both states:
+- **Four:** a status at the 74px `6TH INN` measures gets exactly 76, with scores
+  and without. Equalities rather than `>=`, because `>=` at the two scoreless
+  widths is satisfied by the 80px the shipped layout already handed those rows,
+  so two of the four would have read as properties and bitten on nothing.
+- **Two:** a status at the 78px widest start time gets a column that holds it on
+  a row **with** scores, which is 15f's door stated as a property.
+- **Two:** `FINAL` leaves the name column at the 83 and 43 the fleet draws.
+  `PPD`'s 37 is in the host test's table rather than here, so there is one figure
+  for the property and not two.
+- **Four:** the ceilings, as the 212, 160, 132 and 80 in the table above.
+  `>= kBoardStatusWidth` was what this bullet used to say and it is true for
+  every input by `boardMaxStatusWidth()`'s own ternary, so it reported nothing
+  about a panel width.
+- **Four:** at the ceiling both name columns stand exactly on `kBoardNameFloor`.
+  The tightest of the set, since a pixel either way fails.
+- **Two:** the 76 and the 80 again, written as literals. The four equalities
+  above carry `kBoardStatusSlack` on both sides and move with it, so a slack of
+  0 cleared all of them and only the host run read it.
+
+All eighteen read the literals 320 and 240 and have the same limit 15d names for
+the first fourteen: a third board compiles them clean.
+
+And in the host run, which walks 28 to 1024 in both states twice:
 
 - The three rules, as the boundaries between them: 55 asks for 56, 56 asks for
-  56, 57 asks for 59, and 0 asks for 0.
-- The generalized separation identity in 15c, at every width and at six status
-  widths including two odd ones, which is what found that the thirteenth pixel
-  follows the status width's parity rather than the panel's.
+  56, 57 asks for 59, and 0 asks for 0. The third rule reads as an ordered
+  ladder: an empty status is the first case, so "a status that fits 56 keeps 56"
+  is true for every width from 1 to 56 and not at 0.
+- All twenty-six rows of the table above as equalities: twenty-two in one table
+  of measured widths and the four "nothing sent" rows on their own. And the four
+  grids in the per-row table, as the figures they land on.
+- The generalized separation identity in 15c, at every width and at eight status
+  widths, one of them always odd and one, the ceiling, odd at every odd width the
+  names set it at. That is what found that the thirteenth pixel follows the row's
+  leftover rather than the panel's.
 - The name floor holds at every width above the ceiling's own clamp, and the
   column never exceeds its ceiling.
 - `HALFTIME` on a 240px panel with scores is cut, as an assertion. The gap above

@@ -3587,9 +3587,9 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     const int text = top + 9;
 
     // A row with no score on either side releases two score columns, and the
-    // status column spends what they release. boardColumns() takes that and the
-    // panel width and returns the five edges; its own remarks have the split
-    // and the properties a build checks.
+    // status column spends what they release. boardColumnsFor() takes that, the
+    // panel width and the status width and returns the five edges; its own
+    // remarks have the split and the properties a build checks.
     const bool scoreless = row.awayScore[0] == '\0' && row.homeScore[0] == '\0';
 
     // The status column's width comes from the string it holds, measured in the
@@ -3599,8 +3599,8 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     // textWidth() reads whichever face is current.
     lcd.setFont(FontId::Sans9);
     const BoardColumns columns =
-        boardColumns(kScreenW, scoreless,
-                     boardStatusWidthFor(kScreenW, scoreless, lcd.textWidth(row.status)));
+        boardColumnsFor(kScreenW, scoreless,
+                        boardStatusWidthFor(kScreenW, scoreless, lcd.textWidth(row.status)));
 
     // Away first, home second, which is how a scoreline is read aloud and what
     // the single-game card does.
@@ -3609,10 +3609,15 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     layoutLine(row.homeName, columns.homeNameLeft, text, columns.nameWidth, sport.name,
                "board.home", Align::Left, kTransparentText);
 
+    // columns.scoreWidth rather than kBoardScoreWidth: the same 26 on a row that
+    // has scores, and 0 on a row that has none. The constant was the one figure
+    // in this loop the row did not derive, so a block laid out for no score
+    // column could still have 26px of digits drawn into it, through a team
+    // name. An empty score string draws nothing at either width.
     lcd.setFont(FontId::Sans12);
-    layoutLine(row.awayScore, columns.awayScoreRight, text - 2, kBoardScoreWidth, sport.score,
+    layoutLine(row.awayScore, columns.awayScoreRight, text - 2, columns.scoreWidth, sport.score,
                "board.away.score", Align::Right, kTransparentText);
-    layoutLine(row.homeScore, columns.homeScoreRight, text - 2, kBoardScoreWidth, sport.score,
+    layoutLine(row.homeScore, columns.homeScoreRight, text - 2, columns.scoreWidth, sport.score,
                "board.home.score", Align::Right, kTransparentText);
 
     // The state, in the live colour only when the server says the game is on.
