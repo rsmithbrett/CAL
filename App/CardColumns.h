@@ -155,8 +155,12 @@ constexpr int boardMaxStatusWidth(int screenW, bool scoreless) {
 /// 15g: a start time on a row that reported one score, and a live game's period
 /// on a row that reported both. Section 15h has the before-and-after widths and
 /// what the name columns pay for them.
-constexpr int boardStatusWidthFor(int, bool scoreless, int) {
-  return boardDefaultStatusWidth(scoreless);
+constexpr int boardStatusWidthFor(int screenW, bool scoreless, int measuredTextWidth) {
+  if (measuredTextWidth <= 0) { return 0; }
+  if (measuredTextWidth <= kBoardStatusWidth) { return kBoardStatusWidth; }
+  const int want = measuredTextWidth + kBoardStatusSlack;
+  const int ceiling = boardMaxStatusWidth(screenW, scoreless);
+  return want < ceiling ? want : ceiling;
 }
 
 /// constexpr so the properties below are checked by every build on both panels.
@@ -262,5 +266,47 @@ static_assert(boardSeparation(240, false) >= 2 * kBoardColumnGap, "240 scored st
 // literals this replaced put 248 on a 240px panel.
 static_assert(boardColumns(320, true).statusRight <= 320 - kCardMargin, "320 is on the glass");
 static_assert(boardColumns(240, true).statusRight <= 240 - kCardMargin, "240 is on the glass");
+
+// The measured column, as the two properties TEXT_LAYOUT_DESIGN.md sections 15g
+// and 15f are each about. Both read boardStatusWidthFor() at a figure measured
+// off the glyph table, which is the whole claim: the column holds the string it
+// was given.
+static_assert(boardStatusWidthFor(320, false, kBoardPeriodTextWidth) >= kBoardPeriodTextWidth,
+              "a live row with scores draws a period, and 6TH INN is 74px");
+static_assert(boardStatusWidthFor(240, false, kBoardPeriodTextWidth) >= kBoardPeriodTextWidth,
+              "a live row with scores draws a period, and 6TH INN is 74px");
+static_assert(boardStatusWidthFor(320, true, kBoardPeriodTextWidth) >= kBoardPeriodTextWidth,
+              "a live row with no score sent draws a period too");
+static_assert(boardStatusWidthFor(240, true, kBoardPeriodTextWidth) >= kBoardPeriodTextWidth,
+              "a live row with no score sent draws a period too");
+static_assert(boardStatusWidthFor(320, false, kBoardStartTimeTextWidth) >= kBoardStartTimeTextWidth,
+              "a scheduled row that reported one score still holds a start time");
+static_assert(boardStatusWidthFor(240, false, kBoardStartTimeTextWidth) >= kBoardStartTimeTextWidth,
+              "a scheduled row that reported one score still holds a start time");
+
+// And the other half of the trade: a state word that already fits leaves the
+// name columns exactly where v2026.10.31.0002 put them.
+static_assert(boardColumns(320, false, boardStatusWidthFor(320, false, kBoardStateWordWidth))
+                      .nameWidth == 83,
+              "FINAL costs the 320px panel's names no pixels");
+static_assert(boardColumns(240, false, boardStatusWidthFor(240, false, kBoardStateWordWidth))
+                      .nameWidth == 43,
+              "FINAL costs the 240px panel's names no pixels");
+
+// The ceiling never asks for a column narrower than the one the fleet draws,
+// and at the ceiling both name columns are still on their floor rather than
+// through it.
+static_assert(boardMaxStatusWidth(320, false) >= kBoardStatusWidth, "320 keeps its 56");
+static_assert(boardMaxStatusWidth(240, false) >= kBoardStatusWidth, "240 keeps its 56");
+static_assert(boardColumns(320, false, boardMaxStatusWidth(320, false)).nameWidth >=
+                  kBoardNameFloor,
+              "320 with scores holds the name floor at its ceiling");
+static_assert(boardColumns(240, false, boardMaxStatusWidth(240, false)).nameWidth >=
+                  kBoardNameFloor,
+              "240 with scores holds the name floor at its ceiling");
+static_assert(boardColumns(320, true, boardMaxStatusWidth(320, true)).nameWidth >= kBoardNameFloor,
+              "320 scoreless holds the name floor at its ceiling");
+static_assert(boardColumns(240, true, boardMaxStatusWidth(240, true)).nameWidth >= kBoardNameFloor,
+              "240 scoreless holds the name floor at its ceiling");
 
 }  // namespace CardColumns

@@ -23,7 +23,34 @@ dated heading after.
 
 ## Unreleased
 
-Nothing yet.
+### A game in progress shows what part of the game it's in - App
+
+On a scoreboard row for a game being played, the right-hand column says what part of
+the game it is: "6TH INN", "4TH QTR", "HALFTIME". That column had 56 pixels and those
+need 74, 79 and 94, so every one of them was cut. "6TH INN" read as "6TH...". On every
+display, for every game in progress.
+
+The column now asks for the width of whatever it's holding instead of being handed a
+fixed one. A short word like "FINAL" or "PPD" keeps the 56 pixels it had and costs the
+team names nothing, so a board of finished games draws exactly as it did. A longer one
+takes what it needs from the two team names beside it.
+
+What that costs: on a display lying flat, the names on a row for a game in progress
+drop from 83 pixels to between 63 and 76, depending on how long the period text is. On
+a display standing on its end they drop from 43 to between 31 and 36. Those names were
+already ending in three dots on a long club name and will do it sooner now. A period
+you can read beats a name with two more letters showing.
+
+Two other rows change for the better. A postponed game says "PPD", which is short, so
+it no longer takes the wide column a start time needs and hands those pixels to the
+names: 109 pixels each on a display lying flat, against 97. A game the website couldn't
+describe at all draws nothing in that column and gives the names the whole row. And a
+game that hasn't started but already has one side's score reported now gets its start
+time whole, where before it got the narrow column and read "10:00...".
+
+One row is still cut. "HALFTIME" needs 96 pixels and a display standing on its end can
+only spare 80 for that column without squeezing the team names past the point of saying
+anything, so that row reads "HALFTIM..." upright. A display lying flat shows it whole.
 
 ## v2026.11.01.0001
 

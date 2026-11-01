@@ -2856,11 +2856,18 @@ function running.
   portrait, and confirm no row's status is `10:00...`. Then a board of finished
   games, and confirm the names are no shorter than the shipped release draws
   them. Photograph all four.
-- **The portrait panel's scoreless names are 57px**, down from the 69 that
-  shipped. That is the start-time column's 24 extra pixels, split two ways, and
-  it has not been looked at. 57px at `FreeSansBold9pt7b` is roughly six
-  characters, so a long club name on a portrait board will ellipsize where it
-  did not before. The trade is deliberate and section 15c says why.
+- **The portrait panel's scoreless names are 57px** on a row holding a start
+  time, down from the 69 that shipped. That is the start-time column's 24 extra
+  pixels, split two ways, and it has not been looked at. 57px at
+  `FreeSansBold9pt7b` is roughly six characters, so a long club name on a
+  portrait board will ellipsize where it did not before. The trade is deliberate
+  and section 15c says why. 18e takes a live row there to between 31 and 36 and
+  hands a postponed one back to 69, and section 15h has every figure.
+- **The bench check 18e adds.** A board with a game in progress, on both boards.
+  Read the period off the glass whole in landscape, and confirm the two team
+  names beside it are still readable at 63 to 76 pixels. In portrait a
+  `HALFTIME` row is still cut and the names are at 31, which is the one row this
+  change does not fix and the one most worth photographing.
 - **The column arithmetic now has a host test and the rest of `App/Display.cpp`
   still does not.** The move this section called the right next step is done:
   `boardColumns()`, the constants it reads and `kCardMargin` are in
@@ -2926,7 +2933,7 @@ it had in an unnamed namespace. The ESP32 figure is 95.42% of the binding
 | The start-time column trimmed to 79, keeping the 78px assertion satisfied | `mut/cc1-starttime-79` | 41318623049 | fails at `:82`, the column no longer carries its slack |
 | The home block starts where the away block ends | `mut/cc2-no-block-gap` | 41318630908 | fails at `:126`, two names with no gap between them |
 | The row runs to `kCardMargin` with no inset | `mut/cc3-no-row-inset` | 41318653767 | fails at `:101`, the 320px scoreless name column is 99 and not 97 |
-| The name floor raised to 30 | `mut/cc4-floor-thirty` | 41318668854 | fails at `:171`, the first width clear of the floor is 188 and not 176 |
+| `kBoardMinNameWidth` raised to 30 | `mut/cc4-floor-thirty` | 41318668854 | fails at `:171`, the first width clear of the floor is 188 and not 176 |
 
 **All four pass the fourteen `static_assert`s.** That is the point of them: each
 one is a change the board builds would have accepted. The three mutations in 18a
@@ -2937,18 +2944,90 @@ are the other half, and those stop the build instead.
 - The separation is `2 * kBoardColumnGap` on an even panel width and one pixel
   more on an odd one. Both shipped panels are even, so four assertions at those
   two widths read as a floor and the thirteenth pixel never showed.
-  TEXT_LAYOUT_DESIGN.md 15c had the identity stated without it.
+  TEXT_LAYOUT_DESIGN.md 15c had the identity stated without it. **The parity is
+  the row's leftover and not the panel's**, which 18e found when the status
+  width stopped always being even; the phrasing here held only while it was.
 - The first width whose name column clears the floor is 176 scoreless and 204
   with scores, not the 174 and 202 the document named. Those two are where the
   separation stops holding; the columns actually overlap below 162 and 190. Six
   figures where the document had two.
 - The 78px measurement, and that the 56px column does not hold the periods a
-  provider sends. TEXT_LAYOUT_DESIGN.md 15g has those figures. That one is live
-  and is not fixed here, because widening the scored column takes pixels off two
-  name columns and the width it needs depends on a string the server sends.
+  provider sends. TEXT_LAYOUT_DESIGN.md 15g has those figures. That one was live
+  and is fixed in 18e, by taking the column's width from the string rather than
+  from the row's scores.
 
 **What it does not cover.** It reads `boardColumns()` and nothing that calls it.
 `showSportsBoard()` is still behind the driver block, so what the row actually
 draws into those columns, and the `scoreless` expression that chooses between
 them, are both unasserted. TEXT_LAYOUT_DESIGN.md 15f is why that expression is
 the wrong input to begin with.
+
+### 18e. The status column measures its own string (2026-11-01)
+
+`boardStatusWidthFor(screenW, scoreless, measuredTextWidth)` in
+`App/CardColumns.h`, and one `textWidth()` call in `showSportsBoard()`. The
+column's width used to come from the row's two score strings and the string
+drawn into it had no say, which cut a live game's period on every display
+showing one. TEXT_LAYOUT_DESIGN.md section 15h is the design, 15g the defect and
+15f the second door the same change closes.
+
+**The key assertion failed first, against the shipped behavior.** Branch
+`test/scoreboard-status-column-red`, commit `e5ad473`, run 41321578006: the new
+signatures are in the header and `boardStatusWidthFor()` returns the state's own
+default width, which is what `v2026.11.01.0001` draws. The host step failed with
+exit 134, a raised `assert()` rather than a compile error, at
+`tests/card-columns-test.cpp:132` with `width` 320 and `scoreless` false - a
+live row with scores on the landscape panel, which is 15g's row. Every other
+host step in that run passed.
+
+Sixteen `static_assert`s join the fourteen already there, and the thirty run in
+every `arduino-cli` build of both boards:
+
+| mutation | build |
+|---|---|
+| `boardStatusWidthFor()` returns `boardDefaultStatusWidth(scoreless)` - the shipped behavior | fails: `a live row with scores draws a period, and 6TH INN is 74px`, at 320 and at 240 |
+| The clamp reads `measuredTextWidth <= kBoardStartTimeWidth` so a period keeps the 56 | fails the same two, and `a scheduled row that reported one score still holds a start time` |
+| `kBoardNameFloor` raised to 56, so the 240px ceiling falls to 30 | fails: `240 with scores holds the name floor at its ceiling` |
+| The slack added after the ceiling rather than before it | fails: `240 with scores holds the name floor at its ceiling`, the column going one pixel past its own budget |
+
+The four were run on this workstation with `arduino-cli`, each stopping the
+build with no `Sketch uses` line. **Restore with `git checkout --` and `touch`
+the file**: a restored file keeps its old mtime, Arduino skips the rebuild, and
+the next run links the mutated object.
+
+And the host cases, which are what a width nobody has built reads:
+
+| mutation | branch | run | result |
+|---|---|---|---|
+| `boardStatusWidthFor()` returns the state's default - the shipped behavior | `test/scoreboard-status-column-red` | 41321578006 | fails at `:132`, a 320px row with scores gets 56 for a 74px period |
+| The ceiling drops its `kBoardStatusWidth` clamp, so a narrow panel's ceiling goes negative | `mut/sc1-ceiling-unclamped` | see below | fails at `:303`, the ceiling under the column the fleet draws |
+| The slack dropped, so the column is trimmed to the measurement | `mut/sc2-no-slack` | see below | fails at `:168`, 57 asking for 57 rather than 59 |
+| `boardLeftoverPixel()` reads the panel width's parity, which is what 15c said | `mut/sc3-panel-parity` | see below | fails at `:345`, the separation identity at the first odd width with an odd status |
+
+**What the host run found, which nothing else had.** The thirteenth pixel in
+15c follows the row's leftover, not the panel width. Every status width in the
+header was even - 80 and 56 - and both shipped panels are even, so the two
+parities agreed at every point anybody had looked. A measured column gives
+`6TH INN` 76 and `4TH QTR` 81, and the sweep over eight status widths is what
+reads them apart. `boardLeftoverPixel()` is the corrected identity and 15c now
+states it.
+
+**What this does not prove.**
+
+- Nothing calls `LGFXBase::text_width()`. Every figure in 15h is read off the
+  vendored `FreeSansBold9pt7b` glyph table by a reimplementation of that
+  function at `size_x == 1`, which reproduces all five 12pt figures and all
+  eight 9pt figures already written into TEXT_LAYOUT_DESIGN.md to the pixel.
+  That makes it a sixth agreeing model and still a model. What runs on the
+  device is `textWidth()` itself, and the assertions read the model.
+- `showSportsBoard()` is still behind the driver block, so the `textWidth()`
+  call, the font selected before it and the row actually drawn are unasserted.
+  What the host run checks is the arithmetic the call feeds.
+- **`HALFTIME` at 94px is still cut on a 240px panel with scores.** Asserted as
+  the gap it is, at `tests/card-columns-test.cpp` in the block after 15h's
+  table, so a change that closes it has to come through that line. 15h has why
+  that row has not got the pixels.
+- **Name columns are narrower than `v2026.10.31.0002` draws on any row whose
+  status did not fit.** 83 to between 63 and 76 on the landscape panel, 43 to
+  between 31 and 36 on the portrait one. Held above `kBoardNameFloor` by the
+  ceiling and by four of the new assertions, and unphotographed.
