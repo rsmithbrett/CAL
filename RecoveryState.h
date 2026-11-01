@@ -214,7 +214,7 @@ class Controller {
       out.restore = true;
       return out;  // The touch at expiry cannot also press a restored screen.
     }
-    if (step_ && static_cast<uint32_t>(now - started_) >= kGestureWindowMs) {
+    if (step_ && static_cast<int64_t>(now) - static_cast<int64_t>(started_) >= kGestureWindowMs) {
       step_ = 0;
     }
     if (!gestureAllowed && !visible()) step_ = 0;
