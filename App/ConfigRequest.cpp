@@ -25,7 +25,7 @@ void noteTap(uint32_t now, int32_t x, int32_t y) {
   gHaveTap = true;
   gLastTap = now;
 
-  if (gStep && static_cast<uint32_t>(now - gStarted) >= ConfigGesture::kWindowMs) {
+  if (gStep && now >= gStarted + ConfigGesture::kWindowMs) {
     gStep = 0;
   }
 
