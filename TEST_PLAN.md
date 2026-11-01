@@ -2348,6 +2348,9 @@ changes both shared figures, and fails on the tap count again, so the case
 measures the binding rather than the constant. `mut/m23-zone-63` narrows both
 corner rectangles and `kZoneWidth` together, which satisfies every
 `static_assert` in 16c, and fails on the first corner-edge case.
+`mut/m24-signed-timers` writes both timer comparisons as signed 64-bit
+differences, which is correct on either side of a wrap and wrong across one, and
+fails on the rewritten idle case. The pair of cases it replaces passes it.
 
 The three `Controller::open` assertions were written after the code they cover,
 not before it. The last of them is the one that bites: drop the `step_` reset
