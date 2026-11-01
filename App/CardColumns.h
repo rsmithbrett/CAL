@@ -95,7 +95,7 @@ constexpr int kBoardRowInset = 4;
 /// constexpr so the properties below are checked by every build on both panels.
 constexpr BoardColumns boardColumns(int screenW, bool scoreless) {
   const int rowLeft = kCardMargin + kBoardRowInset;
-  const int rowRight = screenW - kCardMargin - kBoardRowInset;
+  const int rowRight = screenW - kCardMargin;
 
   const int scoreWidth = scoreless ? 0 : kBoardScoreWidth;
   const int statusWidth = scoreless ? kBoardStartTimeWidth : kBoardStatusWidth;
