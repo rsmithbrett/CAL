@@ -2309,16 +2309,35 @@ stubs for touch, drawing, NVS, the partition table and `esp_restart()`. Its
 `main()` runs the state machine checks, the presence and GPIO sampling models,
 and then `integrationTests()`, which drives the production module. It asserts
 the six-tap sequence and the wrong-order, outside-tap, five-tap, timeout and
-disabled-entry cases; held fingers, drags and sub-100 ms bounce; both
-confirmations, Cancel, Back, menu expiry and `millis()` rollover on both timers;
-the live screens outlasting the 60-second menu timeout; GPIO paging, mode
-switching and counters surviving a page change; each action's persisted intent,
-secret removal or preservation, recorded restart cause, and the failure paths
-that must stop without restarting; the menu opening with no gesture at the
-App's request, its idle clock running from that open, and a half-finished
-sequence not carrying across it; and `Updater::Manifest::needsInstall()`
-including a same-version forced reload. It prints `PASS:` and the controller's
-host-ABI size.
+disabled-entry cases; the last pixel inside each corner zone and the first
+pixel outside it on all three edges that matter; the tap count and the bounce
+window read from `ConfigGesture.h` rather than from CAL's own copy of the
+figures; held fingers, drags and sub-bounce contact; both confirmations, Cancel,
+Back, menu expiry, and both timers across a `millis()` rollover their
+subtraction actually spans; the live screens outlasting the 60-second menu
+timeout; GPIO paging, mode switching and counters surviving a page change; each
+action's persisted intent, secret removal or preservation, recorded restart
+cause, and the failure paths that must stop without restarting; the menu opening
+with no gesture at the App's request, its idle clock running from that open, and
+a half-finished sequence not carrying across it; and
+`Updater::Manifest::needsInstall()` including a same-version forced reload. It
+prints `PASS:` and the controller's host-ABI size.
+
+**Two of its cases used to be unfailable, and the wording above is what they
+were replaced with.** The rollover pair started the clock at `UINT32_MAX - 500`
+and then spent six taps at 200 ms each carrying it 1,200 ms past the boundary,
+so `lastActivity_` landed at 699 and the subtraction was an ordinary one. The
+second of the pair had a near-miss on top of that: the expiring tap landed in
+the corner the sequence was not expecting, which resets the counter by itself,
+so the assertion held whether or not the window had expired. Both are rewritten.
+`Controller::open()` takes its time as an argument, which is what puts
+`lastActivity_` on the far side of a wrap from `now`, and the gesture case now
+puts the expiring tap in the corner the sequence is expecting. The boundary loop
+over `kMenuRows` is retired: it asserted `row.contains(row.x, row.y)` and
+`!row.contains(row.x + row.w, row.y)`, which hold for any rectangle with
+positive width and height under any half-open `contains()`, so it could not
+fail. 16c's `static_assert`s and the corner-edge literals above are what cover
+that geometry now.
 
 The three `Controller::open` assertions were written after the code they cover,
 not before it. The last of them is the one that bites: drop the `step_` reset
@@ -2336,10 +2355,11 @@ the reset and was a test of nothing. Continuing the alternation is what gives
 it teeth. A green mutation run is the only reason this was found before it
 shipped.
 
-### 16c. The release is gated on this test
+### 16b. The release is gated on this test
 
-`build-and-release.yml` runs `ci/test-recovery-menu.sh` as its first step, so a
-failing host test stops the release rather than being reported after it. Before
+`build-and-release.yml` runs `ci/test-recovery-menu.sh` and
+`ci/test-loader-order.sh` as its first two steps, so a failing host test stops
+the release rather than being reported after it. Before
 that, `bench-cal.yml` was the only runner and it fires on pull requests alone.
 Work that reached main by merge never re-ran it, and on 2026-10-30 the test
 stopped linking for a week without anybody finding out: `showRecoveryMenu` grew
@@ -2357,9 +2377,12 @@ that should have guarded it was asserting the trap.
 `ci/test-recovery-menu.sh` builds and runs it twice, once plain and once with
 `-DCONFIG_IDF_TARGET_ESP32S3=1`, under `g++ -std=c++17 -Wall -Wextra -Werror`,
 so the Panellan's allowlist and its absent PIR mapping are covered by the same
-assertions. `.github/workflows/bench-cal.yml` runs it as **Test recovery gesture
-and actions on host**, ahead of the compiles, on any PR touching `Recovery*`,
-`CAL.ino`, `Display.*`, `GpioMonitor.h`, `tests/**` or `ci/**`.
+assertions. `ci/test-loader-order.sh` builds `tests/loader-order-test.cpp` the
+same way, once, since nothing it covers is board-specific.
+`.github/workflows/bench-cal.yml` runs both as **Test recovery gesture and
+actions on host** and **Test the loader's NVS write order on host**, ahead of
+the compiles, on any PR touching `Recovery*`, `CAL.ino`, `App/Loader.cpp`,
+`Display.*`, `GpioMonitor.h`, `tests/**` or `ci/**`.
 
 **No assertion in that test has been executed on this workstation.** There is no
 host C++ compiler here; the cross toolchain was used for `-fsyntax-only` and
@@ -2367,7 +2390,7 @@ nothing else, which proves the file parses and does not run a single `assert`.
 CI is where it runs, and a CI pass is the only evidence that any of 16a holds.
 Read the step's own output, not the workflow's green tick.
 
-### 16b. What every build proves, on both boards
+### 16c. What every build proves, on both boards
 
 `RecoveryState.h` carries a block of `static_assert`s over the shared
 rectangles, so the geometry is checked by the compiler in every `arduino-cli`
@@ -2387,11 +2410,20 @@ build of either board and needs no host compiler at all:
   the gesture window, and the cap outlasting a hold which outlasts the listen
   window.
 
-These are what the geometry rests on now. The host test's own boundary check
-compares each rectangle against its own x/y/w/h, which is true of any rectangle
-and any half-open `contains()`, so it passed every boundary mutation, including
-the y<60 zones that overlapped Set up Wi-Fi by 48 × 16 in each corner. That
-check is still in the file; it is not the guarantee.
+These are what the geometry rests on, together with the corner-edge literals in
+16a. The host test's old boundary check compared each rectangle against its own
+x/y/w/h, which is true of any rectangle and any half-open `contains()`, so it
+passed every boundary mutation, including the y<60 zones that overlapped Set up
+Wi-Fi by 48 × 16 in each corner. It has been retired rather than left in place
+reading as coverage.
+
+The `static_assert`s prove no zone overlaps a button. They say nothing about
+where an edge sits while it overlaps nothing, which is why 16a taps 63, 256 and
+43 and then 64, 255 and 44: a zone shrunk by one pixel passes every assertion
+here. Those four cases carry their figures as literals on purpose. Both
+rectangles are asserted equal to `ConfigGesture`'s corner size, so a case that
+read the edges from the constant would move with any mutation of it and catch
+nothing.
 
 **Nobody has inverted one of these to confirm it bites.** The procedure is the
 one section 14 uses for `HeapPools.h`: flip an assertion's sense, confirm the
@@ -2399,7 +2431,39 @@ build stops with that message, restore with `git checkout --`, verify against
 `git diff`, and remember a restored file can keep its old mtime and let the
 build skip the rebuild.
 
-### 16c. The boot hold, which has no automated coverage at all
+### 16d. The order of the App's two NVS writes
+
+`tests/loader-order-test.cpp` links against production `App/Loader.cpp` with
+stubs for `Identity`, `Log`, the partition table and `esp_restart()`, and is
+built and run by `ci/test-loader-order.sh` alongside the recovery test. It
+records every `Identity` write in sequence and asserts, for
+`Loader::requestConfigMenu()`, that `updreq` is committed before `cfgmenu` and
+that the boot partition is selected after both.
+
+That ordering is the whole content of the test, and it's worth saying why a
+sequence is worth a test at all. The two writes are separate NVS commits with
+`esp_restart()` after them. Lose power between them and the boot partition was
+never changed, so the next boot runs the App again holding whichever flag landed
+first. `updreq` alone is absorbed: `Updater::installApplication()` clears it
+after an install, `CAL.ino` clears it when the server confirms the installed
+version is current. `cfgmenu` alone is absorbed by nothing. The App never reads
+it, CAL is its only writer of false, and it waits through every App boot until
+some later boot runs CAL, which opens Configuration at an unattended device and
+holds the boot for up to 60 seconds with Reset identity two taps away.
+
+The test also asserts the other two paths, because they share
+`bootFactoryAndRestart()`: `requestUpdate()` sets `updreq` and nothing else, and
+`returnToLoaderForReprovisioning()` clears the secret and sets `updreq`.
+
+`mut/m21-cfgmenu-before-updreq` carries the reversed order and nothing else, and
+fails this test; the same commit without it passes. The two runs are the
+evidence, not this paragraph.
+
+**What this does not cover.** Nothing here runs `CAL.ino`, so the gate that
+keeps the `cfgmenu` block off a boot where CAL drew nothing has no host
+coverage. It is item 8 of 16e.
+
+### 16e. The boot hold, which has no automated coverage at all
 
 `Recovery::holdBootForTouch()` cannot be reached by the host test as it stands:
 it drives `millis()`, `delay()` and `Display::readTouch()` in a loop, and the
@@ -2440,8 +2504,25 @@ check below is a person at a device.
    skipped entirely: no `[recovery]` line, no `lcd.init()`, no splash, and no
    1,200 ms added to that boot. Touch cannot be read on that path and must not
    be attempted.
+8. **A configuration request on that same quiet path.** Set `cfgmenu` with
+   `updreq` clear, then software-restart a device whose App owns the loading
+   screen. Reaching this state by hand needs a scratch build or an NVS write;
+   16d explains the power cut that used to reach it on its own. The menu must
+   not open. Expect
+   `[recovery] configuration was requested on a boot where the panel stays
+   untouched - cleared without opening it`, and expect the App's own loading
+   screen as usual. Then restart again and confirm the request is gone rather
+   than waiting for the next loud boot. What this guards against is a finger
+   already resting on the glass: `begin()` reads an unstarted panel and consumes
+   nothing, `showRecoveryMenu()` brings the panel up under an open menu, and the
+   first poll reads that finger as a rising edge on `kMenuRows[0]`, which is Set
+   up Wi-Fi.
+9. **Six taps on the running App, with the panel coming up for CAL.** The
+   ordinary path. Expect `[recovery] configuration opened at the App's request`,
+   the splash drawn before it, and the rows live with no gesture. This is the
+   case item 8's gate must not break.
 
-### 16d. The bench checks the assertions can't make
+### 16f. The bench checks the assertions can't make
 
 1. **Photograph both confirmation screens** on both boards. Read the whole
    sentence off the glass. The identity text runs to 125 characters at text size
@@ -2459,7 +2540,7 @@ check below is a person at a device.
    `GpioMonitor::kEventCount` in a scratch build that is never registered, and
    confirm the line and the paging both follow it.
 
-### 16e. Known gaps, recorded rather than discovered later
+### 16g. Known gaps, recorded rather than discovered later
 
 - No host assertion covers `holdBootForTouch()`, the 10-minute limit's actual
   expiry, or the rendering: `showRecoveryMenu()` is a stub in the test and only
@@ -2469,3 +2550,11 @@ check below is a person at a device.
 - A tap landing between two rectangles does nothing, by construction. There is
   no assertion that the gaps are small enough for a finger; that is item 1 of
   the physical acceptance checks in the design document.
+- Nothing compiles `CAL.ino`, so neither the `cfgmenu` block nor the condition
+  that now gates it has host coverage. 16e items 8 and 9 are the only checks on
+  either, and both need a device.
+- 16d proves the order of the App's two writes in the binary. It cannot prove
+  what a device does when power is cut between them, which would mean cutting
+  power to a device inside a window of a few milliseconds.
+- Nothing on this change has been seen on glass. The gesture, the menu and both
+  journal lines are unphotographed.
