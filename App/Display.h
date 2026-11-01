@@ -487,7 +487,11 @@ struct SportsBoardRow {
 ///
 /// <para>SPORTS_CARDS_V2_GENERIC_DESIGN.md section 12 is the layout, written
 /// before this was. Four rows of 38 pixels between the heading and the clock,
-/// nothing past y=220, and the five fields of a row at fixed x positions.</para>
+/// and nothing past y=220. Its "five fields of a row at fixed x positions" is
+/// not what this draws any more: the edges are derived from the panel width and
+/// from the row's own status string, so two rows of one board can disagree about
+/// where the home name starts. CardColumns.h is the arithmetic and
+/// TEXT_LAYOUT_DESIGN.md section 15h is the record.</para>
 ///
 /// <para><b>The same heading as the single-game card</b>, so the two read as one
 /// family - sport chip left, competition right, both optional and both absent

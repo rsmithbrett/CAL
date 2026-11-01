@@ -17,6 +17,9 @@
 /// string fits the column drawn for that string. tests/card-columns-test.cpp does
 /// both, and ci/test-card-columns.sh runs it. TEXT_LAYOUT_DESIGN.md section 15
 /// has the derivation, TEST_PLAN.md section 18 the mutations.
+///
+/// The status column's width comes from the string it holds. Section 15h is the
+/// shape and section 15g is what the fixed width cut.
 namespace CardColumns {
 
 constexpr int kCardMargin = 10;
@@ -35,16 +38,23 @@ struct BoardColumns {
   int statusWidth;
 };
 
-// A score column holds two digits. The status column holds a state word or a
-// period on a row that has scores, and a start time on a row that has none, and
-// those are not the same width.
+// A score column holds two digits. kBoardStatusWidth is the narrowest status
+// column the row ever draws and the floor boardStatusWidthFor() starts from;
+// what it holds is a state word, a period or a start time, and those are not
+// the same width, so the width comes from the string rather than from here.
+// kBoardMinNameWidth is the clamp inside boardColumns(), below which the edges
+// derived from the name width stop holding - a different figure from
+// kBoardNameFloor, which is what the status column's ceiling is budgeted
+// against.
 constexpr int kBoardScoreWidth = 26;
 constexpr int kBoardStatusWidth = 56;
 constexpr int kBoardColumnGap = 6;
 constexpr int kBoardMinNameWidth = 24;
 
-/// The width the status column is sized against on a row with no scores, and
-/// the slack it carries on top.
+/// The width a start time measures, and the slack a measured column carries on
+/// top of its string. kBoardStartTimeWidth is the default a row with no scores
+/// gets before anything measures, and the column boardStatusWidthFor() returns
+/// for a start time at either panel width.
 ///
 /// 78px is the widest string formatTimeOfDay() can hand it: "%d:%02d %s" with a
 /// two-digit hour, and AM rather than PM, because A advances 13 and P advances
@@ -71,11 +81,15 @@ constexpr int kBoardStateWordWidth = 55;
 /// Two periods off the same glyph table, for the properties below to read.
 ///
 /// "6TH INN" at 74px is the example TEXT_LAYOUT_DESIGN.md and Display.h both
-/// use for what the status field holds. "HALFTIME" at 94px is the widest period
-/// that can reach the panel at all: Sports::kMaxPeriodLength is 8 and
-/// CheckIn.cpp's copyBoundedMarked() cuts what the provider sent down to it, so
-/// "2ND PERIOD" arrives as "2ND P..." at 66px rather than as the 112px section
-/// 15g measures.
+/// use for what the status field holds.
+///
+/// "HALFTIME" at 94px is the widest period a provider plausibly sends that the
+/// 8-character Sports::kMaxPeriodLength holds whole, and it is not the widest
+/// eight characters: "OVERTIME" is 97 and the widest the glyph table can make is
+/// 144, which is why boardMaxStatusWidth() below is derived from the names
+/// rather than from a string. What the cap does reach is anything longer, which
+/// CheckIn.cpp's copyBoundedMarked() cuts and marks, so "2ND PERIOD" arrives as
+/// "2ND P..." at 66px rather than as the 112px section 15g measures.
 constexpr int kBoardPeriodTextWidth = 74;
 constexpr int kBoardWidestPeriodTextWidth = 94;
 
@@ -94,28 +108,14 @@ constexpr int kBoardNameFloor = 31;
 /// top of kCardMargin.
 constexpr int kBoardRowInset = 4;
 
-/// Three blocks, all from one figure: whatever the row has left after the score
-/// and status columns splits evenly between the two names. Every edge is derived
-/// from the panel width, so a 240px panel lays out the same way a 320px one does
-/// instead of inheriting literals that held at one width.
-///
-/// The row's state reaches the layout as `scoreless` and nothing else, and
-/// `scoreless` means both score strings are empty. That is where the pixels
-/// come from: two empty score columns release what the status column spends.
-///
-/// It is not the same thing as "the status holds a start time", and the two were
-/// written here as though they were. A scheduled game is scoreless and does
-/// hold a start time. A postponed game is also scoreless and holds "PPD" at
-/// 37px, so it takes the 80px column and both names pay for it; a game whose
-/// state the server did not send holds "" and takes the column for nothing. The
-/// other direction costs more: Sports.cpp writes each side's score
-/// independently, so a scheduled game with one score reported is not scoreless,
-/// and its start time is handed the 56px column it does not fit.
-/// TEXT_LAYOUT_DESIGN.md section 15f says what keying on the status instead
-/// would take.
-///
 /// The two score columns a row gets, which is where the status column's pixels
 /// come from.
+///
+/// `scoreless` means both score strings are empty, which is not the same thing
+/// as "the status holds a start time": Sports.cpp writes each side
+/// independently, so a scheduled game with one score reported is not scoreless.
+/// That is why the status width is measured rather than taken from this.
+/// TEXT_LAYOUT_DESIGN.md sections 15f and 15h.
 constexpr int boardScoreWidth(bool scoreless) { return scoreless ? 0 : kBoardScoreWidth; }
 
 /// The pixels between the row's first column edge and its last.
@@ -124,8 +124,8 @@ constexpr int boardRowSpan(int screenW) {
 }
 
 /// The status width a row's state asks for before anything measures its string.
-/// What the two-argument boardColumns() below uses, and what the assertions at
-/// the bottom of this file read.
+/// What boardColumns() below uses, and what the fourteen assertions predating
+/// section 15h read.
 constexpr int boardDefaultStatusWidth(bool scoreless) {
   return scoreless ? kBoardStartTimeWidth : kBoardStatusWidth;
 }
@@ -155,12 +155,27 @@ constexpr int boardMaxStatusWidth(int screenW, bool scoreless) {
 /// 15g: a start time on a row that reported one score, and a live game's period
 /// on a row that reported both. Section 15h has the before-and-after widths and
 /// what the name columns pay for them.
-constexpr int boardStatusWidthFor(int, bool scoreless, int) {
-  return boardDefaultStatusWidth(scoreless);
+constexpr int boardStatusWidthFor(int screenW, bool scoreless, int measuredTextWidth) {
+  if (measuredTextWidth <= 0) { return 0; }
+  if (measuredTextWidth <= kBoardStatusWidth) { return kBoardStatusWidth; }
+  const int want = measuredTextWidth + kBoardStatusSlack;
+  const int ceiling = boardMaxStatusWidth(screenW, scoreless);
+  return want < ceiling ? want : ceiling;
 }
 
+/// Three blocks, all from one figure: whatever the row has left after the score
+/// and status columns splits evenly between the two names. Every edge is derived
+/// from the panel width, so a 240px panel lays out the same way a 320px one does
+/// instead of inheriting literals that held at one width.
+///
+/// Two inputs beyond the panel width. `scoreless` picks the score columns, which
+/// is where the pixels come from: two empty score columns release what the
+/// status column spends. `statusWidth` is what the status column takes, and the
+/// caller has to pass the same figure it draws into - boardStatusWidthFor()
+/// above is what produces it from the string.
+///
 /// constexpr so the properties below are checked by every build on both panels.
-constexpr BoardColumns boardColumns(int screenW, bool scoreless, int statusWidth) {
+constexpr BoardColumns boardColumnsFor(int screenW, bool scoreless, int statusWidth) {
   const int rowLeft = kCardMargin + kBoardRowInset;
   const int rowRight = screenW - kCardMargin - kBoardRowInset;
 
@@ -170,9 +185,9 @@ constexpr BoardColumns boardColumns(int screenW, bool scoreless, int statusWidth
   // between the three blocks: the third is what boardSeparation() below reads
   // back out as the air between the home score and the status.
   //
-  // The status width is charged here as well as drawn. Charging a fixed figure
-  // and drawing a wider one lets a scoreless row's names and its status column
-  // both spend the pixels the score columns released.
+  // The status width is charged here as well as drawn, which is why the caller
+  // passes one figure for both. Charging a narrower one than it draws lets the
+  // names and the status column both spend the same pixels.
   const int fixedWidth = 2 * scoreWidth + statusWidth + 3 * kBoardColumnGap;
   const int shared = (rowRight - rowLeft - fixedWidth) / 2;
   const int nameWidth = shared > kBoardMinNameWidth ? shared : kBoardMinNameWidth;
@@ -187,18 +202,26 @@ constexpr BoardColumns boardColumns(int screenW, bool scoreless, int statusWidth
 }
 
 /// The row with the status width its state asks for. The draw path measures the
-/// string instead and calls the three-argument form above.
+/// string instead and calls boardColumnsFor() above.
+///
+/// Its own name rather than a two-argument overload of that one. An int converts
+/// to bool without a diagnostic, so `boardColumns(240, measuredWidth)` written
+/// by somebody reaching for the measured form would compile, discard the
+/// measurement and return the scoreless layout - and every assertion in this
+/// file and every case in the host test would pass, because none of them reads
+/// the draw path. Two arities under one name is the shape that allows that;
+/// two names do not.
 constexpr BoardColumns boardColumns(int screenW, bool scoreless) {
-  return boardColumns(screenW, scoreless, boardDefaultStatusWidth(scoreless));
+  return boardColumnsFor(screenW, scoreless, boardDefaultStatusWidth(scoreless));
 }
 
-constexpr int boardStatusLeft(int screenW, bool scoreless, int statusWidth) {
-  const BoardColumns columns = boardColumns(screenW, scoreless, statusWidth);
+constexpr int boardStatusLeftFor(int screenW, bool scoreless, int statusWidth) {
+  const BoardColumns columns = boardColumnsFor(screenW, scoreless, statusWidth);
   return columns.statusRight - columns.statusWidth;
 }
 
 constexpr int boardStatusLeft(int screenW, bool scoreless) {
-  return boardStatusLeft(screenW, scoreless, boardDefaultStatusWidth(scoreless));
+  return boardStatusLeftFor(screenW, scoreless, boardDefaultStatusWidth(scoreless));
 }
 
 /// What stands between the home block's right edge and the status column's
@@ -206,19 +229,26 @@ constexpr int boardStatusLeft(int screenW, bool scoreless) {
 /// status width, score width and panel width, plus the one pixel the even split
 /// cannot divide when the row's leftover is odd, which is why the two columns
 /// cannot be made to touch by changing one of those figures.
-constexpr int boardSeparation(int screenW, bool scoreless, int statusWidth) {
-  return boardStatusLeft(screenW, scoreless, statusWidth) -
-         boardColumns(screenW, scoreless, statusWidth).homeScoreRight;
+constexpr int boardSeparationFor(int screenW, bool scoreless, int statusWidth) {
+  return boardStatusLeftFor(screenW, scoreless, statusWidth) -
+         boardColumnsFor(screenW, scoreless, statusWidth).homeScoreRight;
 }
 
 constexpr int boardSeparation(int screenW, bool scoreless) {
-  return boardSeparation(screenW, scoreless, boardDefaultStatusWidth(scoreless));
+  return boardSeparationFor(screenW, scoreless, boardDefaultStatusWidth(scoreless));
 }
 
 /// The pixels the even split could not divide between the two names. They land
 /// in the separation above, and whose parity they carry is the row's leftover,
 /// not the panel width's: every status width in this file was even until one
 /// was measured off a string. TEXT_LAYOUT_DESIGN.md section 15c.
+///
+/// `& 1` rather than `% 2` because the leftover goes negative on a panel too
+/// narrow to hold the row, where `%` gives -1 and this gives 1. Neither answer
+/// means anything there: the row is over budget and the kBoardMinNameWidth clamp
+/// has already taken over, which is below 154px scoreless and 206px with scores
+/// and under every panel the fleet has. The host test skips that region for the
+/// same reason.
 constexpr int boardLeftoverPixel(int screenW, bool scoreless, int statusWidth) {
   return (boardRowSpan(screenW) -
           (2 * boardScoreWidth(scoreless) + statusWidth + 3 * kBoardColumnGap)) &
@@ -262,5 +292,74 @@ static_assert(boardSeparation(240, false) >= 2 * kBoardColumnGap, "240 scored st
 // literals this replaced put 248 on a 240px panel.
 static_assert(boardColumns(320, true).statusRight <= 320 - kCardMargin, "320 is on the glass");
 static_assert(boardColumns(240, true).statusRight <= 240 - kCardMargin, "240 is on the glass");
+
+// The measured column, as the two properties TEXT_LAYOUT_DESIGN.md sections 15g
+// and 15f are each about. Both read boardStatusWidthFor() at a figure measured
+// off the glyph table, which is the whole claim: the column holds the string it
+// was given.
+//
+// Equalities rather than `>=`. A `>=` is satisfied at 320 and 240 scoreless by
+// the 80px the shipped layout already handed those rows, so four assertions
+// would have read as four properties and bitten on two. 74 plus the slack is 76
+// at every one of the four, and the shipped 80 is not 76.
+static_assert(boardStatusWidthFor(320, false, kBoardPeriodTextWidth) ==
+                  kBoardPeriodTextWidth + kBoardStatusSlack,
+              "a live row with scores draws a period, and 6TH INN is 74px");
+static_assert(boardStatusWidthFor(240, false, kBoardPeriodTextWidth) ==
+                  kBoardPeriodTextWidth + kBoardStatusSlack,
+              "a live row with scores draws a period, and 6TH INN is 74px");
+static_assert(boardStatusWidthFor(320, true, kBoardPeriodTextWidth) ==
+                  kBoardPeriodTextWidth + kBoardStatusSlack,
+              "a live row with no score sent asks for the period it holds, not the state's 80");
+static_assert(boardStatusWidthFor(240, true, kBoardPeriodTextWidth) ==
+                  kBoardPeriodTextWidth + kBoardStatusSlack,
+              "a live row with no score sent asks for the period it holds, not the state's 80");
+static_assert(boardStatusWidthFor(320, false, kBoardStartTimeTextWidth) >= kBoardStartTimeTextWidth,
+              "a scheduled row that reported one score still holds a start time");
+static_assert(boardStatusWidthFor(240, false, kBoardStartTimeTextWidth) >= kBoardStartTimeTextWidth,
+              "a scheduled row that reported one score still holds a start time");
+
+// The same two columns as literals, because the four equalities above carry
+// kBoardStatusSlack on both sides and move with it. Written as 76 and 80, a
+// slack of 0 or of 3 fails here; written as the sum, it passes every assertion
+// in this file and only the host run reads it.
+static_assert(boardStatusWidthFor(320, false, kBoardPeriodTextWidth) == 76,
+              "6TH INN gets 76px, which is its 74 and the 2px of slack");
+static_assert(boardStatusWidthFor(320, false, kBoardStartTimeTextWidth) == 80,
+              "the widest start time gets 80px on a row with scores");
+
+// And the other half of the trade: a state word that already fits leaves the
+// name columns exactly where v2026.10.31.0002 put them. kBoardStateWordWidth is
+// FINAL's 55; PPD's 37 is in the host test's table rather than here, because a
+// second figure for the same property is a second figure to keep.
+static_assert(boardColumnsFor(320, false, boardStatusWidthFor(320, false, kBoardStateWordWidth))
+                      .nameWidth == 83,
+              "FINAL costs the 320px panel's names no pixels");
+static_assert(boardColumnsFor(240, false, boardStatusWidthFor(240, false, kBoardStateWordWidth))
+                      .nameWidth == 43,
+              "FINAL costs the 240px panel's names no pixels");
+
+// The four ceilings, as the figures section 15h writes down rather than as
+// `>= kBoardStatusWidth`, which boardMaxStatusWidth()'s own ternary makes true
+// for every input and so reports nothing about a panel width.
+static_assert(boardMaxStatusWidth(320, true) == 212, "320 scoreless can spend 212 on a status");
+static_assert(boardMaxStatusWidth(320, false) == 160, "320 with scores can spend 160");
+static_assert(boardMaxStatusWidth(240, true) == 132, "240 scoreless can spend 132");
+static_assert(boardMaxStatusWidth(240, false) == 80, "240 with scores can spend 80");
+
+// And at the ceiling both name columns stand exactly on the floor it was
+// derived from, which is the tightest of these: a pixel either way fails.
+static_assert(boardColumnsFor(320, false, boardMaxStatusWidth(320, false)).nameWidth ==
+                  kBoardNameFloor,
+              "320 with scores holds the name floor at its ceiling");
+static_assert(boardColumnsFor(240, false, boardMaxStatusWidth(240, false)).nameWidth ==
+                  kBoardNameFloor,
+              "240 with scores holds the name floor at its ceiling");
+static_assert(boardColumnsFor(320, true, boardMaxStatusWidth(320, true)).nameWidth ==
+                  kBoardNameFloor,
+              "320 scoreless holds the name floor at its ceiling");
+static_assert(boardColumnsFor(240, true, boardMaxStatusWidth(240, true)).nameWidth ==
+                  kBoardNameFloor,
+              "240 scoreless holds the name floor at its ceiling");
 
 }  // namespace CardColumns
