@@ -1334,9 +1334,16 @@ than reasoned about: it compares two line numbers, so a function that sets 2,
 takes an early return, and restores at the bottom has a restore on the larger
 line number and passes. That shape is the original `showStatus()` defect in a
 different arrangement, and it is a path out with scale 2 selected. Rule 2 is
-what closes it. `showMoonPhaseCard()` is the function in the file that already
-has the right shape: it restores before its early return, and rule 2 reads it as
-clean.
+what closes it.
+
+The file passes rule 2 unchanged, and why is worth saying rather than leaving at
+"it passes". Three functions select a scale other than 1 - `showStatus()`,
+`showFailure()` and `showClockDate()` - and none of the three contains a
+`return` at all, so each reaches its restore on every path.
+`showMoonPhaseCard()` has the shape that looks like the interesting case, a
+`restoreDefaultTextState()` at `App/Display.cpp:3965` directly above an early
+`return`, but it never selects a scale other than 1, so rule 2's flag is never
+set inside it.
 
 **Both rules were proven to bite.** Rule 1 by deleting the restore from
 `showStatus()` and confirming the script names that function and exits 1. Rule 2

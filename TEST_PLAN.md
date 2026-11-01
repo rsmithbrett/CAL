@@ -2734,9 +2734,18 @@ with the word "return" in it is not read as a path out.
 |---|---|---|---|
 | `if (detail.length() == 0) return;` in `showStatus()` above the restore | `mut/ts1-early-return` | 41318684486 | fails, names `showStatus()` and the line that set the scale |
 
-Rule 1 passes that same branch, which is the point of it. `showMoonPhaseCard()`
-is the function already in the right shape: it restores before its early return,
-and rule 2 reads it as clean. The whole file passes both rules unchanged.
+Rule 1 passes that same branch, which is the point of it.
+
+The whole file passes both rules unchanged, and the reason is narrower than
+"every function restores before returning". Exactly three functions select a
+scale other than 1 - `showStatus()`, `showFailure()` and `showClockDate()` - and
+none of the three contains a `return` at all, so each reaches its restore on
+every path. `showMoonPhaseCard()` has a `restoreDefaultTextState()` at
+`App/Display.cpp:3965` directly above an early `return`, which is the shape that
+looks like the interesting case, but it never selects a scale other than 1 and
+so never sets rule 2's flag. **No function in the file exercises rule 2 today.**
+It is there for the next one that selects a scale, which is what the mutation
+above stands in for.
 
 **Neither rule models control flow, and section 14d of the design document now
 says so rather than leaving it to be found.** A restore inside a branch clears
@@ -2899,7 +2908,7 @@ could not be compiled anywhere.
 branch, because CI builds stock and a local binary of the same commit is a
 different thing:
 
-| binary | `origin/main`, run 41318078896 | this branch |
+| binary | `origin/main`, run 41318078896 | this branch, run 41318827193 |
 |---|---|---|
 | `CAL.ino.bin`, ESP32 | 1,375,712 | 1,375,712 |
 | `CAL.ino.bin`, ESP32-S3 | 1,306,656 | 1,306,656 |
