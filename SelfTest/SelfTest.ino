@@ -40,6 +40,7 @@ size_t getArduinoLoopTaskStackSize(void) {
   return 16384;
 }
 
+#include "Clock.h"
 #include "Config.h"
 #include "Display.h"
 #include "Identity.h"
@@ -94,21 +95,42 @@ void runSuiteAndShowResults() {
   Log::line("[selftest] ===== starting test run =====");
   Display::showStatus("Running SelfTest", "Screen, SD, file I/O, memory");
 
+  // The clock the report's two timestamps come from, and the one the POST's
+  // certificate check reads. Synced here rather than in setup() so a unit that
+  // came up before the network did gets another attempt on every run.
+  Clock::sync();
+
+  Report::Timing timing;
+  timing.startedAtUtc = Clock::nowUtc();
+
   Display::showStatus("Testing screen", "Fills, text, PNG decode");
+  uint32_t categoryStartMs = millis();
   const ScreenTest::Result screen = ScreenTest::run();
+  timing.screenMs = millis() - categoryStartMs;
   Log::printf("[selftest] screen test: %s (%s)", screen.passed ? "PASS" : "FAIL",
               screen.detail.c_str());
 
   Display::showStatus("Testing SD card", "Mount, format round-trip, file I/O");
+  categoryStartMs = millis();
   const SdTest::Results sd = SdTest::run();
+  // One call runs the mount round trip and the file I/O sizes together, so this
+  // is the pair's wall clock. The file I/O category reports the sum of its own
+  // per-size write and read figures instead, and falls back to this only when
+  // no run measured one.
+  timing.sdFormatMs = millis() - categoryStartMs;
+  timing.fileIoMs = timing.sdFormatMs;
   Log::printf("[selftest] sd format test: mountedBefore=%d mountedAfter=%d formatSucceeded=%d",
               sd.format.mountedBefore, sd.format.mountedAfter, sd.format.formatSucceeded);
 
   Display::showStatus("Testing memory", "Allocating at stress sizes");
+  categoryStartMs = millis();
   const MemoryTest::Results memory = MemoryTest::run();
+  timing.memoryMs = millis() - categoryStartMs;
+
+  timing.completedAtUtc = Clock::nowUtc();
 
   Display::showStatus("Sending report", "Debug stream + server (best-effort)");
-  const bool posted = Report::sendAndLog(screen, sd, memory);
+  const bool posted = Report::sendAndLog(screen, sd, memory, timing);
   Log::printf("[selftest] report POST %s", posted ? "accepted" : "not accepted (see log above)");
 
   // Build the on-screen summary: one line per category, matching the
