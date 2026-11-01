@@ -120,6 +120,20 @@ Six taps on a device that's already showing cards open the same menu. The App
 watches the same two corner zones, and on the sixth tap it sets `updreq`, then
 `cfgmenu`, then selects the factory partition and restarts.
 
+`App/ConfigRequest.cpp` is the whole of the App's half, and
+`App/CardManager.cpp` is what feeds it: every tap goes to
+`ConfigRequest::noteTap()` with the coordinates `Touch::poll` reported, before
+the card deck decides what else the tap meant. Corner taps also page the deck
+left and right, and that's deliberate — paging is reversible and visible, and
+the alternative is a dead zone on a card somebody is reading.
+
+**The App's corners come off the panel it's running on, not off a 320.**
+`Display::screenWidth()` is read on every tap, so a display standing on its end
+is 240 across and its right corner starts at 176 rather than 256, which is where
+the person tapping sees it. CAL's own rectangles in `RecoveryState.h` stay at
+320, because they're checked against its menu rows and that geometry means
+nothing to the App; what the two binaries share is the shape of the gesture.
+
 This is the way in that matters on a healthy device. The boot hold below covers
 a power-on, where CAL draws the splash and listens for 1,200 ms. It can't cover
 a software restart: that boot hands the panel to the App without `lcd.init()`,
@@ -334,6 +348,44 @@ the same way and records every `Identity` write in sequence. It asserts that
 partition after both, and it covers the other two callers of
 `bootFactoryAndRestart()`.
 
+Then `bash ci/test-config-request.sh`, which compiles production
+`App/ConfigRequest.cpp` with stubs for the three functions it calls, and drives
+the App's own counter:
+
+- Six alternating taps open the menu, and six in one corner do not. Both
+  corners, because the counter treats an unexpected left tap and an unexpected
+  right tap differently.
+- The count, the bounce window and the window length are read from
+  `ConfigGesture`, so a figure that reaches one binary and not the other fails
+  here as well as in CAL's test.
+- `kTaps - 1` taps leave the display alone and the next one does not.
+- A whole sequence inside one bounce window counts as one tap, and the boundary
+  either side of `kBounceMs` on a single tap. A swallowed tap doesn't move the
+  last-tap time, so the same tap a millisecond later is read.
+- The gesture window at `kWindowMs - 1` and at `kWindowMs` exactly, and a fresh
+  sequence after an expiry.
+- An unexpected left tap restarting the sequence at one rather than discarding
+  it at zero, which is five more taps and not six.
+- **Three panel widths, and the pixel either side of each corner's edge.** 320
+  and 240 are the fleet; 480 is there because two widths can be satisfied by a
+  switch on the board and a third says the figure is read from the panel in use.
+- The last pixel inside each zone and the first pixel outside it, on both axes.
+  The height one matters past the gesture: 44 is where CAL's first menu row
+  begins, and that row is the one with no confirmation behind it.
+- A sequence spanning the `millis()` wrap, for the bounce window and the gesture
+  window either side of zero.
+- The headline and detail shown before the handover, and that they're shown
+  before it rather than after.
+- That the counter is cleared before the handover call, so a seventh tap in the
+  corner somebody has just tapped six times counts as a first tap.
+
+The counter, the window start and the last-tap time are file statics with no
+reset, and the test does not add one. Each case opens with a tap in the middle
+of the panel instead, which is in neither corner, and setting the counter back
+to zero is the one thing production does with a tap in neither corner. Nothing
+else in the test touches it: a helper that tapped twice, or re-centred between
+taps, would reset the counter underneath a case meant to count to six.
+
 **The geometry is proved by `static_assert` in `RecoveryState.h`, not by that
 host run.** Both corner zones against all three menu rows, the Diagnostics
 footer, Back and each other; the rows against each other; Confirm against Cancel
@@ -347,6 +399,16 @@ holds for any rectangle and any half-open `contains()`, so every boundary
 mutation passed it. That check has been retired. The assertions carry the
 overlaps, and the corner-edge cases listed above carry where an edge sits while
 it overlaps nothing, which no assertion here can say.
+
+`App/ConfigRequest.cpp` had no automated coverage of any kind until that script
+existed, and it is the newest code in the shipped release.
+`ci/test-recovery-menu.sh` compiles CAL's `Recovery.cpp` and nothing else, so a
+mutation that made the App accept six taps in one corner instead of alternating
+passed the entire release gate: the host test, both boards' `arduino-cli`
+compiles, all of it. Six taps anywhere in one corner would have rebooted a
+running display into the loader under somebody's hand. The pull-request bench
+didn't run either, because `App/ConfigRequest.cpp` was not in bench-cal.yml's
+path list; it is now, with `App/CardManager.cpp` beside it.
 
 `holdBootForTouch()` has no host coverage. It drives `millis()`, `delay()` and
 `Display::readTouch()` in a loop, and the test's `delay()` stub throws to stand

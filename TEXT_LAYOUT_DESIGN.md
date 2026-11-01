@@ -1431,8 +1431,15 @@ Measured at both panel widths, against both versions it replaces:
 three pixels, and nine more, are the separation between the home score's right
 edge and the status column's left edge. Substituting `shared` back gives
 `homeScoreRight = rowRight - statusWidth - 2 * kBoardColumnGap`, so that
-separation is 12px for any status width, score width and panel width. The old
-literal layout spent 2px there: a right-aligned `7` two pixels from a
+separation is 12px for any status width, score width and even panel width, and
+13px on an odd one. The thirteenth pixel is the one the even split can't divide:
+both fixed widths are even, so the leftover carries the panel width's own
+parity, and it lands in this gap because nothing else claims it. Both shipped
+panels are even, which is why the four `static_assert`s on the separation read
+as a floor rather than as an equality, and why nothing noticed until the width
+sweep in `tests/card-columns-test.cpp` walked the odd ones.
+
+The old literal layout spent 2px there: a right-aligned `7` two pixels from a
 right-aligned `FINAL` reads as one token. Charging three gaps rather than two
 would hand the names back exactly the 86 they had and leave 6px between those two
 columns, and 83 with 12px of air is the better row.
@@ -1459,11 +1466,47 @@ widths, in every build, on both boards:
   which is where the literals put 248 on a 240px panel.
 - The `kBoardMinNameWidth` floor is clear at both widths. It has to be: the floor
   clamps the name width and nothing clamps the edges derived from it, so below
-  174px scoreless and 202px with scores the home block crosses the status column.
-  No shipped panel is that narrow, which makes it latent rather than live, and
-  those two assertions are what will say so when a third board arrives.
+  174px scoreless and 202px with scores the separation stops holding. No shipped
+  panel is that narrow, which makes it latent rather than live, and those two
+  assertions are what will say so when a third board arrives.
 
-This is the only automated check the scoreboard's geometry has. Nothing in
-either repository compiles `Display.cpp` for a host, so a `constexpr` function and
-a `static_assert` are what a compiler can be made to check without one.
-TEST_PLAN.md section 18 has the mutation they were proven against.
+`boardColumns()` and the constants it reads live in `App/CardColumns.h`, where
+the twelve assertions live with them. The header names no graphics library, no
+font and no Arduino type, which is the whole reason it is a header: `Display.cpp`
+pulls in LovyanGFX and a board pin map, so while these figures were in that file
+they could only be compiled on the toolchain for one of the two boards.
+`kCardMargin` moved with them, because it is the figure the row is derived from
+and a second copy of it is the thing that drifts.
+
+### 15e. And the properties a host run checks
+
+`ci/test-card-columns.sh` compiles that header with `g++` and runs
+`tests/card-columns-test.cpp`. It is not a replacement for the assertions, which
+run in every board build and need no host compiler. It is the three things an
+assertion at a fixed width can't say:
+
+- **The table in 15b, as equalities.** The assertions hold the name columns at or
+  above what `v2026.10.31.0002` shipped, which stops them shrinking. The host run
+  holds them at 97, 83, 57 and 43 exactly, so the table above is checked rather
+  than re-derived.
+- **Every width from 28 to 1024, both states.** The row's two ends are the same
+  distance in from the glass, the two blocks are the same size and have a gap
+  between them, the edges run left to right, the name column never goes under the
+  floor, and the row never asks for more pixels than it has. The separation
+  identity is checked as an identity at each of them, which is where the
+  thirteenth pixel in 15c came from.
+- **The boundaries around the floor, measured rather than named.** The separation
+  stops being `2 * kBoardColumnGap` below 174 scoreless and 202 with scores. The
+  first width whose name column is clear of the floor is 176 and 204, two wider
+  in each case, because 49 pixels of leftover still split into a 24px name. The
+  two columns actually meet at 162 and 190, and below those they're drawn through
+  each other. None of those six figures is a thing a `static_assert` at 320 and
+  240 could have reported.
+- **Whether a measured string fits the column drawn for it.** This is 18b's gap,
+  as far as a host can close it. The 72px for `10:00 PM` is this repository's
+  written figure and not something a compiler can call `textWidth()` for, so
+  `kBoardStartTimeWidth` is written as `kBoardStartTimeTextWidth +
+  kBoardStartTimeSlack` and the host run reads both names. A status column
+  trimmed to 73 clears the 72px assertion and fails here.
+
+TEST_PLAN.md section 18 has the mutations both halves were proven against.
