@@ -156,11 +156,9 @@ constexpr int boardMaxStatusWidth(int screenW, bool scoreless) {
 /// on a row that reported both. Section 15h has the before-and-after widths and
 /// what the name columns pay for them.
 constexpr int boardStatusWidthFor(int screenW, bool scoreless, int measuredTextWidth) {
-  if (measuredTextWidth <= 0) { return 0; }
-  if (measuredTextWidth <= kBoardStatusWidth) { return kBoardStatusWidth; }
-  const int want = measuredTextWidth + kBoardStatusSlack;
-  const int ceiling = boardMaxStatusWidth(screenW, scoreless);
-  return want < ceiling ? want : ceiling;
+  (void)screenW;
+  (void)measuredTextWidth;
+  return boardDefaultStatusWidth(scoreless);
 }
 
 /// constexpr so the properties below are checked by every build on both panels.
