@@ -107,6 +107,26 @@ void clearRecord() {
   gShown.clear();
 }
 
+/// Follows a case that asserted the menu did not open, with one that says the
+/// machine would have opened it.
+///
+/// A negative assertion holds just as well when production has stopped reading
+/// taps at all, for a reason the case knows nothing about. So each one is paired
+/// with a sequence that does open the menu, delivered after the negative
+/// assertion so it cannot mask what that assertion was reading. It opens with a
+/// tap in the middle of the panel, because the counter it inherits is whatever
+/// the case left behind, and every tap is kBounce apart whatever spacing the
+/// case was using.
+void andItStillOpens(Seq& s) {
+  const int before = gHandovers;
+  s.atAfter(kBounce, gPanelWidth / 2, 120);
+  for (unsigned i = 0; i < kTaps; ++i) {
+    s.atAfter(kBounce, (i % 2) == 0 ? 10 : gPanelWidth - 10, 10);
+  }
+  assert(s.handedOver());
+  assert(gHandovers == before + 1);
+}
+
 }  // namespace
 
 namespace Display {
@@ -158,16 +178,18 @@ int main() {
     Seq s(100000);
     for (unsigned i = 0; i < kTaps; ++i) s.at(10, 10);
     assert(!s.handedOver());
+    assert(gHandovers == 0 && gShown.empty());
+    andItStillOpens(s);
   }
-  assert(gHandovers == 0 && gShown.empty());
 
   clearRecord();
   {
     Seq s(200000);
     for (unsigned i = 0; i < kTaps; ++i) s.at(gPanelWidth - 10, 10);
     assert(!s.handedOver());
+    assert(gHandovers == 0 && gShown.empty());
+    andItStillOpens(s);
   }
-  assert(gHandovers == 0 && gShown.empty());
 
   // A sequence that begins on the right wastes its first tap: the counter is at
   // zero, zero expects the left corner, so the sixth tap of this run is only
@@ -213,6 +235,7 @@ int main() {
     s.alternating(kTaps);
     assert(!s.handedOver());
     assert(gHandovers == 0 && gShown.empty());
+    andItStillOpens(s);
   }
 
   // The boundary, on one tap. Five taps that count, then the sixth a
@@ -328,6 +351,7 @@ int main() {
       for (unsigned i = 0; i < 2 * kTaps; ++i) s.at((i % 2) == 0 ? 10 : rightEdge - 1, 0);
       assert(!s.handedOver());
       assert(gHandovers == 0 && gShown.empty());
+      andItStillOpens(s);
     }
 
     // The last pixel of the panel is inside the corner.
@@ -365,6 +389,7 @@ int main() {
     }
     assert(!s.handedOver());
     assert(gHandovers == 0);
+    andItStillOpens(s);
   }
 
   clearRecord();
@@ -375,6 +400,7 @@ int main() {
     }
     assert(!s.handedOver());
     assert(gHandovers == 0);
+    andItStillOpens(s);
   }
 
   // --- the clock rolls over -------------------------------------------------
@@ -400,6 +426,7 @@ int main() {
     assert(s.lastTap() < 0x10000u);
     assert(!s.handedOver());  // expired across the wrap
     assert(gHandovers == 0);
+    andItStillOpens(s);
   }
 
   // --- after a handover -----------------------------------------------------
