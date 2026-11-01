@@ -2339,6 +2339,16 @@ positive width and height under any half-open `contains()`, so it could not
 fail. 16c's `static_assert`s and the corner-edge literals above are what cover
 that geometry now.
 
+**What the new cases were measured against.** `mut/m20-ktaps-3-no-guards` sets
+`ConfigGesture::kTaps` to 3 on the shipped tree and passes the host test on both
+boards, which is the drift itself: the two binaries wanted different gestures
+and nothing said so. The same mutation with the cases present fails on the tap
+count. `mut/m22-literals-restored` puts CAL back on its own 6 and 100 and then
+changes both shared figures, and fails on the tap count again, so the case
+measures the binding rather than the constant. `mut/m23-zone-63` narrows both
+corner rectangles and `kZoneWidth` together, which satisfies every
+`static_assert` in 16c, and fails on the first corner-edge case.
+
 The three `Controller::open` assertions were written after the code they cover,
 not before it. The last of them is the one that bites: drop the `step_` reset
 from `Controller::open` and three corner taps taken before the open still
