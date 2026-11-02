@@ -3835,6 +3835,179 @@ replaced is the other direction: a score column of 40 now fails where it passed.
   no field was added, removed or reinterpreted, so the 6-month compatibility
   gate is untouched. A device without this draws a `10` a tier small.
 
+### 18j. A three-digit score draws (2026-11-02)
+
+The gap 18i recorded and asserted. `100` is 40px of `Sans12` and 30 of `Sans9`,
+over both score columns and past every tier the ladder has, so `layoutLine()`
+fell through to `layoutText()` and the ellipsis loop backed off to `...` with no
+digits in it. A basketball board drew that wherever a side was over 99.
+TEXT_LAYOUT_DESIGN.md section 15l is the design and the four shapes it was
+chosen from.
+
+**The shape.** The board's score state is an `enum class BoardScores { None,
+TwoDigit, ThreeDigit }` where it was a `bool scoreless`, the score column is 30
+in the three-digit state against 28 one-line and 20 two-line, and a board
+carrying a three-digit score draws **every** score on it at `Sans9`. The face is
+the board's decision rather than a row's or a score's, because a `105` drawn a
+tier below the `98` beside it is the defect 18i fixed and deciding per score
+would put it back.
+
+**Why an enum and not a second bool.** Two bools admit a fourth combination that
+means nothing, scoreless and three-digit at once, and let a caller swap them.
+`App/CardColumns.h` already carries a scar about an `int` converting to `bool`
+without a diagnostic. An `enum class` converts from nothing, so a forgotten or
+swapped argument stops the compile; the conversion of 19 signatures and every
+assertion is what that cost.
+
+**The measurements**, off the vendored glyph tables by 9b's method, the
+reimplementation re-run and reproducing all twenty-seven of this repository's
+figures before anything new was read off it:
+
+| digits | `Sans12` | `Sans9` |
+|---|---|---|
+| two | `11`, 28 | 20 |
+| three | `111`, 42 | `100`, 30 |
+| four | `1111`, 56 | 40 |
+
+Every three-digit score is exactly 30 at `Sans9`, because all ten digits advance
+10 in that face, so one column holds all 900. That is the whole reason the face
+drop is cheap: 30 against the two-digit 28 is 2px, where keeping `Sans12` and
+widening to 42 is 14.
+
+**What it costs, and only when it engages.** A board with no three-digit score on
+it is untouched in every figure, so nothing the owner has photographed changes:
+
+| | two-digit | three-digit |
+|---|---|---|
+| 320 one-line name, board of `FINAL`s | 81 | 79 |
+| 240 one-line name, board of `FINAL`s | 41 | 39 |
+| 240 two-line name, board of `FINAL`s | 110 | 100 |
+| 240 two-line name, photographed board | 97 | 87 |
+| 320 two-line name, photographed board | 177 | 167 |
+| one-line ceiling, 320 / 240 | 160 / 80 | 156 / 76 |
+| two-line ceiling, 320 / 240 | 217 / 137 | 207 / 127 |
+
+2px on a one-line row because the two names split it, 10 on a two-line row
+because the one name pays the lot. **Every column edge is unchanged in all three
+states**, which the host test sweeps rather than asserts at one width:
+`nameWidth + scoreWidth` has no score width in it, so `homeNameLeft` is 129 and
+`homeScoreRight` 238 on a 320px board of `FINAL`s whether the column is 0, 28 or
+30.
+
+**What the key tests did against the branch before the code, said plainly.** The
+design document went in first, then the tests, then the code:
+
+- The new three-digit block in `tests/card-columns-test.cpp`, compiled against
+  the branch's own `App/CardColumns.h` before the enum existed, fails to build
+  with 7 errors - `'BoardScores' has not been declared` five times and the two
+  new constants undeclared - and prints no `PASS` line. **Verified** on this
+  workstation's `g++ 16.2.0`. A new type cannot be asserted against before it
+  exists, which is the same failing-first shape 18h recorded.
+- The gate's `boardScoreState()` checks, run against the branch's own
+  `App/Display.cpp` before the fold was renamed, print
+  `boardHasNoScores() not found` and exit 1. **Verified** locally.
+- The `static_assert`s for the three-digit state went in with the enum, not
+  before it, and are not counted as a failing-first check.
+
+**Counts, before and after this section.** `App/CardColumns.h` 75
+`static_assert` declarations to **99**; `grep -c static_assert` 78 to 102.
+`tests/card-columns-test.cpp` 193 `assert`s to **222**, and its sweeps run over
+three score states where they ran over two, so the swept combinations rose by
+half again. `ci/check-board-columns-call.sh` 44 text checks to **48**. Every host
+script passes by its own `PASS:` or `Passed!` line.
+
+**The binary.** `arduino-cli`'s own line for App on esp32:
+`Sketch uses 1579571 bytes (80%) of program storage space`, against 1579399 for
+the same sketch before this section - 172 bytes for the enum, the fold and the
+face. Built with `--export-binaries` this time, so
+`App/build/esp32.esp32.esp32/App.ino.bin` at 1,579,728 bytes is an artifact this
+run produced rather than a stale one; 18i's note about those timestamps is why
+the flag is there.
+
+#### The mutations, and what caught each one
+
+Seventeen, each applied to a byte-for-byte copy taken first, each gated on `cmp`
+saying the file actually changed before any check ran, each restored from that
+copy and `cmp`'d and `touch`ed after, with CR and LF byte counts compared on the
+mutant as well as the restore.
+
+**Four did not land on the first attempt**, all four because the pattern spanned
+two lines and `perl -p` matches a line at a time, so it reported "pattern occurs
+0 times" rather than replacing nothing. Re-aimed at a single line each, all four
+landed and all four were caught. That is the gate on the gate doing its job, and
+it is the third section running where it has earned its place.
+
+**`perl -pi` strips every CR on this toolchain.** The harness puts them back on
+the mutant before any check reads it, and the restore is from the copy, so the
+tree never carries an LF-only file. It is the same hazard the brief names for
+`sed -i`, and it bit twice in this section before the harness handled it.
+
+| # | the change | caught by |
+|---|---|---|
+| L1 | the one-line three-digit arm returns the two-digit column | `static_assert`, "a three-digit board's one-line score column holds three digits of Sans9" |
+| L2 | `kBoardThreeDigitScoreWidth` 30 to 29 | `static_assert`, the 79px name |
+| L3 | `kBoardThreeDigitScoreWidth` 30 to 42, the `Sans12` figure | `static_assert`, the four-digit gap |
+| L4 | both arms of the stacked column read the three-digit width | `static_assert`, the two-line two-digit equality |
+| L5 | the `None` test becomes a `TwoDigit` test | `static_assert`, the scoreless start time |
+| L6 | the fold reads only the away side | the gate |
+| L7 | the three-digit boundary moves to `> 3` | the gate |
+| L8 | the fold keeps the last rather than the longest | the gate |
+| L9 | `bigScores` uses `||` instead of `&&` | the gate |
+| L10 | `bigScores` tests `==` instead of `!=` | the gate |
+| L11 | the face ignores `bigScores` | the gate |
+| L12 | the 2px lift kept on a `Sans9` score | the gate |
+| L13 | the grid gets a literal state instead of the fold's | the gate |
+| L14 | the test's 240 two-line three-digit name says 97 | the host test |
+| L15 | the one-line cost says 4px rather than 2 | the host test |
+| L16 | the swept state list drops `ThreeDigit` | `static_assert`, `kScoreStateCount` |
+| L17 | the cut-name count says none crosses | the host test |
+
+**L16 is the one worth naming.** The sweeps run over an array, and an array that
+drops a state sweeps two thirds of the behaviour while every assertion in it
+still passes. `kScoreStateCount` is checked against the enum's own last value,
+so the array and the type cannot drift: a state added to `BoardScores` and not
+to the array stops the compile. That check exists because this exact mutation was
+the one I could not otherwise see.
+
+**Five caught by a `static_assert` and not by the host run**, for 18i's reason:
+the header's assertions fire at compile time, so the sweep never executes. L14,
+L15 and L17 are the three that prove the three-digit block itself bites, and all
+three mutate a measured figure rather than a constant.
+
+#### What 18j does not cover
+
+- **Nothing has been on glass**, and this section changes something the owner
+  has seen: a landscape board's scores have drawn at `Sans12` since the card was
+  written, and a basketball board's now draw at `Sans9`, the same size as the
+  team names. The two-line portrait row already did that in 15j and was
+  photographed; the landscape row in this state has not been looked at. This is
+  the open item.
+- **`Hurricanes` is cut on a portrait board with a three-digit score.** 94px
+  against the 87px name a three-digit board leaves. No hockey board reaches the
+  state so the photographed board cannot show it, and the host test counts the
+  photographed eight against both columns rather than asserting a win. Of 31 NBA
+  names, 28 fit 87 against 29 at 97, so one name crosses: `Mavericks` at 88.
+  **Verified** off the glyph table, not on a device.
+- **A 240px one-line board with three-digit scores cuts the widest start time**,
+  80 to 76 against `12:00 AM`'s 78. Asserted as the loss it is, in the header
+  and in the host test's two branches, so closing it has to come through those
+  lines. The 240px panel on the fleet is portrait and draws the two-line form,
+  so no fielded board has this shape.
+- **Four digits still draw `...`**, 40px of `Sans9` against the 30px column.
+  Asserted as a gap the way three digits were in 18i. No sport this card carries
+  sends one.
+- **No host test compiles `App/Display.cpp`**, so `boardScoreState()`, the face
+  and the lift are held by the text gate rather than by a run. The gate is a
+  substring matcher and says an expression is present, not that nothing else is.
+- **The 2px and 10px are arithmetic, not a photograph.** Whether a 79px name
+  reads differently from 81, and whether an 87px name on a portrait board reads
+  differently from 97, is what a photograph answers.
+- **Nothing on the wire changes.** `SportsBoardRow`, `Sports::Game` and the
+  check-in payload are byte-for-byte what they were; `BoardScores` is derived on
+  the device from score strings the row already carries. No field was added,
+  removed or reinterpreted, so the 6-month compatibility gate is untouched. A
+  device without this draws `...` for a three-digit score.
+
 ---
 
 ## 19. The brand splash's one length, at both ends (2026-11-01)

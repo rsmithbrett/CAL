@@ -2756,3 +2756,152 @@ to answer.
 `App/CardColumns.h` is the arithmetic, `tests/card-columns-test.cpp` sweeps it,
 `ci/check-board-columns-call.sh` holds the draw path's arguments, and
 TEST_PLAN.md section 18i has the mutations.
+
+### 15l. A three-digit score draws, 2026-11-02
+
+15k left this open and recorded what it was: `100` is 40px of `Sans12` and 30 of
+`Sans9`, over every score column and past every tier the fitting ladder has, so
+`layoutLine()` falls through to `layoutText()` with a one-line budget and the
+ellipsis loop backs off to `...` with no digits in it. A basketball board shows
+`...` wherever a side is over 99, which is most rows of most games.
+`SportsBoardRow::kMaxScore` is 8 and its own remark says three digits are
+expected, so this is a card not drawing what the wire sends it.
+
+#### What three digits measure
+
+Off the vendored glyph tables by 9b's method, the reimplementation reproducing
+all twenty-seven of this repository's figures first:
+
+| digits | widest at `Sans12` | widest at `Sans9` |
+|---|---|---|
+| one | `1`, 14 | 10 |
+| two | `11`, 28 | 20 |
+| three | `111`, 42 | `100`, 30 |
+| four | `1111`, 56 | 40 |
+
+**Every three-digit score is exactly 30px at `Sans9`.** All ten digits advance 10
+in that face, so all 900 of them are 30 and a 30px column holds the lot. At
+`Sans12` the `1` that 15k is about spreads them from 39 to 42, and 27 of the 900
+are over a 40px column.
+
+#### The four shapes, costed
+
+The name column is at 81 on the 320px landscape row and 41 on the 240px one, and
+the 240px portrait row's single name is 97. So "take it out of the names again"
+is costed against a floor of 29 that two of those are already near.
+
+| shape | 320 one-line name | 240 one-line name | 240 two-line name | what else |
+|---|---|---|---|---|
+| today, `...` drawn | 81 | 41 | 97 | no digits at all |
+| **A** 42px column, keep `Sans12` | 67 | **27** | 87 | 240 one-line ceiling collapses to 56, start time cut to 56 |
+| **B** 30px column, `Sans9` scores | **79** | **39** | **87** | 240 one-line start time cut to 76 |
+| **C** per-row rather than per-board | 79 or 81 | 39 or 41 | 87 or 97 | a `105` drawn smaller than the `98` beside it |
+| **D** drop the leading digit | 81 | 41 | 97 | `105` reads as `05`, which is a different score |
+
+**A is the one that cannot be paid for.** 14px off each name takes the 240px
+one-line row to 27, under the 29 floor the status ceiling is derived from, and
+the ceiling there falls to the 56px clamp, which cuts a start time by 24px. 15k
+moved that floor to keep exactly this property.
+
+**D is not a trade, it is a wrong number.** A score column that can show `05` for
+105 is worse than one that shows `...`: the ellipsis says a thing is missing, and
+`05` says the Rockets lost.
+
+**C reintroduces the defect 15k just fixed.** 15k's whole finding is that a `10`
+drawn a tier below the `7` beside it is wrong, and deciding the face per row, or
+per score, puts a small `105` next to a full-size `98` on the same card. The
+principle 15k established is that a row is internally consistent, so the face is
+the board's question and not a row's.
+
+**So B, with the face as a board-wide decision.** The score column is 30 and the
+scores draw at `Sans9` when any score on the board needs three digits, and
+nothing changes when none does. Two digits at `Sans9` are 20 and three are 30,
+so dropping the face is what makes the column cost 2px instead of 14.
+
+#### What it costs, and only when it engages
+
+| | two-digit board | three-digit board |
+|---|---|---|
+| 320 one-line name, board of `FINAL`s | 81 | 79 |
+| 240 one-line name, board of `FINAL`s | 41 | 39 |
+| 240 two-line name, board of `FINAL`s | 110 | 100 |
+| 240 two-line name, photographed board | 97 | 87 |
+| 320 two-line name, photographed board | 177 | 167 |
+| one-line ceiling, 320 / 240 | 160 / 80 | 156 / 76 |
+| two-line ceiling, 320 / 240 | 217 / 137 | 207 / 127 |
+| score column, one-line / two-line | 28 / 20 | 30 / 30 |
+
+**A board with no three-digit score on it is untouched, in every figure.** That
+is the whole of why this is affordable: an NHL, NFL, MLB or soccer board never
+reaches the state, so every figure 15a through 15k carries is the figure that
+board still draws. Nothing the owner has photographed changes.
+
+**The 2px on the one-line row is the same 2px 15k spent**, and for the same
+reason: the names split what the row has left. The 10px on the two-line row is
+larger because that row has one name rather than two, so it pays the whole
+column rather than half of it.
+
+**Every column edge is unchanged, in all three states.** `nameWidth + scoreWidth`
+is `(rowSpan - statusWidth - 3 * kBoardColumnGap) / 2`, which has no score width
+in it, so `homeNameLeft` is 129 and `homeScoreRight` 238 on a 320px board of
+`FINAL`s whether the score column is 0, 28 or 30. The separation is two gaps plus
+the row's leftover pixel at all three. A three-digit board draws on the same grid
+as a two-digit one, and the digits are the only thing that moved.
+
+#### What a reader loses, said rather than left to be found
+
+**A basketball board's scores are the size of its team names.** On a one-line row
+the score has drawn at `Sans12` against `Sans9` names since the card was written,
+which is 29px of face against 22, and that is the emphasis a scoreboard puts on
+the number. A three-digit board gives that up: the score drops to the names' own
+face and the row reads flatter. The two-line portrait row already did this in 15j
+and the owner has photographed it; the landscape row has not been seen this way.
+
+**`Hurricanes` is cut on a portrait board that has a three-digit score.** The
+240px two-line name goes 97 to 87 and `Hurricanes` is 94. No hockey board reaches
+the state, so that pairing cannot arise on the board 15j photographed; what it
+means is that the 97 that section won is 87 for basketball. Of 31 NBA names, 28
+fit 87 against 29 at 97, so exactly one name crosses the line: `Mavericks` at 88.
+`Timberwolves` at 121 and `Trail Blazers` at 108 were cut at 97 already. On a
+board of `FINAL`s rather than one carrying a start time the name is 100, and
+those two are the only ones cut.
+
+**A 240px one-line board with three-digit scores cuts the widest start time.**
+The ceiling there falls from 80 to 76 and `12:00 AM` is 78. The 240px panel on
+the fleet is portrait and draws the two-line form, so no fielded board has this
+shape, and 15k's note about the one-line 240 row being arithmetic rather than a
+panel applies here too. It is a real loss at a width nobody builds, recorded
+rather than hidden: the assertion that a scheduled row holds its start time is
+asserted for the two-digit state and stated as lost for the three-digit one.
+
+**Four digits still draw `...`.** 40px of `Sans9` against the 30px column, past
+every tier again. No sport this card carries sends one: basketball tops out in
+the 100s, cricket innings totals are three digits, and `kMaxScore`'s eight
+characters are a buffer bound rather than an expectation. Asserted as a gap the
+way three digits were, so closing it has to come through that assertion.
+
+#### The board's score state is one value with three cases
+
+`scoreless` was a `bool` and the question is now three-valued: no scores, two
+digits, three digits. Two bools would admit a fourth case that means nothing,
+scoreless and three-digit at once, and would let a caller swap them, which is the
+hazard the remark beside `boardColumns()` already records about an `int`
+converting to `bool` without a diagnostic. So it is an `enum class`:
+
+```cpp
+enum class BoardScores : uint8_t { None, TwoDigit, ThreeDigit };
+```
+
+An `enum class` converts from nothing, so a forgotten or swapped argument stops
+the compile rather than drawing a wrong board. `boardScoreWidth()` reads it and
+owns the policy, which keeps the figures in this header where
+`ci/check-board-columns-call.sh` can go on forbidding the draw path from naming a
+constant.
+
+`boardHasNoScores()` becomes `boardScoreState()`, one fold over the rows
+returning one of the three, beside the fold that measures the widest status.
+`showSportsBoard()` reads it twice: once for the grid and once for the face.
+
+`App/CardColumns.h` is the arithmetic, `tests/card-columns-test.cpp` sweeps all
+three states at every width, `ci/check-board-columns-call.sh` holds the fold and
+the face, and TEST_PLAN.md section 18j has the mutations.

@@ -3607,19 +3607,36 @@ int widestBoardStatus(const SportsBoardRow* rows, uint8_t count) {
   return widest;
 }
 
-/// Whether the board released both score columns, which needs every row of it
-/// to have reported neither side.
+/// What the board's scores ask of the two score columns: nothing, a two-digit
+/// column, or the wider one a three-digit score needs.
 ///
 /// A row's own question in section 15h and the board's here. One game under way
-/// gives all four rows a score column, and the rows with no score draw nothing
-/// into theirs, which is what keeps the digits in one column down the card.
-bool boardHasNoScores(const SportsBoardRow* rows, uint8_t count) {
+/// gives all four rows a score column, one score over 99 gives all four rows
+/// the wider one, and the rows with no score draw nothing into theirs, which is
+/// what keeps the digits in one column down the card.
+///
+/// The longest score STRING on the board decides it, not the largest number: a
+/// score arrives as text and what has to fit the column is the text. Three
+/// characters or more is BoardScores::ThreeDigit, which is also what a
+/// four-character score gets. That column does not hold one, and
+/// TEXT_LAYOUT_DESIGN.md section 15l records that as the remaining gap rather
+/// than inventing a fourth state nothing can draw.
+BoardScores boardScoreState(const SportsBoardRow* rows, uint8_t count) {
+  size_t longest = 0;
   for (uint8_t i = 0; i < count; ++i) {
-    if (rows[i].awayScore[0] != '\0' || rows[i].homeScore[0] != '\0') {
-      return false;
+    const size_t away = strlen(rows[i].awayScore);
+    const size_t home = strlen(rows[i].homeScore);
+    if (away > longest) {
+      longest = away;
+    }
+    if (home > longest) {
+      longest = home;
     }
   }
-  return true;
+  if (longest == 0) {
+    return BoardScores::None;
+  }
+  return longest >= 3 ? BoardScores::ThreeDigit : BoardScores::TwoDigit;
 }
 
 /// The left brace that joins a two-line scoreboard row, so the pair reads as
@@ -3750,10 +3767,20 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
   // What the board spends on its status column it takes off every name on it,
   // down to the floor boardMaxStatusWidth() is derived from. boardColumnsForBoard()
   // and TEXT_LAYOUT_DESIGN.md section 15i have the figures and the trade.
-  const bool scoreless = boardHasNoScores(rows, count);
+  // The board's score state as well as its widest status, because a score over
+  // 99 needs a wider column than two digits and every row of the board draws
+  // into the one it picks. Section 15l has what the wider one costs each name.
+  const BoardScores scores = boardScoreState(rows, count);
   const BoardColumns columns =
-      stacked ? boardStackedColumnsForBoard(kScreenW, scoreless, widestBoardStatus(rows, count))
-              : boardColumnsForBoard(kScreenW, scoreless, widestBoardStatus(rows, count));
+      stacked ? boardStackedColumnsForBoard(kScreenW, scores, widestBoardStatus(rows, count))
+              : boardColumnsForBoard(kScreenW, scores, widestBoardStatus(rows, count));
+
+  // Sans9 scores on a board carrying a three-digit one, on every row of it.
+  // Three digits of Sans12 are 42px and would take 14 off each name instead of
+  // 2; three of Sans9 are 30. The face is the BOARD's, not a row's or a score's,
+  // because a 105 drawn a tier below the 98 beside it is the defect section 15k
+  // is about, and picking the face per score would reintroduce it.
+  const bool bigScores = !stacked && scores != BoardScores::ThreeDigit;
 
   for (uint8_t i = 0; i < count; ++i) {
     const SportsBoardRow& row = rows[i];
@@ -3772,10 +3799,12 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     // Sans12 is 29px against Sans9's 22, and two Sans12 slots are 58 against a
     // 52px card, so a stacked score draws in its name's face on its name's
     // line. The 2px lift is what centres the taller face on the shorter one,
-    // and there is nothing to centre when both are Sans9.
-    const FontId scoreFont = stacked ? FontId::Sans9 : FontId::Sans12;
-    const int awayScoreY = stacked ? awayTextY : text - 2;
-    const int homeScoreY = stacked ? homeTextY : text - 2;
+    // and there is nothing to centre when both are Sans9 - which is the stacked
+    // row and now a three-digit board's one-line row as well, so the lift reads
+    // bigScores rather than the orientation.
+    const FontId scoreFont = bigScores ? FontId::Sans12 : FontId::Sans9;
+    const int awayScoreY = stacked ? awayTextY : (bigScores ? text - 2 : text);
+    const int homeScoreY = stacked ? homeTextY : (bigScores ? text - 2 : text);
 
     // FINAL, P3 and a start time are one value for the pair, so the status
     // sits between the two lines rather than on either of them. Its slot is

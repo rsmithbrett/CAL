@@ -58,8 +58,28 @@ one. One name moves across the line because of it: "Jets" is 36 pixels and the n
 one-line column is now 34, so a flat display showing that board shortens it. On a
 display standing on its end the names are untouched and all of them are spelled out.
 
-A score of 100 or more is still cut, and shows as "..." rather than a number. That
-needs a wider column and a smaller face together, and isn't in this release.
+### Scores over 99 show the number instead of three dots - App
+
+A score of 100 or more didn't fit any score column and was too wide for every text
+size the card can fall back to, so the row drew "..." where the number goes. Not a
+shortened number, nothing: a basketball board showed three dots on most of its rows.
+
+A board carrying a score over 99 now gives every score on it a wider column and
+draws them all one size down, which is what makes the wider column affordable. Three
+digits at the smaller size need 30 pixels where the full size needs 42. The whole
+board drops together, so no score on a card is a different size from the one beside
+it.
+
+The cost falls on the team names, and only on a board that actually has a score over
+99. A display lying flat gives each name 2 pixels less, 81 to 79 on a wide display
+and 41 to 39 on a narrow one. A display standing on its end gives its one name 10
+pixels less, 97 to 87, because that row has one name column rather than two. On a
+basketball board "Mavericks" shortens there where it used to fit, and "Timberwolves"
+and "Trail Blazers" were already too long for it. Hockey, football, baseball and
+soccer boards never reach a three-digit score, so nothing about them changes.
+
+A score of four digits or more still shows "...", and no sport this card carries
+sends one.
 
 ### A game's progress text is measured the way it's drawn - App
 

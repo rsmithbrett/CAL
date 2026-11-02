@@ -10,7 +10,8 @@
 # with no automated check at all, and these single-token changes to them each
 # draw a visibly wrong board with nothing anywhere firing:
 #
-#   boardColumnsForBoard(kScreenW, !scoreless, ..)  score digits through a name
+#   BoardScores::TwoDigit for a board carrying a 100  an ellipsis for a score
+#   BoardScores::ThreeDigit on every board         14px off every name for nothing
 #   kScreenW -> kScreenH                         the board laid out for the wrong
 #                                                panel, off the glass in profile
 #   rows[i].status -> rows[i].awayName           a 132px status column
@@ -46,15 +47,15 @@ say() {
 
 read_function() {
   awk -v name="$1" '
-    $0 ~ ("^(int|bool|void) " name "\\(") { inside = 1 }
-    inside                                { print }
-    inside && /^\}/                       { exit }
+    $0 ~ ("^(int|bool|void|BoardScores) " name "\\(") { inside = 1 }
+    inside                                            { print }
+    inside && /^\}/                                   { exit }
   ' "$TARGET"
 }
 
 BOARD=$(read_function showSportsBoard)
 WIDEST=$(read_function widestBoardStatus)
-NOSCORES=$(read_function boardHasNoScores)
+SCORESTATE=$(read_function boardScoreState)
 
 if [ -z "$BOARD" ]; then
   say "showSportsBoard() not found, so nothing below checked anything."
@@ -66,8 +67,8 @@ if [ -z "$WIDEST" ]; then
   exit 1
 fi
 
-if [ -z "$NOSCORES" ]; then
-  say "boardHasNoScores() not found, so the score state below checked nothing."
+if [ -z "$SCORESTATE" ]; then
+  say "boardScoreState() not found, so the score state below checked nothing."
   exit 1
 fi
 
@@ -227,22 +228,43 @@ fi
 # host test compiles App/Display.cpp, and four single-token changes to it each
 # release both 28px score columns on a board that is drawing digits.
 #
-# The predicate is `||` and not `&&`, which is the rule App/CardColumns.h states
-# in prose beside boardScoreWidth(): a game that reported one side's score is
-# not scoreless.
-if ! has "$NOSCORES" "rows\[i\]\.awayScore\[0\]!='\\\\0'||rows\[i\]\.homeScore\[0\]!='\\\\0'"; then
-  say "boardHasNoScores() does not test both score strings with ||. A row that reported one
-       side is not scoreless, so one of them being non-empty is what answers the question."
+# Both score strings are read, not one. A fold reading only the away side gives
+# a board whose three-digit score is on the home side the wrong state, which is
+# the rule App/CardColumns.h states in prose beside boardScoreWidth(): a game
+# that reported one side's score is not BoardScores::None.
+if ! has "$SCORESTATE" 'strlen(rows\[i\].awayScore)' ||
+   ! has "$SCORESTATE" 'strlen(rows\[i\].homeScore)'; then
+  say "boardScoreState() does not measure both score strings with strlen(). A row that
+       reported one side is not BoardScores::None, and the longest string on the board is
+       what the column has to hold."
 fi
 
-if ! has "$NOSCORES" 'for(uint8_ti=0;i<count;++i)'; then
-  say "boardHasNoScores() does not read every row. One game under way gives the whole board a
-       score column, so a row the fold skips is a column the board does not draw."
+if ! has "$SCORESTATE" 'for(uint8_ti=0;i<count;++i)'; then
+  say "boardScoreState() does not read every row. One game under way gives the whole board a
+       score column and one score over 99 gives it the wider one, so a row the fold skips is
+       a column the board draws wrong."
 fi
 
-if ! has "$NOSCORES" 'returnfalse;' || ! has "$NOSCORES" 'returntrue;'; then
-  say "boardHasNoScores() does not return false on a row with a score and true at the end.
-       The polarity is what picks the score columns, and nothing else reads this function."
+# The three answers, and the boundary between the last two. `>= 3` and not `> 3`
+# is what makes a three-character score reach the wider column; at `> 3` a 100
+# gets the two-digit column and draws an ellipsis, which is the defect section
+# 15l closed.
+if ! has "$SCORESTATE" 'if(longest==0){' || ! has "$SCORESTATE" 'returnBoardScores::None;'; then
+  say "boardScoreState() does not return BoardScores::None for a board whose score strings are
+       all empty. That is what releases both score columns."
+fi
+
+if ! has "$SCORESTATE" 'returnlongest>=3?BoardScores::ThreeDigit:BoardScores::TwoDigit;'; then
+  say "boardScoreState() does not return 'longest >= 3 ? BoardScores::ThreeDigit :
+       BoardScores::TwoDigit'. Three characters is where the wider column starts; at > 3 a
+       100 draws an ellipsis, and at >= 2 every board pays for a column it does not need."
+fi
+
+# And it keeps the longest rather than the last. A fold that assigns without
+# comparing passes every check above and reports the final row's score.
+if ! has "$SCORESTATE" 'if(away>longest){' || ! has "$SCORESTATE" 'if(home>longest){'; then
+  say "boardScoreState() does not keep the longer of each pair. Assigning without comparing
+       reports the last row's score rather than the widest on the board."
 fi
 
 # The two-line row, TEXT_LAYOUT_DESIGN.md section 15j. The same problem as
@@ -267,8 +289,8 @@ if ! has "$BOARD" 'stacked=kScreenH>kScreenW&&cardHeight>=2\*lineHeight'; then
        is drawn on a profile panel and only where two lines fit the card."
 fi
 
-if ! has "$BOARD" 'stacked?boardStackedColumnsForBoard(kScreenW,scoreless,widestBoardStatus(rows,count))'; then
-  say "the two-line grid is not boardStackedColumnsForBoard(kScreenW, scoreless,
+if ! has "$BOARD" 'stacked?boardStackedColumnsForBoard(kScreenW,scores,widestBoardStatus(rows,count))'; then
+  say "the two-line grid is not boardStackedColumnsForBoard(kScreenW, scores,
        widestBoardStatus(rows, count)) on the stacked branch. Swapped with the one-line call it
        lays a profile panel out for two name columns and a landscape one for a brace."
 fi
@@ -298,11 +320,34 @@ if ! has "$BOARD" 'statusY=stacked?awayTextY+lineHeight/2:text'; then
        time are one value for the game, so the status sits between the two lines."
 fi
 
-# The face each score draws in. Two Sans12 slots are 58px against a 52px card,
-# so a stacked score draws with its name.
-if ! has "$BOARD" 'scoreFont=stacked?FontId::Sans9:FontId::Sans12'; then
-  say "scoreFont is not 'stacked ? FontId::Sans9 : FontId::Sans12'. Sans12 is 29px and two of
-       them do not fit the profile card, so a two-line score draws in its name's face."
+# The face each score draws in, and the one decision that picks it. Two Sans12
+# slots are 58px against a 52px card, so a stacked score draws with its name;
+# three digits of Sans12 are 42px and would cost each name 14, so a three-digit
+# board draws its scores at Sans9 too. TEXT_LAYOUT_DESIGN.md section 15l.
+#
+# `bigScores` is read by the face and by the 2px lift that centres Sans12 on
+# Sans9, so one expression decides both and a board that drops the face cannot
+# keep the lift. The whole declaration, because `!stacked && scores ==` flipped
+# to `||` or to `!=` draws a three-digit board at Sans12 through its own names
+# and every check below still passes.
+if ! has "$BOARD" 'constboolbigScores=!stacked&&scores!=BoardScores::ThreeDigit;'; then
+  say "bigScores is not '!stacked && scores != BoardScores::ThreeDigit'. Sans12 is 29px and
+       two of them do not fit the profile card, and three digits of it are 42px against a
+       30px column, so both of those boards draw their scores at Sans9."
+fi
+
+if ! has "$BOARD" 'scoreFont=bigScores?FontId::Sans12:FontId::Sans9'; then
+  say "scoreFont is not 'bigScores ? FontId::Sans12 : FontId::Sans9'. The face is the board's
+       one decision, and reading anything else here lets the column and the face disagree."
+fi
+
+# The lift reads the same thing. It centres a 29px face on a 22px line and is
+# wrong by 2px wherever the score is already Sans9.
+if ! has "$BOARD" 'awayScoreY=stacked?awayTextY:(bigScores?text-2:text)' ||
+   ! has "$BOARD" 'homeScoreY=stacked?homeTextY:(bigScores?text-2:text)'; then
+  say "the score baselines are not 'stacked ? ...TextY : (bigScores ? text - 2 : text)'. The
+       2px lift centres Sans12 on a Sans9 line, so a board drawing Sans9 scores must not
+       take it."
 fi
 
 if ! printf '%s\n' "$BOARD" | awk '
@@ -333,15 +378,15 @@ fi
 # The layout: the panel it is on, the board's own score state, and the widest
 # status the board holds, in one call.
 if ! printf '%s\n' "$BOARD" | tr -d ' \n' |
-     grep -q 'boardColumnsForBoard(kScreenW,scoreless,widestBoardStatus(rows,count))'; then
-  say "the columns are not boardColumnsForBoard(kScreenW, scoreless, widestBoardStatus(rows, count)).
+     grep -q 'boardColumnsForBoard(kScreenW,scores,widestBoardStatus(rows,count))'; then
+  say "the columns are not boardColumnsForBoard(kScreenW, scores, widestBoardStatus(rows, count)).
        Those three arguments are what App/CardColumns.h's assertions were written against:
-       the panel it is on, whether any row of the board reported a score, and the widest
+       the panel it is on, what the widest score on it needs, and the widest
        status string on it."
 fi
 
-if ! printf '%s\n' "$BOARD" | tr -d ' \n' | grep -q 'scoreless=boardHasNoScores(rows,count)'; then
-  say "scoreless is not boardHasNoScores(rows, count). It is the board's question now and not
+if ! printf '%s\n' "$BOARD" | tr -d ' \n' | grep -q 'scores=boardScoreState(rows,count)'; then
+  say "scores is not boardScoreState(rows, count). It is the board's question and not
        a row's: one game under way gives every row of the card a score column."
 fi
 
