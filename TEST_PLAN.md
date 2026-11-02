@@ -2949,10 +2949,12 @@ are the other half, and those stop the build instead.
   TEXT_LAYOUT_DESIGN.md 15c had the identity stated without it. **The parity is
   the row's leftover and not the panel's**, which 18e found when the status
   width stopped always being even; the phrasing here held only while it was.
-- The first width whose name column clears the floor is 176 scoreless and 204
-  with scores, not the 174 and 202 the document named. Those two are where the
-  separation stops holding; the columns actually overlap below 162 and 190. Six
-  figures where the document had two.
+- The first width whose name column clears the floor is 176 scoreless and 208
+  with scores, not the 174 and 206 the document named. Those two are where the
+  separation stops holding; the columns actually overlap below 162 and 194. Six
+  figures where the document had two. The three "with scores" figures read 204,
+  202 and 190 until section 18i widened the score column by two pixels; the
+  scoreless three have no score column in them and did not move.
 - The 78px measurement, and that the 56px column does not hold the periods a
   provider sends. TEXT_LAYOUT_DESIGN.md 15g has those figures. That one was live
   and is fixed in 18e, by taking the column's width from the string rather than
