@@ -2,8 +2,9 @@
 # Holds showSportsBoard()'s call into App/CardColumns.h, and the two folds that
 # feed it, to the shape the arithmetic was proven against.
 #
-# App/CardColumns.h carries seventy-five static_asserts and
-# tests/card-columns-test.cpp sweeps every panel width from 28 to 1024 twice,
+# App/CardColumns.h carries ninety-nine static_asserts and
+# tests/card-columns-test.cpp sweeps every panel width from 28 to 1024 in all
+# three score states,
 # and between them no single-token change to that header moves a drawn pixel
 # without something firing. None of it reads App/Display.cpp. The arguments the
 # draw path hands those functions are therefore the one part of this layout
@@ -11,7 +12,8 @@
 # draw a visibly wrong board with nothing anywhere firing:
 #
 #   BoardScores::TwoDigit for a board carrying a 100  an ellipsis for a score
-#   BoardScores::ThreeDigit on every board         14px off every name for nothing
+#   BoardScores::ThreeDigit on every board         2px off every one-line name and
+#                                                10 off every two-line one, for nothing
 #   kScreenW -> kScreenH                         the board laid out for the wrong
 #                                                panel, off the glass in profile
 #   rows[i].status -> rows[i].awayName           a 132px status column
@@ -150,15 +152,34 @@ else
     say "drawnTextWidth() does not take its end from strlen(text). sizeof() on the pointer
        measures four bytes of every string."
   fi
-  # Both ends trimmed, which is what layoutText() drops. Without these a
-  # trailing control byte is charged a space advance it never draws.
-  if ! has "$DRAWN" 'while(from<to&&isBreakSpace(text\[from\])){'; then
-    say "drawnTextWidth() does not strip leading break space. layoutText() skips it rather
-       than drawing it, so measuring it charges pixels nothing puts on the panel."
+  # Both ends trimmed, which is what layoutText() drops, and each loop WITH ITS
+  # BODY. Pinning a loop header and not what it does is what let an adversarial
+  # pass turn `++from` into `++to`, which never terminates - `from < to` stays
+  # true while `to` grows and the same byte is re-read - on a path reached from
+  # every layoutLine() call in the binary. `--to` into `--from` underflows to
+  # SIZE_MAX, exits, and then reads text[-1]. Neither draws a wrong board; the
+  # first is a watchdog reset and the second is out of bounds.
+  if ! has "$DRAWN" 'while(from<to&&isBreakSpace(text\[from\])){++from;}'; then
+    say "drawnTextWidth()'s leading trim is not 'while (from < to &&
+       isBreakSpace(text[from])) { ++from; }'. layoutText() skips leading break space rather
+       than drawing it, and advancing anything but 'from' here does not terminate."
   fi
-  if ! has "$DRAWN" 'while(to>from&&isBreakSpace(text\[to-1\])){'; then
-    say "drawnTextWidth() does not strip trailing break space. A line ends at a word
-       boundary, so trailing break space is never drawn and must not be measured."
+  if ! has "$DRAWN" 'while(to>from&&isBreakSpace(text\[to-1\])){--to;}'; then
+    say "drawnTextWidth()'s trailing trim is not 'while (to > from &&
+       isBreakSpace(text[to - 1])) { --to; }'. A line ends at a word boundary, so trailing
+       break space is never drawn, and decrementing 'from' here underflows it."
+  fi
+  # The seed and the empty-slice guard. A 'from' of 1 drops the first glyph of
+  # every string in the binary, and '!=' for '==' returns 0 for every string
+  # that is not blank, which turns the fitting ladder off everywhere.
+  if ! has "$DRAWN" 'size_tfrom=0;'; then
+    say "drawnTextWidth() does not start its slice at 0. A seed above zero drops the first
+       glyph of every string measured."
+  fi
+  if ! has "$DRAWN" 'if(from==to){return0;}'; then
+    say "drawnTextWidth() does not return 0 for a slice that trimmed away to nothing. With
+       the test inverted every string that has ink in it measures zero, and layoutLine()
+       stops trying a smaller face for any of them."
   fi
 fi
 
@@ -193,6 +214,13 @@ else
        buffer[length] needs the +1, and without it a slice of exactly capacity bytes writes
        one past the end."
   fi
+  # And the terminator goes where the bound was checked for. buffer[0] instead
+  # of buffer[length] empties every string this file draws, and the bound check
+  # above is what makes the index safe, so the two belong together.
+  if ! has "$SLICE" "buffer\[length\]='\\\\0';"; then
+    say "copySlice() does not terminate at buffer[length]. Terminating anywhere else empties
+       the slice, and every string in this file is measured and drawn through it."
+  fi
 fi
 
 # And the fold keeps the widest of them, over every row, from nothing, and hands
@@ -200,7 +228,7 @@ fi
 # hold; `i < 1` is a board sized on row 0; a seed above zero is a board pinned
 # at whatever the seed asks for; returning anything else throws the fold away.
 # The host test reads App/CardColumns.h and can see none of the four.
-if ! has "$WIDEST" 'if(measured>widest)'; then
+if ! has "$WIDEST" 'if(measured>widest){widest=measured;}'; then
   say "widestBoardStatus() does not keep the larger measurement. Every row of the board draws
        into one column, so the column is sized against the widest string on the card."
 fi
@@ -262,9 +290,13 @@ fi
 
 # And it keeps the longest rather than the last. A fold that assigns without
 # comparing passes every check above and reports the final row's score.
-if ! has "$SCORESTATE" 'if(away>longest){' || ! has "$SCORESTATE" 'if(home>longest){'; then
-  say "boardScoreState() does not keep the longer of each pair. Assigning without comparing
-       reports the last row's score rather than the widest on the board."
+if ! has "$SCORESTATE" 'if(away>longest){longest=away;}' ||
+   ! has "$SCORESTATE" 'if(home>longest){longest=home;}'; then
+  say "boardScoreState() does not keep the longer of each pair as
+       'if (away > longest) { longest = away; }' and the same for home. Assigning without
+       comparing reports the last row's score; assigning the other side of the pair gives a
+       board whose long score is on one side the state of the other, which lays out a 28px
+       column and draws 40px of digits into it."
 fi
 
 # The two-line row, TEXT_LAYOUT_DESIGN.md section 15j. The same problem as
@@ -360,6 +392,23 @@ if ! printf '%s\n' "$BOARD" | awk '
        lcd.setFont(scoreFont);. The score is laid out for one face and has to be drawn in it."
 fi
 
+# And the names, which were the one pair of draws with no face pinned ahead of
+# them. The name column is measured for Sans9 in widestBoardStatus()'s face and
+# the eight-name claim in section 15j is a Sans9 figure, so a name drawn at
+# Sans12 is laid out for a column it does not fit: short names draw 29px tall
+# and long ones fall to Sans9 through the ladder and sit lower, which puts two
+# faces and two baselines on one board. An adversarial pass found this unpinned.
+if ! printf '%s\n' "$BOARD" | awk '
+  /^[[:space:]]*(\/\/|$)/                                       { next }
+  /layoutLine\(row\.awayName,/ && previous ~ /lcd\.setFont\(FontId::Sans9\);/ { found = 1 }
+  { previous = $0 }
+  END                                                           { exit found ? 0 : 1 }
+'; then
+  say "the line before showSportsBoard()'s 'layoutLine(row.awayName,' is not
+       lcd.setFont(FontId::Sans9);. The name column is sized in Sans9 and section 15j's
+       eight-name claim is a Sans9 figure, so the names have to be drawn in it."
+fi
+
 # And the brace, spanning both lines, only on a row that has two of them.
 if ! has "$BOARD" 'if(stacked){drawRowBrace(boardStackedBraceLeft(),awayTextY,homeTextY+lineHeight-1,'; then
   say "the brace is not drawRowBrace(boardStackedBraceLeft(), awayTextY, homeTextY + lineHeight - 1, ..)
@@ -424,14 +473,22 @@ fi
 # correctly and then drawing the home name at the away name's edge, or the
 # status into the name's width, is a wrong row that every other check here
 # passes: they all read how `columns` is built and none read how it is spent.
+# The alignment is in each pattern as well as the edge. BoardColumns' own
+# contract is that a name column takes its x as a LEFT edge and a score or
+# status column takes its x as a RIGHT edge, so Align::Left on a score draws up
+# to 30px of digits rightwards out of the block and through the home name that
+# sits 6px further on. An adversarial pass found that one unpinned.
 for pair in \
-  'row.awayName,columns.awayNameLeft,awayTextY,columns.nameWidth,:the away name' \
-  'row.homeName,columns.homeNameLeft,homeTextY,columns.nameWidth,:the home name' \
-  'row.awayScore,columns.awayScoreRight,awayScoreY,columns.scoreWidth,:the away score' \
-  'row.homeScore,columns.homeScoreRight,homeScoreY,columns.scoreWidth,:the home score' \
-  'row.status,columns.statusRight,statusY,columns.statusWidth,:the status'; do
-  want=${pair%%:*}
-  what=${pair##*:}
+  'row.awayName,columns.awayNameLeft,awayTextY,columns.nameWidth,sport.name,"board.away",Align::Left,|the away name' \
+  'row.homeName,columns.homeNameLeft,homeTextY,columns.nameWidth,sport.name,"board.home",Align::Left,|the home name' \
+  'row.awayScore,columns.awayScoreRight,awayScoreY,columns.scoreWidth,sport.score,"board.away.score",Align::Right,|the away score' \
+  'row.homeScore,columns.homeScoreRight,homeScoreY,columns.scoreWidth,sport.score,"board.home.score",Align::Right,|the home score' \
+  'row.status,columns.statusRight,statusY,columns.statusWidth,|the status'; do
+  # Split on '|' and not ':', because the patterns carry Align:: and ${pair%%:*}
+  # truncated each one at the first colon - which left the alignment unchecked
+  # and let Align::Right become Align::Left with this loop still passing.
+  want=${pair%%|*}
+  what=${pair##*|}
   if ! has "$BOARD" "layoutLine($(printf '%s' "$want" | sed 's/[][\.*^$]/\\&/g')"; then
     say "$what is not drawn at its own edge and its own width. The grid is worked out once and
        spent five times, and a field drawn into another field's column is a wrong row with

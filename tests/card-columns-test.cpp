@@ -81,10 +81,12 @@ constexpr int kWidestSweep = 1024;
 
 /// Every state of the board's scores, which is what each sweep below runs over.
 ///
-/// Three rather than the two `{true, false}` this replaced. A state added to
-/// the enum and not to this array is swept by nothing, which is the one way
-/// this list can be wrong, so the loop below counts it against the enum's own
-/// last value.
+/// Three rather than the two `{true, false}` this replaced. A state added to the
+/// enum and not to this array is swept by nothing, and an array that repeats one
+/// state sweeps two thirds of the behavior with every assertion in it still
+/// passing. Both of those are held below rather than by the length alone: an
+/// adversarial pass got a duplicated entry and an appended enumerator past a
+/// count check, because a count sees neither.
 constexpr BoardScores kAllScoreStates[] = {
     BoardScores::None,
     BoardScores::TwoDigit,
@@ -92,7 +94,27 @@ constexpr BoardScores kAllScoreStates[] = {
 };
 constexpr int kScoreStateCount = sizeof(kAllScoreStates) / sizeof(kAllScoreStates[0]);
 static_assert(kScoreStateCount == static_cast<int>(BoardScores::ThreeDigit) + 1,
-              "every BoardScores value is swept, which a state added to the enum would break");
+              "every BoardScores value is swept, which a state added before the last breaks");
+
+/// A name per state, as a switch with no default.
+///
+/// This is what catches a state APPENDED to BoardScores, which the count above
+/// cannot see: -Wswitch is in -Wall and ci/test-card-columns.sh compiles with
+/// -Werror, so a new enumerator stops this compile with "enumeration value not
+/// handled in switch" rather than being swept by nothing. Returning past the
+/// switch is unreachable and is there because a switch over every enumerator
+/// still falls off the end as far as the compiler's flow analysis goes.
+const char* scoreStateName(BoardScores scores) {
+  switch (scores) {
+    case BoardScores::None:
+      return "None";
+    case BoardScores::TwoDigit:
+      return "TwoDigit";
+    case BoardScores::ThreeDigit:
+      return "ThreeDigit";
+  }
+  return "unreachable";
+}
 
 /// Whether the even split of the leftover pixels came out above the floor. Every
 /// property that depends on an edge derived from the name width holds only here:
@@ -178,8 +200,11 @@ constexpr Score kScores[] = {
     {"21", 27, 20}, {"88", 26, 20}, {"99", 26, 20},
 };
 
-/// Three digits, which neither column holds and neither face does. Here so the
-/// gap is a figure in a test run rather than a sentence in a design document.
+/// Three digits. Neither of the two-digit columns holds them at either face,
+/// which is what section 15k recorded as a gap and 15l closed by giving them a
+/// column and a face of their own. Both figures are still read: the Sans9 one
+/// against the three-digit column it now fits, and the Sans12 one as the reason
+/// the face had to drop rather than the column widen to 42.
 constexpr Score kThreeDigitScores[] = {
     {"100", 40, 30},
     {"111", 42, 30},
@@ -234,6 +259,28 @@ int main() {
     // And two digits of score.
     assert(boardColumns(width, BoardScores::TwoDigit).scoreWidth == kBoardScoreWidth);
     assert(boardColumns(width, BoardScores::None).scoreWidth == 0);
+  }
+
+  // --- the sweep covers every state exactly once -----------------------------
+  //
+  // Each enumerator appears in kAllScoreStates once. A count alone passes an
+  // array that repeats a state and drops another, which takes that state out of
+  // every sweep below while every assertion in them still holds. The switch in
+  // scoreStateName() is what catches an appended enumerator; this is what
+  // catches a duplicated one.
+  {
+    for (const BoardScores wanted :
+         {BoardScores::None, BoardScores::TwoDigit, BoardScores::ThreeDigit}) {
+      int seen = 0;
+      for (const BoardScores scores : kAllScoreStates) {
+        if (scores == wanted) ++seen;
+      }
+      assert(seen == 1);
+    }
+    // And the three are three different things, read through the switch so a
+    // state whose name is missing cannot pass as another's.
+    assert(scoreStateName(BoardScores::None) != scoreStateName(BoardScores::TwoDigit));
+    assert(scoreStateName(BoardScores::TwoDigit) != scoreStateName(BoardScores::ThreeDigit));
   }
 
   // --- a score column holds the digits drawn into it -------------------------
@@ -448,7 +495,7 @@ int main() {
   assert(boardColumnsFor(240, BoardScores::None, 0).nameWidth == 97);
 
   // Section 15h's table, as equalities: the status width a measured string gets
-  // and the name column left beside it, at both panel widths in both states.
+  // and the name column left beside it, at both panel widths in the two states this table covers.
   struct MeasuredRow {
     int width;
     BoardScores scores;
@@ -508,7 +555,7 @@ int main() {
   assert(boardStatusWidthFor(240, BoardScores::None, kBoardWidestPeriodTextWidth) >=
          kBoardWidestPeriodTextWidth);
 
-  // The ceilings in 15h's own table, with the two scores ones four wider for
+  // The ceilings in 15h's own table, with the two scoreless ones four wider for
   // section 15k's floor: a scoreless row has no score column, so the floor's
   // two pixels off each name are all that reaches it.
   assert(boardMaxStatusWidth(320, BoardScores::None) == 216);
@@ -592,7 +639,7 @@ int main() {
     // The photographed board, both panels. FINAL at 55, P1 at 22 twice and a
     // 7:00 PM start time at 67, measured off the vendored FreeSansBold9pt7b
     // table by section 15a's method, which reproduces every 9pt figure in that
-    // document to the pixel. One row has scores, so the board is not scores
+    // document to the pixel. One row has scores, so the board is not scoreless
     // and all four rows draw a score column.
     const int photographed[] = {kBoardStateWordWidth, 22, 22, 67};
     int widestPhotographed = 0;
@@ -639,7 +686,7 @@ int main() {
   // once on the strength of that, so it is asserted rather than reasoned about
   // in a remark.
   //
-  // Both halves, at every swept width and in both states: the function is
+  // Both halves, at every swept width and in all three states: the function is
   // monotonic, and the column the widest string asks for is the widest column
   // any of the strings asks for.
   for (int width = 2 * (kCardMargin + kBoardRowInset); width <= kWidestSweep; ++width) {
@@ -730,7 +777,7 @@ int main() {
   // integer division and 49 pixels of leftover still give a 24px name.
   //
   // The two "with scores" figures moved by four with section 15k's score
-  // column, from 202 and 204; the scores pair has no score column in it and
+  // column, from 202 and 204; the scoreless pair has no score column in it and
   // did not move.
   assert(firstWidthClearOfFloor(BoardScores::None) == 176);
   assert(firstWidthClearOfFloor(BoardScores::TwoDigit) == 208);
@@ -767,7 +814,7 @@ int main() {
   // The same range and the same properties, over eight measured widths rather
   // than the state's own two. One of the eight, 57, gives an odd status width
   // of 59, and 300 gives the ceiling, which is odd at every odd panel width the
-  // names set it at - above 406 scores and 462 with scores it is a flat 302,
+  // names set it at - above 406 scoreless and 462 with scores it is a flat 302,
   // and below 160 and 216 the even 56.
   // That is what the separation identity needed: every status width in the
   // header was even until one was measured off a glyph table, so the leftover
@@ -1038,7 +1085,7 @@ int main() {
   assert(stackedSeparation(142, BoardScores::TwoDigit) <= 0);
   assert(stackedSeparation(146, BoardScores::None) <= 0);
 
-  // Both shipped panels are clear of all of it, in both states.
+  // Both shipped panels are clear of all of it, in all three states.
   for (const int width : {320, 240}) {
     for (const BoardScores scores : kAllScoreStates) {
       assert(stackedFloorClear(width, scores));
@@ -1107,27 +1154,76 @@ int main() {
     assert(cutOnlyByTheWiderColumn == 1);
 
     // Every column edge is where the two-digit board put it, in all three
-    // states, because the name and the score column sum to a figure with no
-    // score width in it. This is the identity 15l rests on, swept rather than
-    // asserted at one width.
+    // states, wherever the three give the status column the same width. The
+    // identity is `nameWidth + scoreWidth == (rowSpan - statusWidth - 3*gap)/2`,
+    // which has no score width in it, and the doubled score width is even so
+    // the halving truncates the same way.
+    //
+    // Swept over the status MEASUREMENT as well as the width, because the status
+    // width is itself state-dependent at the ceiling: a wider score column means
+    // a lower ceiling, so above the narrowest of the three the states hand their
+    // status columns different widths and the edges part with them. A sweep that
+    // fixed the measurement at 55 asserted the unscoped claim and could not see
+    // that, which a review found.
     for (int width = 2 * (kCardMargin + kBoardRowInset); width <= kWidestSweep; ++width) {
-      const BoardColumns two = boardColumnsForBoard(width, BoardScores::TwoDigit, 55);
-      const BoardColumns three = boardColumnsForBoard(width, BoardScores::ThreeDigit, 55);
-      const BoardColumns none = boardColumnsForBoard(width, BoardScores::None, 55);
-      if (two.nameWidth <= kBoardMinNameWidth || three.nameWidth <= kBoardMinNameWidth ||
-          none.nameWidth <= kBoardMinNameWidth) {
-        continue;
+      for (const int measured : {0, 37, 55, 56, 57, 74, 78, 94, 97, 144, 300}) {
+        const BoardColumns two = boardColumnsForBoard(width, BoardScores::TwoDigit, measured);
+        const BoardColumns three = boardColumnsForBoard(width, BoardScores::ThreeDigit, measured);
+        const BoardColumns none = boardColumnsForBoard(width, BoardScores::None, measured);
+        if (two.nameWidth <= kBoardMinNameWidth || three.nameWidth <= kBoardMinNameWidth ||
+            none.nameWidth <= kBoardMinNameWidth) {
+          continue;
+        }
+
+        // Each state spends the whole row it has, whatever its status column
+        // came out at. That is the unconditional part, and it is what makes the
+        // edges a question about the status width alone.
+        const int band = two.statusRight - two.awayNameLeft;
+        for (const BoardColumns& c : {two, three, none}) {
+          assert(2 * c.nameWidth + 2 * c.scoreWidth + c.statusWidth + 3 * kBoardColumnGap <= band);
+          assert(c.statusRight - c.awayNameLeft == band);
+        }
+
+        if (two.statusWidth == three.statusWidth) {
+          assert(two.nameWidth + two.scoreWidth == three.nameWidth + three.scoreWidth);
+          assert(three.scoreWidth - two.scoreWidth == 2);
+          assert(two.nameWidth - three.nameWidth == 2);
+          assert(three.homeNameLeft == two.homeNameLeft);
+          assert(three.homeScoreRight == two.homeScoreRight);
+          assert(three.awayScoreRight == two.awayScoreRight);
+        }
+        if (none.statusWidth == two.statusWidth) {
+          assert(none.homeNameLeft == two.homeNameLeft);
+          assert(none.homeScoreRight == two.homeScoreRight);
+        }
       }
-      assert(three.homeNameLeft == two.homeNameLeft);
-      assert(three.homeScoreRight == two.homeScoreRight);
-      assert(three.awayScoreRight == two.awayScoreRight);
-      assert(none.homeNameLeft == two.homeNameLeft);
-      assert(none.homeScoreRight == two.homeScoreRight);
-      // And the wider column came out of the name beside it and nothing else.
-      assert(two.nameWidth + two.scoreWidth == three.nameWidth + three.scoreWidth);
-      assert(three.scoreWidth - two.scoreWidth == 2);
-      assert(two.nameWidth - three.nameWidth == 2);
     }
+
+    // And where the boundary is, at the two fielded shapes and the one that is
+    // arithmetic. Above these measurements the three states' status columns
+    // differ and so do their edges. 144 is the widest eight characters the Sans9
+    // table makes and Sports::kMaxPeriodLength is 8, so the 320px landscape row
+    // cannot part at all and nothing a provider sends reaches the other two:
+    // OVERTIME, the widest real period, is 97.
+    struct Boundary {
+      int panel;
+      int firstPartingMeasurement;
+    };
+    const Boundary kOneLineBoundaries[] = {{320, 155}, {240, 75}};
+    for (const Boundary& boundary : kOneLineBoundaries) {
+      const int below = boundary.firstPartingMeasurement - 1;
+      assert(boardColumnsForBoard(boundary.panel, BoardScores::None, below).homeNameLeft ==
+             boardColumnsForBoard(boundary.panel, BoardScores::ThreeDigit, below).homeNameLeft);
+      const int at = boundary.firstPartingMeasurement;
+      assert(boardColumnsForBoard(boundary.panel, BoardScores::None, at).homeNameLeft !=
+             boardColumnsForBoard(boundary.panel, BoardScores::ThreeDigit, at).homeNameLeft);
+    }
+    // The 320px landscape board's boundary is past what the glyph table can
+    // make, which is what says it cannot part in service.
+    assert(kOneLineBoundaries[0].firstPartingMeasurement > 144);
+    // And no real period reaches the 240px two-line row's boundary either.
+    assert(boardStackedColumnsForBoard(240, BoardScores::None, 97).homeNameLeft ==
+           boardStackedColumnsForBoard(240, BoardScores::ThreeDigit, 97).homeNameLeft);
   }
 
   std::cout << "PASS: scoreboard columns - the design document's two tables, the measured "

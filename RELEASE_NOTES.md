@@ -78,8 +78,8 @@ basketball board "Mavericks" shortens there where it used to fit, and "Timberwol
 and "Trail Blazers" were already too long for it. Hockey, football, baseball and
 soccer boards never reach a three-digit score, so nothing about them changes.
 
-A score of four digits or more still shows "...", and no sport this card carries
-sends one.
+A score of four digits or more still doesn't fit, and shows its first digit and three
+dots - 1000 reads as "1...". No sport this card carries sends one.
 
 ### A game's progress text is measured the way it's drawn - App
 

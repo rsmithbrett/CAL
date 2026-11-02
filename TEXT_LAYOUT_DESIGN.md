@@ -2841,12 +2841,38 @@ reason: the names split what the row has left. The 10px on the two-line row is
 larger because that row has one name rather than two, so it pays the whole
 column rather than half of it.
 
-**Every column edge is unchanged, in all three states.** `nameWidth + scoreWidth`
-is `(rowSpan - statusWidth - 3 * kBoardColumnGap) / 2`, which has no score width
-in it, so `homeNameLeft` is 129 and `homeScoreRight` 238 on a 320px board of
-`FINAL`s whether the score column is 0, 28 or 30. The separation is two gaps plus
-the row's leftover pixel at all three. A three-digit board draws on the same grid
-as a two-digit one, and the digits are the only thing that moved.
+**Every column edge is unchanged wherever the three states give the status column
+the same width.** `nameWidth + scoreWidth` is
+`(rowSpan - statusWidth - 3 * kBoardColumnGap) / 2`, which has no score width in
+it, and the doubled score width is even so the halving truncates the same way. So
+`homeNameLeft` is 129 and `homeScoreRight` 238 on a 320px board of `FINAL`s
+whether the score column is 0, 28 or 30, and the separation is two gaps plus the
+row's leftover pixel at all three.
+
+**The qualifier is load-bearing, because the status width is itself
+state-dependent at the ceiling.** A wider score column means a lower ceiling, so
+once a board's widest status measures more than the narrowest of the three
+ceilings allows, the three states hand their status columns different widths and
+the edges part with them. The first measurement at which that happens:
+
+| row | parts above a status measuring | widest a provider can send |
+|---|---|---|
+| 320 one-line | 155 | 144 |
+| 240 one-line | 75 | 144 |
+| 240 two-line | 126 | 144 |
+
+144 is the widest eight characters the `Sans9` table can make, from 15h, and
+`Sports::kMaxPeriodLength` is 8. So on the 320px landscape board the edges cannot
+part at all, and on the two fielded shapes nothing a provider sends reaches the
+band: `OVERTIME`, the widest real period, is 97. The 240px one-line row is the
+exception and `6TH INN` at 74 is a pixel under its boundary - which is arithmetic
+rather than a panel, because the 240px panel is portrait and draws two lines.
+
+So the claim a reader should carry is the scoped one: a three-digit board draws
+on the same grid as a two-digit one for every string a provider sends, and the
+digits are the only thing that moved. `tests/card-columns-test.cpp` sweeps the
+identity over width and status measurement together and finds that boundary
+rather than asserting the unscoped version at one status.
 
 #### What a reader loses, said rather than left to be found
 
@@ -2860,8 +2886,8 @@ and the owner has photographed it; the landscape row has not been seen this way.
 **`Hurricanes` is cut on a portrait board that has a three-digit score.** The
 240px two-line name goes 97 to 87 and `Hurricanes` is 94. No hockey board reaches
 the state, so that pairing cannot arise on the board 15j photographed; what it
-means is that the 97 that section won is 87 for basketball. Of 31 NBA names, 28
-fit 87 against 29 at 97, so exactly one name crosses the line: `Mavericks` at 88.
+means is that the 97 that section won is 87 for basketball. Of the 30 NBA
+nicknames, 27 fit 87 against 28 at 97, so exactly one crosses: `Mavericks` at 88.
 `Timberwolves` at 121 and `Trail Blazers` at 108 were cut at 97 already. On a
 board of `FINAL`s rather than one carrying a start time the name is 100, and
 those two are the only ones cut.
@@ -2874,11 +2900,36 @@ panel applies here too. It is a real loss at a width nobody builds, recorded
 rather than hidden: the assertion that a scheduled row holds its start time is
 asserted for the two-digit state and stated as lost for the three-digit one.
 
-**Four digits still draw `...`.** 40px of `Sans9` against the 30px column, past
-every tier again. No sport this card carries sends one: basketball tops out in
-the 100s, cricket innings totals are three digits, and `kMaxScore`'s eight
-characters are a buffer bound rather than an expectation. Asserted as a gap the
-way three digits were, so closing it has to come through that assertion.
+**A two-digit negative score drops the whole board's face.** The fold keys on the
+longest score STRING, so `-10` is three characters and puts the board in the
+three-digit state: 30px columns, `Sans9` scores, 2px off each one-line name or 10
+off the two-line one, for a board whose largest number is 10. The string is what
+has to fit the column, which is why the fold is written that way, and the cost is
+the same 2px any three-character score pays. None of the five registered sports
+sends a negative, and `-1` is `Sports::kNoScore` and draws nothing, so this is
+reachable through the wire rather than through a provider. A fold that measured
+digits instead would mis-size the column for `0-0` the other way.
+
+**The single-game card still draws a three-digit score at `Sans18`.** This
+section is about `showSportsBoard()`. `showSportsCard()` has its own 76px score
+column and draws at `Sans18`, so on one rotation the same 105 is 56px of face on
+`sportsteam` and 22px on `sportsscores`. The consistency rule this section
+applies is within a row and within a board; across the two cards of the family
+there isn't one, and nothing here gives them one. No `Sans18` digit figure exists
+anywhere in this repository, so whether three of them fit that 76px column is
+unmeasured - the fitting ladder would drop them to `Sans12` at 42px before
+reaching an ellipsis either way.
+
+**Four digits still ellipsize, and draw `1...`.** 40px of `Sans9` against the
+30px column, past every tier again, so `layoutText()` backs characters off until
+the line plus the mark fits. At `Sans9` that lands one digit in: `1000` draws
+`1...` at 22px and `32767` draws `3...`. Not the bare `...` a three-digit score
+drew before this section, which is what the 28px `Sans12` column backed off to,
+and that difference is the only thing the wider column buys a four-digit score.
+No sport this card carries sends one: basketball tops out in the 100s, cricket
+innings totals are three digits, and `kMaxScore`'s eight characters are a buffer
+bound rather than an expectation. Asserted as a gap the way three digits were,
+so closing it has to come through that assertion.
 
 #### The board's score state is one value with three cases
 

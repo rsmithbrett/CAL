@@ -3674,7 +3674,7 @@ to 44. `App/Display.cpp` gains one function and no `static_assert`. Every host
 script passes by its own `PASS:` or `Passed!` line, read off each runner rather
 than off an exit code.
 
-Eight of those 193 asserts and eight of the 44 checks were added after the three
+Thirty-eight of those asserts and eight of the checks were added after the three
 reviews, to close what the adversarial pass got past. The table further down
 says which.
 
@@ -3810,9 +3810,11 @@ replaced is the other direction: a score column of 40 now fails where it passed.
   by the host test rather than argued about, and not looked at.
 - **A three-digit score is still cut**, 40px of `Sans12` into 28 and 30px of
   `Sans9` into 20, past every tier the ladder has, so `layoutLine()` falls
-  through to a mid-word break and draws `10` for `105`. Asserted as the gap it
-  is in `kThreeDigitScores`. A basketball board is where it shows and nothing
-  here fixes it.
+  through to `layoutText()`, which backs characters off until the line plus the
+  mark fits and lands on a bare `...` with no digits in it. This bullet said it
+  drew `10` for `105` when it was written; section 15k corrected that and this
+  copy was missed. Asserted as the gap it is in `kThreeDigitScores`. A basketball
+  board is where it shows, nothing in 18i fixes it, and **section 18j does.**
 - **No host test compiles `App/Display.cpp`**, so `drawnTextWidth()` is held by
   a text gate and not by a run. The 5px a control byte costs is a figure in a
   design document and in this section; nothing executes
@@ -3911,9 +3913,9 @@ design document went in first, then the tests, then the code:
 
 **Counts, before and after this section.** `App/CardColumns.h` 75
 `static_assert` declarations to **99**; `grep -c static_assert` 78 to 102.
-`tests/card-columns-test.cpp` 193 `assert`s to **222**, and its sweeps run over
+`tests/card-columns-test.cpp` 193 `assert`s to **231**, and its sweeps run over
 three score states where they ran over two, so the swept combinations rose by
-half again. `ci/check-board-columns-call.sh` 44 text checks to **48**. Every host
+half again. `ci/check-board-columns-call.sh` 44 text checks to **52**. Every host
 script passes by its own `PASS:` or `Passed!` line.
 
 **The binary.** `arduino-cli`'s own line for App on esp32:
@@ -3974,6 +3976,59 @@ the header's assertions fire at compile time, so the sweep never executes. L14,
 L15 and L17 are the three that prove the three-digit block itself bites, and all
 three mutate a measured figure rather than a constant.
 
+#### Three reviews, and the twelve mutations they got past the checks
+
+Three separate agents, one review each: correctness against the design document,
+adversarial, and integration. All three read `ea42ce5` as well, which 18i left
+unreviewed, and all three re-derived the figures rather than reading them. The
+correctness pass rebuilt `text_width()` from scratch and reproduced 24 of this
+repository's figures before trusting it on a digit; the adversarial pass landed
+38 mutations.
+
+**No drawn-pixel defect was found in the code.** The arithmetic, the fold, the
+face, the lift and the trim all check out, and `ea42ce5`'s trim was checked
+exhaustively over 19,607 strings of length 1-5 across `{A, B, 0x20, 0x01, 0x7F,
+0x80, 0xC3}` with zero disagreements between `drawnTextWidth()` and the width of
+the line `layoutText()` builds.
+
+**What was found was twelve single-token changes the checks did not catch**, four
+of them serious. All twelve are closed and re-run:
+
+| what survived | why it mattered | what holds it now |
+|---|---|---|
+| `++from` to `++to` in the leading trim | **never terminates.** `from < to` stays true while `to` grows and the same byte is re-read, on a path every `layoutLine()` call reaches. A watchdog reset, not a wrong board. | the gate pins the loop with its body |
+| `--to` to `--from` in the trailing trim | `from` underflows to `SIZE_MAX`, the loop exits, and `copySlice()` then reads `text[-1]`. **Out of bounds.** | the gate pins that loop with its body |
+| `if (from == to)` to `!=` | every string with ink in it measures 0, so the fitting ladder is off for every card | the gate pins the guard and its return |
+| `size_t from = 0` to `= 1` | every measurement drops its first glyph | the gate pins the seed |
+| `copySlice()` terminating at `buffer[0]` | every string this file draws becomes empty | the gate pins the terminator beside the bound it needs |
+| `longest = home` to `= away` in the fold, and the mirror | a board whose long score is on one side gets the other side's state, which lays out 28px and draws 40px of digits into it | the gate pins both comparisons with their assignments |
+| `widest = measured` to `= 0` | no board draws a status column | the gate pins that assignment |
+| `Align::Right` to `Left` on a score | `awayScoreRight` is a right edge, so the digits paint rightwards through the home name 6px on | the field loop carries the alignment, and splits on `|` because `Align::` has colons in it |
+| the names drawn at `Sans12` | the name column is sized in `Sans9`, so two faces and two baselines land on one board | a `setFont` check before `layoutLine(row.awayName,` |
+| `kAllScoreStates` repeating a state | takes a state out of every sweep with every assertion in them still passing | each enumerator is counted once |
+| a `FourDigit` appended to `BoardScores` | falls through to the two-digit column with nothing firing, and a count check cannot see an append | `scoreStateName()` is a switch with no default, so `-Wswitch` under `-Werror` stops the compile |
+
+The field loop's delimiter is worth naming: the patterns now carry `Align::Right`,
+and `${pair%%:*}` truncated each one at the first colon, so the loop was checking
+up to `Align` and the alignment was unpinned by the very edit that added it. It
+splits on `|` now.
+
+**Four of the twelve were pre-existing**, not introduced by this section: the
+score alignment, the name face, and `copySlice()`'s terminator date from before
+`dbb5adb`, and the two trim loops came in with `ea42ce5`.
+
+**The documentation findings are the rest of the review**, and they were the bulk
+of it. Corrected: four digits draw `1...` and not the bare `...` four places said
+(the pre-15l three-digit case was the bare one); "every column edge is unchanged
+in all three states" was unscoped and is now stated with the boundary, which the
+host sweep finds rather than asserting past; the NBA count was 31 and 28-against-29
+where there are 30 nicknames and it is 27-against-28, with the one crossing name
+unchanged; `154px` for `174px` in a figure this branch edited; thirteen sentences
+the parameter rename mangled; two stale `static_assert` counts in `ci/`; a 14px
+cost in the gate's header that is 2px and 10px; a comment this section's own
+commit invalidated; and a remark citing the `int`-to-`bool` hazard the enum class
+closed, which now reads in the past tense.
+
 #### What 18j does not cover
 
 - **Nothing has been on glass**, and this section changes something the owner
@@ -3985,17 +4040,23 @@ three mutate a measured figure rather than a constant.
 - **`Hurricanes` is cut on a portrait board with a three-digit score.** 94px
   against the 87px name a three-digit board leaves. No hockey board reaches the
   state so the photographed board cannot show it, and the host test counts the
-  photographed eight against both columns rather than asserting a win. Of 31 NBA
-  names, 28 fit 87 against 29 at 97, so one name crosses: `Mavericks` at 88.
-  **Verified** off the glyph table, not on a device.
+  photographed eight against both columns rather than asserting a win. Of the 30
+  NBA nicknames, 27 fit 87 against 28 at 97, so one crosses: `Mavericks` at 88.
+  **Verified** off the glyph table, not on a device. The first count of this read
+  31 and 28 against 29, which double-listed the Blazers; the one name that
+  crosses is the load-bearing half and it did not move.
 - **A 240px one-line board with three-digit scores cuts the widest start time**,
   80 to 76 against `12:00 AM`'s 78. Asserted as the loss it is, in the header
   and in the host test's two branches, so closing it has to come through those
   lines. The 240px panel on the fleet is portrait and draws the two-line form,
   so no fielded board has this shape.
-- **Four digits still draw `...`**, 40px of `Sans9` against the 30px column.
-  Asserted as a gap the way three digits were in 18i. No sport this card carries
-  sends one.
+- **Four digits still ellipsize**, 40px of `Sans9` against the 30px column, and
+  they draw `1...` rather than the bare `...` a three-digit score drew before
+  this section: `layoutText()` backs characters off until the line plus the mark
+  fits, and at `Sans9` that keeps one digit. `1000` draws `1...` at 22px and
+  `32767` draws `3...`. **Verified** by simulating `layoutText()`'s ellipsis loop
+  against the glyph table. Asserted as a gap the way three digits were in 18i. No
+  sport this card carries sends one.
 - **No host test compiles `App/Display.cpp`**, so `boardScoreState()`, the face
   and the lift are held by the text gate rather than by a run. The gate is a
   substring matcher and says an expression is present, not that nothing else is.

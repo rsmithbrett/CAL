@@ -1157,11 +1157,19 @@ bool copySlice(char* buffer, size_t capacity, const char* text, size_t from, siz
 /// whose widest status was `FINAL\x01` took a 62px column instead of 56. An
 /// interior run is left alone, because copySlice() keeps it byte for byte.
 ///
-/// A string too long for the line buffer measures raw. Neither caller can
-/// reach that: a status is SportsBoardRow::kMaxStatus, which is 16, and
-/// layoutLine()'s own callers hand it names and stat values far inside 128. It
-/// is the answer that charges least rather than a correct one, because the raw
-/// width skips control bytes that the drawn line would spend a space on.
+/// A string whose trimmed slice is too long for the line buffer measures that
+/// slice raw, which is the one case where this does not predict the drawn width.
+/// It is reachable: qr.caption carries CardSpec.text, which holds up to 280
+/// characters and an operator can type a paragraph into. What it is NOT is the
+/// raw `text`, which would charge the leading and trailing break space this
+/// function exists to drop - 128 'M's between two spaces measures 2068 that way
+/// against the 1980 the panel draws, and over-charging is the direction that
+/// makes layoutLine() drop a tier for a string that fits.
+///
+/// A string that long overflows every box on either panel either way, so the
+/// comparison layoutLine() makes is already decided and layoutText() re-measures
+/// before it draws. The slice is what is measured because it is the closer of
+/// the two wrong answers, not because the answer matters here.
 int drawnTextWidth(const char* text) {
   if (text == nullptr || text[0] == '\0') {
     return 0;
@@ -1179,7 +1187,7 @@ int drawnTextWidth(const char* text) {
   }
   char buffer[kLayoutLineBytes];
   if (!copySlice(buffer, sizeof(buffer), text, from, to)) {
-    return lcd.textWidth(text);
+    return lcd.textWidth(text + from);
   }
   return lcd.textWidth(buffer);
 }

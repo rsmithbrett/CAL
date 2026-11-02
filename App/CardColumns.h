@@ -39,17 +39,17 @@ constexpr int kCardMargin = 10;
 /// What the board's scores need from the two score columns, which is the one
 /// input the layout takes beyond the panel width and the status string.
 ///
-/// Three cases rather than the `BoardScores scores` this replaced, because the
+/// Three cases rather than the `bool scoreless` this replaced, because the
 /// question is three-valued: a board where no row reported either side, one
 /// whose widest score is two digits, and one carrying a three-digit score.
 /// TEXT_LAYOUT_DESIGN.md section 15l is why the third exists, and what it costs.
 ///
 /// An enum class rather than a second bool beside the first. Two bools admit a
-/// fourth combination that means nothing - scores and three-digit at once -
-/// and let a caller swap them, which is the hazard the remark beside
-/// boardColumns() below already records about an int converting to bool without
-/// a diagnostic. An enum class converts from nothing, so a forgotten or swapped
-/// argument stops the compile rather than drawing a wrong board.
+/// fourth combination that means nothing - scoreless and three-digit at once -
+/// and let a caller swap them. That is the shape of the hazard the remark beside
+/// boardColumns() below records in the past tense, an argument that compiles and
+/// means something else. An enum class converts from nothing, so a forgotten or
+/// swapped argument stops the compile rather than drawing a wrong board.
 ///
 /// It is the BOARD's state and not a row's, for the reason
 /// boardColumnsForBoard() gives: one game under way gives all four rows a score
@@ -164,8 +164,11 @@ constexpr int kBoardWidestTwoDigitStackedScoreWidth = 20;
 ///
 /// kBoardWidestFourDigitScoreWidth is the same question one digit further out,
 /// and it is here so the gap is a figure a run reads rather than a sentence: 40
-/// is over the column, so a four-digit score draws an ellipsis the way a
-/// three-digit one did before 15l. No sport this card carries sends one.
+/// is over the column, so a four-digit score is ellipsized. What it draws is
+/// "1..." at 22px, one digit and the mark, rather than the bare "..." a
+/// three-digit score drew before 15l - layoutText() backs characters off until
+/// the line plus the mark fits, and at Sans9 that lands one digit in. No sport
+/// this card carries sends one.
 constexpr int kBoardThreeDigitScoreWidth = 30;
 constexpr int kBoardWidestFourDigitScoreWidth = 40;
 
@@ -305,13 +308,21 @@ constexpr BoardColumns boardColumnsFor(int screenW, BoardScores scores, int stat
 /// boardColumnsForBoard() below, and what reads this are the assertions at the
 /// bottom of this file and the host test.
 ///
-/// Its own name rather than a two-argument overload of that one. An int converts
-/// to bool without a diagnostic, so `boardColumns(240, measuredWidth)` written
-/// by somebody reaching for the measured form would compile, discard the
-/// measurement and return the scores layout - and every assertion in this
-/// file and every case in the host test would pass, because none of them reads
-/// the draw path. Two arities under one name is the shape that allows that;
-/// two names do not.
+/// Its own name rather than a two-argument overload of that one, and the reason
+/// is now historical. While the state was a `bool scoreless`, an int converted
+/// to it without a diagnostic, so `boardColumns(240, measuredWidth)` written by
+/// somebody reaching for the measured form compiled, discarded the measurement
+/// and returned the scoreless layout - and every assertion in this file and
+/// every case in the host test passed, because none of them reads the draw
+/// path. Two arities under one name is the shape that allowed that; two names
+/// do not.
+///
+/// BoardScores closed that particular door: an enum class converts from no int,
+/// so the mistake above stops the compile. The two names stay because the
+/// distinction they draw is still worth drawing - this one is the state's own
+/// default width and boardColumnsFor() takes a measured one - and because the
+/// hazard a reader should take from this remark is the general one, that an
+/// argument which compiles and means something else reports nothing.
 constexpr BoardColumns boardColumns(int screenW, BoardScores scores) {
   return boardColumnsFor(screenW, scores, boardDefaultStatusWidth(scores));
 }
@@ -484,7 +495,7 @@ constexpr int boardSeparation(int screenW, BoardScores scores) {
 /// `& 1` rather than `% 2` because the leftover goes negative on a panel too
 /// narrow to hold the row, where `%` gives -1 and this gives 1. Neither answer
 /// means anything there: the row is over budget and the kBoardMinNameWidth clamp
-/// has already taken over, which is below 154px scores and 206px with scores
+/// has already taken over, which is below 174px scoreless and 206px with scores
 /// and under every panel the fleet has. The host test skips that region for the
 /// same reason.
 constexpr int boardLeftoverPixel(int screenW, BoardScores scores, int statusWidth) {
@@ -639,7 +650,7 @@ static_assert(boardStackedStatusWidthFor(240, BoardScores::ThreeDigit, kBoardSta
 
 // The separation holds only while the kBoardMinNameWidth floor is not engaged:
 // the floor clamps the name width and nothing clamps the edges derived from it,
-// so below 174px scores and 206px with scores the separation falls under
+// so below 174px scoreless and 206px with scores the separation falls under
 // 2 * kBoardColumnGap, and below 162 and 194 the home block and the status
 // column overlap. All four are under every panel the fleet has, and these two
 // pairs are what says so at the two it has. The two "with scores" figures were
@@ -795,9 +806,9 @@ static_assert(boardColumnsForBoard(240, BoardScores::TwoDigit, kBoardStateWordWi
 // The one string 15h and 15i both record the profile board as unable to hold.
 // One kBoardNameFloor in the ceiling instead of two is the whole of the fix.
 static_assert(boardStackedMaxStatusWidth(240, BoardScores::TwoDigit) == 137, "240 two-line can spend 137");
-static_assert(boardStackedMaxStatusWidth(240, BoardScores::None) == 157, "240 two-line scores, 157");
+static_assert(boardStackedMaxStatusWidth(240, BoardScores::None) == 157, "240 two-line scoreless, 157");
 static_assert(boardStackedMaxStatusWidth(320, BoardScores::TwoDigit) == 217, "320 two-line can spend 217");
-static_assert(boardStackedMaxStatusWidth(320, BoardScores::None) == 237, "320 two-line scores, 237");
+static_assert(boardStackedMaxStatusWidth(320, BoardScores::None) == 237, "320 two-line scoreless, 237");
 static_assert(boardStackedColumnsForBoard(240, BoardScores::TwoDigit, kBoardWidestPeriodTextWidth).statusWidth ==
                   kBoardWidestPeriodTextWidth + kBoardStatusSlack,
               "HALFTIME gets the 96px column it asks for on a 240px two-line board");
@@ -849,7 +860,7 @@ static_assert(boardStackedColumnsFor(320, BoardScores::TwoDigit, kBoardStatusWid
 static_assert(boardStackedSeparationFor(240, BoardScores::TwoDigit, kBoardStatusWidth) == 2 * kBoardColumnGap,
               "240 two-line with scores keeps two gaps of air");
 static_assert(boardStackedSeparationFor(240, BoardScores::None, kBoardStartTimeWidth) == 2 * kBoardColumnGap,
-              "240 two-line scores keeps two gaps of air");
+              "240 two-line scoreless keeps two gaps of air");
 static_assert(boardStackedSeparationFor(241, BoardScores::TwoDigit, kBoardStatusWidth) == 2 * kBoardColumnGap,
               "and an odd panel width keeps two gaps as well, where the one-line row keeps 13");
 
