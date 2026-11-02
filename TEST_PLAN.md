@@ -3666,11 +3666,15 @@ went in first, then the tests, then the code, in that order:
 **Counts, before and after.** `App/CardColumns.h` 70 `static_assert`
 declarations to 75; `grep -c static_assert` reads 72 to 78, because two comment
 lines and then three name it in prose. `tests/card-columns-test.cpp` 173
-`assert`s to 185, in one binary whose own `PASS:` line is what
+`assert`s to 193, in one binary whose own `PASS:` line is what
 `ci/test-card-columns.sh` reads. `ci/check-board-columns-call.sh` 31 text checks
-to 36. `App/Display.cpp` gains one function and no `static_assert`. Every host
+to 44. `App/Display.cpp` gains one function and no `static_assert`. Every host
 script passes by its own `PASS:` or `Passed!` line, read off each runner rather
 than off an exit code.
+
+Eight of those 193 asserts and eight of the 44 checks were added after the three
+reviews, to close what the adversarial pass got past. The table further down
+says which.
 
 #### The mutations, and what caught each one
 
@@ -3715,6 +3719,82 @@ the same spirit as 18e's and 18f's. J is the one the gate did not have before
 this section: `layoutLine()`'s overflow test was the second caller reading raw
 bytes and nothing read it, so the check was added with the fix.
 
+#### Three reviews, and the regression two of them found
+
+Three separate agents, one review each: correctness against the design document,
+adversarial, and integration. Each re-derived the figures rather than reading
+them. They are what the rest of this section's second half comes from.
+
+**Two of the three independently found a regression the first version
+introduced, and the integration pass found it as well.** `drawnTextWidth()`
+copied the whole string through `copySlice()`, which turns every byte at or
+below 0x20 into a space, including the ones at the ends. `layoutText()` drops
+those: it skips leading break space before it starts a line, and a line ends at
+a word boundary, so trailing break space is never in the slice it draws. So the
+new measurement was 5px per leading or trailing control byte **over** the drawn
+width, where `lcd.textWidth()` had been exact for them. Measured: `FINAL<0x01>`
+measured 60 and drew 55; `7:30 PM<0x0A><0x0A>` measured 77 and drew 67; a status
+of one control byte measured 5 and drew nothing.
+
+It reached the panel through the one caller that does not measure again.
+`widestBoardStatus()` handed a board whose widest status was `FINAL<0x01>` a 62px
+column instead of 56 and took 3px off each name, for a string the header asserts
+in so many words costs the names no pixels. Two trailing control bytes on a
+start time put the 240px one-line row on `kBoardNameFloor`. **Verified** by a
+sixth reimplementation of `text_width()` run against both paths.
+
+`drawnTextWidth()` strips leading and trailing break space before it copies now,
+and the design document's claim that a control byte at either end costs nothing
+is a claim about the code rather than about `text_width()` alone. Two gate
+checks hold the two trim loops. The fix is **ready to review and not reviewed**:
+the three reviews above read the version without it.
+
+**Nine more mutations survived the first version's checks.** The adversarial
+pass landed 38 and 27 survived; the ones worth closing are closed:
+
+| what survived | what holds it now |
+|---|---|
+| `drawnTextWidth()` with the `!` dropped from its `copySlice()` guard, which returns the raw width on every string that fits the buffer | the gate pins the guard with its `!`, not the call |
+| `layoutLine()`'s `text[0] != '\0'` flipped to `==`, which turns the fitting ladder off for every real string | the gate pins the whole four-term predicate |
+| `strlen(text)` to `sizeof(text)`, which measures four bytes of every string | the gate pins `size_t to = strlen(text);` |
+| `drawnTextWidth(rows[i].status) / 2`, which halves every status column | the gate pins the whole statement including its semicolon |
+| `copySlice()`'s `? ' ' : c` dropped, which restores the mismatch from the other side | a gate check over `copySlice()`, matched on the raw text because `has()` strips the space out of the `' '` literal |
+| `isBreakSpace()`'s `<= 0x20` to `< 0x20`, after which nothing in the binary wraps | a gate check over `isBreakSpace()` |
+| `copySlice()`'s `length + 1 > capacity` to `length > capacity`, a one-byte overrun | a gate check over the bound |
+| nine of the fourteen figures in the new score tables, which were read only as a ceiling, a maximum and a count | `scoreWidthByRule()` checks every entry in both tables against the per-digit rule the tables encode: 13 per digit at `Sans12` and 14 for a `1`, 10 per digit at `Sans9` |
+| the three new score `static_assert`s, which were `>=` and passed when flipped to `<=` | they are `==`, so a column wider than the digits fails as well as one narrower |
+
+All thirteen of those re-run and are caught, each gated on `cmp` first and
+restored and `cmp`'d after. The score-table rule catches four on its own,
+including a `kOneExtraAdvance12` of 0, which is the glyph table's own claim
+about `1` stated as a figure a run reads.
+
+**One mutation still survives and no equality in this file resists it.**
+Flipping a `static_assert`'s `==` to `<=` passes, because both sides are equal.
+That is a mutation of the assertion rather than of the code, and it is true of
+every equality in `App/CardColumns.h`. What the `==` does buy over the `>=` it
+replaced is the other direction: a score column of 40 now fails where it passed.
+
+**What the reviews found and this section did not fix:**
+
+- `copySlice()`'s own correctness beyond those two checks, and `isBreakSpace()`'s
+  treatment of 0x7F, which is outside the predicate and so is not a break
+  opportunity. `2ND<0x7F>QTR` is one unbroken word and gets hard-broken rather
+  than wrapped. Pre-existing, not touched.
+- `LGFXBase::decodeUTF8()` is stateful across calls, so a string ending in a
+  truncated UTF-8 lead byte leaves the decoder mid-sequence and the next
+  measurement eats a byte. Pre-existing; `drawnTextWidth()` makes one
+  `textWidth()` call where the old code made one, so the call count is unchanged.
+- `drawnTextWidth()`'s fallback for a string longer than the buffer is
+  unreachable from either caller: a status is 16 bytes and `layoutLine()`'s
+  callers are far inside 128. The first version's remark claimed the fallback
+  could not change an answer, which is false for a string of mostly control
+  bytes; it now says the branch is unreachable instead, which is what holds.
+- `+128 bytes` of peak stack if the compiler keeps `drawnTextWidth()`'s buffer
+  live across the `layoutText()` call. The two buffers are never both live by
+  construction. Arithmetic against a 16384-byte loop task stack, not a
+  watermark.
+
 #### What 18i does not cover
 
 - **Nothing has been on glass.** Every figure is a glyph table, a `g++` run or a
@@ -3735,12 +3815,12 @@ bytes and nothing read it, so the check was added with the fix.
   a text gate and not by a run. The 5px a control byte costs is a figure in a
   design document and in this section; nothing executes
   `LGFXBase::text_width()` outside an `arduino-cli` build.
-- **`copySlice()`'s own substitution is read by no check.** Changing
-  `isBreakSpace(c) ? ' ' : c` back to `c` would restore the mismatch from the
-  other side and the gate would still pass, because it reads
-  `drawnTextWidth()`'s shape rather than what `copySlice()` does. It would also
-  break section 3's whitespace rule on every card that takes free text, which is
-  the only thing standing there.
+- **Three gate checks now stand over `copySlice()` and `isBreakSpace()`**, which
+  nothing read until `drawnTextWidth()` depended on them. They pin the
+  substitution, the `<= 0x20` boundary and the `length + 1 > capacity` bound.
+  What they do not read is the rest of either function, and the gate is a
+  substring matcher: it says the expression is present, not that nothing else
+  is.
 - **A control byte has never been sent.** The fix is for a payload the wire
   allows and no device has produced, so the before column of 15k's table is read
   off two routines rather than off a panel.

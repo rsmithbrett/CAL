@@ -1147,17 +1147,38 @@ bool copySlice(char* buffer, size_t capacity, const char* text, size_t from, siz
 /// a control byte is on the measuring path and the drawing path both. A second
 /// copy of that rule is the shape this defect already had.
 ///
-/// A string too long for the line buffer measures raw. That cannot change an
-/// answer: kLayoutLineBytes characters of the narrowest face in this binary is
-/// wider than any box on either panel, so a caller asking whether it overflows
-/// is already being told yes.
+/// Leading and trailing break space is stripped first, because layoutText()
+/// drops it rather than drawing it: it skips leading break space before it
+/// starts a line, and a line ends at a word boundary, so trailing break space
+/// is never in the slice that goes out. Substituting a space for it and
+/// measuring that charges 5px at Sans9 for a byte that puts no ink on the
+/// panel, which is this same defect pointing the other way - and on the one
+/// path that does not measure again before it spends the answer, so a board
+/// whose widest status was `FINAL\x01` took a 62px column instead of 56. An
+/// interior run is left alone, because copySlice() keeps it byte for byte.
+///
+/// A string too long for the line buffer measures raw. Neither caller can
+/// reach that: a status is SportsBoardRow::kMaxStatus, which is 16, and
+/// layoutLine()'s own callers hand it names and stat values far inside 128. It
+/// is the answer that charges least rather than a correct one, because the raw
+/// width skips control bytes that the drawn line would spend a space on.
 int drawnTextWidth(const char* text) {
   if (text == nullptr || text[0] == '\0') {
     return 0;
   }
+  size_t from = 0;
+  size_t to = strlen(text);
+  while (from < to && isBreakSpace(text[from])) {
+    ++from;
+  }
+  while (to > from && isBreakSpace(text[to - 1])) {
+    --to;
+  }
+  if (from == to) {
+    return 0;
+  }
   char buffer[kLayoutLineBytes];
-  const size_t length = strlen(text);
-  if (!copySlice(buffer, sizeof(buffer), text, 0, length)) {
+  if (!copySlice(buffer, sizeof(buffer), text, from, to)) {
     return lcd.textWidth(text);
   }
   return lcd.textWidth(buffer);
@@ -3778,10 +3799,10 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     layoutLine(row.homeName, columns.homeNameLeft, homeTextY, columns.nameWidth, sport.name,
                "board.home", Align::Left, kTransparentText);
 
-    // columns.scoreWidth rather than kBoardScoreWidth: the same 26 on a board
+    // columns.scoreWidth rather than kBoardScoreWidth: the same 28 on a board
     // that has scores, and 0 on a board where no row reported one. The constant
     // was the one figure in this loop the layout did not derive, so a block laid
-    // out for no score column could still have 26px of digits drawn into it,
+    // out for no score column could still have 28px of digits drawn into it,
     // through a team name. A row with no score of its own draws nothing into the
     // column the board gave it, which in the stacked form is a blank cell at the
     // end of each of the pair's two lines.

@@ -327,7 +327,7 @@ constexpr int boardStackedScoreWidth(bool scoreless) {
 /// two, because a two-line row has one name column where a one-line row has
 /// two. That single subtraction is what takes HALFTIME off the list of strings
 /// the 240px panel cannot hold: 94px asks for 96, the one-line ceiling there is
-/// 80, and this one is 135.
+/// 80, and this one is 137.
 constexpr int boardStackedMaxStatusWidth(int screenW, bool scoreless) {
   const int fromName = boardRowSpan(screenW) - kBoardBraceWidth -
                        boardStackedScoreWidth(scoreless) - 3 * kBoardColumnGap -
@@ -461,11 +461,16 @@ static_assert(kBoardScoreWidth == kBoardWidestTwoDigitScoreWidth,
               "a one-line score column is the widest two digits of Sans12, which is 11 at 28");
 static_assert(kBoardStackedScoreWidth == kBoardWidestTwoDigitStackedScoreWidth,
               "a two-line score column is the widest two digits of Sans9, which is any two at 20");
-static_assert(boardColumns(320, false).scoreWidth >= kBoardWidestTwoDigitScoreWidth,
+// Equalities here too. As `>=` these three are satisfied at every value the two
+// equalities above permit, so flipping one to `<=` passed and they reported
+// nothing about either panel - which is what the remark above
+// boardColumnsForBoard()'s assertions calls an assertion reading its own
+// definition back. An adversarial pass found all three.
+static_assert(boardColumns(320, false).scoreWidth == kBoardWidestTwoDigitScoreWidth,
               "the 320px panel's row holds a two-digit score with a 1 in it");
-static_assert(boardColumns(240, false).scoreWidth >= kBoardWidestTwoDigitScoreWidth,
+static_assert(boardColumns(240, false).scoreWidth == kBoardWidestTwoDigitScoreWidth,
               "the 240px panel's row holds a two-digit score with a 1 in it");
-static_assert(boardStackedScoreWidth(false) >= kBoardWidestTwoDigitStackedScoreWidth,
+static_assert(boardStackedScoreWidth(false) == kBoardWidestTwoDigitStackedScoreWidth,
               "and a two-line row holds two digits of the face it draws them in");
 
 // The separation holds only while the kBoardMinNameWidth floor is not engaged:

@@ -168,6 +168,31 @@ constexpr Score kThreeDigitScores[] = {
     {"199", 40, 30},
 };
 
+/// What a digit advances in each face, which is the rule both tables above
+/// encode. Read off the same glyph tables: at Sans12 every digit has an
+/// xAdvance of 13 except `1`, which has 14, and at Sans9 every digit has 10.
+///
+/// For a digit the xAdvance is also the wider of the two terms
+/// text_width() takes a maximum of - `1` at Sans12 is width 7 and xOffset 3, so
+/// max(14, 10) is 14, and `8` at Sans9 is width 10 and xOffset 0, so max(10, 10)
+/// is 10 - so a run of digits measures the sum of its advances exactly, with no
+/// bearing term on the last one. That is what lets the loop below check every
+/// figure in both tables instead of only the widest.
+constexpr int kDigitAdvance12 = 13;
+constexpr int kOneExtraAdvance12 = 1;
+constexpr int kDigitAdvance9 = 10;
+
+/// The width the rule above gives `digits`, for the test to read each table
+/// entry against. A figure that is a typo rather than a measurement fails here
+/// whether or not it happens to be the widest in its table.
+constexpr int scoreWidthByRule(const char* digits, int perDigit, int oneExtra) {
+  int total = 0;
+  for (const char* c = digits; *c != '\0'; ++c) {
+    total += perDigit + (*c == '1' ? oneExtra : 0);
+  }
+  return total;
+}
+
 }  // namespace
 
 int main() {
@@ -204,6 +229,30 @@ int main() {
   // score added to it that is wider than the constant fails here rather than
   // sitting in the table with nothing reading it.
   {
+    // Every figure in both tables against the per-digit rule first. Without
+    // this only the widest entry of each column carries any load: the checks
+    // below are a ceiling, a maximum and a count, so nine of the fourteen
+    // measurements could be any number at or under the column and nothing would
+    // read them. An adversarial pass over this file found exactly that.
+    for (const Score& score : kScores) {
+      assert(score.sans12 == scoreWidthByRule(score.digits, kDigitAdvance12, kOneExtraAdvance12));
+      assert(score.sans9 == scoreWidthByRule(score.digits, kDigitAdvance9, 0));
+    }
+    for (const Score& score : kThreeDigitScores) {
+      assert(score.sans12 == scoreWidthByRule(score.digits, kDigitAdvance12, kOneExtraAdvance12));
+      assert(score.sans9 == scoreWidthByRule(score.digits, kDigitAdvance9, 0));
+    }
+
+    // And the rule is the one the glyph tables carry, as the two figures the
+    // column widths are derived from. Written as the rule applied to "11" and
+    // not as the constants again, so a per-digit advance that is wrong fails
+    // here rather than agreeing with itself.
+    assert(scoreWidthByRule("11", kDigitAdvance12, kOneExtraAdvance12) ==
+           kBoardWidestTwoDigitScoreWidth);
+    assert(scoreWidthByRule("11", kDigitAdvance9, 0) == kBoardWidestTwoDigitStackedScoreWidth);
+    assert(kOneExtraAdvance12 > 0);
+    assert(scoreWidthByRule("00", kDigitAdvance12, kOneExtraAdvance12) == 26);
+
     int widestTwoDigit12 = 0;
     int widestTwoDigit9 = 0;
     int twoDigitScores = 0;

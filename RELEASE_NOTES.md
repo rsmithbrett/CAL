@@ -40,8 +40,40 @@ one fact about the pair rather than about either team. A game that hasn't starte
 keeps its blank where the score will go, on both of its lines.
 
 Still four games to a card. The score digits on a display standing on its end are one
-size smaller than they were, which is what makes room for the second line. A display
-lying flat is unchanged.
+size smaller than they were, which is what makes room for the second line.
+
+### Scores in the teens are drawn the same size as the rest - App
+
+A scoreboard gave each score a column 26 pixels wide, which holds two digits of the
+size it draws them at, except that a `1` is a pixel wider than the other nine digits.
+So a score of 10 through 19, or anything ending in a 1, didn't fit and was drawn one
+size down beside a full-size score on the same row. A game at 10-7 showed the 10
+smaller than the 7. Eighteen of the ninety two-digit scores did it, which is most
+hockey and football boards.
+
+The column is 28 pixels now, which holds any two digits whichever they are. Paying for
+it takes two pixels off each team name on a display lying flat, so a board of finished
+games goes from 83 pixels of name to 81 on a wide display and 43 to 41 on a narrow
+one. One name moves across the line because of it: "Jets" is 36 pixels and the narrow
+one-line column is now 34, so a flat display showing that board shortens it. On a
+display standing on its end the names are untouched and all of them are spelled out.
+
+A score of 100 or more is still cut, and shows as "..." rather than a number. That
+needs a wider column and a smaller face together, and isn't in this release.
+
+### A game's progress text is measured the way it's drawn - App
+
+A scoreboard works out how wide to make its status column by measuring the widest
+status on the card. If the server sent a progress label with a stray control
+character in it, the measurement skipped that character and the drawing turned it into
+a space, so the column came out narrower than the text put into it and the text was
+shortened to fit. "2ND QTR" with a stray character between the words came out as
+"2ND...". Nothing recorded it, because shortening text is the ordinary case for a long
+team name.
+
+The measurement reads the text the way the panel draws it now. No device has been seen
+sending such a label, so this is a shape the server could send rather than something
+anybody watched happen.
 
 ## v2026.11.01.0005
 

@@ -108,10 +108,15 @@ fi
 # into a space, which is 5px at Sans9. A column sized off the raw bytes is
 # narrower than the string drawn into it, and the row then ellipsizes a status
 # that was measured as fitting. TEXT_LAYOUT_DESIGN.md section 15k.
-if ! printf '%s\n' "$WIDEST" | tr -d ' \n' | grep -q 'drawnTextWidth(rows\[i\]\.status)'; then
-  say "widestBoardStatus() does not measure drawnTextWidth(rows[i].status). The column holds
-       the status as the draw path builds it, and lcd.textWidth() charges nothing for a
-       control byte that copySlice() then draws as a space."
+# The whole statement including its semicolon, not the call as a substring. A
+# substring match passes anything wrapped around the call - `drawnTextWidth(..)
+# / 2` halves every status column on every board and satisfies a grep for the
+# call - and an adversarial pass found exactly that.
+if ! has "$WIDEST" 'constintmeasured=drawnTextWidth(rows\[i\].status);'; then
+  say "widestBoardStatus()'s measurement is not exactly
+       'const int measured = drawnTextWidth(rows[i].status);'. The column holds the status as
+       the draw path builds it, and arithmetic wrapped around the call is a column the
+       arithmetic in App/CardColumns.h was never proven against."
 fi
 
 # And drawnTextWidth() is that substitution rather than a second name for the raw
@@ -125,14 +130,67 @@ DRAWN=$(read_function drawnTextWidth)
 if [ -z "$DRAWN" ]; then
   say "drawnTextWidth() not found, so the measurement above cannot be the drawn one."
 else
-  if ! has "$DRAWN" 'copySlice(buffer,sizeof(buffer),text,0,length)'; then
-    say "drawnTextWidth() does not build its copy with copySlice(buffer, sizeof(buffer), text,
-       0, length). copySlice() is the substitution layoutText() draws through, and measuring
-       any other copy is a second rule to keep in step with it."
+  # The guard with its `!`, not the call. Dropping one character puts the raw
+  # measurement on the normal path and the copy on the long one, and a grep for
+  # the copySlice() call alone passes it. An adversarial pass found that too.
+  if ! has "$DRAWN" 'if(!copySlice(buffer,sizeof(buffer),text,from,to)){'; then
+    say "drawnTextWidth() does not guard on '!copySlice(buffer, sizeof(buffer), text, from,
+       to)'. copySlice() is the substitution layoutText() draws through, the slice is the
+       string with its leading and trailing break space off, and a dropped ! returns the raw
+       width on every string that fits the buffer."
   fi
   if ! has "$DRAWN" 'returnlcd.textWidth(buffer);'; then
     say "drawnTextWidth() does not return lcd.textWidth(buffer). Measuring the argument
        instead of the copy it just made is the raw width under a new name."
+  fi
+  # The length, because sizeof(text) on a pointer measures the first four bytes
+  # of every string and satisfies both checks above.
+  if ! has "$DRAWN" 'size_tto=strlen(text);'; then
+    say "drawnTextWidth() does not take its end from strlen(text). sizeof() on the pointer
+       measures four bytes of every string."
+  fi
+  # Both ends trimmed, which is what layoutText() drops. Without these a
+  # trailing control byte is charged a space advance it never draws.
+  if ! has "$DRAWN" 'while(from<to&&isBreakSpace(text\[from\])){'; then
+    say "drawnTextWidth() does not strip leading break space. layoutText() skips it rather
+       than drawing it, so measuring it charges pixels nothing puts on the panel."
+  fi
+  if ! has "$DRAWN" 'while(to>from&&isBreakSpace(text\[to-1\])){'; then
+    say "drawnTextWidth() does not strip trailing break space. A line ends at a word
+       boundary, so trailing break space is never drawn and must not be measured."
+  fi
+fi
+
+# The two primitives drawnTextWidth() now depends on, which nothing read before
+# it did. isBreakSpace() decides what a control byte is for the wrap, for the
+# substitution and now for the measurement, and copySlice()'s substitution is
+# the rule the measurement is supposed to agree with. Single-token changes to
+# either put the measure path and the draw path back out of step with nothing
+# firing, which is the defect TEXT_LAYOUT_DESIGN.md section 15k is about.
+BREAKSPACE=$(read_function isBreakSpace)
+if [ -z "$BREAKSPACE" ]; then
+  say "isBreakSpace() not found, so the break-space rule below checked nothing."
+elif ! has "$BREAKSPACE" 'returnstatic_cast<unsignedchar>(c)<=0x20;'; then
+  say "isBreakSpace() is not 'static_cast<unsigned char>(c) <= 0x20'. At < 0x20 a space stops
+       being a break opportunity and nothing in the binary wraps; wider, printable bytes are
+       drawn as spaces."
+fi
+
+SLICE=$(read_function copySlice)
+if [ -z "$SLICE" ]; then
+  say "copySlice() not found, so the substitution below checked nothing."
+else
+  # Matched on the raw text rather than through has(), which strips spaces and
+  # would read the ' ' literal as ''. The space is the whole substitution.
+  if ! printf '%s\n' "$SLICE" | grep -qF "buffer[i] = isBreakSpace(c) ? ' ' : c;"; then
+    say "copySlice() does not substitute a space for a break-space byte. That substitution is
+       what drawnTextWidth() measures and what the panel draws, and the two have to be the
+       same rule."
+  fi
+  if ! has "$SLICE" 'if(length+1>capacity){'; then
+    say "copySlice() does not check 'length + 1 > capacity'. The terminator it writes at
+       buffer[length] needs the +1, and without it a slice of exactly capacity bytes writes
+       one past the end."
   fi
 fi
 
@@ -167,7 +225,7 @@ fi
 
 # The board's score state, the same way. Its body is read by nothing else: no
 # host test compiles App/Display.cpp, and four single-token changes to it each
-# release both 26px score columns on a board that is drawing digits.
+# release both 28px score columns on a board that is drawing digits.
 #
 # The predicate is `||` and not `&&`, which is the rule App/CardColumns.h states
 # in prose beside boardScoreWidth(): a game that reported one side's score is
@@ -361,10 +419,15 @@ fi
 # Read off the file rather than through read_function(), which matches a leading
 # int, bool or void and layoutLine() returns a TextResult. Grepping the whole
 # file is enough here because `overflows` is declared once.
-if ! grep -q 'drawnTextWidth(text) > width' "$TARGET"; then
-  say "layoutLine()'s overflow test is not drawnTextWidth(text) > width. The ladder has to
-       compare the width the string is drawn at, or it skips a tier for the one class of
-       string that needs one. TEXT_LAYOUT_DESIGN.md section 15k."
+# The whole predicate, not the comparison. `text[0] != '\0'` flipped to `==`
+# leaves this grep matching and turns the ladder off for every real string,
+# which is the mechanism the score column half of section 15k depends on.
+if ! printf '%s\n' "$(cat "$TARGET")" | tr -d ' \n' |
+     grep -qF "width>0&&text!=nullptr&&text[0]!='\0'&&drawnTextWidth(text)>width;"; then
+  say "layoutLine()'s overflow test is not
+       'width > 0 && text != nullptr && text[0] != '\\0' && drawnTextWidth(text) > width'.
+       The ladder has to compare the width the string is drawn at, over every string rather
+       than the empty one. TEXT_LAYOUT_DESIGN.md section 15k."
 fi
 
 if [ "$(grep -c 'bool overflows =' "$TARGET")" != "1" ]; then
