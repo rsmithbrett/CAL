@@ -1479,8 +1479,14 @@ the header, still returns the figures in this table, and is what the original
 fourteen assertions and the host test read, so the table stays as the state's
 default width. 15h has the measured before-and-after.
 
+**The 26 below is 28 now.** Section 15k measured two digits of `Sans12` at 28
+where one of them is a `1`, so every "name" figure in this section's table that
+has a score column in it is two pixels narrower than it reads here: 83 is 81 and
+43 is 41. The scoreless rows are unaffected, because a scoreless row has no
+score column. 15k has the trade.
+
 ```cpp
-const int scoreWidth  = scoreless ? 0 : kBoardScoreWidth;    // 26
+const int scoreWidth  = scoreless ? 0 : kBoardScoreWidth;    // 28
 const int statusWidth = scoreless ? kBoardStartTimeWidth     // 80
                                   : kBoardStatusWidth;       // 56
 const int fixedWidth  = 2 * scoreWidth + statusWidth + 3 * kBoardColumnGap;
@@ -1747,8 +1753,9 @@ still gets nothing.
 
 `scoreless` is still an argument, and it still means both score strings are
 empty. It no longer picks the status width. It picks the two score columns, and
-through them the ceiling, because a row that isn't spending 52px on scores can
-spend more of the row on its status.
+through them the ceiling, because a row that isn't spending 56px on scores can
+spend more of the row on its status. 52 is what that pair cost at the 26px
+column; 15k has it at 28.
 
 #### The ceiling is a name floor, and the name floor is a judgement
 
@@ -1771,7 +1778,13 @@ figure in this section that isn't measured.** Two things fix it. It's 7px clear
 of `kBoardMinNameWidth`, where the layout's own clamp engages and 15c's
 separation stops holding. And it's the largest floor that still lets the 240px
 panel hand a start time the 80px a start time measures: at 32 the ceiling there
-is 78 and `12:00 AM` is cut again, which is the regression 15a is about. 15c's
+is 78 and `12:00 AM` is cut again, which is the regression 15a is about.
+
+**The second of those two is why the floor is 29 now.** It's a derivation with
+the score width inside it, and 15k corrected the score width to 28, which makes
+29 the largest floor that still hands a start time its 80px. The four ceilings
+above are then 216, 160, 136 and 80, and the clear of `kBoardMinNameWidth` is
+5px rather than 7. 15c's
 reason for spending names on the status applies to both doors. A name
 ellipsized to `Lightn...` is still the team. A start time ellipsized to
 `10:00...` is not a time, and `6TH...` is not a period.
@@ -1825,6 +1838,14 @@ records `v2026.10.31.0002` charging a flat 56 there and drawing 109px names at
 320 and 69 at 240. Those two figures come back in the "after" column, which is
 what the last paragraph of this section is about.
 
+**Read the thirteen "with scores" rows two pixels wide.** Section 15k widened
+the score column from 26 to 28 and re-derived `kBoardNameFloor` from 31 to 29,
+so every name in those rows is two narrower than it reads here and the three
+that stand on the floor read 29 rather than 31. The thirteen scoreless rows and
+every status column in the table are unchanged, and so is every edge: a name two
+narrower beside a score two wider starts the home block in the same place. 15k
+has the table and what it costs.
+
 | panel | state | status | measured | name before | status before | name after | status after |
 |---|---|---|---|---|---|---|---|
 | 320 | with scores | nothing sent | 0 | 83 | 56 | 111 | 0 |
@@ -1868,6 +1889,14 @@ whatever the row has left, so a name column is
 `(rowBudget - statusWidth) / 2`, and `statusWidth` is the string's own width
 plus 2 once it passes 56. The bounds that follow:
 
+Section 15k moves the "with scores" rows of this table too. Read 83 as 81 and 43
+as 41, the floor as 29 in all four rows, and each of the eight "with scores"
+per-string figures two narrower, down to 29 where the old figure was 31. The
+"scoreless" rows are the figures they are. The two widths at which a name first
+stands on the floor do not move: 157px of status on the 320px panel and 77 on
+the 240px one, because the score column and the floor each gave up two pixels
+and the name takes half of both.
+
 | panel | state | names while the status fits 56 | narrowest the ceiling allows | over the strings this document measures |
 |---|---|---|---|---|
 | 320 | with scores | 83, unchanged | 31 | 81 at a 57px status, 73 for `6TH INN`, 63 for `HALFTIME`, 61 for `OVERTIME` |
@@ -1875,16 +1904,19 @@ plus 2 once it passes 56. The bounds that follow:
 | 240 | with scores | 43, unchanged | 31 | 41, 33, 31, 31 |
 | 240 | scoreless | 69, up from 57 | 31 | 67, 59, 49, 47 |
 
-The narrowest a name column gets is 31, wherever the ceiling is the one the
-names set. On the 320px panel with scores that needs a status measuring 157px,
+The narrowest a name column gets is `kBoardNameFloor`, wherever the ceiling is
+the one the names set. That was 31 when this was written and 15k re-derived it
+to 29. On the 320px panel with scores that needs a status measuring 157px,
 which is more than the 144 the widest eight characters in the glyph table make,
 so nothing the server can send reaches it there. On the 240px panel with scores
 anything from 77px up lands on it, which is most of the periods in 15g.
 
-Below 216px with scores and 164px scoreless the ceiling is the
-`kBoardStatusWidth` clamp instead, and 31 stops being the floor: a 200px panel
-with scores draws 24px names, which is `kBoardMinNameWidth` and not this
-section's figure. No board is that narrow. The host test guards the equality
+Below 216px with scores and 160px scoreless the ceiling is the
+`kBoardStatusWidth` clamp instead, and the name floor stops being the floor: a
+200px panel with scores draws 24px names, which is `kBoardMinNameWidth` and not
+this section's figure. The scoreless width was 164 at the floor of 31 these
+paragraphs were written against; 216 is unchanged, because the score column and
+the floor moved by the same two pixels in opposite directions. No board is that narrow. The host test guards the equality
 with `ceiling > kBoardStatusWidth` for exactly that reason.
 
 The release note for `v2026.10.31.0002` was written about those name columns,
@@ -1894,10 +1926,12 @@ pays.
 
 **`HALFTIME` is still cut on the 240px panel.** 94px needs a 96px column, the
 ceiling there is 80, and reaching 96 would put the names at 24, which is
-`kBoardMinNameWidth`, where the clamp engages and the separation falls to 10
-against 15c's 12. Not an overlap: the home block and the status column touch at
-a panel width of 230 and cross below it, so a 240px panel asking for 96 draws a
-row that is wrong by 2px of air rather than one drawn through itself. That row
+`kBoardMinNameWidth`, where the clamp engages and the separation falls under
+15c's 12. Not an overlap: at the 28px score column 15k settled on, the home
+block and the status column touch at a panel width of 234 and cross below it, so
+a 240px panel asking for 96 draws a row that is wrong by 6px of air rather than
+one drawn through itself. At the 26px column these paragraphs were written
+against those two figures were 230 and 2px. That row
 has 212px for two names, two scores and a status, and it hasn't got the pixels. The 320px panel holds every period the eight-character
 buffer can carry.
 
@@ -2120,6 +2154,10 @@ already reached, so no name goes anywhere a row couldn't already go; what
 changed is how many rows go there together. The photographed board at 240px, and
 the worst case a provider can send at both widths:
 
+Two pixels wide on every row of it, for 15k's reason: the score column is 28 and
+not the 26 these were worked out at, so 36 is 34, 43 is 41, 76 is 74, 63 is 61
+and the two rows on the floor read 29. Every status column here is unchanged.
+
 | panel | board | widest status | status column | name per row | against 15h's per-row names |
 |---|---|---|---|---|---|
 | 240 | the photograph | `7:00 PM`, 67 | 69 | 36 | 43, 43, 43, 62 |
@@ -2299,8 +2337,14 @@ board still shows four games.
 
 So in profile the score draws in `Sans9` with the name. Two digits measure 20px
 there against 26 at `Sans12`, measured off the vendored glyph table by 9b's
-method, and `kBoardStackedScoreWidth` is that 20. Landscape keeps `Sans12` and
-its 26, and `kBoardScoreWidth` is not touched.
+method, and `kBoardStackedScoreWidth` is that 20. Landscape keeps `Sans12`, and
+`kBoardScoreWidth` is not touched here.
+
+**The 26 was wrong and section 15k is where it was corrected.** Two digits of
+`Sans12` are 28 where one of them is a `1`, so `kBoardScoreWidth` is 28 and the
+one-line names in this section's "before" column are two pixels narrower than
+it says. The 20 stands: every digit of `Sans9` advances 10, so a two-line score
+column of 20 holds any two of them.
 
 Reversing the trade is one constant and one face: a `kMaxRows` of 3 and a score
 drawn at `Sans12` gives big digits on three games. The figures above are what
@@ -2312,6 +2356,10 @@ it would cost to look at.
 `boardColumnsForBoard()`, `kBoardScoreWidth`, `Sans12` scores and every figure
 15h and 15i wrote down, and the assertions in `App/CardColumns.h` that read
 them are unchanged.
+
+Unchanged by *this* section. Section 15k widened `kBoardScoreWidth` to 28 and
+moved the one-line name figures in 15h and 15i by two pixels, and the two-line
+figures below are the ones it left alone.
 
 `showSportsBoard()` branches once, on `kScreenH > kScreenW`, which is the
 branch it already makes for `kRowHeight`. What the branch picks is the grid,
@@ -2332,7 +2380,9 @@ have started, with the start time centred against the brace. The pair is there
 and the numbers haven't happened.
 
 A board where no row reported a score releases the column on every row, and the
-name goes to 186 at 240px with the widest start time in the status.
+name goes to 106 at 240px with the widest start time in the status. 186 is what
+it reaches when the status column goes too, which is a board whose rows sent no
+status at all. `App/CardColumns.h` asserts both.
 
 #### What a profile row gets, at both widths
 
@@ -2424,3 +2474,207 @@ the same payload one line to a row.
 `App/CardColumns.h` is the arithmetic, `tests/card-columns-test.cpp` sweeps it,
 `ci/check-board-columns-call.sh` holds the draw path's arguments, and
 TEST_PLAN.md section 18h has the mutations.
+
+### 15k. Two widths that were measured wrong, 2026-11-02
+
+Both of these came out of reading glyph tables and the two routines that read
+them. Neither has been photographed, and the end of this section says what that
+leaves open.
+
+#### A two-digit score with a `1` in it is drawn a tier small
+
+`1` is the only digit in `FreeSansBold12pt7b` whose `xAdvance` is 14. Every
+other digit advances 13, and `kBoardScoreWidth` was 26, which is two of those
+13s and nothing over:
+
+| score | `Sans12` | against a 26px column |
+|---|---|---|
+| `00` | 26 | fits, with nothing to spare |
+| `99` | 26 | fits, with nothing to spare |
+| `10` | 27 | over |
+| `21` | 27 | over |
+| `11` | 28 | over |
+
+Eighteen of the ninety two-digit scores measure over 26: `10` through `19`, and
+`21`, `31`, `41`, `51`, `61`, `71`, `81` and `91`. Not one of the ninety
+measures over 28.
+
+What a score wider than its column gets is `layoutLine()`'s ladder, working
+exactly as section 10 writes it. The string doesn't fit one line of the caller's
+`Sans12`, so the ladder steps down the family and `Sans9` fits, which is 22px of
+face against 29. A game at 10-7 draws its `10` smaller than the `7` beside it,
+on one row, and the only report is the tier drop the ladder logs under
+`verbose()`, where a drop is the ordinary case for a long team name.
+
+**The single digit is fine.** `1` on its own is 14px and sits inside the column,
+so a game at 1-0 draws both digits at `Sans12`. It takes two digits.
+
+The column is 28 now, which is what `11` measures, and
+`kBoardWidestTwoDigitScoreWidth` carries that 28 beside it so a build reads the
+two against each other rather than against a comment.
+
+**Three digits are drawn wrong and this does not fix it.** `100` is 40px at
+`Sans12` and 30 at `Sans9`, over the old column, over the new one and over every
+tier the ladder has, so `layoutLine()` falls through to `layoutText()`'s
+mid-word break and draws `10` with a `printf()` line saying a word was broken.
+`SportsBoardRow::kMaxScore` holds eight characters and its own remark says a
+score is three digits at the outside, so a basketball board draws a cut score
+wherever a side is over 99. Closing that is a column width and a face rather
+than a constant, and it is written down here rather than changed.
+
+#### Where the two pixels come from
+
+Two pixels on each of the two score columns is four off the row, and the names
+split what the row has left, so each name column loses two. Section 15b's table
+and the "with scores" half of 15h's are the figures, and the "scoreless" half of
+both is untouched because a scoreless row has no score column to widen.
+
+| panel | state | name before | name after |
+|---|---|---|---|
+| 320 | with scores | 83 | 81 |
+| 320 | scoreless | 97 | 97 |
+| 240 | with scores | 43 | 41 |
+| 240 | scoreless | 57 | 57 |
+
+What doesn't move is where the second block starts and ends. `homeNameLeft` is
+`rowLeft + nameWidth + scoreWidth + kBoardColumnGap`, so a name two narrower and
+a score two wider land it in the same place: all four of 15h's ragged-grid name
+edges, 157, 129, 119 and 109, and all four of its home-score edges, 294, 238,
+218 and 198, are the figures they were. So is the separation, which is two
+column gaps plus the row's leftover pixel at every width.
+
+**The clearest thing the two pixels cost is `Jets`.** On 15i's photographed
+240px board the one-line name column goes from 36 to 34, and `Jets` measures 36.
+It was the one name of those eight the landscape row still spelled, and the
+landscape row now draws `Jet...` as well. The two-line row's 97 holds all eight,
+so the profile panel this board was photographed on is unaffected; a 240px board
+in landscape would lose the last name it had. `tests/card-columns-test.cpp`
+counts the eight rather than asserting a win, which is what turned this up.
+
+#### The name floor is the same derivation re-run
+
+`kBoardNameFloor` was 31 because 31 is "the largest floor that still leaves the
+240px panel room to hand a start time the 80px a start time measures". That
+sentence is a derivation with the score width inside it. Re-run at 28 it gives
+29, and the floor is 29 now.
+
+Keeping 31 was the other option and it costs a property. The 240px ceiling would
+go to 76, the widest start time asks for 80, and the assertion in
+`App/CardColumns.h` that a scheduled row which reported one score still holds a
+start time would have had to come out. Re-deriving the floor keeps both ceilings
+on rows with scores exactly where they were:
+
+| ceiling | before | after |
+|---|---|---|
+| 320, with scores | 160 | 160 |
+| 240, with scores | 80 | 80 |
+| 320, scoreless | 212 | 216 |
+| 240, scoreless | 132 | 136 |
+| 320, two-line, with scores | 215 | 217 |
+| 240, two-line, with scores | 135 | 137 |
+| 320, two-line, scoreless | 235 | 237 |
+| 240, two-line, scoreless | 155 | 157 |
+
+The scoreless and two-line ceilings rise because a floor is subtracted from each
+of them and nothing else in them moved. No row reaches any of the four two-line
+ceilings at any string a provider can send, so every name figure in 15j is the
+figure it was.
+
+What the floor costs is two pixels on a name already standing on it, which on
+the 240px panel is a row with scores and a status over 77px. Those rows read 29
+where they read 31. The widths where the floor first engages move with the score
+column: the separation stops being two gaps below 206px with scores rather than
+202, and the two columns cross below 194 rather than 190. Both are far under
+every panel the fleet has, and the scoreless pair, 174 and 162, is unchanged.
+
+#### The two-line row was already right
+
+Every digit of `FreeSansBold9pt7b` advances 10, `1` with the rest of them, so
+the widest two digits at that face are 20 and `kBoardStackedScoreWidth` is 20
+exactly. A `11` on a profile row has always fitted. The defect is the landscape
+one-line row's alone, and `a525c3b` dropping the stacked score to `Sans9` is
+what kept it out of the two-line form rather than anything anybody checked.
+
+#### A status carrying a control byte is drawn wider than it was measured
+
+Two routines disagree about a byte below 0x20, and the board reads one of them
+and draws through the other.
+
+`LGFXBase::text_width()` skips such a byte. Its UTF-8 loop advances over
+anything under 0x20 before it reaches a glyph table, so the byte contributes no
+pixels at all, and a string that ends in one ends the measurement there.
+
+`copySlice()` in `App/Display.cpp` turns it into a space, which is what section
+3's whitespace rule asks for: a `\n` in an admin's announcement would otherwise
+reach `drawString()` and render as whatever box glyph an ASCII-only face has.
+The space it becomes advances 5px at `Sans9`.
+
+So each interior control byte in a status is charged nothing when the column is
+sized and 5px when the string goes on the panel. On a 320px board with scores, a
+period arriving as `2ND<0x01>QTR`:
+
+| | measured | status column | name | what the row draws |
+|---|---|---|---|---|
+| before | 76 | 78 | 70 | `2ND...` at 49px |
+| after | 81 | 83 | 67 | `2ND QTR` at 81px |
+
+The before row is the whole of it. `widestBoardStatus()` measured 76, so the
+board laid out a 78px column; `layoutLine()`'s own overflow test read the same
+76 and found it inside 78, so no tier was tried; and `layoutText()` then built
+the line through `copySlice()`, measured the 81px it had made and ellipsized to
+fit. Three measurements of one string, two of the bytes that arrived and one of
+the bytes that get drawn.
+
+A leading or trailing control byte costs nothing either way. `layoutText()`
+skips leading break space before it starts a line and backs off trailing break
+space before it measures, and `text_width()` skips both, so `FINAL<0x01>`
+measures 55 and draws 55. It takes a byte with glyphs on both sides.
+
+#### What the board measures now
+
+One function, `drawnTextWidth()`, which copies a string through the same
+control-byte substitution `copySlice()` applies and measures that. Both places
+that were reading the raw bytes read it: `widestBoardStatus()`, which sizes the
+column, and `layoutLine()`'s overflow test, which decides whether to try a
+smaller face. A string with no control byte in it measures what it always
+measured, so nothing else on any card moves.
+
+It sits beside `copySlice()` and takes the substitution from the same
+`isBreakSpace()` predicate, because two copies of "a control byte becomes a
+space" is the shape the defect had in the first place. A string longer than the
+`kLayoutLineBytes` buffer falls back to the raw measurement, which cannot change
+an answer: 128 characters of the narrowest face in the binary is past any box
+this panel has, so the comparison the caller is making is already true.
+
+#### What is measured and what is assumed
+
+The widths are measured. Every figure in this section comes off the vendored
+glyph tables by 9b's method, and that reimplementation reproduces all
+twenty-seven figures this repository already carries, `FINAL` 55, `HALFTIME` 94,
+`Hurricanes` 94, `Est. value` 112 and the rest, to the pixel, before it was
+trusted on a digit.
+
+The score defect is on the fleet. Any board with a side on 10 through 19 draws
+it, which is most hockey and football boards and nearly every basketball one.
+
+**A status with a control byte in it has never been reported.** The route is
+open: `period` arrives through `copyBoundedMarked()` in `App/CheckIn.cpp`, which
+bounds the length and marks a cut and does not scrub control characters, where
+`Calendar.cpp` scrubs its own free text and says so. So the arrival is a thing
+the wire allows rather than a thing a device has sent, and the two widths are
+what was established before anything was changed.
+
+**Nothing on the wire changes.** `SportsBoardRow`, `Sports::Game` and the
+check-in payload are byte-for-byte what they were. No field was added, removed
+or reinterpreted, so the 6-month compatibility gate is untouched, and a device
+without this draws the same payload with the same two defects.
+
+**Neither has been on glass.** The score column is a constant and two tables of
+arithmetic a host run checks; the control byte is a measurement a text gate
+checks. What a 28px column looks like beside a 41px name on the 240px panel, and
+whether the two pixels each name gave up can be seen, is what a photograph has
+to answer.
+
+`App/CardColumns.h` is the arithmetic, `tests/card-columns-test.cpp` sweeps it,
+`ci/check-board-columns-call.sh` holds the draw path's arguments, and
+TEST_PLAN.md section 18i has the mutations.

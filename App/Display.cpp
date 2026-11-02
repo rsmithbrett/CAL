@@ -1131,6 +1131,38 @@ bool copySlice(char* buffer, size_t capacity, const char* text, size_t from, siz
   return true;
 }
 
+/// The width `text` goes on the panel at, rather than the width the bytes that
+/// arrived measure.
+///
+/// LGFXBase::text_width() and copySlice() above disagree about a byte below
+/// 0x20. The UTF-8 loop in text_width() advances over anything under 0x20
+/// before it reaches a glyph table, so such a byte is charged nothing;
+/// copySlice() turns it into a space, which advances 5px at Sans9. So a string
+/// carrying one is measured narrower than it is drawn, by 5px for each
+/// interior byte, and a caller comparing the raw measurement against a box is
+/// comparing the wrong number. TEXT_LAYOUT_DESIGN.md section 15k has what that
+/// did to the scoreboard's status column.
+///
+/// Through copySlice() rather than its own loop, so one predicate decides what
+/// a control byte is on the measuring path and the drawing path both. A second
+/// copy of that rule is the shape this defect already had.
+///
+/// A string too long for the line buffer measures raw. That cannot change an
+/// answer: kLayoutLineBytes characters of the narrowest face in this binary is
+/// wider than any box on either panel, so a caller asking whether it overflows
+/// is already being told yes.
+int drawnTextWidth(const char* text) {
+  if (text == nullptr || text[0] == '\0') {
+    return 0;
+  }
+  char buffer[kLayoutLineBytes];
+  const size_t length = strlen(text);
+  if (!copySlice(buffer, sizeof(buffer), text, 0, length)) {
+    return lcd.textWidth(text);
+  }
+  return lcd.textWidth(buffer);
+}
+
 /// Draws text into box, wrapping on word boundaries and ellipsizing when the
 /// line budget runs out. `what` names the string for the debug stream
 /// ("sports.away", "notice.body") so a log line says which string on which card
@@ -1434,8 +1466,13 @@ TextResult layoutLine(const char* text, int x, int y, int width, uint32_t colour
   const int freeBelow = roomBelow > 0 ? roomBelow : 0;
 
   const int tier = sansTierIndex(callerFont);
+  // drawnTextWidth() rather than lcd.textWidth(): the raw bytes measure narrower
+  // than the line layoutText() builds out of them whenever a control byte is in
+  // the middle of the string, and reading the raw width here finds a string
+  // inside the box that layoutText() then ellipsizes rather than dropping a
+  // tier for. Section 15k.
   const bool overflows =
-      width > 0 && text != nullptr && text[0] != '\0' && lcd.textWidth(text) > width;
+      width > 0 && text != nullptr && text[0] != '\0' && drawnTextWidth(text) > width;
 
   if (overflows && tier >= 0) {
     for (uint8_t lines = 1; lines <= 2; ++lines) {
@@ -3532,11 +3569,16 @@ namespace {
 /// What the board hands boardColumnsForBoard(): the widest string rather than
 /// the widest column, which is the same column because boardStatusWidthFor()
 /// does not fall as its measurement rises. TEXT_LAYOUT_DESIGN.md section 15i.
+///
+/// drawnTextWidth() rather than lcd.textWidth(), because a period arriving with
+/// a control byte in it is 5px wider on the panel than its bytes measure and
+/// the column has to hold what is drawn. CheckIn.cpp bounds the length of that
+/// field and does not scrub it. Section 15k.
 int widestBoardStatus(const SportsBoardRow* rows, uint8_t count) {
   int widest = 0;
   lcd.setFont(FontId::Sans9);
   for (uint8_t i = 0; i < count; ++i) {
-    const int measured = lcd.textWidth(rows[i].status);
+    const int measured = drawnTextWidth(rows[i].status);
     if (measured > widest) {
       widest = measured;
     }

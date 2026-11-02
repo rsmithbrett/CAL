@@ -2,7 +2,7 @@
 # Holds showSportsBoard()'s call into App/CardColumns.h, and the two folds that
 # feed it, to the shape the arithmetic was proven against.
 #
-# App/CardColumns.h carries seventy-two static_asserts and
+# App/CardColumns.h carries seventy-five static_asserts and
 # tests/card-columns-test.cpp sweeps every panel width from 28 to 1024 twice,
 # and between them no single-token change to that header moves a drawn pixel
 # without something firing. None of it reads App/Display.cpp. The arguments the
@@ -101,9 +101,39 @@ if ! printf '%s\n' "$WIDEST" | awk '
 fi
 
 # The measurement: each row's own status string, and nothing else on the row.
-if ! printf '%s\n' "$WIDEST" | tr -d ' \n' | grep -q 'lcd\.textWidth(rows\[i\]\.status)'; then
-  say "widestBoardStatus() does not measure lcd.textWidth(rows[i].status). The column holds
-       the status, so the status is what it is sized against."
+#
+# drawnTextWidth() rather than lcd.textWidth(), because the two disagree about a
+# byte below 0x20 and the panel gets the one the draw path uses.
+# LGFXBase::text_width() skips such a byte for no pixels; copySlice() turns it
+# into a space, which is 5px at Sans9. A column sized off the raw bytes is
+# narrower than the string drawn into it, and the row then ellipsizes a status
+# that was measured as fitting. TEXT_LAYOUT_DESIGN.md section 15k.
+if ! printf '%s\n' "$WIDEST" | tr -d ' \n' | grep -q 'drawnTextWidth(rows\[i\]\.status)'; then
+  say "widestBoardStatus() does not measure drawnTextWidth(rows[i].status). The column holds
+       the status as the draw path builds it, and lcd.textWidth() charges nothing for a
+       control byte that copySlice() then draws as a space."
+fi
+
+# And drawnTextWidth() is that substitution rather than a second name for the raw
+# measurement. Two checks, because a body that copies nothing and returns
+# lcd.textWidth(text) satisfies the call site above and is this defect with a
+# longer name on it. It has to build its copy with copySlice(), which is the one
+# function layoutText() draws through, and it has to measure the copy rather
+# than its argument. Its own loop over isBreakSpace() would pass a second copy
+# of the rule, which is the shape the defect had.
+DRAWN=$(read_function drawnTextWidth)
+if [ -z "$DRAWN" ]; then
+  say "drawnTextWidth() not found, so the measurement above cannot be the drawn one."
+else
+  if ! has "$DRAWN" 'copySlice(buffer,sizeof(buffer),text,0,length)'; then
+    say "drawnTextWidth() does not build its copy with copySlice(buffer, sizeof(buffer), text,
+       0, length). copySlice() is the substitution layoutText() draws through, and measuring
+       any other copy is a second rule to keep in step with it."
+  fi
+  if ! has "$DRAWN" 'returnlcd.textWidth(buffer);'; then
+    say "drawnTextWidth() does not return lcd.textWidth(buffer). Measuring the argument
+       instead of the copy it just made is the raw width under a new name."
+  fi
 fi
 
 # And the fold keeps the widest of them, over every row, from nothing, and hands
@@ -277,14 +307,14 @@ if ! printf '%s\n' "$BOARD" | awk '
        read the rows that will be drawn, so a fifth row the card drops cannot widen a column."
 fi
 
-# The score columns come from the board's grid, not from the constant. A 26px
+# The score columns come from the board's grid, not from the constant. A 28px
 # column drawn into a block laid out for none is painted through a team name.
 #
 # Comments are stripped first, because the line that explains why the constant
 # is not read here names the constant.
 if printf '%s\n' "$BOARD" | sed 's|//.*$||' | grep -q 'kBoardScoreWidth'; then
   say "showSportsBoard() reads kBoardScoreWidth. The score columns are columns.scoreWidth,
-       which is 0 on a board where no row reported a score; the constant is 26 always."
+       which is 0 on a board where no row reported a score; the constant is 28 always."
 fi
 
 # And each of the five fields draws into its own column. Working out the grid
@@ -320,6 +350,26 @@ if ! printf '%s\n' "$BOARD" | awk '
   say "the line before showSportsBoard()'s 'layoutLine(row.status,' is not
        lcd.setFont(FontId::Sans9);. The status is measured in Sans9 and has to be drawn in it,
        or the column holds a string of a different width than the one it was sized for."
+fi
+
+# The fitting ladder's own overflow test, which is the other caller that was
+# reading raw bytes. layoutLine() decides whether to try a smaller face by
+# comparing a measurement against the box; on the raw width it finds a string
+# with a control byte in it inside a box that layoutText() then ellipsizes,
+# so the ladder is skipped for exactly the strings that need it.
+#
+# Read off the file rather than through read_function(), which matches a leading
+# int, bool or void and layoutLine() returns a TextResult. Grepping the whole
+# file is enough here because `overflows` is declared once.
+if ! grep -q 'drawnTextWidth(text) > width' "$TARGET"; then
+  say "layoutLine()'s overflow test is not drawnTextWidth(text) > width. The ladder has to
+       compare the width the string is drawn at, or it skips a tier for the one class of
+       string that needs one. TEXT_LAYOUT_DESIGN.md section 15k."
+fi
+
+if [ "$(grep -c 'bool overflows =' "$TARGET")" != "1" ]; then
+  say "App/Display.cpp declares 'bool overflows =' other than once, so the check above may be
+       reading a different one than layoutLine() uses."
 fi
 
 # The chevrons sit the same distance in from each edge. The static_assert in

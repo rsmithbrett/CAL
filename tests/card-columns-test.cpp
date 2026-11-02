@@ -14,8 +14,8 @@
 //     both shipped panels are even, so four assertions at those two widths
 //     could not have said so.
 //   - Where the floor engages, and what the row does below it. The doc names
-//     174 and 202 as the widths the separation stops holding at; the first
-//     width whose name column is clear of the floor is 176 and 204, because the
+//     174 and 206 as the widths the separation stops holding at; the first
+//     width whose name column is clear of the floor is 176 and 208, because the
 //     even split truncates.
 //   - Whether a column keeps the slack it is written to carry. The header
 //     asserts the start-time column holds the 78px the widest start time
@@ -65,6 +65,8 @@ using CardColumns::kBoardStateWordWidth;
 using CardColumns::kBoardStatusSlack;
 using CardColumns::kBoardStatusWidth;
 using CardColumns::kBoardWidestPeriodTextWidth;
+using CardColumns::kBoardWidestTwoDigitScoreWidth;
+using CardColumns::kBoardWidestTwoDigitStackedScoreWidth;
 using CardColumns::kCardMargin;
 
 namespace {
@@ -137,6 +139,35 @@ constexpr Name kNamesStillTooWide[] = {
     {"Diamondbacks", 128},
 };
 
+/// A score and what it measures in the two faces a score is drawn in, off the
+/// vendored glyph tables by section 9b's method. The same reimplementation
+/// reproduces every figure above and in the header.
+///
+/// `1` advances 14 at Sans12 where every other digit advances 13, so the three
+/// 27s and the 28 here are the whole of TEXT_LAYOUT_DESIGN.md section 15k's
+/// first defect: a 26px column held `00` and `99` and dropped `10`, `11` and
+/// `21` a tier. At Sans9 every digit advances 10, which is why the two-line
+/// row's 20 was already right and is in this table beside the other.
+struct Score {
+  const char* digits;
+  int sans12;
+  int sans9;
+};
+
+constexpr Score kScores[] = {
+    {"0", 13, 10},  {"1", 14, 10},  {"7", 13, 10},  {"00", 26, 20},
+    {"01", 27, 20}, {"10", 27, 20}, {"11", 28, 20}, {"19", 27, 20},
+    {"21", 27, 20}, {"88", 26, 20}, {"99", 26, 20},
+};
+
+/// Three digits, which neither column holds and neither face does. Here so the
+/// gap is a figure in a test run rather than a sentence in a design document.
+constexpr Score kThreeDigitScores[] = {
+    {"100", 40, 30},
+    {"111", 42, 30},
+    {"199", 40, 30},
+};
+
 }  // namespace
 
 int main() {
@@ -162,6 +193,58 @@ int main() {
     assert(boardColumns(width, true).scoreWidth == 0);
   }
 
+  // --- a score column holds the digits drawn into it -------------------------
+  //
+  // TEXT_LAYOUT_DESIGN.md section 15k. Every other column in this file is
+  // checked against a string it has to hold; the two score columns were checked
+  // against the sentence "a score column holds two digits" and nothing read a
+  // digit. These do.
+  //
+  // The widest figure read off the table rather than written down twice, so a
+  // score added to it that is wider than the constant fails here rather than
+  // sitting in the table with nothing reading it.
+  {
+    int widestTwoDigit12 = 0;
+    int widestTwoDigit9 = 0;
+    int twoDigitScores = 0;
+    for (const Score& score : kScores) {
+      // Each face holds the score it is handed, which is the property. The
+      // one-line row draws at Sans12 into kBoardScoreWidth and the two-line row
+      // at Sans9 into kBoardStackedScoreWidth.
+      assert(score.sans12 <= kBoardScoreWidth);
+      assert(score.sans9 <= kBoardStackedScoreWidth);
+
+      if (score.digits[0] != '\0' && score.digits[1] != '\0') {
+        ++twoDigitScores;
+        if (score.sans12 > widestTwoDigit12) widestTwoDigit12 = score.sans12;
+        if (score.sans9 > widestTwoDigit9) widestTwoDigit9 = score.sans9;
+      }
+    }
+    assert(twoDigitScores == 8);
+    assert(widestTwoDigit12 == kBoardWidestTwoDigitScoreWidth);
+    assert(widestTwoDigit9 == kBoardWidestTwoDigitStackedScoreWidth);
+
+    // And the columns are those two measurements and not a pixel under. As
+    // `>=` alone a column of 40 would pass, which is a column nothing measured.
+    assert(kBoardScoreWidth == kBoardWidestTwoDigitScoreWidth);
+    assert(kBoardStackedScoreWidth == kBoardWidestTwoDigitStackedScoreWidth);
+
+    // `1` is the digit that did it, and a single `1` never overflowed. Both
+    // halves, because a face where every digit advanced 14 would satisfy the
+    // first on its own and is not what the glyph table says.
+    assert(kScores[1].sans12 > kScores[0].sans12);
+    assert(kScores[1].sans12 <= kBoardScoreWidth);
+    assert(kScores[0].sans9 == kScores[1].sans9);
+
+    // Three digits fit neither column at either face, which is the gap section
+    // 15k leaves open. Asserted as the gap it is, so closing it has to come
+    // through this line and that section.
+    for (const Score& score : kThreeDigitScores) {
+      assert(score.sans12 > kBoardScoreWidth);
+      assert(score.sans9 > kBoardStackedScoreWidth);
+    }
+  }
+
   // --- the table in TEXT_LAYOUT_DESIGN.md section 15b ------------------------
   //
   // The four rows of the "this change" column, as equalities rather than as
@@ -169,13 +252,17 @@ int main() {
   // figures v2026.10.31.0002 shipped, which is what stops them shrinking; these
   // are what makes the table in the design document a thing a build checks
   // rather than a thing somebody re-derives.
+  // The two "with scores" names are 81 and 41 rather than 15b's own 83 and 43,
+  // which is section 15k's two pixels: the score column is 28 and not 26, so
+  // four pixels come off the row and the two names split them. The scoreless
+  // pair is untouched, because a scoreless row has no score column to widen.
   assert(boardColumns(320, true).nameWidth == 97);
   assert(boardColumns(320, true).statusWidth == 80);
-  assert(boardColumns(320, false).nameWidth == 83);
+  assert(boardColumns(320, false).nameWidth == 81);
   assert(boardColumns(320, false).statusWidth == 56);
   assert(boardColumns(240, true).nameWidth == 57);
   assert(boardColumns(240, true).statusWidth == 80);
-  assert(boardColumns(240, false).nameWidth == 43);
+  assert(boardColumns(240, false).nameWidth == 41);
   assert(boardColumns(240, false).statusWidth == 56);
 
   // --- the column a measured status gets ------------------------------------
@@ -210,7 +297,7 @@ int main() {
   assert(boardDefaultStatusWidth(true) == 80);
   assert(boardDefaultStatusWidth(false) == 56);
   assert(boardScoreWidth(true) == 0);
-  assert(boardScoreWidth(false) == 26);
+  assert(boardScoreWidth(false) == 28);
 
   // The three rules in 15h, read at the boundaries between them rather than in
   // the middle of each. 55 asks for 56, 56 asks for 56, 57 asks for 59, and an
@@ -233,8 +320,8 @@ int main() {
   }
 
   // An empty status hands the names the whole row.
-  assert(boardColumnsFor(320, false, 0).nameWidth == 111);
-  assert(boardColumnsFor(240, false, 0).nameWidth == 71);
+  assert(boardColumnsFor(320, false, 0).nameWidth == 109);
+  assert(boardColumnsFor(240, false, 0).nameWidth == 69);
   assert(boardColumnsFor(320, true, 0).nameWidth == 137);
   assert(boardColumnsFor(240, true, 0).nameWidth == 97);
 
@@ -247,25 +334,30 @@ int main() {
     int statusWidth;
     int nameWidth;
   };
+  //
+  // Every "with scores" name here is two narrower than 15h's own table, and the
+  // three that stand on the floor read 29 rather than 31, which is section
+  // 15k's score column and its re-derived floor. Every status column, and every
+  // scoreless row, is the figure 15h wrote down.
   const MeasuredRow kMeasured[] = {
-      {320, false, 37, 56, 83},   // PPD
-      {320, false, 55, 56, 83},   // FINAL
-      {320, false, 67, 69, 76},   // 7:30 PM, on a row that reported one score
-      {320, false, 74, 76, 73},   // 6TH INN
-      {320, false, 78, 80, 71},   // 12:00 AM
-      {320, false, 80, 82, 70},   // 3RD QTR
-      {320, false, 94, 96, 63},   // HALFTIME
+      {320, false, 37, 56, 81},   // PPD
+      {320, false, 55, 56, 81},   // FINAL
+      {320, false, 67, 69, 74},   // 7:30 PM, on a row that reported one score
+      {320, false, 74, 76, 71},   // 6TH INN
+      {320, false, 78, 80, 69},   // 12:00 AM
+      {320, false, 80, 82, 68},   // 3RD QTR
+      {320, false, 94, 96, 61},   // HALFTIME
       {320, true, 37, 56, 109},   // PPD, which used to take the 80px column
       {320, true, 78, 80, 97},    // 12:00 AM
       {320, true, 80, 82, 96},    // 3RD QTR, a period on a row with no score sent
       {320, true, 94, 96, 89},    // HALFTIME
-      {240, false, 37, 56, 43},   // PPD
-      {240, false, 55, 56, 43},   // FINAL
-      {240, false, 67, 69, 36},   // 7:30 PM
-      {240, false, 74, 76, 33},   // 6TH INN
-      {240, false, 78, 80, 31},   // 12:00 AM, on the name floor
-      {240, false, 80, 80, 31},   // 3RD QTR, at the ceiling with no slack left
-      {240, false, 94, 80, 31},   // HALFTIME, cut - see below
+      {240, false, 37, 56, 41},   // PPD
+      {240, false, 55, 56, 41},   // FINAL
+      {240, false, 67, 69, 34},   // 7:30 PM
+      {240, false, 74, 76, 31},   // 6TH INN
+      {240, false, 78, 80, 29},   // 12:00 AM, on the name floor
+      {240, false, 80, 80, 29},   // 3RD QTR, at the ceiling with no slack left
+      {240, false, 94, 80, 29},   // HALFTIME, cut - see below
       {240, true, 37, 56, 69},    // PPD
       {240, true, 78, 80, 57},    // 12:00 AM
       {240, true, 80, 82, 56},    // 3RD QTR
@@ -279,8 +371,10 @@ int main() {
 
   // The one row the column still does not hold: "HALFTIME" at 94px on a 240px
   // panel that has scores. The ceiling there is 80, because 96 would put the
-  // names at 23 and kBoardMinNameWidth is 24. Asserted as the gap it is, so a
-  // change that closes it has to come through this line and section 15h.
+  // names at 21 and kBoardMinNameWidth is 24. Asserted as the gap it is, so a
+  // change that closes it has to come through this line and section 15h. The
+  // ceiling is still 80 after section 15k: the score column took two pixels
+  // from each name and the re-derived floor gave them back.
   assert(boardMaxStatusWidth(240, false) == 80);
   assert(boardStatusWidthFor(240, false, kBoardWidestPeriodTextWidth) <
          kBoardWidestPeriodTextWidth);
@@ -292,10 +386,12 @@ int main() {
   assert(boardStatusWidthFor(240, true, kBoardWidestPeriodTextWidth) >=
          kBoardWidestPeriodTextWidth);
 
-  // The ceilings in 15h's own table.
-  assert(boardMaxStatusWidth(320, true) == 212);
+  // The ceilings in 15h's own table, with the two scoreless ones four wider for
+  // section 15k's floor: a scoreless row has no score column, so the floor's
+  // two pixels off each name are all that reaches it.
+  assert(boardMaxStatusWidth(320, true) == 216);
   assert(boardMaxStatusWidth(320, false) == 160);
-  assert(boardMaxStatusWidth(240, true) == 132);
+  assert(boardMaxStatusWidth(240, true) == 136);
 
   // --- what a row asks for on its own ---------------------------------------
   //
@@ -353,7 +449,7 @@ int main() {
     assert(grid.homeNameLeft == 109);
     assert(grid.awayScoreRight == 103);
     assert(grid.homeScoreRight == 198);
-    assert(grid.nameWidth == 63);
+    assert(grid.nameWidth == 61);
     assert(grid.statusWidth == 96);
 
     // And the grid is the narrowest-named of the four a row could have asked
@@ -383,21 +479,24 @@ int main() {
     }
     assert(widestPhotographed == 67);
 
+    // The two name figures are 15i's own 36 and 76 less section 15k's two
+    // pixels. Both edges below are what they were: a name two narrower beside a
+    // score two wider starts and ends the home block in the same place.
     const BoardColumns narrow = boardColumnsForBoard(240, false, widestPhotographed);
     assert(narrow.statusWidth == 69);
-    assert(narrow.nameWidth == 36);
+    assert(narrow.nameWidth == 34);
     assert(narrow.homeNameLeft == 82);
     assert(narrow.homeScoreRight == 144);
     assert(narrow.scoreWidth == kBoardScoreWidth);
 
     const BoardColumns wide = boardColumnsForBoard(320, false, widestPhotographed);
     assert(wide.statusWidth == 69);
-    assert(wide.nameWidth == 76);
+    assert(wide.nameWidth == 74);
 
     // A board of state words costs its names nothing at either width, which is
     // the other half of the trade.
-    assert(boardColumnsForBoard(320, false, kBoardStateWordWidth).nameWidth == 83);
-    assert(boardColumnsForBoard(240, false, kBoardStateWordWidth).nameWidth == 43);
+    assert(boardColumnsForBoard(320, false, kBoardStateWordWidth).nameWidth == 81);
+    assert(boardColumnsForBoard(240, false, kBoardStateWordWidth).nameWidth == 41);
 
     // A board where no row reported a score releases both score columns on
     // every row of it, and one that did gives every row one. The board's
@@ -503,30 +602,35 @@ int main() {
   //
   // Below these widths the floor clamps the name column and the edges derived
   // from it carry on shrinking, so the home block walks towards the status
-  // column. 174 and 202 are where the separation stops being
+  // column. 174 and 206 are where the separation stops being
   // 2 * kBoardColumnGap. The first width whose name column is clear of the floor
   // is two wider in each case, because the leftover pixels are split with
   // integer division and 49 pixels of leftover still give a 24px name.
+  //
+  // The two "with scores" figures moved by four with section 15k's score
+  // column, from 202 and 204; the scoreless pair has no score column in it and
+  // did not move.
   assert(firstWidthClearOfFloor(true) == 176);
-  assert(firstWidthClearOfFloor(false) == 204);
+  assert(firstWidthClearOfFloor(false) == 208);
   assert(boardColumns(175, true).nameWidth == kBoardMinNameWidth);
-  assert(boardColumns(203, false).nameWidth == kBoardMinNameWidth);
+  assert(boardColumns(207, false).nameWidth == kBoardMinNameWidth);
 
   // The separation holds down to the widths the document names and not below.
   assert(boardSeparation(174, true) == 2 * kBoardColumnGap);
   assert(boardSeparation(173, true) < 2 * kBoardColumnGap);
-  assert(boardSeparation(202, false) == 2 * kBoardColumnGap);
-  assert(boardSeparation(201, false) < 2 * kBoardColumnGap);
+  assert(boardSeparation(206, false) == 2 * kBoardColumnGap);
+  assert(boardSeparation(205, false) < 2 * kBoardColumnGap);
 
-  // And the columns themselves meet lower still: 162 and 190 are where the home
+  // And the columns themselves meet lower still: 162 and 194 are where the home
   // block's right edge reaches the status column's left edge, and under those
   // the two are drawn through each other. Both figures are well under every
   // panel the fleet has, which is what makes this latent rather than live - and
-  // what a third board arriving narrow would land on.
+  // what a third board arriving narrow would land on. 190 is what the second
+  // was at the 26px score column.
   assert(boardSeparation(162, true) == 0);
   assert(boardSeparation(161, true) < 0);
-  assert(boardSeparation(190, false) == 0);
-  assert(boardSeparation(189, false) < 0);
+  assert(boardSeparation(194, false) == 0);
+  assert(boardSeparation(193, false) < 0);
 
   // Both shipped panels are clear of all four figures.
   for (const int width : {320, 240}) {
@@ -541,8 +645,8 @@ int main() {
   // The same range and the same properties, over eight measured widths rather
   // than the state's own two. One of the eight, 57, gives an odd status width
   // of 59, and 300 gives the ceiling, which is odd at every odd panel width the
-  // names set it at - above 410 scoreless and 462 with scores it is a flat 302,
-  // and below 164 and 216 the even 56.
+  // names set it at - above 406 scoreless and 462 with scores it is a flat 302,
+  // and below 160 and 216 the even 56.
   // That is what the separation identity needed: every status width in the
   // header was even until one was measured off a glyph table, so the leftover
   // pixel read as the panel width's own parity and section 15c said it was.
@@ -606,7 +710,7 @@ int main() {
         boardStackedColumnsForBoard(240, false, kBoardShortStartTimeTextWidth);
     const BoardColumns oneLine =
         boardColumnsForBoard(240, false, kBoardShortStartTimeTextWidth);
-    assert(oneLine.nameWidth == 36);
+    assert(oneLine.nameWidth == 34);
     assert(twoLine.nameWidth == 97);
     assert(twoLine.statusWidth == kBoardShortStartTimeTextWidth + kBoardStatusSlack);
     assert(oneLine.statusWidth == twoLine.statusWidth);
@@ -622,15 +726,20 @@ int main() {
     assert(boardStackedSeparationFor(240, false, twoLine.statusWidth) == 12);
 
     // And the claim the change is for: all eight of those names are drawn
-    // whole at 97 and seven of the eight are not at 36. Counting both sides
-    // rather than asserting the eight fit, so a name added to the table that
-    // the one-line row already held cannot read as a win.
-    int cutOnMain = 0;
+    // whole at 97 and none of them is at 34. Counting both sides rather than
+    // asserting the eight fit, so a name added to the table that the one-line
+    // row already held cannot read as a win.
+    //
+    // Eight rather than 15j's seven, because section 15k took the one-line name
+    // from 36 to 34 and `Jets` measures 36. That is the clearest thing the two
+    // pixels cost: the shortest name on the photographed board was the one name
+    // the landscape row still spelled, and it isn't now.
+    int cutOnOneLine = 0;
     for (const Name& name : kPhotographedNames) {
       assert(name.measured <= twoLine.nameWidth);
-      if (name.measured > oneLine.nameWidth) ++cutOnMain;
+      if (name.measured > oneLine.nameWidth) ++cutOnOneLine;
     }
-    assert(cutOnMain == 7);
+    assert(cutOnOneLine == 8);
 
     // What it does not reach. The 20-character kMaxName holds strings no panel
     // width makes fit, and these two are still ellipsized.
@@ -641,7 +750,7 @@ int main() {
 
   // A board of state words, where the status fits the 56px column and costs
   // the name nothing in either form.
-  assert(boardColumnsForBoard(240, false, kBoardStateWordWidth).nameWidth == 43);
+  assert(boardColumnsForBoard(240, false, kBoardStateWordWidth).nameWidth == 41);
   assert(boardStackedColumnsForBoard(240, false, kBoardStateWordWidth).nameWidth == 110);
   assert(boardStackedColumnsForBoard(240, false, kBoardStateWordWidth).statusWidth ==
          kBoardStatusWidth);
@@ -649,8 +758,8 @@ int main() {
   // HALFTIME, which 15h and 15i both record as the one string the profile
   // board could not hold. One kBoardNameFloor in the ceiling instead of two is
   // the whole of the fix, so the ceilings are what this reads first.
-  assert(boardStackedMaxStatusWidth(240, false) == 135);
-  assert(boardStackedMaxStatusWidth(240, true) == 155);
+  assert(boardStackedMaxStatusWidth(240, false) == 137);
+  assert(boardStackedMaxStatusWidth(240, true) == 157);
   assert(boardMaxStatusWidth(240, false) == 80);
   {
     const int wanted = kBoardWidestPeriodTextWidth + kBoardStatusSlack;
@@ -697,14 +806,20 @@ int main() {
     int nameAfter;
     int statusAfter;
   };
+  //
+  // Every `nameAfter` is the figure 15j wrote down. The `nameBefore` column is
+  // the one-line row's, so section 15k's two pixels come off each of its "with
+  // scores" rows and the four on the floor read 29. No two-line row reaches its
+  // own ceiling at any string a provider can send, so the floor moving does
+  // nothing to the right-hand column.
   const Row kSection15j[] = {
-      {240, false, 0, 71, 166, 0},    {240, false, 37, 43, 110, 56},
-      {240, false, 55, 43, 110, 56},  {240, false, 67, 36, 97, 69},
-      {240, false, 74, 33, 90, 76},   {240, false, 78, 31, 86, 80},
-      {240, false, 80, 31, 84, 82},   {240, false, 94, 31, 70, 96},
-      {240, false, 97, 31, 67, 99},   {240, true, 78, 57, 106, 80},
-      {240, true, 94, 49, 90, 96},    {320, false, 55, 83, 190, 56},
-      {320, false, 94, 63, 150, 96},  {320, true, 94, 89, 170, 96},
+      {240, false, 0, 69, 166, 0},    {240, false, 37, 41, 110, 56},
+      {240, false, 55, 41, 110, 56},  {240, false, 67, 34, 97, 69},
+      {240, false, 74, 31, 90, 76},   {240, false, 78, 29, 86, 80},
+      {240, false, 80, 29, 84, 82},   {240, false, 94, 29, 70, 96},
+      {240, false, 97, 29, 67, 99},   {240, true, 78, 57, 106, 80},
+      {240, true, 94, 49, 90, 96},    {320, false, 55, 81, 190, 56},
+      {320, false, 94, 61, 150, 96},  {320, true, 94, 89, 170, 96},
   };
   for (const Row& row : kSection15j) {
     const BoardColumns before = boardColumnsForBoard(row.panel, row.scoreless, row.measured);

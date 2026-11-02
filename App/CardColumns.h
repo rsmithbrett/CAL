@@ -48,15 +48,21 @@ struct BoardColumns {
   int statusWidth;
 };
 
-// A score column holds two digits. kBoardStatusWidth is the narrowest status
-// column the row ever draws and the floor boardStatusWidthFor() starts from;
-// what it holds is a state word, a period or a start time, and those are not
-// the same width, so the width comes from the string rather than from here.
-// kBoardMinNameWidth is the clamp inside boardColumns(), below which the edges
-// derived from the name width stop holding - a different figure from
-// kBoardNameFloor, which is what the status column's ceiling is budgeted
-// against.
-constexpr int kBoardScoreWidth = 26;
+// A score column holds two digits of FreeSansBold12pt7b, which is 28 and not
+// the 26 two of them average: kBoardWidestTwoDigitScoreWidth below is that
+// measurement and the static_assert at the bottom of this file reads the two
+// against each other. It was 26 until 2026-11-02, so eighteen of the ninety
+// two-digit scores were a tier small on the panel - TEXT_LAYOUT_DESIGN.md
+// section 15k.
+//
+// kBoardStatusWidth is the narrowest status column the row ever draws and the
+// floor boardStatusWidthFor() starts from; what it holds is a state word, a
+// period or a start time, and those are not the same width, so the width comes
+// from the string rather than from here. kBoardMinNameWidth is the clamp inside
+// boardColumns(), below which the edges derived from the name width stop
+// holding - a different figure from kBoardNameFloor, which is what the status
+// column's ceiling is budgeted against.
+constexpr int kBoardScoreWidth = 28;
 constexpr int kBoardStatusWidth = 56;
 constexpr int kBoardColumnGap = 6;
 constexpr int kBoardMinNameWidth = 24;
@@ -103,6 +109,26 @@ constexpr int kBoardStateWordWidth = 55;
 constexpr int kBoardPeriodTextWidth = 74;
 constexpr int kBoardWidestPeriodTextWidth = 94;
 
+/// What a score column has to hold, off the vendored glyph tables by the method
+/// TEXT_LAYOUT_DESIGN.md section 9b describes.
+///
+/// kBoardWidestTwoDigitScoreWidth is the widest two digits of
+/// FreeSansBold12pt7b, which is "11" at 28. `1` is the only digit in that face
+/// whose xAdvance is 14 rather than 13, so a two-digit score carrying one is 27
+/// or 28 and the rest are 26: eighteen of the ninety two-digit scores are over
+/// 26 and none is over 28. A single `1` is 14 and was never the problem.
+///
+/// kBoardWidestTwoDigitStackedScoreWidth is the same question at
+/// FreeSansBold9pt7b, where every digit advances 10 and `1` is not special, so
+/// any two of them are 20. Section 15k is what each of these two columns was
+/// drawing before they were measured against.
+///
+/// Three digits are over both columns and over every tier the fitting ladder
+/// has - "100" is 40 at Sans12 and 30 at Sans9 - and 15k records that as open
+/// rather than closed.
+constexpr int kBoardWidestTwoDigitScoreWidth = 28;
+constexpr int kBoardWidestTwoDigitStackedScoreWidth = 20;
+
 /// A single-digit-hour start time, off the same glyph table: "6:00 PM" and
 /// "7:30 PM" are both 67px, against the 78 kBoardStartTimeTextWidth carries for
 /// the widest one formatTimeOfDay() can make. It is the ordinary evening
@@ -114,12 +140,18 @@ constexpr int kBoardShortStartTimeTextWidth = 67;
 /// from the string it holds.
 ///
 /// A choice about which column pays rather than a measurement, and the only
-/// figure here that is one. It sits 7px clear of kBoardMinNameWidth, where the
+/// figure here that is one. It sits 5px clear of kBoardMinNameWidth, where the
 /// clamp below engages and the separation identity stops holding, and it is the
 /// largest floor that still leaves the 240px panel room to hand a start time
 /// the 80px a start time measures. TEXT_LAYOUT_DESIGN.md section 15h has what
 /// it costs each name column at each panel width.
-constexpr int kBoardNameFloor = 31;
+///
+/// 29 rather than the 31 it was until 2026-11-02, which is the same derivation
+/// re-run: the largest floor clearing a start time depends on the score column,
+/// and the score column is 28 now. At 31 the 240px ceiling would be 76 and a
+/// start time would be cut there again. Section 15k has the trade and the eight
+/// ceilings it moves.
+constexpr int kBoardNameFloor = 29;
 
 /// How far in from each edge of the panel the first and last column edge sit, on
 /// top of kCardMargin.
@@ -268,10 +300,15 @@ constexpr BoardColumns boardColumnsForBoard(int screenW, bool scoreless,
 ///
 /// kBoardStackedScoreWidth is two digits of FreeSansBold9pt7b, measured off the
 /// vendored glyph table by the method TEXT_LAYOUT_DESIGN.md section 9b
-/// describes. kBoardScoreWidth's 26 is the same two digits at Sans12, which is
+/// describes. kBoardScoreWidth's 28 is the same two digits at Sans12, which is
 /// the face a one-line row draws them in and a two-line row has no height for:
 /// two Sans12 slots are 58px against the 52px card the profile panel gives a
 /// row. Section 15j is the trade.
+///
+/// 20 holds any two digits of that face and always did. Every digit of Sans9
+/// advances 10, where Sans12 gives `1` an xAdvance of 14 against every other
+/// digit's 13, so section 15k's score defect reached the one-line row and not
+/// this one.
 constexpr int kBoardBraceWidth = 8;
 constexpr int kBoardStackedScoreWidth = 20;
 
@@ -411,17 +448,33 @@ static_assert(boardColumns(320, false).statusWidth >= kBoardStateWordWidth,
               "a row with scores draws a state word there, and FINAL is 55px");
 static_assert(boardColumns(240, false).statusWidth >= kBoardStateWordWidth,
               "a row with scores draws a state word there, and FINAL is 55px");
-static_assert(boardColumns(320, false).nameWidth >= 83,
-              "a row with scores keeps the 83px name column of v2026.10.31.0002");
-static_assert(boardColumns(240, false).nameWidth >= 43,
-              "a row with scores keeps the 43px name column of v2026.10.31.0002");
+static_assert(boardColumns(320, false).nameWidth >= 81,
+              "a row with scores keeps the 81px name column of section 15k");
+static_assert(boardColumns(240, false).nameWidth >= 41,
+              "a row with scores keeps the 41px name column of section 15k");
+
+// The two score columns against the digits drawn into them, which is what the
+// pair of them was short of until section 15k. Equalities rather than `>=`: a
+// column wider than the widest two digits is pixels taken off two name columns
+// for nothing, and the four figures in 15k's own trade table are this 28.
+static_assert(kBoardScoreWidth == kBoardWidestTwoDigitScoreWidth,
+              "a one-line score column is the widest two digits of Sans12, which is 11 at 28");
+static_assert(kBoardStackedScoreWidth == kBoardWidestTwoDigitStackedScoreWidth,
+              "a two-line score column is the widest two digits of Sans9, which is any two at 20");
+static_assert(boardColumns(320, false).scoreWidth >= kBoardWidestTwoDigitScoreWidth,
+              "the 320px panel's row holds a two-digit score with a 1 in it");
+static_assert(boardColumns(240, false).scoreWidth >= kBoardWidestTwoDigitScoreWidth,
+              "the 240px panel's row holds a two-digit score with a 1 in it");
+static_assert(boardStackedScoreWidth(false) >= kBoardWidestTwoDigitStackedScoreWidth,
+              "and a two-line row holds two digits of the face it draws them in");
 
 // The separation holds only while the kBoardMinNameWidth floor is not engaged:
 // the floor clamps the name width and nothing clamps the edges derived from it,
-// so below 174px scoreless and 202px with scores the separation falls under
-// 2 * kBoardColumnGap, and below 162 and 190 the home block and the status
+// so below 174px scoreless and 206px with scores the separation falls under
+// 2 * kBoardColumnGap, and below 162 and 194 the home block and the status
 // column overlap. All four are under every panel the fleet has, and these two
-// pairs are what says so at the two it has.
+// pairs are what says so at the two it has. The two "with scores" figures were
+// 202 and 190 at the 26px score column section 15k corrected.
 static_assert(boardColumns(320, false).nameWidth > kBoardMinNameWidth, "320 clears the floor");
 static_assert(boardColumns(240, false).nameWidth > kBoardMinNameWidth, "240 clears the floor");
 static_assert(boardSeparation(320, true) >= 2 * kBoardColumnGap, "320 scoreless stays apart");
@@ -474,18 +527,18 @@ static_assert(boardStatusWidthFor(320, false, kBoardStartTimeTextWidth) == 80,
 // FINAL's 55; PPD's 37 is in the host test's table rather than here, because a
 // second figure for the same property is a second figure to keep.
 static_assert(boardColumnsFor(320, false, boardStatusWidthFor(320, false, kBoardStateWordWidth))
-                      .nameWidth == 83,
+                      .nameWidth == 81,
               "FINAL costs the 320px panel's names no pixels");
 static_assert(boardColumnsFor(240, false, boardStatusWidthFor(240, false, kBoardStateWordWidth))
-                      .nameWidth == 43,
+                      .nameWidth == 41,
               "FINAL costs the 240px panel's names no pixels");
 
 // The four ceilings, as the figures section 15h writes down rather than as
 // `>= kBoardStatusWidth`, which boardMaxStatusWidth()'s own ternary makes true
 // for every input and so reports nothing about a panel width.
-static_assert(boardMaxStatusWidth(320, true) == 212, "320 scoreless can spend 212 on a status");
+static_assert(boardMaxStatusWidth(320, true) == 216, "320 scoreless can spend 216 on a status");
 static_assert(boardMaxStatusWidth(320, false) == 160, "320 with scores can spend 160");
-static_assert(boardMaxStatusWidth(240, true) == 132, "240 scoreless can spend 132");
+static_assert(boardMaxStatusWidth(240, true) == 136, "240 scoreless can spend 136");
 static_assert(boardMaxStatusWidth(240, false) == 80, "240 with scores can spend 80");
 
 // And at the ceiling both name columns stand exactly on the floor it was
@@ -512,25 +565,25 @@ static_assert(boardColumnsFor(240, true, boardMaxStatusWidth(240, true)).nameWid
 // boardColumnsForBoard() is boardColumnsFor() over boardStatusWidthFor(), so an
 // assertion built from those two reads its own definition back and reports
 // nothing about either figure.
-static_assert(boardColumnsForBoard(320, false, kBoardWidestPeriodTextWidth).nameWidth == 63,
-              "a 320px board holding a HALFTIME gives all four rows 63px names");
+static_assert(boardColumnsForBoard(320, false, kBoardWidestPeriodTextWidth).nameWidth == 61,
+              "a 320px board holding a HALFTIME gives all four rows 61px names");
 static_assert(boardColumnsForBoard(320, false, kBoardWidestPeriodTextWidth).homeNameLeft == 109,
-              "and starts every home name at 109");
+              "and starts every home name at 109, which the wider score column does not move");
 static_assert(boardColumnsForBoard(240, false, kBoardWidestPeriodTextWidth).nameWidth ==
                   kBoardNameFloor,
               "a 240px board holding a HALFTIME stands every row on the name floor");
-static_assert(boardColumnsForBoard(320, false, kBoardStartTimeTextWidth).nameWidth == 71,
-              "a 320px board holding the widest start time gives 71px names");
+static_assert(boardColumnsForBoard(320, false, kBoardStartTimeTextWidth).nameWidth == 69,
+              "a 320px board holding the widest start time gives 69px names");
 static_assert(boardColumnsForBoard(240, false, kBoardStartTimeTextWidth).nameWidth ==
                   kBoardNameFloor,
               "a 240px board holding the widest start time stands on the floor too");
 
 // A board of state words costs its names nothing, which is the other half of
 // the trade: the figures v2026.10.31.0002 shipped stand on every row of it.
-static_assert(boardColumnsForBoard(320, false, kBoardStateWordWidth).nameWidth == 83,
-              "four FINALs on a 320px board draw the 83px name column the fleet draws");
-static_assert(boardColumnsForBoard(240, false, kBoardStateWordWidth).nameWidth == 43,
-              "four FINALs on a 240px board draw the 43px name column the fleet draws");
+static_assert(boardColumnsForBoard(320, false, kBoardStateWordWidth).nameWidth == 81,
+              "four FINALs on a 320px board draw an 81px name column");
+static_assert(boardColumnsForBoard(240, false, kBoardStateWordWidth).nameWidth == 41,
+              "four FINALs on a 240px board draw a 41px name column");
 
 // A board where no row reported a score releases both score columns, on every
 // row of it. The board's scoreless, not a row's.
@@ -552,8 +605,8 @@ static_assert(boardColumnsForBoard(320, false, kBoardStartTimeTextWidth).scoreWi
 static_assert(boardStackedColumnsForBoard(240, false, kBoardShortStartTimeTextWidth).nameWidth ==
                   97,
               "the photographed board's 67px start time gives a two-line row a 97px name");
-static_assert(boardColumnsForBoard(240, false, kBoardShortStartTimeTextWidth).nameWidth == 36,
-              "where the one-line row on the same board draws 36");
+static_assert(boardColumnsForBoard(240, false, kBoardShortStartTimeTextWidth).nameWidth == 34,
+              "where the one-line row on the same board draws 34");
 
 // Hurricanes is 94px of FreeSansBold9pt7b and Mammoth 86, the two names the
 // photograph cut to Hur... and Ma..., and 97 holds both whole.
@@ -567,15 +620,15 @@ static_assert(boardStackedColumnsForBoard(240, false, kBoardStateWordWidth).name
 static_assert(boardStackedColumnsForBoard(240, false, kBoardStateWordWidth).statusWidth ==
                   kBoardStatusWidth,
               "and FINAL costs that name no pixels, the same trade the one-line row makes");
-static_assert(boardColumnsForBoard(240, false, kBoardStateWordWidth).nameWidth == 43,
-              "which is the 43px the one-line row draws on a board of state words");
+static_assert(boardColumnsForBoard(240, false, kBoardStateWordWidth).nameWidth == 41,
+              "which is the 41px the one-line row draws on a board of state words");
 
 // The one string 15h and 15i both record the profile board as unable to hold.
 // One kBoardNameFloor in the ceiling instead of two is the whole of the fix.
-static_assert(boardStackedMaxStatusWidth(240, false) == 135, "240 two-line can spend 135");
-static_assert(boardStackedMaxStatusWidth(240, true) == 155, "240 two-line scoreless, 155");
-static_assert(boardStackedMaxStatusWidth(320, false) == 215, "320 two-line can spend 215");
-static_assert(boardStackedMaxStatusWidth(320, true) == 235, "320 two-line scoreless, 235");
+static_assert(boardStackedMaxStatusWidth(240, false) == 137, "240 two-line can spend 137");
+static_assert(boardStackedMaxStatusWidth(240, true) == 157, "240 two-line scoreless, 157");
+static_assert(boardStackedMaxStatusWidth(320, false) == 217, "320 two-line can spend 217");
+static_assert(boardStackedMaxStatusWidth(320, true) == 237, "320 two-line scoreless, 237");
 static_assert(boardStackedColumnsForBoard(240, false, kBoardWidestPeriodTextWidth).statusWidth ==
                   kBoardWidestPeriodTextWidth + kBoardStatusSlack,
               "HALFTIME gets the 96px column it asks for on a 240px two-line board");

@@ -3577,9 +3577,10 @@ before it only bounded the answer.
   card. The alternative costed in 15j is three rows of 74px, which drops a game.
   Nothing tests which of those a reader prefers.
 - **A three-digit score is still cut.** 30px of `Sans9` into the 20px column,
-  where landscape puts 39px of `Sans12` into 26. Carried over from the one-line
+  where landscape puts 40px of `Sans12` into 28. Carried over from the one-line
   row unchanged, not fixed and not worsened, and a basketball board is where it
-  shows.
+  shows. The two landscape figures read 39 and 26 until section 18i measured
+  them: `100` is 40 and the column is 28.
 - **`kBoardScoreWidth` is a pixel or two short for any score holding a `1`, and
   that is on the fleet now.** Found while measuring the two-line column, not
   caused by it. `1` is the one digit in `FreeSansBold12pt7b` with an `xAdvance`
@@ -3589,6 +3590,9 @@ before it only bounded the answer.
   alone here because moving that constant moves every figure in 15b, 15h and
   15i. The two-line row is unaffected: all ten `Sans9` digits advance 10, so
   every two-digit score is exactly the 20px it is given.
+
+  **Closed by section 18i** on 2026-11-02, which moved the constant to 28 and
+  every figure with it. Still nothing on glass.
 - **The landscape row was read, not photographed.** Every figure 15h and 15i
   wrote down is untouched and the assertions that hold them still pass, but no
   landscape board has been looked at since.
@@ -3603,6 +3607,151 @@ before it only bounded the answer.
 - **`SPORTS_CARDS_V2_GENERIC_DESIGN.md` is in the other repository** and says
   the row is five fields at fixed positions. It was already behind after 18e and
   18f and this moves it further.
+
+### 18i. Two widths that were measured wrong (2026-11-02)
+
+`kBoardScoreWidth` and `kBoardNameFloor` in `App/CardColumns.h`, and a new
+`drawnTextWidth()` in `App/Display.cpp` read by `widestBoardStatus()` and by
+`layoutLine()`'s overflow test. Two defects, both found by measurement and
+neither by eye. TEXT_LAYOUT_DESIGN.md section 15k is the design.
+
+**The score column was 26 and two digits of `FreeSansBold12pt7b` are 28.** `1`
+is the only digit in that face with an `xAdvance` of 14 rather than 13, so
+eighteen of the ninety two-digit scores measure 27 or 28 against a 26px column
+and `layoutLine()`'s ladder drops them to `Sans9`. The column is 28 and
+`kBoardNameFloor` is 29, which is the floor's own derivation re-run at the
+corrected score width. The two-line row was already right: every `Sans9` digit
+advances 10, so `kBoardStackedScoreWidth`'s 20 holds any two of them.
+
+**A status carrying a control byte was measured at one width and drawn at
+another.** `LGFXBase::text_width()` skips a byte below 0x20 for no pixels and
+`copySlice()` turns it into a space, which is 5px at `Sans9`, so a period
+arriving as `2ND<0x01>QTR` sized a 78px column and then drew `2ND...` into it.
+`drawnTextWidth()` measures the string through `copySlice()` and both callers
+read it. **Established before anything was changed**, by reading
+`LGFXBase.cpp:2184` and `2350` against `App/Display.cpp`'s `layoutText()`, and
+the mechanism is **Verified**. **That a device has ever sent such a status is
+not.** `copyBoundedMarked()` in `App/CheckIn.cpp` bounds the length of `period`
+and does not scrub control characters, so the route is open and no telemetry
+says it has been used.
+
+**The measurements.** `LGFXBase::text_width()` was reimplemented a fifth time at
+`size_x == 1` by 9b's method, off the vendored `FreeSansBold9pt7b.h` and
+`FreeSansBold12pt7b.h` glyph tables, and it reproduces all twenty-seven figures
+this repository already carries - `FINAL` 55, `PPD` 37, `6TH INN` 74, `4TH QTR`
+79, `3RD QTR` 80, `HALFTIME` 94, `OVERTIME` 97, `12:00 AM` 78, `7:30 PM` 67,
+`2ND P...` 66, `2ND PERIOD` 112, `Hurricanes` 94, `Mammoth` 86, `Capitals` 70,
+`Est. value` 112, `Sunrise` 89, `Sunset` 81, `$400K - $450K` 161,
+`$9999K - $99999K` 200, the 323/235/83 compliance wrap, the two addresses at 384
+and 518, and `$275/sq ft - updated Sep 25` 232 - to the pixel before it was
+trusted on a digit. Four of those were checked at the wrong face on the first
+attempt and came out 25% low, which is what a reproduction gate is for: the
+figures were right and this file's reading of which face they belonged to was
+not.
+
+**What the key tests did against `main`, said plainly.** The design document
+went in first, then the tests, then the code, in that order:
+
+- The new score-column block in `tests/card-columns-test.cpp`, compiled against
+  the tree with `kBoardScoreWidth` still at 26, fails at
+  `score.sans12 <= kBoardScoreWidth` on line 214 with no `PASS` line.
+  **Verified** on this workstation's `g++ 16.2.0`.
+- The two new `widestBoardStatus()` checks in
+  `ci/check-board-columns-call.sh`, run against `main`'s own `App/Display.cpp`,
+  print two `ERROR:` lines and exit 1. **Verified** locally.
+- The constant was changed after both. The `static_assert`s holding the score
+  column against its measurement were added with it, so they are **not** a
+  failing-first check and are not counted as one.
+
+**Counts, before and after.** `App/CardColumns.h` 70 `static_assert`
+declarations to 75; `grep -c static_assert` reads 72 to 78, because two comment
+lines and then three name it in prose. `tests/card-columns-test.cpp` 173
+`assert`s to 185, in one binary whose own `PASS:` line is what
+`ci/test-card-columns.sh` reads. `ci/check-board-columns-call.sh` 31 text checks
+to 36. `App/Display.cpp` gains one function and no `static_assert`. Every host
+script passes by its own `PASS:` or `Passed!` line, read off each runner rather
+than off an exit code.
+
+#### The mutations, and what caught each one
+
+Thirteen that landed, each applied to a byte-for-byte copy taken first, each
+gated on `cmp` saying the file actually changed before the check ran, each
+restored from that copy and `cmp`'d and `touch`ed after. A mutation that did not
+land is recorded as such rather than as a pass.
+
+One did not land. `F` was first aimed at `App/CardColumns.h` when the table it
+changes is in `tests/card-columns-test.cpp`, and `perl` reported "pattern occurs
+0 times" rather than replacing nothing. That is the gate on the gate, and it is
+why it is there. Re-aimed at the right file it landed and was caught.
+
+| # | the change | caught by |
+|---|---|---|
+| A | `kBoardScoreWidth` 28 to 26, the defect restored | `static_assert`, "a one-line score column is the widest two digits of Sans12" |
+| B | `kBoardScoreWidth` 28 to 40, wider than measured | `static_assert`, "a row with scores keeps the 81px name column" |
+| C | `kBoardWidestTwoDigitScoreWidth` 28 to 27 | `static_assert`, the same equality |
+| D | `kBoardNameFloor` 29 to 31, the floor not re-derived | `static_assert`, "a scheduled row that reported one score still holds a start time" |
+| E | `kBoardStackedScoreWidth` 20 to 19 | `static_assert`, the two-line equality |
+| F | the score table says `11` measures 26 at `Sans12` | the host test, `widestTwoDigit12 == kBoardWidestTwoDigitScoreWidth` |
+| K | the score table says `100` fits `Sans12` | the host test, `score.sans12 > kBoardScoreWidth` |
+| L | the photographed-name count back to seven | the host test, `cutOnOneLine == 8` |
+| M | the score table says `11` is 25 at `Sans9` | the host test, `score.sans9 <= kBoardStackedScoreWidth` |
+| G | `widestBoardStatus()` back to the raw width | the gate |
+| H | `drawnTextWidth()` measures its argument | the gate |
+| I | `drawnTextWidth()` stops going through `copySlice()` | the gate |
+| J | `layoutLine()`'s overflow test back to the raw width | the gate |
+
+**Five of the thirteen were caught by a `static_assert` and not by the host
+test**, which is worth writing down rather than counting as five test results:
+the header's assertions fire at compile time, so the sweep never runs and the
+runtime block that reads the score table never executes. F, K, L and M are the
+four that prove that block itself bites, and they were found by mutating the
+measured table rather than the constant. The one run where the runtime
+assertion on line 214 did fire is the failing-first run above, taken before the
+`static_assert`s existed.
+
+**G through J are the whole of the control-byte fix's coverage.** No host test
+compiles `App/Display.cpp`, so a text gate is what holds those four lines, in
+the same spirit as 18e's and 18f's. J is the one the gate did not have before
+this section: `layoutLine()`'s overflow test was the second caller reading raw
+bytes and nothing read it, so the check was added with the fix.
+
+#### What 18i does not cover
+
+- **Nothing has been on glass.** Every figure is a glyph table, a `g++` run or a
+  compile. Whether a 28px score column beside a 41px name reads at arm's length,
+  and whether the two pixels each name gave up can be seen, is what a photograph
+  answers and none has been taken. This is the open item.
+- **`Jets` is now cut on the landscape row.** The 240px one-line name column
+  goes 36 to 34 and `Jets` measures 36, so the one name of 15i's photographed
+  eight that the landscape row still spelled is cut. The two-line row's 97 holds
+  all eight, so the panel that board was photographed on is unaffected. Counted
+  by the host test rather than argued about, and not looked at.
+- **A three-digit score is still cut**, 40px of `Sans12` into 28 and 30px of
+  `Sans9` into 20, past every tier the ladder has, so `layoutLine()` falls
+  through to a mid-word break and draws `10` for `105`. Asserted as the gap it
+  is in `kThreeDigitScores`. A basketball board is where it shows and nothing
+  here fixes it.
+- **No host test compiles `App/Display.cpp`**, so `drawnTextWidth()` is held by
+  a text gate and not by a run. The 5px a control byte costs is a figure in a
+  design document and in this section; nothing executes
+  `LGFXBase::text_width()` outside an `arduino-cli` build.
+- **`copySlice()`'s own substitution is read by no check.** Changing
+  `isBreakSpace(c) ? ' ' : c` back to `c` would restore the mismatch from the
+  other side and the gate would still pass, because it reads
+  `drawnTextWidth()`'s shape rather than what `copySlice()` does. It would also
+  break section 3's whitespace rule on every card that takes free text, which is
+  the only thing standing there.
+- **A control byte has never been sent.** The fix is for a payload the wire
+  allows and no device has produced, so the before column of 15k's table is read
+  off two routines rather than off a panel.
+- **The 240px one-line row is not a panel the fleet has.** The 240px board is
+  profile and draws the two-line form, so the figures that moved most are the
+  arithmetic's rather than any fielded display's. The 320px landscape board is
+  the one that changes on glass, by two pixels of name.
+- **A rollout draws the same payload two ways.** `SportsBoardRow`,
+  `Sports::Game` and the check-in payload are byte-for-byte what they were and
+  no field was added, removed or reinterpreted, so the 6-month compatibility
+  gate is untouched. A device without this draws a `10` a tier small.
 
 ---
 
