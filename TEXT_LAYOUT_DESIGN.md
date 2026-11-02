@@ -2900,15 +2900,20 @@ panel applies here too. It is a real loss at a width nobody builds, recorded
 rather than hidden: the assertion that a scheduled row holds its start time is
 asserted for the two-digit state and stated as lost for the three-digit one.
 
-**A two-digit negative score drops the whole board's face.** The fold keys on the
-longest score STRING, so `-10` is three characters and puts the board in the
-three-digit state: 30px columns, `Sans9` scores, 2px off each one-line name or 10
-off the two-line one, for a board whose largest number is 10. The string is what
-has to fit the column, which is why the fold is written that way, and the cost is
-the same 2px any three-character score pays. None of the five registered sports
-sends a negative, and `-1` is `Sports::kNoScore` and draws nothing, so this is
-reachable through the wire rather than through a provider. A fold that measured
-digits instead would mis-size the column for `0-0` the other way.
+**A two-digit negative score dropped the whole board's face. Closed by 15m,
+2026-11-02.** The fold keys on the longest score STRING, so `-10` was three
+characters and put the board in the three-digit state: 30px columns, `Sans9`
+scores, 2px off each one-line name or 10 off the two-line one, for a board whose
+largest number is 10. 15m settles it as a question about the data instead of a
+column width: none of the five registered sports scores below zero, `-1` is
+already `Sports::kNoScore`, and a rule that drew `-2` and blanked `-1` would give
+two answers about one range. The whole negative range now stores as `kNoScore`
+and draws an empty cell, so no signed string reaches this fold and `strlen`
+equals the digit count for everything that does. 15m also measures what the two
+alternatives cost: `-10` is 35px at `Sans12` against a 28px two-digit column, so
+a fold counting digits would have handed it a column it is over and the ladder
+would have drawn it a tier below the digits beside it, which is this section's
+own option C.
 
 **The single-game card still draws a three-digit score at `Sans18`.** This
 section is about `showSportsBoard()`. `showSportsCard()` has its own 76px score
@@ -2956,3 +2961,157 @@ returning one of the three, beside the fold that measures the widest status.
 `App/CardColumns.h` is the arithmetic, `tests/card-columns-test.cpp` sweeps all
 three states at every width, `ci/check-board-columns-call.sh` holds the fold and
 the face, and TEST_PLAN.md section 18j has the mutations.
+
+---
+
+### 15m. A negative score is not a scoreline, 2026-11-02
+
+15l left one case written down rather than fixed, and this closes it as a
+decision about the data rather than as a fourth column width.
+
+`boardScoreState()` folds over the score STRINGS and keys on `strlen`, so `-10`
+is three characters and puts the whole board in `BoardScores::ThreeDigit`: 30px
+score columns, `Sans9` scores on every row, 2px off each one-line name or 10 off
+each two-line one. A board whose largest number is 10 pays what a board carrying
+a 105 pays, and every other score on it drops a face with it.
+
+#### What a minus sign measures
+
+Off the vendored glyph tables by 9b's method. The reimplementation reproduces
+all twenty-four figures this repository already carries by hand - `Est. value`
+112, `Sunrise` 89, `Sunset` 81, `$400K - $450K` 161, `$9999K - $99999K` 200,
+`FINAL` 55, `6TH INN` 74, `4TH QTR` 79, `HALFTIME` 94, `OVERTIME` 97,
+`2ND P...` 66, `2ND PERIOD` 112, the 78px widest start time, `6:00 PM` and
+`7:30 PM` at 67, `11` at 28 and `1` at 14 in `Sans12`, `100` at 40 and 30,
+`11` at 20 in `Sans9`, `1000` at 40, `1...` and `3...` at 22, `...` at 12 - to
+the pixel, and `fontHeight()` at 22 and 29.
+
+`-` advances 8 in `Sans12` and 6 in `Sans9`. So:
+
+| score | characters | `Sans12` | `Sans9` |
+|---|---|---|---|
+| `-1` to `-9` | 2 | 21 to 22 | 16 |
+| `-10` to `-99` | 3 | 34 to 36 | 26 |
+| `-100` to `-999` | 4 | 47 to 50 | 36 |
+| `-1000` to `-9999` | 5 | 60 to 64 | 46 |
+
+#### Counting digits instead of characters moves the defect, it does not fix it
+
+The obvious reading is that the fold should have counted digits, because 10 is a
+two-digit number. Measure it and what you get is 15k's defect instead of this
+one.
+
+`kBoardScoreWidth` is 28, which is `11` at `Sans12`. `-10` at `Sans12` is 35. A
+fold that called `-10` two-digit would hand the board a 28px column and the score
+would be 7px over it, so `layoutLine()` steps down `kSansTiers` from the caller's
+face: `Sans12` measures over and is skipped, `Sans9` is 26 and its 22px block
+sits inside the 29px slot, and the score draws **whole, at `Sans9`, one tier
+below the digits beside it**. No ellipsis. That is exactly the defect 15k is
+about and 15l's option C rejects, a `105` drawn smaller than the `98` next to it,
+and it is why the face is the board's and not a score's.
+
+So the alternative swaps a face drop every row of the board pays together for one
+score drawn a tier small on its own. The string is what has to fit the column,
+which is why the fold is written the way it is, and `boardScoreState()`'s own
+remark says so: a score arrives as text and what has to fit the column is the
+text.
+
+#### A fourth state costs more than the face drop on one row shape and less on the other
+
+The other reading is a `BoardScores::NegativeTwoDigit`. Sized at 36px, the widest
+`-10` to `-99` measures at `Sans12`, it costs each one-line name 8px against the
+face drop's 2, on a 240px row whose name is already 41. Four times, and the
+figure is right.
+
+It does not hold on the two-line row, and that is the row the fleet's 240px panel
+draws. That row has one score column, not two, and it is already `Sans9`, so a
+fourth state would be sized at 26 rather than 36 and would cost its one name 6px
+against the face drop's 10. On the shape most of the fleet is looking at, the
+alternative this section rejects is the cheaper one. Computed through
+`boardStackedColumnsFor()`: the two-line name is 110 at a 20px column, 104 at 26,
+100 at 30.
+
+So the pixels do not decide it, and saying they do would be the kind of
+justification that reads as settled and is not. What decides it is the next
+section: a fourth state threads a fourth case through nineteen signatures and
+`scoreStateName()`'s switch, to buy a column for a number no sport this card
+carries can produce.
+
+#### So the negative range is not a score
+
+The five sports `sportChipLabel()` maps are american-football, football,
+basketball, baseball and hockey. None of them scores below zero. A negative
+reaches the panel through the wire, where `SportsCardPayload`'s score is `int?`
+end to end and nothing bounds it, rather than through a provider.
+
+And the stored representation already answers for part of that range.
+`Sports::kNoScore` is `-1`, so a server sending `-1` is sending "no score" and
+gets an empty cell today. A rule that drew `-2` and blanked `-1` would give two
+answers about one range, and which answer you got would depend on a sentinel
+value picked for a different reason. Separating them would take a second wire
+field saying which `-1` was meant. The compatibility gate closed 2026-09-22 and
+allows additive optional fields, so that field is available rather than
+impossible - it is just a field, a server change and a parse branch bought for a
+case no league produces, which is a worse trade than the one below.
+
+So the whole negative range is "no score". `CheckIn.cpp` stores
+`Sports::kNoScore` for anything under zero, and for anything above `INT16_MAX`
+as well, because the narrowing into `int16_t` is modular and 65536 would
+otherwise arrive as a nil-nil draw. It names the value it was sent in the
+stream. Both renderers read one predicate for what a drawable score is rather
+than each restating the sentinel, which is what keeps their behavior defined for
+a value this parse never produces.
+
+#### What the board draws, and what the fold now rests on
+
+Every score string the board can hold is decimal digits with no sign, so
+`strlen` and the digit count are the same number and the fold is right by that
+invariant rather than by accident. `boardScoreIsDrawable()` in
+`App/CardColumns.h` is the predicate, it is `constexpr`, and
+`tests/card-columns-test.cpp` sweeps the whole `int16_t` range against it and
+asserts the invariant across every score the formatter can write.
+`ci/check-score-guard.sh` holds the three lines that call it, because a predicate
+nothing calls is a predicate that passes its own test.
+
+#### What a reader loses, said rather than left to be found
+
+**A negative score draws the same empty cell a game that has not started draws.**
+That is the cost, and it is not recoverable on glass: the cell holds no mark, and
+15l's own reasoning rules out inventing one, because a glyph standing for "the
+server sent a figure this card will not draw" is a claim about the server that
+the panel has no room to qualify. What carries it instead is the stream, which
+is a deployed device's only diagnostic channel: the check-in that parsed the
+value logs the teams and the number it dropped, once per check-in rather than
+once per draw.
+
+**Nothing a provider sends changes.** For all five sports every score is zero or
+above, so this moves no pixel on any board the fleet is drawing. The scores that
+change are the ones the wire can carry and no league produces.
+
+**One layout does move, on the single-game card.** `showSportsCard()` decides
+whether to reserve its 76px score column from `homeScore.length() > 0 ||
+awayScore.length() > 0`. A game whose two scores were both negative used to give
+two non-empty strings and keep the column; both are empty now, so the card draws
+the shape a game that has not started draws and the two club names take the whole
+panel. That is the right shape for a figure the card refuses to draw, and it is
+the one layout in the family this section moves.
+
+**The impression summary stops carrying the number too.** `describeCardAt()`
+builds its line through the same `scoreText()`, so what the device reports as
+having been on screen goes from `Penguins -5 @ Capitals` to `Penguins @
+Capitals`. The field is free text and no schema moves. It matches what the panel
+drew, which is the point of reading one predicate rather than two.
+
+**The log has a ceiling and this can reach it.** Four cards of four games with
+both sides negative is 32 lines in one check-in, and `Log`'s pending ring holds
+exactly 32, so that check-in's other buffered lines are evicted. It needs a
+server sending negatives on all sixteen games. Serial still carries everything;
+what is lost is the remote stream's other content for that interval.
+
+**A score of zero still draws.** `0` is 10px at `Sans9` and 13 at `Sans12`, and a
+nil-nil draw is a real scoreline, which is the whole reason `kNoScore` is not 0
+and the reason the predicate is `>= 0` rather than `> 0`.
+
+**Four and five digit scores are untouched.** They are still `BoardScores::ThreeDigit`
+and still ellipsize to `1...` at 22px, which 15l costed and left open. This
+section narrows what can reach that case; it does not close it.

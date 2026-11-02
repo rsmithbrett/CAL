@@ -8,11 +8,16 @@
 #include <ArduinoJson.h>
 #include <time.h>
 
+#include <cstdint>
 #include <cstring>
 
 #include "Actions.h"
 #include "Impressions.h"
 #include "Assets.h"
+// For boardScoreIsDrawable(). The header names no graphics library and no
+// Arduino type, which is why the score facts live there and why a host
+// compiler can sweep them - see the remarks at the top of it.
+#include "CardColumns.h"
 #include "CardManager.h"
 #include "PersonalPhotos.h"
 #include "Config.h"
@@ -649,6 +654,45 @@ void parseAcceptedActionIds(JsonVariantConst source, Result& result) {
   }
 }
 
+/// One side's score as stored, from whatever the wire sent.
+///
+/// Zero and above is stored. Anything below zero becomes Sports::kNoScore and
+/// is named in the stream: -1 is kNoScore already, and the rest of the negative
+/// range joins it because none of the five sports sportChipLabel() maps scores
+/// below zero, and a rule that stored -2 while rejecting -1 would give two
+/// answers about one range. The server's score is `int?` end to end and bounds
+/// it nowhere, so a negative reaches here through the wire rather than through a
+/// provider. TEXT_LAYOUT_DESIGN.md section 15m.
+///
+/// **Both ends of the int16_t range, and both tested on the int the parser
+/// handed over rather than after the narrowing.** The narrowing is modular, so
+/// every value outside the range folds onto one inside it and a guard that ran
+/// after it would read the fold rather than the wire: -65536 would arrive as 0
+/// and draw a nil, and so would 65536. Testing INT16_MAX here as well as the
+/// sign is what makes Sports.h's "zero or above, or kNoScore" true of the
+/// stored field instead of true only of the negative half.
+///
+/// The two formatters in Sports.cpp read the same predicate. That is not a
+/// second copy of this rule: it is what keeps the renderers' own behaviour
+/// defined for a value this function never produces, so a later caller writing
+/// into Sports::Game without coming through here cannot draw a signed string.
+///
+/// Logged here rather than at the draw, so the number that arrived costs one
+/// line per check-in instead of one per dwell, and the line carries what was
+/// sent rather than the kNoScore it became.
+int16_t storedScore(int fromWire, const char* side, const char* away, const char* home) {
+  if (CardColumns::boardScoreIsDrawable(fromWire) && fromWire <= INT16_MAX) {
+    return static_cast<int16_t>(fromWire);
+  }
+  if (fromWire != static_cast<int>(Sports::kNoScore)) {
+    Log::printf("[sports] %s score %d is not a scoreline this card stores - no sport it carries "
+                "scores below zero and none reaches %d, so %s at %s draws an empty cell where "
+                "that number would have gone",
+                side, fromWire, static_cast<int>(INT16_MAX), away, home);
+  }
+  return Sports::kNoScore;
+}
+
 }  // namespace
 
 Result perform() {
@@ -1130,8 +1174,15 @@ Result perform() {
           // -1 for absent, which is Sports::kNoScore - and distinct from 0,
           // because a nil-nil draw is a real scoreline and a game that has not
           // started is not 0-0.
-          slot.homeScore = game["homeScore"] | static_cast<int>(Sports::kNoScore);
-          slot.awayScore = game["awayScore"] | static_cast<int>(Sports::kNoScore);
+          //
+          // Through storedScore(), so the whole negative range reaches the
+          // renderers as kNoScore and the number that was sent reaches the
+          // stream. The teams are read off the JSON rather than off the slot
+          // because the bounded copies below have not run yet.
+          slot.homeScore = storedScore(game["homeScore"] | static_cast<int>(Sports::kNoScore),
+                                       "home", game["away"] | "", game["home"] | "");
+          slot.awayScore = storedScore(game["awayScore"] | static_cast<int>(Sports::kNoScore),
+                                       "away", game["away"] | "", game["home"] | "");
 
           // Bounded copies: these strings came off a wire and their length is
           // not this firmware's to trust.

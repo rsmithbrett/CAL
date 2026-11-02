@@ -40,6 +40,9 @@ jobs:
       - name: Check the scoreboard's call into the column arithmetic
         if: ${{ hashFiles('ci/check-board-columns-call.sh') != '' }}
         run: bash ci/check-board-columns-call.sh
+      - name: Check what a score below zero does
+        if: ${{ hashFiles('ci/check-score-guard.sh') != '' }}
+        run: bash ci/check-score-guard.sh
 
   full-gate:
     # The arduino-cli half of the release gate, for mutations that only a real

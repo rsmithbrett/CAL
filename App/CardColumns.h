@@ -172,6 +172,35 @@ constexpr int kBoardWidestTwoDigitStackedScoreWidth = 20;
 constexpr int kBoardThreeDigitScoreWidth = 30;
 constexpr int kBoardWidestFourDigitScoreWidth = 40;
 
+/// What a negative score measures, which is what the two alternatives to
+/// rejecting one would have cost. Here so the trade is a figure a run reads
+/// rather than a sentence, the way kBoardWidestFourDigitScoreWidth above is.
+///
+/// `-` advances 8 in FreeSansBold12pt7b and 6 in FreeSansBold9pt7b, off the
+/// vendored glyph tables by the method in TEXT_LAYOUT_DESIGN.md section 9b. So
+/// `-10` to `-99` run 34 to 36 at Sans12 and are 26 at Sans9, and 36 and 26 are
+/// the two widest.
+///
+/// 36 against kBoardScoreWidth's 28 is what rules out counting digits instead
+/// of characters: a board that called `-10` two-digit would hand it a 28px
+/// column at Sans12, 7px over, and layoutLine() would step down the ladder to
+/// Sans9, where 26 fits. The score draws whole, one tier below the digits beside
+/// it, which is the defect section 15k is about rather than a column that holds
+/// its string.
+///
+/// 36 against kBoardThreeDigitScoreWidth's 30 is what a fourth state would have
+/// taken off each one-line name, against the 2px the face drop takes. On a
+/// two-line row the figure runs the other way: that row has one score column and
+/// it is already Sans9, so a fourth state sized at 26 costs its one name 6
+/// against the face drop's 10.
+///
+/// And 26 inside that 30 is why the shipped defect dropped the board's face
+/// rather than ellipsizing anything: the state `-10` landed in did hold it.
+///
+/// Section 15m is the decision, and what these figures do and do not settle.
+constexpr int kBoardWidestNegativeTwoDigitScoreWidth = 36;
+constexpr int kBoardWidestNegativeTwoDigitStackedScoreWidth = 26;
+
 /// A single-digit-hour start time, off the same glyph table: "6:00 PM" and
 /// "7:30 PM" are both 67px, against the 78 kBoardStartTimeTextWidth carries for
 /// the widest one formatTimeOfDay() can make. It is the ordinary evening
@@ -199,6 +228,27 @@ constexpr int kBoardNameFloor = 29;
 /// How far in from each edge of the panel the first and last column edge sit, on
 /// top of kCardMargin.
 constexpr int kBoardRowInset = 4;
+
+/// Whether a stored score is a figure a score column draws, as against one it
+/// leaves empty.
+///
+/// Zero and above. Zero draws, because a nil-nil draw is a real scoreline and is
+/// the reason Sports::kNoScore is -1 rather than 0. Everything below zero is "no
+/// score": -1 is kNoScore itself, and the rest of the negative range joins it
+/// because none of the five sports this card carries scores below zero and a
+/// rule that drew -2 while blanking -1 would give two answers about one range.
+///
+/// Here rather than in Sports.h because Sports.h includes Arduino.h and nothing
+/// in this file names a graphics library or an Arduino type, which is what lets
+/// tests/card-columns-test.cpp sweep the whole int16_t range against it on a
+/// host compiler. CheckIn.cpp reads it at the wire and stores kNoScore for what
+/// it rejects; Sports.cpp's two formatters read it rather than each restating
+/// the sentinel. ci/check-score-guard.sh holds those three call sites.
+///
+/// It takes an int rather than an int16_t so a wider value from the parser
+/// converts without the narrowing that would fold a rejected score back into
+/// range. TEXT_LAYOUT_DESIGN.md section 15m is the decision and what it costs.
+constexpr bool boardScoreIsDrawable(int score) { return score >= 0; }
 
 /// The two score columns a row gets, which is where the status column's pixels
 /// come from.
@@ -570,6 +620,41 @@ static_assert(boardStackedScoreWidth(BoardScores::ThreeDigit) >
 // figure rather than as a sentence.
 static_assert(kBoardWidestFourDigitScoreWidth > kBoardThreeDigitScoreWidth,
               "a four-digit score is over the column and draws an ellipsis");
+
+// Section 15m's two rejected alternatives, as the measurements that reject
+// them, and the one figure that says what the shipped defect was.
+static_assert(kBoardWidestNegativeTwoDigitScoreWidth > kBoardScoreWidth,
+              "a fold counting digits would hand -10 a column it is over, so the ladder would "
+              "draw it a tier below the digits beside it");
+static_assert(kBoardWidestNegativeTwoDigitScoreWidth > kBoardThreeDigitScoreWidth,
+              "a fourth state for a negative score would be the widest column on the board");
+static_assert(kBoardWidestNegativeTwoDigitStackedScoreWidth <= kBoardThreeDigitScoreWidth,
+              "the three-digit column does hold -10 at Sans9, so the defect dropped the "
+              "board's face rather than ellipsizing the score");
+static_assert(kBoardWidestNegativeTwoDigitStackedScoreWidth > kBoardStackedScoreWidth,
+              "and a fourth state's two-line column would still be wider than the two-digit "
+              "one, which is the 6px it would cost that row's one name");
+
+// Both negative widths are the two-digit width plus the minus sign's own
+// advance, 8 at Sans12 and 6 at Sans9, because prefixing a `-` moves the cursor
+// by exactly its xAdvance and the last glyph still sets the right edge. Written
+// as the sum so each figure is pinned from both sides rather than only bounded
+// below: a drift in either constant now has to disagree with a width this file
+// already asserts.
+static_assert(kBoardWidestNegativeTwoDigitScoreWidth == kBoardWidestTwoDigitScoreWidth + 8,
+              "the widest negative two-digit score is the widest two-digit one plus the Sans12 "
+              "minus sign");
+static_assert(kBoardWidestNegativeTwoDigitStackedScoreWidth ==
+                  kBoardWidestTwoDigitStackedScoreWidth + 6,
+              "and the same at Sans9, where the minus sign advances 6");
+
+// Zero draws and the whole negative range does not. kNoScore's -1 is one value
+// of that range and not the boundary; the boundary is zero, because a nil-nil
+// draw is a real scoreline.
+static_assert(boardScoreIsDrawable(0), "a nil-nil draw is a scoreline and draws");
+static_assert(!boardScoreIsDrawable(-1), "-1 is Sports::kNoScore and draws nothing");
+static_assert(!boardScoreIsDrawable(-2),
+              "and so does every other negative, which is what keeps one range to one answer");
 
 // What the three-digit state costs a name, at both widths, on a board of state
 // words. Two pixels on a one-line row because the two names split it, ten on a

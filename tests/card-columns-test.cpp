@@ -26,6 +26,8 @@
 // TEST_PLAN.md section 18d has the mutations each case was proven against.
 
 #include <cassert>
+#include <cstdio>
+#include <cstring>
 #include <iostream>
 
 #include "CardColumns.h"
@@ -37,6 +39,7 @@ using CardColumns::BoardColumns;
 using CardColumns::boardDefaultStatusWidth;
 using CardColumns::boardLeftoverPixel;
 using CardColumns::boardMaxStatusWidth;
+using CardColumns::boardScoreIsDrawable;
 using CardColumns::boardScoreWidth;
 using CardColumns::boardSeparation;
 using CardColumns::boardSeparationFor;
@@ -67,6 +70,8 @@ using CardColumns::kBoardStatusWidth;
 using CardColumns::kBoardWidestPeriodTextWidth;
 using CardColumns::kBoardThreeDigitScoreWidth;
 using CardColumns::kBoardWidestFourDigitScoreWidth;
+using CardColumns::kBoardWidestNegativeTwoDigitScoreWidth;
+using CardColumns::kBoardWidestNegativeTwoDigitStackedScoreWidth;
 using CardColumns::kBoardWidestTwoDigitScoreWidth;
 using CardColumns::kBoardWidestTwoDigitStackedScoreWidth;
 using CardColumns::BoardScores;
@@ -1226,6 +1231,118 @@ int main() {
            boardStackedColumnsForBoard(240, BoardScores::ThreeDigit, 97).homeNameLeft);
   }
 
+  // --- a negative score, TEXT_LAYOUT_DESIGN.md section 15m --------------------
+  //
+  // 15l left `-10` putting the whole board in the three-digit state, because the
+  // fold keys on the score STRING and `-10` is three characters. 15m closes it
+  // on the data: the negative range is not a scoreline, so no signed string
+  // reaches the fold at all.
+  //
+  // What this covers is the predicate and the property the fold then rests on.
+  // It does not cover whether CheckIn.cpp and Sports.cpp call the predicate -
+  // neither file compiles on a host, and ci/check-score-guard.sh holds those
+  // three call sites for the same reason ci/check-board-columns-call.sh holds
+  // the draw path's arguments.
+  {
+    // Every value an int16_t score can hold, either side of zero. Swept rather
+    // than sampled: a predicate written `score > 0`, `score != -1`, or with the
+    // comparison inverted passes any handful of examples that happens to miss
+    // the one value it gets wrong, and 0 and -1 are both boundaries.
+    int drawable = 0;
+    int rejected = 0;
+    for (int score = -32768; score <= 32767; ++score) {
+      if (boardScoreIsDrawable(score)) {
+        ++drawable;
+        assert(score >= 0);
+      } else {
+        ++rejected;
+        assert(score < 0);
+      }
+    }
+    assert(drawable == 32768);
+    assert(rejected == 32768);
+
+    // The two boundaries named one at a time, so a run says which side each
+    // sits on rather than leaving it to the counts. A nil-nil draw is a real
+    // scoreline and is why kNoScore is -1; -1 is kNoScore itself; -2 is the
+    // first value that is neither, and it is rejected with the rest.
+    assert(boardScoreIsDrawable(0));
+    assert(!boardScoreIsDrawable(-1));
+    assert(!boardScoreIsDrawable(-2));
+    assert(!boardScoreIsDrawable(-10));
+    assert(!boardScoreIsDrawable(-32768));
+    assert(boardScoreIsDrawable(1));
+    assert(boardScoreIsDrawable(99));
+    assert(boardScoreIsDrawable(100));
+    assert(boardScoreIsDrawable(32767));
+
+    // Eight characters, matching SportsBoardRow::kMaxScore. Stated as its own
+    // number rather than including Display.h, which names a graphics library
+    // and would stop this file compiling - the same reason Display.h restates
+    // Sports::kMaxTeamNameLength as kMaxName.
+    constexpr int kScoreBufferSize = 8;
+
+    // The property the board's fold rests on: every drawable score formats to
+    // decimal digits with no sign, so strlen and the digit count are the same
+    // number. Swept over the whole drawable range rather than checked at the
+    // boundary, because what the fold reads is the length of this string.
+    //
+    // This is `std::snprintf` with the same format and the same capacity, not
+    // Sports::writeScore() itself, which cannot be compiled here. So no change
+    // to App/ can make this group fail: it establishes the property, and what
+    // ties the property to this firmware is ci/check-score-guard.sh pinning
+    // writeScore()'s own `"%d"` and its guard.
+    //
+    // The consequence is the claim worth having: three characters is reachable
+    // only from a score of 100 or more. That is what makes the fold's
+    // `longest >= 3` a question about the number and not about its sign.
+    int threeCharacters = 0;
+    for (int score = 0; score <= 32767; ++score) {
+      char text[kScoreBufferSize];
+      const int written = std::snprintf(text, sizeof(text), "%d", score);
+      assert(written > 0);
+      assert(written < kScoreBufferSize);
+
+      const std::size_t length = std::strlen(text);
+      assert(static_cast<int>(length) == written);
+      assert(length >= 1);
+      for (std::size_t i = 0; i < length; ++i) {
+        assert(text[i] >= '0' && text[i] <= '9');
+      }
+
+      int digits = 1;
+      for (int remaining = score; remaining >= 10; remaining /= 10) ++digits;
+      assert(static_cast<int>(length) == digits);
+
+      assert((length >= 3) == (score >= 100));
+      if (length >= 3) ++threeCharacters;
+    }
+    // Everything from 100 up, which is the whole three-character case and the
+    // four- and five-character ones 15l left open above it.
+    assert(threeCharacters == 32767 - 100 + 1);
+
+    // And what the two rejected alternatives would have cost, as the figures
+    // 15m measures rather than as its sentences.
+    //
+    // Counting digits instead of characters: the board would call `-10`
+    // two-digit, hand it kBoardScoreWidth and draw it at Sans12, where it is
+    // over the column and past every tier the ladder has. A face drop traded
+    // for an ellipsis.
+    assert(kBoardWidestNegativeTwoDigitScoreWidth > kBoardScoreWidth);
+
+    // A fourth state: wider than the three-digit column, so it would take its
+    // pixels off every name on the board rather than off the score face.
+    assert(kBoardWidestNegativeTwoDigitScoreWidth > kBoardThreeDigitScoreWidth);
+
+    // And why the shipped defect is a face drop and not an ellipsis: the
+    // three-digit column the string-keyed fold hands `-10` does hold it, at the
+    // Sans9 that same state selects. The board drew the score and dropped
+    // everything else a tier.
+    assert(kBoardWidestNegativeTwoDigitStackedScoreWidth <= kBoardThreeDigitScoreWidth);
+    assert(kBoardWidestNegativeTwoDigitStackedScoreWidth >
+           kBoardWidestTwoDigitStackedScoreWidth);
+  }
+
   std::cout << "PASS: scoreboard columns - the design document's two tables, the measured "
                "status column and its ceiling, what a row asks for on its own, the one grid "
                "four rows of a board share, the fold over the strings at every width up to "
@@ -1234,7 +1351,9 @@ int main() {
             << " score states, the separation identity over eight status widths, the "
                "floor's boundaries, section 15j's two-line row - the photographed board's "
                "eight names, the table at both widths, HALFTIME held whole, and the same sweep "
-               "with the parity term gone - and section 15l's three-digit score: the column "
+               "with the parity term gone - section 15l's three-digit score: the column "
                "that holds it, what it costs each row shape, the one name it cuts, and the "
-               "edges it leaves where they were\n";
+               "edges it leaves where they were - and section 15m's negative score: every "
+               "value an int16_t holds against the predicate, the digits every drawable "
+               "score formats to, and what the two rejected alternatives measure\n";
 }

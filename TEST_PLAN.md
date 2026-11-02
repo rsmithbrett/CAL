@@ -4071,6 +4071,228 @@ closed, which now reads in the past tense.
 
 ---
 
+### 18k. A negative score is not a scoreline (2026-11-02)
+
+18j left `-10` putting the whole board in the three-digit state, because
+`boardScoreState()` keys on the score STRING and `-10` is three characters. The
+board then drew every score on it at `Sans9` and took 2px off each one-line name
+or 10 off each two-line one, for a board whose largest number is 10.
+TEXT_LAYOUT_DESIGN.md section 15m closes it on the data rather than on a column
+width: a score below zero is not a scoreline, so `CheckIn.cpp` stores
+`Sports::kNoScore` for the whole negative range and both formatters in
+`Sports.cpp` write an empty cell for it.
+
+**The defect was read off the source before anything was changed.** `strlen` on
+both score strings, `longest >= 3 ? ThreeDigit : TwoDigit`, and
+`bigScores = !stacked && scores != BoardScores::ThreeDigit` at the call site, so
+one three-character score on any row drops the face on all four. **Verified** by
+reading `App/Display.cpp:3632` and `:3781`. A negative reaches that fold:
+`CheckIn.cpp` parsed `game["homeScore"] | -1` into an `int16_t` with no bound,
+and `writeScore()` formatted anything that was not exactly `-1` with `"%d"`.
+**Verified** by reading the parse and the formatter. `-1` could not, because it
+is `kNoScore` and already drew nothing.
+
+#### The order, and the failing-first runs
+
+The design document went in first, then the test, then the code.
+
+1. TEXT_LAYOUT_DESIGN.md section 15m, and 15l's own paragraph on this case
+   rewritten from a recorded gap to a decision, in the same pass. Section 15m
+   was then rewritten again after the first review: six of its claims were wrong
+   and the load-bearing one is below.
+2. `CardColumns::boardScoreIsDrawable()` added carrying **the shipped rule**,
+   `score != -1`, and the new block in `tests/card-columns-test.cpp` written
+   against it.
+3. That build fails on `static_assert(!boardScoreIsDrawable(-2))` with
+   "and so does every other negative", exit 1, no `PASS` line. **Verified** on
+   this workstation's `g++ 16.2.0`.
+4. With the three new `static_assert`s removed so the compile gets far enough to
+   run, the binary aborts on `Assertion failed: score >= 0, file
+   tests/card-columns-test.cpp, line 1256` and prints no `PASS` line.
+   **Verified**. That is the sweep finding `-2` drawable under the shipped rule.
+5. The predicate changed to `score >= 0`. `ci/test-card-columns.sh` prints its
+   own `PASS: scoreboard columns` line including section 15m's clause.
+   **Verified**.
+
+The predicate is new, so step 3 on its own is only the shape 18h and 18j record,
+where a name that does not exist yet cannot be asserted against. Step 4 is the
+one that bites: the same sweep, compiling, failing at a real assertion on the
+behavior `main` shipped.
+
+**The written justification was wrong where it mattered, and a review found it.**
+The first 15m said a fold counting digits instead of characters would hand `-10`
+a 28px column, go past every tier of the fitting ladder, and ellipsize to `-...`.
+It would not. `layoutLine()` steps **down** `kSansTiers` from the caller's face:
+`Sans12` measures 35 against 28 and is skipped, `Sans9` measures 26 and its 22px
+block sits inside the 29px slot, so the score draws **whole, at `Sans9`, one tier
+below the digits beside it**. That is section 15k's defect and 15l's rejected
+option C, which is a better argument against the alternative than the one that
+was written, and 15m's own measurement table had the 26 in it all along.
+**Verified** by reading `layoutLine()` at `App/Display.cpp:1483` against the
+measured widths. The same wrong mechanism had reached five places - 15m twice,
+15l's rewrite, a `CardColumns.h` comment block and a `static_assert` message, and
+a comment in the host test - and all five were corrected. The assertions
+themselves still held; it was the explanations that were false.
+
+**And the pixel case against a fourth state only holds on one row shape.** 15m
+said a `BoardScores::NegativeTwoDigit` would cost 8px off each one-line name
+against the face drop's 2, which is right, and then said 8px off a two-line name,
+which is not: that row has one score column and it is already `Sans9`, so a
+fourth state would be sized at 26 rather than 36 and would cost its one name 6px
+against the face drop's 10. On the 240px portrait row - the only 240px shape the
+fleet draws - the rejected alternative is the cheaper one. **Verified** through
+`boardStackedColumnsFor()`'s own arithmetic: 110 at a 20px column, 104 at 26, 100
+at 30. 15m now says the pixels do not settle it and rests the decision on what
+does, which is that a fourth state threads a fourth case through nineteen
+signatures to hold a number no sport this card carries can produce.
+
+#### The mutations, and what caught each one
+
+Each one applied to a byte-for-byte copy and **`cmp`-proved to have landed**
+before the runner was read, then restored and `cmp`-proved identical again.
+**Twenty-five mutations, twenty-five caught**, each by a check that names the
+thing that moved.
+
+`sed` and `awk` both strip every CR from these CRLF files in the same pass, so
+two of the runs below changed the line endings as well as the token. A **control
+run** is what makes them readable: CRs removed from all five files with **no**
+token changed, and both `ci/check-score-guard.sh` and `ci/test-card-columns.sh`
+pass by their own lines. Run again after the gate was hardened, because the
+first control predated half of these checks. **Verified** both times.
+
+**Ten of these came from the adversarial review**, which found the first version
+of this gate green on nine ways of leaving the behavior wrong. An eleventh came
+from this sweep finding a hole in its own gate: a `Log::printf(` pinned by
+presence alone stayed present as `(void)0; if (false) Log::printf(...)`. The pin
+is now the guard, the call immediately inside its brace, and the arguments.
+
+| mutation | what it would draw | caught by |
+|---|---|---|
+| `score >= 0` to `score != -1` | the shipped defect, exactly | `ci/check-score-guard.sh`, and the host test's `static_assert` |
+| `score >= 0` to `score > 0` | a nil-nil draw stops drawing | the gate, and `static_assert(boardScoreIsDrawable(0))` |
+| a second `boardScoreIsDrawable(int16_t)` overload beside the pinned one | both formatters bind the overload and go back to `!= -1`; the pinned text never moves, and the host test passes an `int` | the gate's declaration count |
+| `kNoScore` from `-1` to `0` in `App/Sports.h` | every game that has not started stores a drawable zero, so all four rows draw `0`, `None` becomes `TwoDigit`, and the score columns take their pixels off every name | the gate |
+| `storedScore`'s parameter from `int` to `int16_t` | the narrowing moves ahead of the guard, so -65536 arrives as 0 and draws a nil | the gate |
+| `\| static_cast<int>(Sports::kNoScore)` to `\| 0` | same picture as the `kNoScore` mutation, from the other end | the gate |
+| ` && fromWire <= INT16_MAX` deleted | 65536 folds to 0 and draws a nil-nil | the gate |
+| `if (fromWire < -1) return 0;` inserted above the guard | a `-10` stores 0 and draws a nil, logging nothing | the gate |
+| `storedScore(game["homeScore"]` to `["awayScore"]` | the home line draws the away score | the gate |
+| a second unguarded `slot.homeScore =` appended after the guarded one | the guard is bypassed and the last write wins, which is what a bad merge leaves | the gate's assignment count |
+| `return Sports::kNoScore` to `return fromWire` | the parse guard does nothing | the gate |
+| the parse guard negated | every drawable score stored as `kNoScore` | the gate |
+| the log guard to `fromWire < 0` | nothing drawn differently, so nothing visible | the gate |
+| `Log::printf` left present but unreachable | the same, and the pinned text is still in the file | the gate |
+| the log's `away, home` swapped | the stream names the wrong game | the gate |
+| the `!` dropped in `writeScore()` | every drawable score writes an empty cell, so no board draws scores | the gate |
+| `writeScore()`'s guard deleted and left as one `// Was:` comment line | a `-10` writes a signed string and `kNoScore` writes `-1` | the gate, after it learned to strip comments |
+| `"%d"` to `"%+d"` in `writeScore()` | a 10 writes `+10`: three characters, so the board drops a face with no negative anywhere | the gate |
+| `scoreText()`'s arms swapped | the single-game card draws the sentinel and blanks real scores | the gate |
+| `scoreText()`'s return deleted and left as a comment | the card prints `-1` for every game that has not started | the gate |
+| `writeScore()` back to `score == kNoScore` | two rules for one question, and the two cards drift apart | the gate, twice |
+| `kNoScore == score` instead | the same, written the other way round | the gate |
+| a `'-'` case added to `boardScoreState()` | the symptom patched where the guard belongs | the gate |
+| the same case written `== 0x2D` | the same, past a check that looked for the character | the gate, after it was pinned on the statement instead |
+| either negative width constant drifting from the glyph table | a figure the design document reasons from stops being the measurement | the host test's two sum identities |
+
+The log mutations are the ones with no drawn consequence, and they are pinned
+anyway: the stream is a deployed device's one diagnostic channel, so a check-in
+that drops a number and says nothing about it is the failure nobody can
+investigate afterwards.
+
+#### Counts, before and after this section
+
+`App/CardColumns.h` 99 `static_assert` declarations to **108**;
+`grep -c static_assert` 102 to 111. `tests/card-columns-test.cpp` 231 `assert`s
+to **256**. `ci/check-board-columns-call.sh` stays at 52 text checks, and the new
+`ci/check-score-guard.sh` carries **21**. Every host script passes by its own
+`PASS:` or `Passed!` line, and every text gate by its own `==>` line.
+
+`ci/check-score-guard.sh` is invoked from `ci/build-firmware.sh` beside the four
+gates already there, and as its own step in `mut-host-test.yml`. That wiring is
+part of this section rather than a detail: the adversarial review's last note was
+that it had not checked whether anything ran the new gate, and nothing did.
+
+#### What 18k does not cover
+
+- **Nothing has been on glass, and nothing on glass changes for a real score.**
+  All five sports `sportChipLabel()` maps - american-football, football,
+  basketball, baseball, hockey - score zero or above, so no board the fleet is
+  drawing moves a pixel. The scores this changes are ones the wire can carry and
+  no league produces. **Verified** by reading `sportChipLabel()`. That is why no
+  photograph was taken, and it is also why a photograph would not have shown
+  anything a provider can produce.
+- **One layout does move, and only a crafted payload reaches it.**
+  `showSportsCard()` at `App/Display.cpp:3529` decides whether to reserve its
+  76px score column from `homeScore.length() > 0 || awayScore.length() > 0`. A
+  game whose two scores are both negative used to give two non-empty strings and
+  keep the column; both are empty now, so the card draws the "not started" shape
+  and the two club names take the whole panel. Correct for a figure the card
+  refuses to draw, **Verified** by reading those lines, and **nobody has looked
+  at it**. It was found by the integration review, not by the change.
+- **The impression summary stops carrying the refused number.**
+  `describeCardAt()` at `App/Sports.cpp:425` builds `Impressions::Entry::summary`
+  through the same `scoreText()`, so what the device reports as having been on
+  screen goes from `Penguins -5 @ Capitals` to `Penguins @ Capitals`. Free text,
+  no schema moves, and it matches what the panel drew. **Verified.** It reaches
+  the server's impression store, which is the one place this change is visible
+  off the device.
+- **The log has a ceiling and this can reach it.** Four cards of four games with
+  both sides negative is 32 lines in one check-in; `Log`'s pending ring holds
+  exactly 32 (`App/Log.cpp:181`), so that check-in's other buffered lines are
+  evicted. Needs a server sending negatives on all sixteen games. Serial still
+  carries everything. **Verified** from the two constants, not reproduced.
+- **The gate strips line comments but not block comments.** `//` is taken out
+  before matching, because a fixed-string pin is otherwise satisfied by a
+  commented-out copy of the statement it pins - which an adversarial review
+  demonstrated on two checks. `/* */` appears nowhere in the four files, so a
+  pinned statement hidden in one would pass. Recorded rather than closed.
+- **The gate holds spellings, not properties.** The sentinel check reads four
+  ways of writing `score == kNoScore` and the predicate count reads one
+  declaration; both came from an adversarial pass that got past the first
+  versions. A fifth spelling is a fifth hole, and a fixed-string gate cannot do
+  better than a list.
+- **No host test compiles `App/CheckIn.cpp`, `App/Sports.cpp` or
+  `App/Display.cpp`.** All three name an Arduino type or a graphics library. The
+  predicate and its sweep are host-run; that the three files call it is held by
+  `ci/check-score-guard.sh`, which is a fixed-string matcher over flattened
+  function bodies and says an expression is present, not that nothing else is.
+- **The three reviews were run, and all three changed the change.** Separate
+  agents, one charter each. Correctness against the document reproduced every
+  figure independently off the glyph tables and found six places where the prose
+  was wrong, the load-bearing one being that a digit-counting fold would not have
+  ellipsized `-10` at all. Adversarial found nine ways to leave the behavior
+  wrong with both runners green. Integration found the `hasScores` layout, the
+  impression summary, the log ceiling and the `Sports.h` invariant that was false
+  above `INT16_MAX`. Every one of those is answered above or in section 15m.
+  What the reviews did not have is a build: all three ran before
+  `ci/build-firmware.sh` finished, so none of them compiled the three files that
+  gained an include.
+- **A negative score draws the cell a game that has not started draws.** There
+  is no mark for "the server sent a figure this card will not draw", and 15m
+  records why one was not invented. The stream carries the number instead. A
+  reader looking at a board cannot tell the two apart.
+- **A positive score over `INT16_MAX` is rejected, and that was a review
+  finding rather than the first draft.** The first version guarded the sign
+  only, and the narrowing into `int16_t` is modular: 32768 folded to -32768 and
+  drew an empty cell, which the formatters' own reading of the predicate caught,
+  but **65536 folded to 0 and drew a nil-nil**. A wrong scoreline, not a blank,
+  and `App/Sports.h`'s stated invariant was false of exactly that case.
+  `storedScore()` now tests `fromWire <= INT16_MAX` beside the sign, and the gate
+  pins both halves. **Verified** by reading the fold through the real narrowing.
+  What is still not bounded is the log: a 65536 is named in the stream, so the
+  number is recoverable, but nothing distinguishes it there from an ordinary
+  out-of-range value.
+- **Four and five digit scores still ellipsize to `1...`**, which 18j costed and
+  left open. This section narrows what can reach that case and does not close it.
+- **Nothing on the wire changes.** `SportsBoardRow`, `Sports::Game` and the
+  check-in payload are byte-for-byte what they were, and `BoardScores` is still
+  derived on the device. No field was added, removed or reinterpreted, so the
+  6-month compatibility gate is untouched. A device without this draws a signed
+  string for a negative score and drops its board's face; a device with it draws
+  an empty cell.
+
+---
+
 ## 19. The brand splash's one length, at both ends (2026-11-01)
 
 `Updater::cacheBrandAssets()` tested its write with `written <= 0`, so any 200

@@ -2,6 +2,10 @@
 
 #include <string.h>
 
+// CardColumns.h for boardScoreIsDrawable(), which is where the score facts live
+// because that header names no graphics library and a host compiler can sweep
+// them.
+#include "CardColumns.h"
 #include "Cards.h"
 #include "Display.h"
 #include "Log.h"
@@ -131,8 +135,14 @@ String stateText(const Game& game) {
 
 /// A score, or an empty string before play starts. kNoScore and 0 are different
 /// facts and a nil-nil draw is real, so this cannot collapse them.
+///
+/// Through CardColumns::boardScoreIsDrawable() rather than against kNoScore, so
+/// the whole negative range draws the empty cell -1 draws and this card's answer
+/// does not depend on which value the sentinel happens to be. CheckIn.cpp
+/// rejects a negative at the wire; this catches a positive over 32767 that
+/// narrowed into one on the way in. TEXT_LAYOUT_DESIGN.md section 15m.
 String scoreText(int16_t score) {
-  return score == kNoScore ? String("") : String(score);
+  return CardColumns::boardScoreIsDrawable(score) ? String(score) : String("");
 }
 
 /// The age line, or an empty string for "draw nothing", which is what this
@@ -171,9 +181,16 @@ void copyInto(char* destination, size_t capacity, const char* source) {
 /// A score, or an empty cell before play has started. kNoScore is the whole
 /// reason this is a function: an unplayed game and a nil-nil draw are different
 /// claims, and only one of them is a zero.
+///
+/// Through CardColumns::boardScoreIsDrawable() rather than against kNoScore, so
+/// what this writes is always decimal digits with no sign. That is the invariant
+/// boardScoreState() in Display.cpp rests on: it keys on the length of this
+/// string, and a leading `-` would put a board whose largest number is 10 into
+/// the three-digit state and drop every score on it a face.
+/// TEXT_LAYOUT_DESIGN.md section 15m.
 void writeScore(char* destination, size_t capacity, int16_t score) {
   if (destination == nullptr || capacity == 0) { return; }
-  if (score == kNoScore) {
+  if (!CardColumns::boardScoreIsDrawable(score)) {
     destination[0] = '\0';
     return;
   }

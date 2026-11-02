@@ -111,6 +111,17 @@ enum class State : uint8_t {
 
 /// One game as stored. Scores are int16_t with kNoScore for "not started",
 /// because null and zero are different facts and a nil-nil draw is real.
+///
+/// **A stored score is zero or above, or it is kNoScore.** CheckIn.cpp stores
+/// kNoScore for everything else, and names in the stream what it was sent. -1 is
+/// this sentinel and the rest of the negative range joins it because none of the
+/// five sports sportChipLabel() maps scores below zero, and a rule that drew -2
+/// while blanking -1 would answer two ways about one range. A wire value above
+/// INT16_MAX is rejected there too, because the narrowing to int16_t is modular
+/// and 65536 would otherwise arrive as a nil-nil draw.
+/// CardColumns::boardScoreIsDrawable() is the predicate every reader of these
+/// two fields goes through, and TEXT_LAYOUT_DESIGN.md section 15m is the
+/// decision.
 static constexpr int16_t kNoScore = -1;
 
 struct Game {

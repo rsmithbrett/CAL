@@ -3629,6 +3629,14 @@ int widestBoardStatus(const SportsBoardRow* rows, uint8_t count) {
 /// four-character score gets. That column does not hold one, and
 /// TEXT_LAYOUT_DESIGN.md section 15l records that as the remaining gap rather
 /// than inventing a fourth state nothing can draw.
+///
+/// Every string this reads is decimal digits with no sign, so the length and the
+/// digit count are the same number and three characters means a score of 100 or
+/// more. Sports::writeScore() is what holds that, through
+/// CardColumns::boardScoreIsDrawable(): a leading `-` would make `-10` three
+/// characters and put a board whose largest number is 10 in the three-digit
+/// state, dropping every score on it a face. Section 15m is the decision and
+/// ci/check-score-guard.sh holds the lines that keep it.
 BoardScores boardScoreState(const SportsBoardRow* rows, uint8_t count) {
   size_t longest = 0;
   for (uint8_t i = 0; i < count; ++i) {

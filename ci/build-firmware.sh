@@ -330,12 +330,22 @@ done
 bash ci/check-text-state.sh
 
 # The fourth. The scoreboard lays one grid for the whole board, sized against
-# the widest status string on it, and App/CardColumns.h's ninety-nine
+# the widest status string on it, and App/CardColumns.h's hundred and five
 # static_asserts and the host sweep over them read none of App/Display.cpp, so
 # the arguments the draw path hands that arithmetic, and where in the function
 # it hands them, are the one part of the layout with nothing checking it. Its
 # own script for the same reason as the gate above.
 bash ci/check-board-columns-call.sh
+
+# The fifth. A score below zero is not a scoreline, so CheckIn.cpp stores
+# Sports::kNoScore for it and both formatters in Sports.cpp draw an empty cell.
+# What that buys showSportsBoard() is an invariant - every score string is
+# decimal digits with no sign - and the fold keys on the length of that string,
+# so a `-10` would be three characters and would drop every score on the board a
+# face. The predicate is swept over the whole int16_t range on a host; none of
+# the four files that define or call it compiles there, so the call sites are
+# this gate's. TEXT_LAYOUT_DESIGN.md section 15m.
+bash ci/check-score-guard.sh
 
 echo "==> Compiling CAL for the ESP32-2432S028"
 arduino-cli compile --fqbn "$FQBN" --libraries "$LIBRARIES_DIR" --export-binaries .
