@@ -23,6 +23,36 @@ dated heading after.
 
 ## Unreleased
 
+### A display standing on its end spells the team names out - App
+
+On a display standing on its end, a scoreboard squeezed four columns of text across
+240 pixels and left the team names about 36 of them. "Hurricanes" came out as
+"Hur...", "Mammoth" as "Ma...", and on one photographed board seven of the eight
+names were cut. A row also drew a single line of text into 56 pixels of height, so a
+third of every row sat empty.
+
+A row is two lines now, one team each, with a brace drawn down the left to show the
+two are one game. One team per line means one column of names instead of two, and the
+name column goes from about 36 pixels to about 97. Every name on that board is spelled
+out, and longer ones like "Golden Knights" still shorten. What part of the game it is,
+"FINAL" or a period or a start time, sits once between the two lines, because it is
+one fact about the pair rather than about either team. A game that hasn't started
+keeps its blank where the score will go, on both of its lines.
+
+Still four games to a card. The score digits on a display standing on its end are one
+size smaller than they were, which is what makes room for the second line. A display
+lying flat is unchanged.
+
+## v2026.11.01.0005
+
+Published and **not registered**. Its App binaries were held back because, on a board
+carrying a start time, one column grid takes every team name to 36 pixels and the names
+on a display standing on its end were already cut. What those binaries carry is below;
+the release that follows carries it together with the two-line row that makes it safe.
+
+The loader in it is the same binary the fleet already runs as `cal-v2026.11.01.0003`.
+
+
 ### A scoreboard lines its rows up again - App
 
 `v2026.11.01.0003` gave each row of a scoreboard a right-hand column as wide as its
@@ -54,26 +84,6 @@ and they went unnoticed; on a scoreboard, where every row is a filled panel reac
 both margins, the right-hand arrow was drawn on top of the row and read as the row
 spilling off its own card. They sit three pixels further out, in the margin, and
 nothing else moves.
-
-### A display standing on its end spells the team names out - App
-
-On a display standing on its end, a scoreboard squeezed four columns of text across
-240 pixels and left the team names about 36 of them. "Hurricanes" came out as
-"Hur...", "Mammoth" as "Ma...", and on one photographed board seven of the eight
-names were cut. A row also drew a single line of text into 56 pixels of height, so a
-third of every row sat empty.
-
-A row is two lines now, one team each, with a brace drawn down the left to show the
-two are one game. One team per line means one column of names instead of two, and the
-name column goes from about 36 pixels to about 97. Every name on that board is spelled
-out, and longer ones like "Golden Knights" still shorten. What part of the game it is,
-"FINAL" or a period or a start time, sits once between the two lines, because it is
-one fact about the pair rather than about either team. A game that hasn't started
-keeps its blank where the score will go, on both of its lines.
-
-Still four games to a card. The score digits on a display standing on its end are one
-size smaller than they were, which is what makes room for the second line. A display
-lying flat is unchanged.
 
 ## v2026.11.01.0004
 
