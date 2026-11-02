@@ -3279,6 +3279,91 @@ Server-side, `CheckInGatewayService.ProcessCheckInAsync` records a failed
 not merely logged" treatment `CardPolicyMismatch` already gets on
 `/diag/audit`, for the different silent failure this one is.
 
+## The report says why now, not just which
+
+The section above gets a display as far as naming the picture. It stops there,
+and that turned out to be most of the way to useless. The server's own
+`AssetDecodeFailureDigest` has to work the cause out backwards from what the
+asset catalog holds today, which cannot tell a picture that is wrong from a
+display that was short of heap at that one moment, and cannot say "fixed
+since" at all.
+
+So the report carries three more values, measured where the failure happens
+rather than reconstructed afterwards.
+
+`assetDecodeFailureReason` is one of three names. `decoder-absent` means the
+file wanted LovyanGFX's PNG decoder and this heap could not have held its
+45,056-byte scratch in one block, so nothing was ever in front of a decoder.
+`allocation-refused` means the rgb565 band path asked `malloc` for a buffer of
+even one scanline and got null back. `bytes-rejected` means a decoder did run,
+had the bytes, and would not read them. Those three are the whole of what a
+display can distinguish, and `Display.cpp` already decided between them: the
+first two are what `notePngDrawFailure()` and the band-buffer branch set
+`lastDrawFailedOnAllocation()` from, and the third is what is left. The flag
+widens into `Display::lastDrawFailureReason()` and the old accessor stays,
+derived from it, so no other caller changes.
+
+`assetDecodeFailureBytes` is the size of the file the draw was reading, off the
+cached copy on the card. `assetDecodeFailureLargestBlock` is
+`heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)` read at the moment this
+module gives up. Together with the reason they answer the question the id alone
+cannot: whether a 9KB picture failed on a display holding 40,000 contiguous
+bytes, which is a picture problem, or a 153,600-byte one failed on a display
+holding 3,444, which is not.
+
+All three describe **the first failure of the reporting cycle**, which is also
+the first id in `assetDecodeFailureIds`, so the four line up and read as one
+record. The first is the one worth carrying rather than the latest: by the time
+four pictures have failed the heap is somewhere else entirely, and the first
+failure is the one that isn't a consequence of the ones before it.
+
+**Each field is omitted when the device cannot measure it, and absent never
+reads as zero.** A reason is a name, so it has no zero to be confused with. The
+two figures are omitted rather than sent as 0, because a display with no SD card
+has no file to size and 0 bytes would read as a measurement of an empty file.
+Firmware predating all three sends none of them, which is the same thing it
+sends today and is what the six-month compatibility gate requires.
+
+### A refusal for want of a block is reported now
+
+`giveUpOnDecodeFailure()` used to count a refusal and stop there, for a reason
+worth restating: reporting it would have filed an `AssetDecodeFailure` row
+against a picture whose bytes were fine, and the server had no way to know
+better. The reason code is what makes it safe, and it is most of why these
+fields exist. A row carrying `decoder-absent` is a statement about the display,
+and the digest can read it as one instead of blaming the catalog.
+
+What has not changed is the branch's behavior. A refusal still keeps the cached
+copy and still does not `invalidate()`, because re-fetching 153,600 bytes onto
+the heap that just refused a band buffer is the damage that branch was written
+to stop. It now records the id and the three values as well.
+
+Two consequences to expect. Rows start appearing again on displays that have
+been failing quietly, which is the point. And the volume per cycle is bounded by
+the cap and the dedup below rather than by how often a card redraws.
+
+### What the count actually counts
+
+`recordDecodeFailure()` had a counting defect, on the fleet as shipped. The
+dedup asked whether the id was already somewhere in the reported id string, and
+ids stopped being appended once the count reached the 4-id cap. So the fifth and
+every later distinct id in a cycle was never added, therefore never matched by
+the dedup, and incremented the counter on every single failed draw. The
+increment was a bare `uint8_t++` with no `UINT8_MAX` guard, unlike
+`gAllocationRefusals` beside it, so a display redrawing a bad overlay every
+dwell wrapped 255 back to 0.
+
+The increment moves inside the append branch and takes the guard its sibling
+has. The count is therefore the number of distinct pictures named in the report,
+at most 4, and equal to the number of ids - which is what `Assets.h` always said
+it was. A count read off an older record is not that: it is a tally of failed
+draws with an unknown number of pictures behind it, and it can have wrapped.
+
+Dedup is now an exact comparison against the ids already held rather than a
+substring search. A bounded report cannot dedup an id it has no room to
+remember, so capping the count at what it can see is the only reading of it that
+stays true.
+
 ## The likely root cause: the SD card's SPI lines are shared with the display's, by hardware design
 
 **SUPERSEDED - this premise was measured and is false.** The panel is on

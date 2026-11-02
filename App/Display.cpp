@@ -6201,15 +6201,40 @@ constexpr size_t kRgb565BandLines = 8;
 /// height from the width instead of trusting kRgb565BandLines outright.
 constexpr size_t kRgb565MaxBandBytes = kRgb565BandLines * 320 * kRgb565BytesPerPixel;
 
-/// Backs Display::lastDrawFailedOnAllocation() - see Display.h for why anyone
-/// needs to tell these two failures apart. Cleared by every public draw entry
-/// point, so a stale true cannot outlive the draw that set it.
+/// Why the most recent failed draw failed, and what the heap looked like when it
+/// did. Backs Display::lastDrawFailureReason(),
+/// Display::lastDrawFailureLargestBlock() and the older
+/// Display::lastDrawFailedOnAllocation() - see Display.h for why anyone needs to
+/// tell these failures apart. Cleared by every public draw entry point, so a
+/// stale reading cannot outlive the draw that set it.
 ///
 /// Set from two kinds of evidence. The rgb565 band path sets it from a malloc
 /// that actually came back null, which is the fact itself. The png paths set
 /// it from the heap figure at the moment of refusal, because their decoder
 /// answers a bare false either way - see notePngDrawFailure().
-bool gLastDrawFailedOnAllocation = false;
+///
+/// **This used to be one bool and the widening is the feature.** A caller could
+/// learn that the heap refused the draw and not which way, so a display reported
+/// an asset id to the server and the server had to guess the rest from its own
+/// catalog. The two allocation causes are the ones it most needed and could least
+/// infer: a missing decoder scratch and a refused band buffer send a person to
+/// completely different places. The bool stays, derived, so nothing else changed.
+DecodeFailure::Reason gLastDrawFailureReason = DecodeFailure::Reason::Unclassified;
+
+/// The largest contiguous 8-bit block at the moment of the refusal above, or 0
+/// when no draw has been classified. Captured where the refusal is read rather
+/// than re-measured by the caller afterwards, so the figure in the log line and
+/// the figure on the check-in request are the same number.
+uint32_t gLastDrawFailureLargestBlock = 0;
+
+/// Called at the top of every public draw entry point. A draw that fails without
+/// reaching either classification therefore reports no reason at all, which is
+/// the right answer for an unrecognised image format - see
+/// DecodeFailure::Reason::Unclassified.
+void noteDrawAttemptStarting() {
+  gLastDrawFailureReason = DecodeFailure::Reason::Unclassified;
+  gLastDrawFailureLargestBlock = 0;
+}
 
 /// The one contiguous block a PNG decode needs, measured at 45,056 bytes.
 ///
@@ -6247,7 +6272,12 @@ void notePngDrawFailure(const char* where) {
   const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   const bool tooSmallToHaveDecoded = largest < kPngDecoderScratchBytes;
 
-  gLastDrawFailedOnAllocation = tooSmallToHaveDecoded;
+  // The same reading, now said in full: a heap that could not have held the
+  // scratch means nothing ever reached a decoder, and a heap that could means the
+  // decoder had the bytes and refused them.
+  gLastDrawFailureReason = tooSmallToHaveDecoded ? DecodeFailure::Reason::DecoderAbsent
+                                                 : DecodeFailure::Reason::BytesRejected;
+  gLastDrawFailureLargestBlock = static_cast<uint32_t>(largest);
 
   Log::printf("[display] %s refused a png - 8BIT largest=%u free=%u, the decoder needs %u in one "
               "block, reading this as %s",
@@ -6595,11 +6625,14 @@ bool drawRgb565FromSd(const String& path, int32_t boxX, int32_t boxY, int32_t bo
     // twice (see logHeapSnapshot()). Names the floor, so the line reads "not
     // even one scanline" rather than leaving the reader to work out which rung
     // of the ladder above gave up.
-    gLastDrawFailedOnAllocation = true;
+    // Read once and used twice, so the log line and the figure that rides the
+    // next check-in cannot disagree about the same moment.
+    const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    gLastDrawFailureReason = DecodeFailure::Reason::AllocationRefused;
+    gLastDrawFailureLargestBlock = static_cast<uint32_t>(largest);
     Log::printf("[display] no %u contiguous bytes for an rgb565 band buffer of even 1 line "
                 "(8BIT largest=%u free=%u)",
-                static_cast<unsigned>(bandBytes),
-                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+                static_cast<unsigned>(bandBytes), static_cast<unsigned>(largest),
                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
     file.close();
     return false;
@@ -6754,7 +6787,7 @@ void clearPanel() { lcd.fillScreen(bg()); }
 void releaseDecodeMemory();
 
 bool drawImageFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, int32_t h) {
-  gLastDrawFailedOnAllocation = false;
+  noteDrawAttemptStarting();
   // No fillScreen() here, deliberately - see this function's own header
   // comment. Streamed straight from SD, bounded to (w, h) at (x, y) instead of
   // the whole panel; scaleX/scaleY left at 0 is what makes LovyanGFX auto-fit
@@ -6838,7 +6871,7 @@ bool drawImageFromSdInRect(const String& path, int32_t x, int32_t y, int32_t w, 
 
 bool drawImageFromBufferInRect(const uint8_t* data, size_t size, int32_t x, int32_t y, int32_t w,
                                int32_t h) {
-  gLastDrawFailedOnAllocation = false;
+  noteDrawAttemptStarting();
 
   if (data == nullptr || size == 0) {
     // No bytes, so no decode, so nothing this device failed at - the same
@@ -7054,7 +7087,7 @@ void releaseDecodeMemory() {
 /// never had this problem - a fact that sat in this codebase's own comments as
 /// an unexplained curiosity for some time.
 bool drawImageFromSd(const String& path) {
-  gLastDrawFailedOnAllocation = false;
+  noteDrawAttemptStarting();
   // Sniffed before the panel is cleared, so the log reads in the order things
   // happened: what the file is, then what the heap looked like going in.
   const ImageFormat format = sniffImageFormat(path);
@@ -7161,7 +7194,7 @@ bool drawImageFromSd(const String& path) {
 }
 
 bool drawImageFromBuffer(const uint8_t* data, size_t size) {
-  gLastDrawFailedOnAllocation = false;
+  noteDrawAttemptStarting();
   lcd.fillScreen(bg());
   bool ok = false;
   ImageFormat format = ImageFormat::Unknown;
@@ -7284,7 +7317,18 @@ void logViewport() {
   Log::printf("[display] %s, %dx%d", gPortrait ? "portrait" : "landscape", kScreenW, kScreenH);
 }
 
-bool lastDrawFailedOnAllocation() { return gLastDrawFailedOnAllocation; }
+DecodeFailure::Reason lastDrawFailureReason() { return gLastDrawFailureReason; }
+
+uint32_t lastDrawFailureLargestBlock() { return gLastDrawFailureLargestBlock; }
+
+/// Derived rather than stored, so the bool and the reason cannot drift apart.
+/// Both allocation causes answer true: a decoder that could never be allocated
+/// and a band buffer that was refused are the same finding as far as the
+/// keep-the-cached-copy decision goes, which is the only question this answers.
+bool lastDrawFailedOnAllocation() {
+  return gLastDrawFailureReason == DecodeFailure::Reason::DecoderAbsent ||
+         gLastDrawFailureReason == DecodeFailure::Reason::AllocationRefused;
+}
 
 Orientation storedOrientation() {
   Preferences prefs;

@@ -777,14 +777,37 @@ Result perform() {
     }
   }
 
-  // Reports any asset that downloaded and SHA-256-verified fine but still
-  // would not decode as a picture - see Assets.h's own remarks. Omitted
-  // entirely when nothing has failed, the same "absent, not zero" contract
-  // cardPolicyKnownCount above uses. Cleared only once this request actually
-  // succeeds (see below), so a failed check-in never loses the report.
+  // Reports any asset that downloaded and SHA-256-verified fine and then would
+  // not draw - see Assets.h's own remarks. Omitted entirely when nothing has
+  // failed, the same "absent, not zero" contract cardPolicyKnownCount above
+  // uses. Cleared only once this request actually succeeds (see below), so a
+  // failed check-in never loses the report.
+  //
+  // THE THREE FIELDS AFTER THE PAIR SAY WHY, and they describe the FIRST failure
+  // of the cycle, which is the one the first id names. Without them the server
+  // gets an id and has to work the cause out backwards from its own asset
+  // catalog, which cannot tell a picture that is wrong from a display that was
+  // short of heap at that one moment.
+  //
+  // EACH IS OMITTED WHEN THIS DEVICE COULD NOT MEASURE IT, never sent as a zero
+  // or an empty name. A display with no SD card has no file to size, and 0 bytes
+  // would read as a measurement of an empty file rather than as not having
+  // looked. Firmware predating all three sends none of them, which the server
+  // reads exactly as it reads today's requests - the standing 6-month
+  // backward-compatibility mandate.
   if (Assets::decodeFailureCount() > 0) {
     requestDoc["assetDecodeFailureCount"] = Assets::decodeFailureCount();
     requestDoc["assetDecodeFailureIds"] = Assets::decodeFailureIds();
+    const char* reason = Assets::decodeFailureReason();
+    if (reason != nullptr) {
+      requestDoc["assetDecodeFailureReason"] = reason;
+    }
+    if (Assets::decodeFailureBytes() > 0) {
+      requestDoc["assetDecodeFailureBytes"] = Assets::decodeFailureBytes();
+    }
+    if (Assets::decodeFailureLargestBlock() > 0) {
+      requestDoc["assetDecodeFailureLargestBlock"] = Assets::decodeFailureLargestBlock();
+    }
   }
 
   // THE BOARD RIDES THE CHECK-IN REQUEST, for the reason motionCapability a few

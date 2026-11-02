@@ -5,6 +5,12 @@
                    // include Sports.h already carries rather than relying on
                    // Arduino.h to drag it in.
 
+#include "DecodeFailureReport.h"  // DecodeFailure::Reason, returned by
+                                  // lastDrawFailureReason() below. The enum lives
+                                  // there rather than here because the report
+                                  // that carries it is host-tested and this
+                                  // header is not compilable off a device.
+
 /// Everything the App draws.
 ///
 /// Unlike CAL's Display, this one renders actual product content (the weather
@@ -1102,6 +1108,29 @@ bool drawImageFromBufferInRect(const uint8_t* data, size_t size, int32_t x, int3
 void releaseSplashDecodeMemory();
 
 bool lastDrawFailedOnAllocation();
+
+/// Which of the three causes the most recent failed draw was, or
+/// `Unclassified` when no draw path reached a verdict on it.
+///
+/// The fuller answer to the question above. `lastDrawFailedOnAllocation()` is
+/// enough to decide whether to delete the cached file, which is all Assets.cpp
+/// needed while the finding stayed on this device. It is not enough to tell a
+/// server anything: an id alone leaves "this picture is wrong" and "this display
+/// was short of heap" indistinguishable, and the server's own asset catalog
+/// cannot separate them either. See DecodeFailure::Reason for what each means.
+///
+/// Valid under the same condition as `lastDrawFailedOnAllocation()` - immediately
+/// after a draw call returned false, and cleared at the start of every draw.
+DecodeFailure::Reason lastDrawFailureReason();
+
+/// The largest contiguous 8-bit block at the moment of that refusal, or 0 when no
+/// draw has been classified.
+///
+/// Captured where the refusal is read rather than measured again afterwards. A
+/// caller asking the heap itself would get a figure from a few hundred
+/// milliseconds and three retries later, and the log line and the check-in
+/// request would then quote two different numbers for one event.
+uint32_t lastDrawFailureLargestBlock();
 
 }  // namespace Display
 

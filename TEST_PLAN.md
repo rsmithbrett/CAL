@@ -3867,3 +3867,161 @@ photographs are the record that the screen was looked at.
   12.3 were computed by hand and are arithmetic, not a test.
 - **No device has been touched.** Every step above is a human at a bench with a
   powered unit, and none of them has been performed.
+
+## 21. Why a picture would not draw, and the count that was never a count (2026-11-02)
+
+The report a display sends when it gives up on a picture. It used to carry a
+count and up to four ids; it now carries a reason, the byte size and the largest
+free block as well, and the count means something different because it was wrong.
+
+The design is this repository's README, "The report says why now, not just which".
+The server half is SCR-DIAG-11 in the DiscoverAroundMe tree and is unapplied.
+
+### 21a. The host test
+
+`ci/test-decode-failure-report.sh` builds `tests/decode-failure-report-test.cpp`
+against `App/DecodeFailureReport.h` with `g++ -std=c++17 -Wall -Wextra -Werror`
+and `tests/decode-failure-stubs/Arduino.h`, which supplies `String` as
+`std::string` and nothing else.
+
+```
+==> Decode failure report accounting
+PASS: decode failure report, 12 cases
+```
+
+**The accounting moved into a header so it could be run at all.** It lived in
+`Assets.cpp`, which needs SD, mbedTLS, LovyanGFX and four other modules, so
+nothing except a device had ever executed it - and it was wrong for as long as it
+shipped. Same move `App/CardColumns.h` made for the scoreboard arithmetic, for
+the same reason, and recorded in section 18d.
+
+The stub deliberately gives `String` only the operations both Arduino's String
+and `std::string` agree on: `length()`, `+=`, `==` and `c_str()`. `indexOf()` is
+Arduino's alone, and the substring dedup that used it is the defect below.
+
+The script captures the binary's output with `|| true` and prints it before
+judging it. Under `set -e` a command substitution that exits non-zero kills the
+script at that line, so the one run that most needs reading - the failing one -
+would print the names of the failed checks to nowhere and leave only the heading
+in the log. The other `ci/test-*.sh` scripts have the same shape and were left
+alone; this is noted in 21e.
+
+### 21b. The twelve cases
+
+- `nothingReported` — a fresh report counts nothing, names nothing, and carries
+  no reason. `wireName()` answers `nullptr`, which is what `CheckIn.cpp` omits
+  the member on, so absence stays distinguishable from a value
+- `oneFailure` — all four values carried, and the id list is the id
+- `theSamePictureTwice` — one picture, two give-ups. An aircraft logo overlay
+  redraws on every appearance of that card
+- `fourDistinctPictures` — the cap filled, comma-joined in failure order
+- `theFifthPictureDoesNotInflateTheCount` — **the defect, first half.** See 21c
+- `nothingWraps` — **the defect, second half.** 600 draws of an unreportable
+  fifth picture leave the count at four, and the give-up tally saturates at 255
+  rather than rolling to zero
+- `theThreeValuesAreTheFirstFailures` — the reason, byte size and heap figure are
+  the first failure's, not the latest. By the fourth failure the heap is somewhere
+  else entirely, and the first one is the only one that is not a consequence of
+  its predecessors. It is also the one the first id names
+- `arepeatDoesNotRestateTheValues` — a refail of the first picture minutes later
+  must not overwrite the measurement that mattered
+- `whatCouldNotBeMeasuredStaysAbsent` — a zero byte size or heap figure is not
+  offered to the wire. A display with no SD card has no file to size, and 0 bytes
+  would read as a measurement of an empty file
+- `clearingResetsEverything` — including the three values, and the report takes a
+  new failure afterwards
+- `theWireNames` — the three names pinned, because a typo here is a reason code
+  the server files as unrecognized
+- `anUnclassifiedFailureStillReports` — a failure no draw path classified is
+  still reported, with no reason on the wire. Nothing substitutes a default; an
+  unrecognised image format reaches that state, and calling it a decoder refusal
+  would be inventing a finding
+
+### 21c. The defect, and the run that proved it
+
+`recordDecodeFailure()` deduped by asking whether the id appeared anywhere in the
+comma-joined id string, and ids stopped being appended once the count reached the
+4-id cap. So the fifth and every later distinct id of a reporting cycle was never
+in that string, therefore never matched by the dedup, and incremented the counter
+on every failed draw of it. The increment was a bare `uint8_t++` with no
+`UINT8_MAX` guard, unlike `gAllocationRefusals` beside it, so it wrapped 255 back
+to 0 and the report then read as nothing having failed at all.
+
+**The test was run against the shipped accounting before the fix.** The header was
+first written carrying the old logic verbatim, and the run printed 16 named
+failures, among them:
+
+```
+  FAILED: a fifth picture the report has no room for does not raise the count
+  FAILED: 600 draws of a fifth picture leave the count at four
+  FAILED: the give-up tally saturates rather than wrapping to zero
+FAIL: 16 decode failure report check(s)
+```
+
+The wrap is measured rather than reasoned about: 4 ids plus 600 draws of a fifth
+gave 604, which a `uint8_t` holds as 92.
+
+The increment moved inside the append branch and the dedup became an exact
+comparison against the ids already held. A bounded report cannot dedup an id it
+has no room to remember, so capping the count at what it can see is the only
+reading of it that stays true. `giveUps()` keeps the rest of the story and carries
+the `UINT8_MAX` guard, where that ceiling is doing real work.
+
+**A count read off a record written before this is not a count of pictures.** It
+is a tally of failed draws with an unknown number of pictures behind it, and it
+may have wrapped.
+
+### 21d. What a build proves
+
+`arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs
+--libraries ..\libraries`, read off its own size lines rather than its exit code:
+
+```
+Sketch uses 1580071 bytes (80%) of program storage space. Maximum is 1966080 bytes.
+Global variables use 115204 bytes (35%) of dynamic memory, leaving 212476 bytes for local variables.
+```
+
+Against `58f6278` compiled the same way in a throwaway worktree: 1,579,279 and
+115,140. So **+792 bytes of flash and +64 bytes of static RAM**, leaving 212,476
+for local variables. Four `String`s replace one and the three values are two
+`uint32_t`s and an enum; `Display.cpp` trades one `bool` for a reason and a
+captured heap figure.
+
+That figure matters here because every memory decision on this panel turns on
+contiguous blocks - 16,717 twice for a TLS session, 45,056 for the PNG decoder -
+and 64 bytes of BSS is far below any of them. It is still measured rather than
+assumed.
+
+The compile also proves `Display.h` can carry `DecodeFailureReport.h` and that
+`lastDrawFailedOnAllocation()`, now derived from the reason rather than stored,
+still satisfies every existing caller. No warning in the log names `Assets.cpp`,
+`Display.cpp`, `CheckIn.cpp` or `DecodeFailureReport.h`.
+
+### 21e. Known gaps, recorded rather than discovered later
+
+- **No device has run any of this.** The reason classification, the byte size and
+  the largest-block figure have never been read off a real failure on real
+  hardware. Everything above is a host test, a compile and a reading of the code.
+- **The S3 board was not compiled.** Only the ESP32 pass was run. The change names
+  no board-specific type and the header is plain C++, so there is no reason to
+  expect a difference, which is an expectation rather than a measurement.
+- **`compile-app.cmd` at the repository root is missing `--libraries`.** It fails
+  on `ConfigGesture.h` before reaching any of this, which is how it was found.
+  `ci/build-firmware.sh` passes the flag and is right; the convenience script was
+  not updated when `libraries/DamBoards` arrived. Left alone, since fixing a build
+  script was not this change.
+- **Which branch a draw takes is not host-tested.** `giveUpOnDecodeFailure()` lives
+  in `Assets.cpp` and needs the whole module to compile, so what is covered here is
+  the accounting the header holds, not the decision in front of it. That a PNG
+  refused on a heap under 45,056 bytes classifies as `decoder-absent` rather than
+  `bytes-rejected` is read off `notePngDrawFailure()` and has no test.
+- **The refusal branch now reports, and the fleet effect is unmeasured.** Rows
+  stopped on 2026-10-25 and will resume on displays that have been failing without
+  saying so. The volume per cycle is bounded by the 4-id cap and the fixed dedup
+  rather than by how often a card redraws, which is an argument and not an
+  observation.
+- **The other `ci/test-*.sh` scripts swallow a failing run's output.** They capture
+  the binary's output into a variable under `set -e`, so a non-zero exit kills the
+  script before the `echo` and the log shows only the heading. Every one of them is
+  green today, so nothing has been lost; `ci/test-decode-failure-report.sh` does
+  not have the shape, and the others were left alone.

@@ -15,19 +15,25 @@
 namespace Assets {
 namespace {
 
-/// State for decodeFailureCount()/decodeFailureIds()/clearDecodeFailures() -
-/// see Assets.h's own remarks on why this exists and how CheckIn.cpp uses it.
-constexpr uint8_t kMaxReportedDecodeFailures = 4;
-String gDecodeFailureIds;
-uint8_t gDecodeFailureCount = 0;
+/// State for decodeFailureCount()/decodeFailureIds()/clearDecodeFailures() and
+/// the three fields beside them - see Assets.h's own remarks on why this exists
+/// and how CheckIn.cpp uses it.
+///
+/// The accounting lives in DecodeFailureReport.h rather than here so it can be
+/// run on a host, which is how the counting defect it used to carry was finally
+/// read: the increment sat outside the append branch, so a fifth distinct id in
+/// one cycle was never deduped and bumped the count on every failed draw until a
+/// bare uint8_t wrapped. See that header's record().
+DecodeFailure::Report gDecodeFailures;
 
-/// Draws given up on because no block large enough was available, counted apart
-/// from the decode failures above because they are a different fault with a
-/// different first question: a decode failure asks what is wrong with the bytes,
-/// this asks what the picture needs in one contiguous block and what this device
-/// has. Logged rather than sent - see giveUpOnDecodeFailure() for what reporting
-/// it would take. Cleared with the decode-failure report so the figure in the
-/// log line stays per reporting cycle rather than per boot.
+/// Draws given up on because no block large enough was available.
+///
+/// Kept beside the report rather than folded into it. The report now carries
+/// these too, with a reason code saying which of them it was, so this is no
+/// longer the only place they are recorded - but it counts every one where the
+/// report counts distinct pictures and caps at four, and the log line reads off
+/// this. Cleared with the report so the figure stays per reporting cycle rather
+/// than per boot.
 uint8_t gAllocationRefusals = 0;
 
 /// How many times drawFullScreen()/drawCachedInRect()/drawCached() retry a
@@ -73,23 +79,6 @@ constexpr uint8_t kMaxCheapRefetches = 4;
 String gCheapRefetchedIds;
 uint8_t gCheapRefetchCount = 0;
 
-void recordDecodeFailure(const String& assetId) {
-  // Dedup within one reporting cycle: an aircraft logo overlay redraws (and
-  // can refail) every time that card is shown, and without this a single
-  // bad logo would otherwise fill the whole 4-id cap with repeats of
-  // itself before anything else ever got a slot.
-  if (gDecodeFailureIds.indexOf(assetId) >= 0) {
-    return;
-  }
-  if (gDecodeFailureCount < kMaxReportedDecodeFailures) {
-    if (gDecodeFailureIds.length() > 0) {
-      gDecodeFailureIds += ",";
-    }
-    gDecodeFailureIds += assetId;
-  }
-  gDecodeFailureCount++;
-}
-
 /// Defined below, declared here for the refusal branch of
 /// giveUpOnDecodeFailure().
 String pathFor(const String& id);
@@ -132,8 +121,11 @@ size_t cachedSizeOf(const String& id) {
 /// few thousand bytes over a connection this device already has.
 ///
 /// Returns whether the cached copy was dropped.
-bool reFetchIfCheap(const String& id) {
-  const size_t cached = cachedSizeOf(id);
+///
+/// `cached` is the file's size, passed in rather than looked up again - the
+/// caller has already measured it to put on the check-in report, and an SD stat
+/// on a give-up path is not worth doing twice.
+bool reFetchIfCheap(const String& id, size_t cached) {
   if (cached == 0 || cached > kCheapRefetchBytes) {
     return false;
   }
@@ -173,37 +165,63 @@ bool reFetchIfCheap(const String& id) {
 /// heap that just refused a band buffer. Device 17 on 2026-10-11 did this three
 /// times in one minute for a file that was intact the whole time.
 ///
-/// **The report is on the same footing, and the allocation check comes before
-/// it.** recordDecodeFailure() used to run first, so a refusal for want of a
-/// block travelled in assetDecodeFailureIds and the gateway filed an
-/// AssetDecodeFailure audit row against an asset whose bytes were fine. What
-/// Assets.h says that report means - "present on the card, downloaded and
-/// SHA-256 verified fine, but LovyanGFX still refused it" - is now what it
-/// carries. A refusal is counted here and logged, and goes no further, so it
-/// reaches the server only as the cannot-draw restart cause once a run of them
-/// trips App.ino's watchdog. Reporting it directly would take an optional
-/// assetDrawOutOfMemory pair on the check-in request, which means Assets.h,
-/// CheckIn.cpp and the gateway together.
-void giveUpOnDecodeFailure(const String& id) {
+/// **Both branches report now, and the reason code is what makes that safe.** A
+/// refusal for want of a block used to be counted here and go no further,
+/// because the report carried an id and nothing else: the gateway would have
+/// filed an AssetDecodeFailure row against a picture whose bytes were fine, and
+/// had no way to know better. With the reason beside the id a row can say
+/// decoder-absent, which is a statement about the display, and the server reads
+/// it as one instead of sending somebody to re-encode a picture that was
+/// already right. That was the whole cost of keeping these quiet, and it is paid.
+///
+/// What has NOT changed is what each branch does. A refusal still keeps the
+/// cached copy and still does not invalidate(), because re-fetching an RGB565
+/// asset's ~153,600 bytes onto the heap that just refused a band buffer is the
+/// damage this split was written to stop - device 17 on 2026-10-11 did exactly
+/// that three times in one minute for a file that was intact the whole time.
+///
+/// `ramBytes` is the size of a buffer fetched straight to RAM, for the two
+/// drawRam* callers; 0 means read the size off the card instead. A display with
+/// no card and no RAM buffer to measure reports no size at all rather than
+/// claiming an empty file - see DecodeFailure::Report::reportsBytes().
+void giveUpOnDecodeFailure(const String& id, size_t ramBytes = 0) {
+  const size_t bytes = ramBytes > 0 ? ramBytes : cachedSizeOf(id);
+
+  // Taken from Display rather than measured here. Three attempts and two 75ms
+  // delays separate the refusal from this line, so asking the heap now would
+  // quote a different moment than the log line that named the refusal.
+  const DecodeFailure::Reason reason = Display::lastDrawFailureReason();
+  gDecodeFailures.record(id, reason, static_cast<uint32_t>(bytes),
+                         Display::lastDrawFailureLargestBlock());
+
   if (Display::lastDrawFailedOnAllocation()) {
     if (gAllocationRefusals < UINT8_MAX) {
       ++gAllocationRefusals;
     }
-    if (reFetchIfCheap(id)) {
+    if (reFetchIfCheap(id, bytes)) {
       return;
     }
-    Log::printf("[assets] '%s' could not be drawn after %u attempt(s) - keeping the cached copy "
-                "and not reporting it as a decode failure, this heap had no block to draw it with "
-                "(%u refusal(s) this reporting cycle)",
+    Log::printf("[assets] '%s' could not be drawn after %u attempt(s) - keeping the cached copy, "
+                "this heap had no block to draw it with (%s, %u bytes, largest 8BIT block=%u, "
+                "%u refusal(s) and %u give-up(s) this reporting cycle)",
                 id.c_str(), static_cast<unsigned>(kMaxDrawAttempts),
-                static_cast<unsigned>(gAllocationRefusals));
+                DecodeFailure::wireName(reason) == nullptr ? "unclassified"
+                                                           : DecodeFailure::wireName(reason),
+                static_cast<unsigned>(bytes),
+                static_cast<unsigned>(Display::lastDrawFailureLargestBlock()),
+                static_cast<unsigned>(gAllocationRefusals),
+                static_cast<unsigned>(gDecodeFailures.giveUps()));
     return;
   }
 
-  recordDecodeFailure(id);
   invalidate(id);
-  Log::printf("[assets] '%s' would not decode after %u attempt(s) - invalidating the cache",
-              id.c_str(), static_cast<unsigned>(kMaxDrawAttempts));
+  Log::printf("[assets] '%s' would not decode after %u attempt(s) - invalidating the cache (%s, "
+              "%u bytes, largest 8BIT block=%u)",
+              id.c_str(), static_cast<unsigned>(kMaxDrawAttempts),
+              DecodeFailure::wireName(reason) == nullptr ? "unclassified"
+                                                         : DecodeFailure::wireName(reason),
+              static_cast<unsigned>(bytes),
+              static_cast<unsigned>(Display::lastDrawFailureLargestBlock()));
 }
 
 /// Same hex-encoding helper as CAL's own Updater.cpp uses to check a firmware
@@ -1163,7 +1181,7 @@ bool drawRam(const String& id, const RamAssetBuffer& buffer) {
       delay(kDrawRetryDelayMs);
     }
   }
-  giveUpOnDecodeFailure(id);
+  giveUpOnDecodeFailure(id, buffer.size);
   return false;
 }
 
@@ -1187,7 +1205,7 @@ bool drawRamInRect(const String& id, const RamAssetBuffer& buffer, int32_t x, in
       delay(kDrawRetryDelayMs);
     }
   }
-  giveUpOnDecodeFailure(id);
+  giveUpOnDecodeFailure(id, buffer.size);
   return false;
 }
 
@@ -1276,13 +1294,22 @@ uint16_t cachedCount() {
   return count;
 }
 
-uint8_t decodeFailureCount() { return gDecodeFailureCount; }
+uint8_t decodeFailureCount() { return gDecodeFailures.count(); }
 
-String decodeFailureIds() { return gDecodeFailureIds; }
+String decodeFailureIds() { return gDecodeFailures.ids(); }
+
+const char* decodeFailureReason() { return DecodeFailure::wireName(gDecodeFailures.reason()); }
+
+uint32_t decodeFailureBytes() {
+  return gDecodeFailures.reportsBytes() ? gDecodeFailures.bytes() : 0;
+}
+
+uint32_t decodeFailureLargestBlock() {
+  return gDecodeFailures.reportsLargestBlock() ? gDecodeFailures.largestBlock() : 0;
+}
 
 void clearDecodeFailures() {
-  gDecodeFailureIds = "";
-  gDecodeFailureCount = 0;
+  gDecodeFailures.clear();
   gAllocationRefusals = 0;
 }
 

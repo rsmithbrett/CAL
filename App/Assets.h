@@ -253,10 +253,12 @@ bool drawRamInRect(const String& id, const RamAssetBuffer& buffer, int32_t x, in
 /// fleet's storage view can show cache growth alongside sdUsedBytes.
 uint16_t cachedCount();
 
-/// The ids reported here failed to *decode* as a picture on this device -
-/// present on the card, downloaded and SHA-256 verified fine, but LovyanGFX
-/// still refused it (a corrupted PNG at the source, an encoding this
-/// decoder cannot read). Recorded by drawCached()/drawCachedInRect()/
+/// The ids reported here are pictures this device gave up drawing - present on
+/// the card, downloaded and SHA-256 verified fine, and then either refused by
+/// LovyanGFX (a corrupted PNG at the source, an encoding this decoder cannot
+/// read) or never put in front of it at all for want of a contiguous block.
+/// decodeFailureReason() below is what separates those, and until it existed
+/// this list carried only the first. Recorded by drawCached()/drawCachedInRect()/
 /// drawFullScreen() themselves whenever Display::drawImageFromSd*() returns
 /// false for an id that was genuinely cached - so this can never fire for
 /// the ordinary "hasn't fetched yet" case. Same "report what silently
@@ -266,12 +268,59 @@ uint16_t cachedCount();
 /// per reporting cycle so one card redrawing the same bad asset every dwell
 /// (Graphic.cpp's cards stop retrying after one failure, but an aircraft
 /// logo overlay does not) cannot balloon the pending report.
+///
+/// **The count is distinct pictures, at most four, and equal to the number of
+/// ids.** It used to be neither: the increment sat outside the append branch, so
+/// a fifth distinct id in one cycle was never deduped and bumped the count on
+/// every failed draw of it, with no ceiling on a uint8_t that therefore wrapped
+/// 255 to 0. A count read off a record written before that fix is a tally of
+/// draws with an unknown number of pictures behind it. See
+/// DecodeFailure::Report::record().
+///
+/// **A draw refused for want of a block is in here too now.** It used to be
+/// counted and dropped, because an id with no reason beside it would have had the
+/// gateway blaming a picture whose bytes were fine. The three accessors below are
+/// what changed that.
 uint8_t decodeFailureCount();
 String decodeFailureIds();
 
+/// Why the FIRST failure of this reporting cycle failed - the one the first id
+/// names, so the four values read as one record. One of "decoder-absent",
+/// "allocation-refused" or "bytes-rejected", or nullptr when no draw path reached
+/// a verdict.
+///
+/// The first rather than the latest: by the fourth failure the heap is somewhere
+/// else entirely, and the first one is the only one that is not a consequence of
+/// the ones before it.
+///
+/// **nullptr is what CheckIn.cpp omits the member on**, which is how the server
+/// tells "did not say" from a value. Nothing substitutes a default for an
+/// unclassified failure - an unrecognised image format reaches that state, and
+/// calling it a decoder refusal would be inventing a finding.
+const char* decodeFailureReason();
+
+/// The size of what that first failure was reading - the cached file, or the RAM
+/// buffer on a device with no card.
+///
+/// **0 means this device could not measure it, and CheckIn.cpp omits the member
+/// rather than sending the zero.** A display with no card and no buffer has no
+/// file to size, and a 0 on the wire would read as a measurement of an empty
+/// file.
+uint32_t decodeFailureBytes();
+
+/// The largest contiguous 8-bit block this device had when it gave up on that
+/// first failure, straight from Display::lastDrawFailureLargestBlock().
+///
+/// Read with the byte size above and the reason: 9KB refused on a device holding
+/// 40,000 contiguous bytes is a picture problem, and 153,600 refused on one
+/// holding 3,444 is not. 0 means unmeasured, and is omitted rather than sent -
+/// see decodeFailureBytes().
+uint32_t decodeFailureLargestBlock();
+
 /// Clears the pending decode-failure report - called once it has actually
 /// been sent on a check-in, so a failure is reported once per occurrence
-/// rather than on every subsequent check-in forever.
+/// rather than on every subsequent check-in forever. Resets the three values
+/// above with it, so the next cycle's first failure is the one that is reported.
 void clearDecodeFailures();
 
 /// Draws the "splash" asset at boot if it is already on the card, exactly the
