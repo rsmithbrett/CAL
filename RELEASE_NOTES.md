@@ -23,6 +23,8 @@ dated heading after.
 
 ## Unreleased
 
+## v2026.11.02.0002
+
 ### Scores in the teens are drawn the same size as the rest - App
 
 A scoreboard gave each score a column 26 pixels wide, which holds two digits of the
