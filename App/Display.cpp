@@ -3559,6 +3559,39 @@ bool boardHasNoScores(const SportsBoardRow* rows, uint8_t count) {
   return true;
 }
 
+/// The left brace that joins a two-line scoreboard row, so the pair reads as
+/// one game rather than as two teams that happen to be stacked.
+///
+/// Drawn from drawLine() and drawFastHLine(), the same two primitives
+/// drawNavAffordances() draws the chevrons with, rather than set as a glyph.
+/// The widest brace either vendored face carries is 17px tall and the block
+/// this has to span is 44, and scaling a glyph to reach would put a text scale
+/// on the panel that section 14's contract then has to put back.
+///
+/// A spine broken at the middle, a nose pointing left out of the break, and a
+/// tip turning right at each end. The width is kBoardBraceWidth whatever the
+/// height; `top` and `bottom` are the two lines the caller is drawing, so the
+/// brace follows the row height instead of carrying a second copy of it.
+void drawRowBrace(int left, int top, int bottom, uint16_t colour) {
+  constexpr int kNoseDepth = 4;
+  constexpr int kTipLength = 3;
+  constexpr int kNoseHalfHeight = 3;
+  static_assert(kNoseDepth + kTipLength + 1 == kBoardBraceWidth,
+                "the nose, the spine and a tip are the whole of kBoardBraceWidth");
+
+  const int spineX = left + kNoseDepth;
+  const int midY = (top + bottom) / 2;
+  const int noseTop = midY - kNoseHalfHeight;
+  const int noseBottom = midY + kNoseHalfHeight;
+
+  lcd.drawLine(spineX, top, spineX, noseTop, colour);
+  lcd.drawLine(spineX, noseBottom, spineX, bottom, colour);
+  lcd.drawFastHLine(spineX + 1, top, kTipLength, colour);
+  lcd.drawFastHLine(spineX + 1, bottom, kTipLength, colour);
+  lcd.drawLine(spineX, noseTop, left, midY, colour);
+  lcd.drawLine(left, midY, spineX, noseBottom, colour);
+}
+
 }  // namespace
 
 void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ageText,
@@ -3621,6 +3654,25 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
   const int kRowHeight =
       kScreenH > kScreenW ? (kAgeY - kRowTop) / kMaxRows : 35;
 
+  // The 34px of each profile row that the one-line form leaves empty, spent on
+  // a second line. A team per line and one name column instead of two takes the
+  // photographed board's name from 36px to 97, which is the difference between
+  // `Hur...` and `Hurricanes`. TEXT_LAYOUT_DESIGN.md section 15j.
+  //
+  // `stacked` rather than the orientation alone: the two lines are only drawn
+  // where two of them fit the card, so a panel that gives the row less height
+  // than this one draws the landscape form rather than two lines through each
+  // other. Sans9 is the face both lines draw their names in, and selecting it
+  // here is also what widestBoardStatus() measures under below.
+  lcd.setFont(FontId::Sans9);
+  const int lineHeight = lcd.fontHeight();
+  const int cardHeight = kRowHeight - 4;
+  const bool stacked = kScreenH > kScreenW && cardHeight >= 2 * lineHeight;
+
+  // Centred in the card, so the pair sits on the row rather than riding the top
+  // of it. 4px above and below on the profile panel's 52px card.
+  const int linePad = stacked ? (cardHeight - 2 * lineHeight) / 2 : 0;
+
   if (count > kMaxRows) {
     Log::printf("[sports] board sent %u games, drawing %u", static_cast<unsigned>(count),
                 static_cast<unsigned>(kMaxRows));
@@ -3637,23 +3689,51 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
   // and TEXT_LAYOUT_DESIGN.md section 15i have the figures and the trade.
   const bool scoreless = boardHasNoScores(rows, count);
   const BoardColumns columns =
-      boardColumnsForBoard(kScreenW, scoreless, widestBoardStatus(rows, count));
+      stacked ? boardStackedColumnsForBoard(kScreenW, scoreless, widestBoardStatus(rows, count))
+              : boardColumnsForBoard(kScreenW, scoreless, widestBoardStatus(rows, count));
 
   for (uint8_t i = 0; i < count; ++i) {
     const SportsBoardRow& row = rows[i];
     const int top = kRowTop + i * kRowHeight;
 
-    lcd.fillRoundRect(kCardMargin, top, kContentWidth(), kRowHeight - 4, 8,
-                      to565(sport.panel));
+    lcd.fillRoundRect(kCardMargin, top, kContentWidth(), cardHeight, 8, to565(sport.panel));
 
     const int text = top + 9;
+
+    // Where each half of the scoreline goes. One line apart in the stacked
+    // form and the same line in the one-line form, which is what keeps the
+    // five draw calls below to one set rather than two.
+    const int awayTextY = stacked ? top + linePad : text;
+    const int homeTextY = stacked ? awayTextY + lineHeight : text;
+
+    // Sans12 is 29px against Sans9's 22, and two Sans12 slots are 58 against a
+    // 52px card, so a stacked score draws in its name's face on its name's
+    // line. The 2px lift is what centres the taller face on the shorter one,
+    // and there is nothing to centre when both are Sans9.
+    const FontId scoreFont = stacked ? FontId::Sans9 : FontId::Sans12;
+    const int awayScoreY = stacked ? awayTextY : text - 2;
+    const int homeScoreY = stacked ? homeTextY : text - 2;
+
+    // FINAL, P3 and a start time are one value for the pair, so the status
+    // sits between the two lines rather than on either of them. Its slot is
+    // Sans9 and so are the two lines, so centring it in the block is half a
+    // line down from the first one. lineHeight rather than lcd.fontHeight(),
+    // which reads whichever face the loop last set.
+    const int statusY = stacked ? awayTextY + lineHeight / 2 : text;
+
+    // The brace, spanning both lines, so the pair reads as one game. Drawn
+    // before the text because nothing of it is inside the name column.
+    if (stacked) {
+      drawRowBrace(boardStackedBraceLeft(), awayTextY, homeTextY + lineHeight - 1,
+                   to565(sport.muted));
+    }
 
     // Away first, home second, which is how a scoreline is read aloud and what
     // the single-game card does.
     lcd.setFont(FontId::Sans9);
-    layoutLine(row.awayName, columns.awayNameLeft, text, columns.nameWidth, sport.name,
+    layoutLine(row.awayName, columns.awayNameLeft, awayTextY, columns.nameWidth, sport.name,
                "board.away", Align::Left, kTransparentText);
-    layoutLine(row.homeName, columns.homeNameLeft, text, columns.nameWidth, sport.name,
+    layoutLine(row.homeName, columns.homeNameLeft, homeTextY, columns.nameWidth, sport.name,
                "board.home", Align::Left, kTransparentText);
 
     // columns.scoreWidth rather than kBoardScoreWidth: the same 26 on a board
@@ -3661,11 +3741,12 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     // was the one figure in this loop the layout did not derive, so a block laid
     // out for no score column could still have 26px of digits drawn into it,
     // through a team name. A row with no score of its own draws nothing into the
-    // column the board gave it.
-    lcd.setFont(FontId::Sans12);
-    layoutLine(row.awayScore, columns.awayScoreRight, text - 2, columns.scoreWidth, sport.score,
+    // column the board gave it, which in the stacked form is a blank cell at the
+    // end of each of the pair's two lines.
+    lcd.setFont(scoreFont);
+    layoutLine(row.awayScore, columns.awayScoreRight, awayScoreY, columns.scoreWidth, sport.score,
                "board.away.score", Align::Right, kTransparentText);
-    layoutLine(row.homeScore, columns.homeScoreRight, text - 2, columns.scoreWidth, sport.score,
+    layoutLine(row.homeScore, columns.homeScoreRight, homeScoreY, columns.scoreWidth, sport.score,
                "board.home.score", Align::Right, kTransparentText);
 
     // The state, in the live colour only when the server says the game is on.
@@ -3673,7 +3754,7 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     // row somebody should look at is the one that catches the eye.
     if (row.status[0] != '\0') {
       lcd.setFont(FontId::Sans9);
-      layoutLine(row.status, columns.statusRight, text, columns.statusWidth,
+      layoutLine(row.status, columns.statusRight, statusY, columns.statusWidth,
                  row.isLive ? sport.liveFill : sport.muted,
                  "board.status", Align::Right, kTransparentText);
     }

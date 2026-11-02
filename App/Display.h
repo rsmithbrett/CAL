@@ -494,6 +494,16 @@ struct SportsBoardRow {
 /// CardColumns.h is the arithmetic and TEXT_LAYOUT_DESIGN.md sections 15h and
 /// 15i are the record.</para>
 ///
+/// <para><b>A profile panel draws each row as two lines, a team each, joined by
+/// a drawn left brace.</b> 56px of row height against landscape's 35 is room
+/// for a second line, and one name column instead of two takes the name from
+/// 36px to 97 on a 240px board. The score drops to Sans9 there, because two
+/// Sans12 slots are 58px against a 52px card, and the status sits between the
+/// two lines because it describes the pair rather than either team. Landscape
+/// is one line and every figure 15h and 15i wrote down. Section 15j is the
+/// record, and showSportsBoard() branches on whether two lines fit the card
+/// rather than on the orientation alone.</para>
+///
 /// <para><b>The same heading as the single-game card</b>, so the two read as one
 /// family - sport chip left, competition right, both optional and both absent
 /// rather than substituted when the server says nothing.</para>

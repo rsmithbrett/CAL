@@ -40,15 +40,25 @@ using CardColumns::boardMaxStatusWidth;
 using CardColumns::boardScoreWidth;
 using CardColumns::boardSeparation;
 using CardColumns::boardSeparationFor;
+using CardColumns::boardStackedBraceLeft;
+using CardColumns::boardStackedColumnsFor;
+using CardColumns::boardStackedColumnsForBoard;
+using CardColumns::boardStackedMaxStatusWidth;
+using CardColumns::boardStackedScoreWidth;
+using CardColumns::boardStackedSeparationFor;
+using CardColumns::boardStackedStatusWidthFor;
 using CardColumns::boardStatusLeft;
 using CardColumns::boardStatusLeftFor;
 using CardColumns::boardStatusWidthFor;
+using CardColumns::kBoardBraceWidth;
 using CardColumns::kBoardColumnGap;
+using CardColumns::kBoardStackedScoreWidth;
 using CardColumns::kBoardMinNameWidth;
 using CardColumns::kBoardNameFloor;
 using CardColumns::kBoardPeriodTextWidth;
 using CardColumns::kBoardRowInset;
 using CardColumns::kBoardScoreWidth;
+using CardColumns::kBoardShortStartTimeTextWidth;
 using CardColumns::kBoardStartTimeSlack;
 using CardColumns::kBoardStartTimeTextWidth;
 using CardColumns::kBoardStateWordWidth;
@@ -78,6 +88,54 @@ int firstWidthClearOfFloor(bool scoreless) {
   }
   return 0;
 }
+
+/// The two-line row at the status width its state asks for, which is the
+/// counterpart of boardColumns() and the shape the boundary helpers below read.
+/// The header has no two-argument form of it, for the reason boardColumns()
+/// gives beside itself: an int converts to bool without a diagnostic, so a
+/// two-arity overload would let a measurement be passed as a state.
+BoardColumns stackedColumns(int screenW, bool scoreless) {
+  return boardStackedColumnsFor(screenW, scoreless, boardDefaultStatusWidth(scoreless));
+}
+
+bool stackedFloorClear(int screenW, bool scoreless) {
+  return stackedColumns(screenW, scoreless).nameWidth > kBoardMinNameWidth;
+}
+
+int firstStackedWidthClearOfFloor(bool scoreless) {
+  for (int w = 2 * (kCardMargin + kBoardRowInset); w <= kWidestSweep; ++w) {
+    if (stackedFloorClear(w, scoreless)) return w;
+  }
+  return 0;
+}
+
+int stackedSeparation(int screenW, bool scoreless) {
+  return boardStackedSeparationFor(screenW, scoreless, boardDefaultStatusWidth(scoreless));
+}
+
+/// A team name and what it measures in FreeSansBold9pt7b, off the vendored
+/// glyph table by the method TEXT_LAYOUT_DESIGN.md section 9b describes. The
+/// same reimplementation reproduces all twenty figures this repository already
+/// carries - FINAL 55, HALFTIME 94, Hurricanes 94, Capitals 70 and the rest -
+/// to the pixel, which is what these are worth trusting on.
+///
+/// Five of these are the names the photographed board cut to an ellipsis.
+struct Name {
+  const char* team;
+  int measured;
+};
+
+constexpr Name kPhotographedNames[] = {
+    {"Jets", 36},    {"Hurricanes", 94}, {"Wild", 38},   {"Capitals", 70},
+    {"Mammoth", 86}, {"Flyers", 53},     {"Oilers", 51}, {"Rangers", 72},
+};
+
+/// Names above the column either form draws. The point of the two-line row is
+/// how much of the league moves across that line, not that the line goes away.
+constexpr Name kNamesStillTooWide[] = {
+    {"Golden Knights", 134},
+    {"Diamondbacks", 128},
+};
 
 }  // namespace
 
@@ -533,10 +591,230 @@ int main() {
     }
   }
 
+  // --- the two-line row, TEXT_LAYOUT_DESIGN.md section 15j -------------------
+  //
+  // A profile panel has height going spare and width it has run out of, so the
+  // row turns one into the other: two lines, one team per line, joined by a
+  // drawn brace. One name instead of two is the whole of the width win, and
+  // everything below is what that costs and what it buys.
+
+  // The photographed board. Four NHL games reading FINAL, FINAL, P3 and a
+  // 6:00 PM start time, so the widest status on it is the start time's 67px
+  // and not FINAL's 55, and the column the board lands on is 69.
+  {
+    const BoardColumns twoLine =
+        boardStackedColumnsForBoard(240, false, kBoardShortStartTimeTextWidth);
+    const BoardColumns oneLine =
+        boardColumnsForBoard(240, false, kBoardShortStartTimeTextWidth);
+    assert(oneLine.nameWidth == 36);
+    assert(twoLine.nameWidth == 97);
+    assert(twoLine.statusWidth == kBoardShortStartTimeTextWidth + kBoardStatusSlack);
+    assert(oneLine.statusWidth == twoLine.statusWidth);
+    assert(twoLine.scoreWidth == kBoardStackedScoreWidth);
+
+    // The edges, as section 15j writes them down.
+    assert(boardStackedBraceLeft() == 14);
+    assert(twoLine.awayNameLeft == 28);
+    assert(twoLine.awayNameLeft + twoLine.nameWidth - 1 == 124);
+    assert(twoLine.awayScoreRight == 145);
+    assert(twoLine.statusRight - twoLine.statusWidth == 157);
+    assert(twoLine.statusRight == 226);
+    assert(boardStackedSeparationFor(240, false, twoLine.statusWidth) == 12);
+
+    // And the claim the change is for: all eight of those names are drawn
+    // whole at 97 and seven of the eight are not at 36. Counting both sides
+    // rather than asserting the eight fit, so a name added to the table that
+    // the one-line row already held cannot read as a win.
+    int cutOnMain = 0;
+    for (const Name& name : kPhotographedNames) {
+      assert(name.measured <= twoLine.nameWidth);
+      if (name.measured > oneLine.nameWidth) ++cutOnMain;
+    }
+    assert(cutOnMain == 7);
+
+    // What it does not reach. The 20-character kMaxName holds strings no panel
+    // width makes fit, and these two are still ellipsized.
+    for (const Name& name : kNamesStillTooWide) {
+      assert(name.measured > twoLine.nameWidth);
+    }
+  }
+
+  // A board of state words, where the status fits the 56px column and costs
+  // the name nothing in either form.
+  assert(boardColumnsForBoard(240, false, kBoardStateWordWidth).nameWidth == 43);
+  assert(boardStackedColumnsForBoard(240, false, kBoardStateWordWidth).nameWidth == 110);
+  assert(boardStackedColumnsForBoard(240, false, kBoardStateWordWidth).statusWidth ==
+         kBoardStatusWidth);
+
+  // HALFTIME, which 15h and 15i both record as the one string the profile
+  // board could not hold. One kBoardNameFloor in the ceiling instead of two is
+  // the whole of the fix, so the ceilings are what this reads first.
+  assert(boardStackedMaxStatusWidth(240, false) == 135);
+  assert(boardStackedMaxStatusWidth(240, true) == 155);
+  assert(boardMaxStatusWidth(240, false) == 80);
+  {
+    const int wanted = kBoardWidestPeriodTextWidth + kBoardStatusSlack;
+    assert(boardStackedStatusWidthFor(240, false, kBoardWidestPeriodTextWidth) == wanted);
+    assert(boardStatusWidthFor(240, false, kBoardWidestPeriodTextWidth) < wanted);
+    assert(boardStackedColumnsForBoard(240, false, kBoardWidestPeriodTextWidth).nameWidth == 70);
+    // OVERTIME at 97 fits too, where the one-line row cuts it by 19 pixels.
+    assert(boardStackedStatusWidthFor(240, false, 97) == 99);
+  }
+
+  // The three rules boardStackedStatusWidthFor() states, pinned at the
+  // boundary between each pair of them. Nothing in App/CardColumns.h's own
+  // assertions reads 56 or 57, so a rule that fires at `< kBoardStatusWidth`
+  // rather than `<=` passes every one of them and only shows up here: it hands
+  // a 56px string a 58px column, which is within every bound the sweep below
+  // checks and is not the rule.
+  {
+    struct Rule {
+      int measured;
+      int want;
+    };
+    const Rule kRules[] = {
+        {0, 0},   {1, kBoardStatusWidth},      {55, kBoardStatusWidth},
+        {56, kBoardStatusWidth},               {57, 57 + kBoardStatusSlack},
+        {74, 74 + kBoardStatusSlack},          {94, 94 + kBoardStatusSlack},
+    };
+    for (const Rule& rule : kRules) {
+      assert(boardStackedStatusWidthFor(240, false, rule.measured) == rule.want);
+      assert(boardStackedStatusWidthFor(320, false, rule.measured) == rule.want);
+    }
+    // An empty status also "fits" 56, and the rule that owns zero reads first.
+    assert(boardStackedStatusWidthFor(240, false, 0) == 0);
+    assert(boardStackedStatusWidthFor(240, false, -1) == 0);
+  }
+
+  // The rest of section 15j's table, as equalities. The 320 rows are what a
+  // 320px panel in profile would draw; no board on the fleet is one, and the
+  // sweep below is what covers the widths between and beyond.
+  struct Row {
+    int panel;
+    bool scoreless;
+    int measured;
+    int nameBefore;
+    int nameAfter;
+    int statusAfter;
+  };
+  const Row kSection15j[] = {
+      {240, false, 0, 71, 166, 0},    {240, false, 37, 43, 110, 56},
+      {240, false, 55, 43, 110, 56},  {240, false, 67, 36, 97, 69},
+      {240, false, 74, 33, 90, 76},   {240, false, 78, 31, 86, 80},
+      {240, false, 80, 31, 84, 82},   {240, false, 94, 31, 70, 96},
+      {240, false, 97, 31, 67, 99},   {240, true, 78, 57, 106, 80},
+      {240, true, 94, 49, 90, 96},    {320, false, 55, 83, 190, 56},
+      {320, false, 94, 63, 150, 96},  {320, true, 94, 89, 170, 96},
+  };
+  for (const Row& row : kSection15j) {
+    const BoardColumns before = boardColumnsForBoard(row.panel, row.scoreless, row.measured);
+    const BoardColumns after =
+        boardStackedColumnsForBoard(row.panel, row.scoreless, row.measured);
+    assert(before.nameWidth == row.nameBefore);
+    assert(after.nameWidth == row.nameAfter);
+    assert(after.statusWidth == row.statusAfter);
+    // Every row of that table is a wider name than the one-line grid drew, at
+    // every status a provider can send. That is the table's whole claim and
+    // nothing above states it as a rule.
+    assert(after.nameWidth > before.nameWidth);
+  }
+
+  // --- the two-line sweep ----------------------------------------------------
+  //
+  // The same range and the same eight measured widths the one-line sweep uses.
+  // Two properties here are the one-line row's with the parity term taken out,
+  // because one name takes the whole remainder and nothing is split in half.
+  for (int width = 2 * (kCardMargin + kBoardRowInset); width <= kWidestSweep; ++width) {
+    for (const bool scoreless : {true, false}) {
+      const int ceiling = boardStackedMaxStatusWidth(width, scoreless);
+      assert(ceiling >= kBoardStatusWidth);
+
+      // A column at the ceiling leaves the one name column standing exactly on
+      // the floor the ceiling is derived from, wherever the name sets it.
+      if (ceiling > kBoardStatusWidth) {
+        assert(boardStackedColumnsFor(width, scoreless, ceiling).nameWidth == kBoardNameFloor);
+      }
+
+      // The two-line ceiling is never under the one-line ceiling at the same
+      // width and state: it subtracts one name floor where the other subtracts
+      // two, and it releases a score column as well. This is what says the
+      // strings the one-line row cut are reachable rather than only that
+      // HALFTIME is.
+      assert(ceiling >= boardMaxStatusWidth(width, scoreless));
+
+      int previousStatus = -1;
+      for (const int measured : {0, 55, 56, 57, 74, 78, 94, 300}) {
+        const int statusWidth = boardStackedStatusWidthFor(width, scoreless, measured);
+        assert(statusWidth == 0 || statusWidth >= kBoardStatusWidth);
+        assert(statusWidth <= ceiling);
+
+        // Never falls as the measurement rises. This is what lets
+        // showSportsBoard() fold over the board's measurements and convert
+        // once, rather than converting each row and keeping the widest column.
+        assert(statusWidth >= previousStatus);
+        previousStatus = statusWidth;
+
+        const BoardColumns c = boardStackedColumnsFor(width, scoreless, statusWidth);
+        assert(c.statusWidth == statusWidth);
+        assert(c.scoreWidth == boardStackedScoreWidth(scoreless));
+        assert(c.nameWidth >= kBoardMinNameWidth);
+
+        // Both lines at one x, which is what keeps showSportsBoard() to one set
+        // of draw calls for the two orientations.
+        assert(c.awayNameLeft == c.homeNameLeft);
+        assert(c.awayScoreRight == c.homeScoreRight);
+
+        // The brace stands at the row's left edge with a column gap between it
+        // and the name, and the row ends on the glass.
+        assert(boardStackedBraceLeft() == kCardMargin + kBoardRowInset);
+        assert(c.awayNameLeft == boardStackedBraceLeft() + kBoardBraceWidth + kBoardColumnGap);
+        assert(c.statusRight == width - kCardMargin - kBoardRowInset);
+        assert(c.statusRight <= width - kCardMargin);
+
+        if (c.nameWidth <= kBoardMinNameWidth) continue;
+
+        // What the row asks for is what it has, with nothing left over. The
+        // one-line sweep's counterpart carries boardLeftoverPixel() here.
+        const int asked =
+            kBoardBraceWidth + c.nameWidth + c.scoreWidth + c.statusWidth + 3 * kBoardColumnGap;
+        const int band = c.statusRight - boardStackedBraceLeft();
+        assert(asked == band);
+
+        // So the separation is two gaps exactly, at an odd panel width as well
+        // as an even one.
+        assert(boardStackedSeparationFor(width, scoreless, statusWidth) == 2 * kBoardColumnGap);
+        assert(c.statusRight - c.statusWidth > c.awayScoreRight);
+      }
+    }
+  }
+
+  // Where the two-line floor engages, which is far below either shipped panel
+  // and is what a third board arriving narrow would land on. The separation
+  // degrades below it for the one-line row's reason: the floor clamps the name
+  // width and nothing clamps the edges derived from it.
+  assert(firstStackedWidthClearOfFloor(false) == 155);
+  assert(firstStackedWidthClearOfFloor(true) == 159);
+  assert(stackedSeparation(154, false) == 2 * kBoardColumnGap);
+  assert(stackedSeparation(153, false) < 2 * kBoardColumnGap);
+  assert(stackedSeparation(158, true) == 2 * kBoardColumnGap);
+  assert(stackedSeparation(157, true) < 2 * kBoardColumnGap);
+  assert(stackedSeparation(142, false) <= 0);
+  assert(stackedSeparation(146, true) <= 0);
+
+  // Both shipped panels are clear of all of it, in both states.
+  for (const int width : {320, 240}) {
+    for (const bool scoreless : {true, false}) {
+      assert(stackedFloorClear(width, scoreless));
+      assert(stackedSeparation(width, scoreless) == 2 * kBoardColumnGap);
+    }
+  }
+
   std::cout << "PASS: scoreboard columns - the design document's two tables, the measured "
                "status column and its ceiling, what a row asks for on its own, the one grid "
                "four rows of a board share, the fold over the strings at every width up to "
             << kWidestSweep
-            << " in both states, the separation identity over eight status widths, and the "
-               "floor's boundaries\n";
+            << " in both states, the separation identity over eight status widths, the "
+               "floor's boundaries, and section 15j's two-line row - the photographed board's "
+               "eight names, the table at both widths, HALFTIME held whole, and the same sweep "
+               "with the parity term gone\n";
 }

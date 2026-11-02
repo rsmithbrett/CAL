@@ -330,7 +330,7 @@ done
 bash ci/check-text-state.sh
 
 # The fourth. The scoreboard lays one grid for the whole board, sized against
-# the widest status string on it, and App/CardColumns.h's forty-one
+# the widest status string on it, and App/CardColumns.h's seventy-two
 # static_asserts and the host sweep over them read none of App/Display.cpp, so
 # the arguments the draw path hands that arithmetic, and where in the function
 # it hands them, are the one part of the layout with nothing checking it. Its

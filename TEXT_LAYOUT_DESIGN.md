@@ -2180,3 +2180,247 @@ far enough in to clear the bezel on a cased device is the one thing here that a
 photograph has to answer.
 
 TEST_PLAN.md section 18f has the mutations and what they caught.
+
+---
+
+### 15j. Two lines and a brace, so a 240px panel can spell the team, 2026-11-01
+
+A photograph of a portrait CYD running `v2026.11.01.0004` came back with five
+of eight team names cut to an ellipsis on one NHL board: `Jets 0 Hur... 7
+FINAL`, `Wild 5 Ca... 1 FINAL`, `Ma... 1 Fly... 5 P3`, `Oilers Rang... 6:00 PM`.
+`Ma...` and `Ca...` carry no team at all.
+
+Nothing is broken. 15i's grid is doing exactly what it says: four text columns
+share the 212px a 240px panel has, the widest status on that board is the
+`6:00 PM` start time at 67px rather than `FINAL`'s 55, the column it lands on
+is 69, and what the two names split afterwards is 36px each. `Hurricanes` is
+94. The row has the pixels it has.
+
+The device in the frame is a release behind and draws the per-row grids 15i
+replaced, which is why `Wild` and `Oilers` are whole in it. On `main` the same
+board puts every row on the one 36px column, so seven of those eight names are
+cut rather than five. 15i names that trade and takes it, to line the digits up.
+
+The row also has height nobody is spending. `kRowHeight` is 56 in profile
+against 35 in landscape, because the profile panel has 224px between the
+heading and the age line and only four rows to put in it. The row draws one
+22px line into all 56. Width is the binding constraint and height is the one
+going spare, so the row turns one into the other: two lines, one team per line,
+joined by a left brace that says they are one game.
+
+#### What the row holds, per line
+
+One name and one score, which is the whole of the width win. A one-line row
+spends its 212px on two names, two scores and a status; a two-line row spends
+it on a brace, one name, one score and a status, and the single name keeps
+everything the second one was taking.
+
+On the photographed board at 240px, whose widest status is the 67px start time:
+
+| | brace | name | score | status |
+|---|---|---|---|---|
+| one line, on `main` | - | 36 each | 26 each | 69 |
+| two lines | 8 | **97** | 20 | 69 |
+
+`Jets` 36, `Hurricanes` 94, `Wild` 38, `Capitals` 70, `Mammoth` 86, `Flyers`
+53, `Oilers` 51 and `Rangers` 72 all measure under 97. Every name on that
+photograph is drawn whole, where `main` cuts seven of the eight. The edges are
+brace 14..21, name 28..124, score right edge 145, status 157..226, and 12
+pixels of separation, which is 15c's `2 * kBoardColumnGap` exactly and with no
+leftover pixel to carry: one name rather than two means nothing is split in
+half, so the parity term 15c had to chase doesn't arise.
+
+A board whose statuses are all state words keeps the 56px column and gives the
+name 110 instead, which is the `FINAL` row of the table further down.
+
+#### The brace is drawn, because no face holds one this tall
+
+LovyanGFX's `{` in `FreeSansBold9pt7b` is 4px wide and 17px tall, and 12pt's is
+6 by 23 against a 44px block. A glyph can't span two lines, and scaling one
+with `setTextSize()` would scale its stroke with it and put a text scale on the
+panel that section 14's contract then has to put back.
+
+So it's drawn, from the primitives `drawNavAffordances()` already uses for the
+chevrons: a vertical spine broken in the middle, a nose pointing left out of
+the break, and a short tip turning right at each end.
+
+```
+    __
+   |
+  <
+   |__
+```
+
+`kBoardBraceWidth` is 8 and the geometry inside it is fixed: the nose is the
+leftmost pixel, the spine stands 4px right of it, and the two tips run 3px
+right of the spine. Width is 8 at any height.
+
+Height isn't a constant. The brace runs from the top of the first line's slot
+to the bottom of the second's, both of which come from `kRowHeight`, so a panel
+that gives the row more or fewer pixels gets a brace that spans whatever the
+two lines end up being. Nothing in it is measured off a glyph table, because
+nothing in it is a glyph.
+
+8px is thin for a 44px span, and that is a choice. A brace drawn in proportion
+would be about 18 wide and would cost the name column ten of the pixels this
+whole section exists to find. It reads as a bracket with a pinch in the middle,
+which is what it has to do.
+
+#### Where the one value for the pair goes
+
+`FINAL`, `P3` and `6:00 PM` describe the game, not a team. There are two lines
+and one of each of those, so the status stays in the column it's in, right edge
+on `statusRight` the same as landscape, and sits vertically centred between the
+two lines rather than on either one.
+
+Right, because that is the one column a reader scans down the side of the card,
+and 15h is explicit that it's the column that stayed aligned when nothing else
+did. Moving it would cost the scan to buy nothing. Centred, because a status on
+line one reads as the away team's and a status on line two as the home team's,
+and it is neither.
+
+The status slot is `Sans9`, 22px tall, in a 44px block, so its top is 11px
+below the block's top line, which is `top + 15` on the profile panel.
+
+#### The score face drops a tier, and that is what buys the fourth game
+
+This is the cost, and it is the only one.
+
+The profile row is 56px and the card inside it is 52. Two `Sans9` slots are 22
+each: 4px of padding, 22, 22, 4px of padding, 52 exactly. Two `Sans12` slots
+are 29 each, which is 58, and 58 does not go into 52. The score cannot stay at
+`Sans12` and be on its own team's line.
+
+The alternative is three rows instead of four. 224px over three gives a 74px
+row and a 70px card, which holds two `Sans12` lines with room over. It also
+drops a game off a board the server sends four of, which is a product change
+nobody asked for, so it isn't what this does. `kMaxRows` is still 4 and the
+board still shows four games.
+
+So in profile the score draws in `Sans9` with the name. Two digits measure 20px
+there against 26 at `Sans12`, measured off the vendored glyph table by 9b's
+method, and `kBoardStackedScoreWidth` is that 20. Landscape keeps `Sans12` and
+its 26, and `kBoardScoreWidth` is not touched.
+
+Reversing the trade is one constant and one face: a `kMaxRows` of 3 and a score
+drawn at `Sans12` gives big digits on three games. The figures above are what
+it would cost to look at.
+
+#### Landscape is one line, and nothing in it moves
+
+35px holds one 22px slot and not two. The landscape board keeps
+`boardColumnsForBoard()`, `kBoardScoreWidth`, `Sans12` scores and every figure
+15h and 15i wrote down, and the assertions in `App/CardColumns.h` that read
+them are unchanged.
+
+`showSportsBoard()` branches once, on `kScreenH > kScreenW`, which is the
+branch it already makes for `kRowHeight`. What the branch picks is the grid,
+the two line positions, the score face and whether a brace is drawn; the five
+`layoutLine()` calls underneath are one set, not two. The profile row puts both
+names at the same left edge and both scores at the same right edge, so
+`BoardColumns` holds the profile grid without a field added to it:
+`awayNameLeft == homeNameLeft` and `awayScoreRight == homeScoreRight`, and the
+two lines differ in y alone.
+
+#### A scheduled game, in the two-line form
+
+15i's rule is unchanged and it reads better vertically. `scoreless` is still
+the board's question: one game under way gives every row a score column, and a
+scheduled row draws nothing into it. In the two-line form that is a blank cell
+at the end of each of the pair's two lines, under the digits of the games that
+have started, with the start time centred against the brace. The pair is there
+and the numbers haven't happened.
+
+A board where no row reported a score releases the column on every row, and the
+name goes to 186 at 240px with the widest start time in the status.
+
+#### What a profile row gets, at both widths
+
+Measured off the vendored `FreeSansBold9pt7b` table by 9b's method, which
+reproduces all twenty figures this document and 15g, 15h and 15i already carry
+to the pixel: `FINAL` 55, `PPD` 37, `LIVE` 41, `P1` 22, `6TH INN` 74, `4TH QTR`
+79, `3RD QTR` 80, `HALFTIME` 94, `OVERTIME` 97, `12:00 AM` 78, `7:30 PM` 67,
+`7:00 PM` 67, `2ND P...` 66, `Hurricanes` 94, `Capitals` 70 and `Automated
+estimate, not an appraisal.` 323 at 9pt, and `Sunrise` 89, `Sunset` 81,
+`Est. value` 112, `$9999K - $99999K` 200 at 12pt.
+
+"Before" is the one-line grid of `v2026.11.01.0005`, which is built and not
+registered. The 320 column is what a 320px panel in profile would draw, not
+what the landscape board draws; no such panel is on the fleet, and the host
+sweep is what covers it.
+
+| panel | board | widest status | name before | status before | name after | status after |
+|---|---|---|---|---|---|---|
+| 240 | with scores | nothing sent | 71 | 0 | 166 | 0 |
+| 240 | with scores | `PPD` 37 | 43 | 56 | **110** | 56 |
+| 240 | with scores | `FINAL` 55 | 43 | 56 | **110** | 56 |
+| 240 | with scores | `7:30 PM` 67 | 36 | 69 | **97** | 69 |
+| 240 | with scores | `6TH INN` 74 | 33 | 76 | **90** | 76 |
+| 240 | with scores | `12:00 AM` 78 | 31 | 80 | **86** | 80 |
+| 240 | with scores | `3RD QTR` 80 | 31 | 80 | **84** | 82 |
+| 240 | with scores | `HALFTIME` 94 | 31 | 80 cut | **70** | **96** |
+| 240 | with scores | `OVERTIME` 97 | 31 | 80 cut | **67** | **99** |
+| 240 | scoreless | `12:00 AM` 78 | 57 | 80 | 106 | 80 |
+| 240 | scoreless | `HALFTIME` 94 | 49 | 96 | 90 | 96 |
+| 320 | with scores | `FINAL` 55 | 83 | 56 | 190 | 56 |
+| 320 | with scores | `HALFTIME` 94 | 63 | 96 | 150 | 96 |
+| 320 | scoreless | `HALFTIME` 94 | 89 | 96 | 170 | 96 |
+
+`HALFTIME` is no longer cut on the 240px panel. 15h and 15i both record it as
+the one string the profile board could not hold: 94px needs 96, the ceiling
+there was 80, and 96 would have put two name columns at 24 where
+`kBoardMinNameWidth` clamps. There is one name column now, so the ceiling is
+
+```
+rowSpan - kBoardBraceWidth - scoreWidth - 3 * kBoardColumnGap - kBoardNameFloor
+```
+
+with one `kBoardNameFloor` subtracted instead of two, which is 135 at 240 with
+scores and 155 scoreless. 96 fits under both. `OVERTIME` at 97 fits too, and so
+does every eight-character string the glyph table can make up to 133px.
+
+#### What a reader loses, said rather than left to be found
+
+The profile score digits are a tier smaller, `Sans12` to `Sans9`, on the
+profile panel only. That is what the fourth game cost.
+
+A three-digit score is still cut, and by the same margin it is today: 30px of
+`Sans9` into a 20px column, where landscape puts 39px of `Sans12` into 26.
+Carried over unchanged rather than fixed or worsened, and a basketball board is
+where it shows.
+
+And one thing the measurement turned up that is **not** this change and is on
+the fleet now. `kBoardScoreWidth` is 26 and its own remark calls that two
+digits of `Sans12`, which is true of nine digits out of ten: every digit in
+`FreeSansBold12pt7b` has an `xAdvance` of 13 except `1`, which has 14. So `11`
+measures 28 and `10` measures 27, both over the 26px column, and `layoutLine()`
+drops them to the next face down and draws them at `Sans9`. A score of 1 or 11
+or 10 or 21 on a one-line row is a tier smaller than the score beside it. It is
+not cut and it is not wrong, it is inconsistent, and a hockey or baseball board
+hits it most nights. Fixing it moves `kBoardScoreWidth`, which every table in
+15b, 15h and 15i is built on, so it is its own change and not this one.
+
+The two-line row does not have it. Every digit in `FreeSansBold9pt7b` has an
+`xAdvance` of 10, so every two-digit score measures exactly 20 and
+`kBoardStackedScoreWidth` is exactly 20.
+
+A name over 97px is still ellipsized on the photographed board's status, and
+over 110 on a board of state words. `Golden Knights` is 134 and `Diamondbacks`
+128, so they draw as `Golden Kni...` and `Diamondba...` on either. The
+20-character `SportsBoardRow::kMaxName` can hold a
+string the column can't, and no panel width makes that go away; what changed is
+how much of the league is above the line rather than below it.
+
+A tall row with two lines in it is a denser card: four games, eight team names
+and four statuses on a 240px panel, where the same card held four names whole
+and four stubs. Whether that reads as a scoreboard or as a wall is the thing a
+photograph has to answer and nothing here can.
+
+Nothing on the wire changes. `SportsBoardRow` and `Sports::Game` are
+byte-for-byte what they were. No field was added, removed or reinterpreted, so
+the 6-month compatibility gate is untouched, and a device without this draws
+the same payload one line to a row.
+
+`App/CardColumns.h` is the arithmetic, `tests/card-columns-test.cpp` sweeps it,
+`ci/check-board-columns-call.sh` holds the draw path's arguments, and
+TEST_PLAN.md section 18h has the mutations.

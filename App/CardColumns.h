@@ -103,6 +103,13 @@ constexpr int kBoardStateWordWidth = 55;
 constexpr int kBoardPeriodTextWidth = 74;
 constexpr int kBoardWidestPeriodTextWidth = 94;
 
+/// A single-digit-hour start time, off the same glyph table: "6:00 PM" and
+/// "7:30 PM" are both 67px, against the 78 kBoardStartTimeTextWidth carries for
+/// the widest one formatTimeOfDay() can make. It is the ordinary evening
+/// fixture and the status the photographed board in TEXT_LAYOUT_DESIGN.md
+/// section 15j was widest on.
+constexpr int kBoardShortStartTimeTextWidth = 67;
+
 /// The narrowest a name column gets once the status column is taking its width
 /// from the string it holds.
 ///
@@ -248,6 +255,105 @@ constexpr BoardColumns boardColumnsForBoard(int screenW, bool scoreless,
                                             int widestStatusTextWidth) {
   return boardColumnsFor(screenW, scoreless,
                          boardStatusWidthFor(screenW, scoreless, widestStatusTextWidth));
+}
+
+/// The brace that joins a two-line row's two lines, and the score column those
+/// lines draw into.
+///
+/// kBoardBraceWidth is 8 at any height. The nose is the leftmost pixel, the
+/// spine stands 4px right of it, and each tip runs 3px right of the spine;
+/// Display.cpp's drawRowBrace() asserts those three add up to this. It is drawn
+/// from line segments rather than set as a glyph, because the widest brace
+/// either vendored face carries is 17px tall against a 44px block.
+///
+/// kBoardStackedScoreWidth is two digits of FreeSansBold9pt7b, measured off the
+/// vendored glyph table by the method TEXT_LAYOUT_DESIGN.md section 9b
+/// describes. kBoardScoreWidth's 26 is the same two digits at Sans12, which is
+/// the face a one-line row draws them in and a two-line row has no height for:
+/// two Sans12 slots are 58px against the 52px card the profile panel gives a
+/// row. Section 15j is the trade.
+constexpr int kBoardBraceWidth = 8;
+constexpr int kBoardStackedScoreWidth = 20;
+
+/// The brace's left edge, which is the row's own left edge.
+constexpr int boardStackedBraceLeft() { return kCardMargin + kBoardRowInset; }
+
+/// The one score column a two-line row draws, which both of its lines share.
+/// Released by the board's `scoreless` on the same rule boardScoreWidth() uses.
+constexpr int boardStackedScoreWidth(bool scoreless) {
+  return scoreless ? 0 : kBoardStackedScoreWidth;
+}
+
+/// The widest status column a two-line row can be given.
+///
+/// boardMaxStatusWidth()'s shape with one kBoardNameFloor subtracted instead of
+/// two, because a two-line row has one name column where a one-line row has
+/// two. That single subtraction is what takes HALFTIME off the list of strings
+/// the 240px panel cannot hold: 94px asks for 96, the one-line ceiling there is
+/// 80, and this one is 135.
+constexpr int boardStackedMaxStatusWidth(int screenW, bool scoreless) {
+  const int fromName = boardRowSpan(screenW) - kBoardBraceWidth -
+                       boardStackedScoreWidth(scoreless) - 3 * kBoardColumnGap -
+                       kBoardNameFloor;
+  return fromName > kBoardStatusWidth ? fromName : kBoardStatusWidth;
+}
+
+/// The three rules boardStatusWidthFor() states, under the two-line ceiling.
+/// Nothing is drawn for an empty status, a status that fits the 56px column
+/// keeps it, and anything wider asks for its own width plus the slack.
+constexpr int boardStackedStatusWidthFor(int screenW, bool scoreless,
+                                         int measuredTextWidth) {
+  if (measuredTextWidth <= 0) { return 0; }
+  if (measuredTextWidth <= kBoardStatusWidth) { return kBoardStatusWidth; }
+  const int want = measuredTextWidth + kBoardStatusSlack;
+  const int ceiling = boardStackedMaxStatusWidth(screenW, scoreless);
+  return want < ceiling ? want : ceiling;
+}
+
+/// A two-line row's column edges: a brace, one name, one score and the status.
+///
+/// Returns the same BoardColumns a one-line row does, with the away and home
+/// edges equal, because the two lines sit at one x and differ in y alone. That
+/// is what lets showSportsBoard() keep one set of layoutLine() calls for both
+/// orientations instead of forking the draw path.
+///
+/// The name takes the whole remainder rather than half of one, so there is no
+/// pixel a split cannot divide: boardStackedSeparationFor() below is exactly
+/// 2 * kBoardColumnGap at every panel width, where the one-line form carries
+/// the parity term boardLeftoverPixel() reads.
+constexpr BoardColumns boardStackedColumnsFor(int screenW, bool scoreless,
+                                              int statusWidth) {
+  const int rowLeft = boardStackedBraceLeft();
+  const int rowRight = screenW - kCardMargin - kBoardRowInset;
+  const int scoreWidth = boardStackedScoreWidth(scoreless);
+  const int nameLeft = rowLeft + kBoardBraceWidth + kBoardColumnGap;
+
+  // Three column gaps for the three that sit between the four blocks, one of
+  // which is the air boardStackedSeparationFor() reads back out.
+  const int fixedWidth =
+      kBoardBraceWidth + scoreWidth + statusWidth + 3 * kBoardColumnGap;
+  const int remainder = (rowRight - rowLeft) - fixedWidth;
+  const int nameWidth = remainder > kBoardMinNameWidth ? remainder : kBoardMinNameWidth;
+
+  const int scoreRight = nameLeft + nameWidth + scoreWidth;
+
+  return BoardColumns{nameLeft, scoreRight, nameLeft,   scoreRight,
+                      rowRight, nameWidth,  scoreWidth, statusWidth};
+}
+
+/// The one grid every two-line row of a board draws into, from the widest
+/// status string on it. boardColumnsForBoard()'s counterpart, and the same two
+/// calls under one name so the draw path has one thing to call.
+constexpr BoardColumns boardStackedColumnsForBoard(int screenW, bool scoreless,
+                                                   int widestStatusTextWidth) {
+  return boardStackedColumnsFor(
+      screenW, scoreless,
+      boardStackedStatusWidthFor(screenW, scoreless, widestStatusTextWidth));
+}
+
+constexpr int boardStackedSeparationFor(int screenW, bool scoreless, int statusWidth) {
+  const BoardColumns columns = boardStackedColumnsFor(screenW, scoreless, statusWidth);
+  return (columns.statusRight - columns.statusWidth) - columns.homeScoreRight;
 }
 
 constexpr int boardStatusLeftFor(int screenW, bool scoreless, int statusWidth) {
@@ -433,5 +539,105 @@ static_assert(boardColumnsForBoard(320, true, kBoardStartTimeTextWidth).scoreWid
 static_assert(boardColumnsForBoard(320, false, kBoardStartTimeTextWidth).scoreWidth ==
                   kBoardScoreWidth,
               "one game under way gives every row of the board a score column");
+
+// The two-line row, as the figures TEXT_LAYOUT_DESIGN.md section 15j writes
+// down. 240 is the profile panel it was written for; 320 is what a profile
+// panel of that width would draw, which no board on the fleet has, and the
+// host sweep is what covers every width between and beyond.
+//
+// The photographed board first. Four NHL games reading FINAL, FINAL, P3 and a
+// 6:00 PM start time, so the widest status on it is the start time's 67px and
+// the column is 69. Literals on the right, because an assertion built from the
+// same two calls reads its own definition back.
+static_assert(boardStackedColumnsForBoard(240, false, kBoardShortStartTimeTextWidth).nameWidth ==
+                  97,
+              "the photographed board's 67px start time gives a two-line row a 97px name");
+static_assert(boardColumnsForBoard(240, false, kBoardShortStartTimeTextWidth).nameWidth == 36,
+              "where the one-line row on the same board draws 36");
+
+// Hurricanes is 94px of FreeSansBold9pt7b and Mammoth 86, the two names the
+// photograph cut to Hur... and Ma..., and 97 holds both whole.
+static_assert(boardStackedColumnsForBoard(240, false, kBoardShortStartTimeTextWidth).nameWidth >=
+                  94,
+              "Hurricanes measures 94 and the two-line row spells it");
+
+// And a board of state words, where the status costs the name nothing.
+static_assert(boardStackedColumnsForBoard(240, false, kBoardStateWordWidth).nameWidth == 110,
+              "a 240px board of state words gives a two-line row a 110px name");
+static_assert(boardStackedColumnsForBoard(240, false, kBoardStateWordWidth).statusWidth ==
+                  kBoardStatusWidth,
+              "and FINAL costs that name no pixels, the same trade the one-line row makes");
+static_assert(boardColumnsForBoard(240, false, kBoardStateWordWidth).nameWidth == 43,
+              "which is the 43px the one-line row draws on a board of state words");
+
+// The one string 15h and 15i both record the profile board as unable to hold.
+// One kBoardNameFloor in the ceiling instead of two is the whole of the fix.
+static_assert(boardStackedMaxStatusWidth(240, false) == 135, "240 two-line can spend 135");
+static_assert(boardStackedMaxStatusWidth(240, true) == 155, "240 two-line scoreless, 155");
+static_assert(boardStackedMaxStatusWidth(320, false) == 215, "320 two-line can spend 215");
+static_assert(boardStackedMaxStatusWidth(320, true) == 235, "320 two-line scoreless, 235");
+static_assert(boardStackedColumnsForBoard(240, false, kBoardWidestPeriodTextWidth).statusWidth ==
+                  kBoardWidestPeriodTextWidth + kBoardStatusSlack,
+              "HALFTIME gets the 96px column it asks for on a 240px two-line board");
+static_assert(boardStackedColumnsForBoard(240, false, kBoardWidestPeriodTextWidth).nameWidth == 70,
+              "and the name that buys it is 70, not the floor");
+static_assert(boardColumnsForBoard(240, false, kBoardWidestPeriodTextWidth).statusWidth <
+                  kBoardWidestPeriodTextWidth,
+              "where the one-line row on the same panel still cuts it");
+
+// A board where no row reported a score releases the one score column, and a
+// board with nothing in its status column spends the lot on the name.
+static_assert(boardStackedColumnsForBoard(240, true, kBoardStartTimeTextWidth).scoreWidth == 0,
+              "a two-line board of scheduled games draws no score column");
+static_assert(boardStackedColumnsForBoard(240, true, kBoardStartTimeTextWidth).nameWidth == 106,
+              "and gives its name 106px at the widest start time");
+static_assert(boardStackedColumnsForBoard(240, false, kBoardStartTimeTextWidth).scoreWidth ==
+                  kBoardStackedScoreWidth,
+              "one game under way gives every two-line row a score column");
+static_assert(boardStackedColumnsForBoard(240, false, 0).statusWidth == 0,
+              "a board whose rows sent no status draws no status column");
+static_assert(boardStackedColumnsForBoard(240, false, 0).nameWidth == 166,
+              "and spends the lot on the name");
+
+// The two lines sit at one x and differ in y, which is what lets one set of
+// draw calls serve both orientations.
+static_assert(boardStackedColumnsFor(240, false, kBoardStatusWidth).awayNameLeft ==
+                  boardStackedColumnsFor(240, false, kBoardStatusWidth).homeNameLeft,
+              "both lines of a two-line row start their name at one edge");
+static_assert(boardStackedColumnsFor(240, false, kBoardStatusWidth).awayScoreRight ==
+                  boardStackedColumnsFor(240, false, kBoardStatusWidth).homeScoreRight,
+              "and end their score at one edge");
+
+// The brace stands inside the content band with the name clear of it, and the
+// row still ends on the glass.
+static_assert(boardStackedBraceLeft() >= kCardMargin,
+              "the brace stands inside the content band, not in the margin the chevrons use");
+static_assert(boardStackedColumnsFor(240, false, kBoardStatusWidth).awayNameLeft ==
+                  boardStackedBraceLeft() + kBoardBraceWidth + kBoardColumnGap,
+              "and a column gap stands between the brace and the name");
+static_assert(boardStackedColumnsFor(240, false, kBoardStatusWidth).statusRight <=
+                  240 - kCardMargin,
+              "240 two-line is on the glass");
+static_assert(boardStackedColumnsFor(320, false, kBoardStatusWidth).statusRight <=
+                  320 - kCardMargin,
+              "320 two-line is on the glass");
+
+// The separation is exactly two gaps and carries no parity term, because one
+// name takes the whole remainder and nothing is split in half.
+static_assert(boardStackedSeparationFor(240, false, kBoardStatusWidth) == 2 * kBoardColumnGap,
+              "240 two-line with scores keeps two gaps of air");
+static_assert(boardStackedSeparationFor(240, true, kBoardStartTimeWidth) == 2 * kBoardColumnGap,
+              "240 two-line scoreless keeps two gaps of air");
+static_assert(boardStackedSeparationFor(241, false, kBoardStatusWidth) == 2 * kBoardColumnGap,
+              "and an odd panel width keeps two gaps as well, where the one-line row keeps 13");
+
+// At the ceiling the one name column stands exactly on the floor it was
+// derived from, which is the tightest of these: a pixel either way fails.
+static_assert(boardStackedColumnsFor(240, false, boardStackedMaxStatusWidth(240, false))
+                      .nameWidth == kBoardNameFloor,
+              "240 two-line with scores holds the name floor at its ceiling");
+static_assert(boardStackedColumnsFor(240, true, boardStackedMaxStatusWidth(240, true))
+                      .nameWidth == kBoardNameFloor,
+              "240 two-line scoreless holds the name floor at its ceiling");
 
 }  // namespace CardColumns

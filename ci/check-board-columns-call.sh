@@ -2,7 +2,7 @@
 # Holds showSportsBoard()'s call into App/CardColumns.h, and the two folds that
 # feed it, to the shape the arithmetic was proven against.
 #
-# App/CardColumns.h carries forty-one static_asserts and
+# App/CardColumns.h carries seventy-two static_asserts and
 # tests/card-columns-test.cpp sweeps every panel width from 28 to 1024 twice,
 # and between them no single-token change to that header moves a drawn pixel
 # without something firing. None of it reads App/Display.cpp. The arguments the
@@ -157,6 +157,91 @@ if ! has "$NOSCORES" 'returnfalse;' || ! has "$NOSCORES" 'returntrue;'; then
        The polarity is what picks the score columns, and nothing else reads this function."
 fi
 
+# The two-line row, TEXT_LAYOUT_DESIGN.md section 15j. The same problem as
+# everything above: App/CardColumns.h holds the arithmetic and reads none of
+# the arguments, so these single-token changes each draw a wrong board with
+# nothing anywhere firing.
+#
+#   the two grid calls swapped        a profile panel on the one-line grid and a
+#                                     landscape one on the two-line grid
+#   kScreenH > kScreenW reversed      two 22px lines into a 35px row
+#   the cardHeight term dropped       two lines into a card that cannot hold them
+#   homeTextY = awayTextY             both team names on one line, overdrawn
+#   the score faces swapped           29px of digits into a 22px line
+#   statusY = awayTextY               one value for the pair sitting on the away team
+#   the drawRowBrace() call deleted   two lines with nothing saying they are a pair
+
+# Which grid, and the orientation that picks it. The two-line form only where
+# two lines fit the card: the height term is what stops a shorter panel drawing
+# them through each other.
+if ! has "$BOARD" 'stacked=kScreenH>kScreenW&&cardHeight>=2\*lineHeight'; then
+  say "'stacked' is not 'kScreenH > kScreenW && cardHeight >= 2 * lineHeight'. The two-line row
+       is drawn on a profile panel and only where two lines fit the card."
+fi
+
+if ! has "$BOARD" 'stacked?boardStackedColumnsForBoard(kScreenW,scoreless,widestBoardStatus(rows,count))'; then
+  say "the two-line grid is not boardStackedColumnsForBoard(kScreenW, scoreless,
+       widestBoardStatus(rows, count)) on the stacked branch. Swapped with the one-line call it
+       lays a profile panel out for two name columns and a landscape one for a brace."
+fi
+
+# The line height the two lines, the brace and the status are all placed from,
+# read off the face they draw in rather than written as 22.
+if ! printf '%s\n' "$BOARD" | awk '
+  /^[[:space:]]*(\/\/|$)/                                        { next }
+  /lineHeight = lcd\.fontHeight\(\);/ && previous ~ /lcd\.setFont\(FontId::Sans9\);/ { found = 1 }
+  { previous = $0 }
+  END                                                            { exit found ? 0 : 1 }
+'; then
+  say "lineHeight is not lcd.fontHeight() taken on the line after lcd.setFont(FontId::Sans9);.
+       Both lines, the brace and the status are placed from it, and fontHeight() reads whichever
+       face is current."
+fi
+
+# A line apart, and the second one below the first.
+if ! has "$BOARD" 'homeTextY=stacked?awayTextY+lineHeight:text'; then
+  say "homeTextY is not 'stacked ? awayTextY + lineHeight : text'. The home team is a line below
+       the away team in the two-line form and on the same line in the one-line form."
+fi
+
+# The status between the two lines, because it describes the pair.
+if ! has "$BOARD" 'statusY=stacked?awayTextY+lineHeight/2:text'; then
+  say "statusY is not 'stacked ? awayTextY + lineHeight / 2 : text'. FINAL, a period and a start
+       time are one value for the game, so the status sits between the two lines."
+fi
+
+# The face each score draws in. Two Sans12 slots are 58px against a 52px card,
+# so a stacked score draws with its name.
+if ! has "$BOARD" 'scoreFont=stacked?FontId::Sans9:FontId::Sans12'; then
+  say "scoreFont is not 'stacked ? FontId::Sans9 : FontId::Sans12'. Sans12 is 29px and two of
+       them do not fit the profile card, so a two-line score draws in its name's face."
+fi
+
+if ! printf '%s\n' "$BOARD" | awk '
+  /^[[:space:]]*(\/\/|$)/                                 { next }
+  /layoutLine\(row\.awayScore,/ && previous ~ /lcd\.setFont\(scoreFont\);/ { found = 1 }
+  { previous = $0 }
+  END                                                     { exit found ? 0 : 1 }
+'; then
+  say "the line before showSportsBoard()'s 'layoutLine(row.awayScore,' is not
+       lcd.setFont(scoreFont);. The score is laid out for one face and has to be drawn in it."
+fi
+
+# And the brace, spanning both lines, only on a row that has two of them.
+if ! has "$BOARD" 'if(stacked){drawRowBrace(boardStackedBraceLeft(),awayTextY,homeTextY+lineHeight-1,'; then
+  say "the brace is not drawRowBrace(boardStackedBraceLeft(), awayTextY, homeTextY + lineHeight - 1, ..)
+       under 'if (stacked)'. It stands at the row's own left edge and spans the top of the first
+       line to the bottom of the second, which is what says the two are one game."
+fi
+
+BRACE=$(read_function drawRowBrace)
+if [ -z "$BRACE" ]; then
+  say "drawRowBrace() not found, so the brace below checked nothing."
+elif ! has "$BRACE" 'static_assert(kNoseDepth+kTipLength+1==kBoardBraceWidth'; then
+  say "drawRowBrace() does not assert its nose, spine and tip add up to kBoardBraceWidth. The
+       column arithmetic reserves that width and nothing else measures what is drawn into it."
+fi
+
 # The layout: the panel it is on, the board's own score state, and the widest
 # status the board holds, in one call.
 if ! printf '%s\n' "$BOARD" | tr -d ' \n' |
@@ -207,11 +292,11 @@ fi
 # status into the name's width, is a wrong row that every other check here
 # passes: they all read how `columns` is built and none read how it is spent.
 for pair in \
-  'row.awayName,columns.awayNameLeft,text,columns.nameWidth,:the away name' \
-  'row.homeName,columns.homeNameLeft,text,columns.nameWidth,:the home name' \
-  'row.awayScore,columns.awayScoreRight,text-2,columns.scoreWidth,:the away score' \
-  'row.homeScore,columns.homeScoreRight,text-2,columns.scoreWidth,:the home score' \
-  'row.status,columns.statusRight,text,columns.statusWidth,:the status'; do
+  'row.awayName,columns.awayNameLeft,awayTextY,columns.nameWidth,:the away name' \
+  'row.homeName,columns.homeNameLeft,homeTextY,columns.nameWidth,:the home name' \
+  'row.awayScore,columns.awayScoreRight,awayScoreY,columns.scoreWidth,:the away score' \
+  'row.homeScore,columns.homeScoreRight,homeScoreY,columns.scoreWidth,:the home score' \
+  'row.status,columns.statusRight,statusY,columns.statusWidth,:the status'; do
   want=${pair%%:*}
   what=${pair##*:}
   if ! has "$BOARD" "layoutLine($(printf '%s' "$want" | sed 's/[][\.*^$]/\\&/g')"; then

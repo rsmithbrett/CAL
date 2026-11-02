@@ -3478,6 +3478,134 @@ the field did not change. It is bounded by the device's 8-character cut and by
   it moves every figure in 15h's two tables.
 ---
 
+### 18h. Two lines and a brace, on the profile panel (2026-11-01)
+
+`boardStackedColumnsForBoard()` and its five helpers in `App/CardColumns.h`,
+`drawRowBrace()` and the orientation branch in `showSportsBoard()`. 18g's last
+bullet is the thing this does: the profile row had 56px of height, drew one
+22px line into it, and gave the names 36px of the 212 it had across. It draws
+two lines now, one team each, joined by a drawn left brace, and the name column
+goes to 97 on the photographed board. TEXT_LAYOUT_DESIGN.md section 15j is the
+design.
+
+**The source is a photograph of a portrait CYD running `v2026.11.01.0004`**,
+which shows `Jets 0 Hur... 7 FINAL`, `Wild 5 Ca... 1 FINAL`, `Ma... 1 Fly... 5
+P3` and `Oilers Rang... 6:00 PM`. Five of eight names cut, two of them to a
+two-letter stub. The device is a release behind and draws the per-row grids 15i
+replaced, so on `main` the same payload is worse rather than better: every row
+lands on the one 36px column the 67px start time leaves, and seven of the eight
+names are cut. Traced in the code and **Verified** by the host test at both
+versions, not on a device.
+
+**What the key test did against `main`, said plainly.** The design document and
+`App/CardColumns.h` were written before `tests/card-columns-test.cpp`: the
+arithmetic came first and the sweep second, and this says so rather than
+leaving the other order to be assumed. What was checked against `main` is that
+neither new check passes there:
+
+- The host test as it now stands, compiled against `main`'s own
+  `App/CardColumns.h`, fails to build with six `has not been declared in
+  'CardColumns'` errors and no `PASS` line. **Verified** on this workstation's
+  `g++ 16.2.0`.
+- `ci/check-board-columns-call.sh` as it now stands, run against `main`'s own
+  `App/Display.cpp`, prints three `ERROR:` lines and exits 1. **Verified**
+  locally. `main`'s Display.cpp was put in place from `git show`, the gate run,
+  and the file restored from a byte-for-byte copy and `cmp`'d afterwards.
+
+**Counts, before and after.** `App/CardColumns.h` 43 `static_assert`s to 72.
+`tests/card-columns-test.cpp` 112 `assert`s to 173, in one binary whose own
+`PASS:` line is what `ci/test-card-columns.sh` reads. `App/Display.cpp` one
+`static_assert` to two, the new one holding `drawRowBrace()`'s own geometry to
+the `kBoardBraceWidth` the column arithmetic reserves. The gate goes from 21
+text checks to 31. All seven host scripts pass by their own `PASS:` or
+`Passed!` line, read off each runner rather than off an exit code.
+
+#### The mutations, and what caught each one
+
+Thirteen, each applied to a byte-for-byte copy taken first, each gated on `cmp`
+saying the file actually changed before the check ran, each restored from that
+copy and `cmp`'d and `touch`ed after. A mutation that did not land is recorded
+as such rather than as a pass.
+
+Two of them did not land on the first attempt, both because the pattern was
+written with LF newlines against a CRLF tree, and `perl` reported "pattern
+occurs 0 times" rather than replacing nothing quietly. That is the gate on the
+gate, and it is why it is there.
+
+| # | the change | caught by |
+|---|---|---|
+| A | `kBoardBraceWidth` 8 to 7 | `static_assert`, the 97px name |
+| B | the ceiling subtracts two name floors, not one | `static_assert`, "240 two-line can spend 135" |
+| C | `kBoardStackedScoreWidth` 20 to 26 | `static_assert`, the 97px name |
+| D | the two-line name splits its remainder in half | `static_assert`, the 97px name |
+| E | `kBoardShortStartTimeTextWidth` 67 to 68 | `static_assert`, the 97px name |
+| F | the 56px rule fires at `<` rather than `<=` | the host test, line 681 |
+| G | the two grid calls swapped | the gate |
+| H | `kScreenH > kScreenW` reversed | the gate |
+| I | the card-height term dropped from `stacked` | the gate |
+| J | both team names on one line | the gate |
+| K | the status back on the away team's line | the gate |
+| L | the two score faces swapped | the gate |
+| M | the `drawRowBrace()` call deleted | the gate |
+| N | the brace spans one line rather than two | the gate |
+| O | `drawRowBrace()`'s width assertion weakened to `<=` | the gate |
+| P | `lineHeight` measured under `Sans12` | the gate |
+| Q | the score drawn in a face it was not laid out for | the gate |
+
+**Five of those were caught by a `static_assert` and not by the host test**,
+which is worth writing down rather than counting as five test results: the
+header's assertions fire at compile time and the sweep never runs. F is the one
+that proves the sweep itself bites, and it was found by looking for a change no
+assertion in the header reads. The rule table at line 681 was added for it, and
+it pins `boardStackedStatusWidthFor()` at 0, 1, 55, 56, 57, 74 and 94, where
+before it only bounded the answer.
+
+#### What 18h does not cover
+
+- **Nothing has been on glass.** Every figure here is arithmetic, a `g++` run
+  or a compile. Whether two lines and a brace read as one game, whether an 8px
+  brace is legible at 44px tall, whether a `Sans9` score is big enough to glance
+  at, and whether four two-line rows read as a scoreboard or as a wall of text
+  are all things only a photograph answers, and none has been taken. This is the
+  open item.
+- **No host test compiles `App/Display.cpp`**, for 18g's reason. The brace is
+  drawn by eight calls into LovyanGFX that nothing here executes. Its width is
+  held by a `static_assert` an `arduino-cli` build runs; its shape is held by
+  nobody.
+- **The score face drops a tier in profile**, `Sans12` to `Sans9`, and that is
+  what keeps the board at four games. Two `Sans12` slots are 58px against a 52px
+  card. The alternative costed in 15j is three rows of 74px, which drops a game.
+  Nothing tests which of those a reader prefers.
+- **A three-digit score is still cut.** 30px of `Sans9` into the 20px column,
+  where landscape puts 39px of `Sans12` into 26. Carried over from the one-line
+  row unchanged, not fixed and not worsened, and a basketball board is where it
+  shows.
+- **`kBoardScoreWidth` is a pixel or two short for any score holding a `1`, and
+  that is on the fleet now.** Found while measuring the two-line column, not
+  caused by it. `1` is the one digit in `FreeSansBold12pt7b` with an `xAdvance`
+  of 14 rather than 13, so `11` measures 28 and `10` measures 27 against a 26px
+  column, and `layoutLine()` draws them a tier down at `Sans9` beside
+  full-size neighbours. **Verified** off the glyph table, not on a device. Left
+  alone here because moving that constant moves every figure in 15b, 15h and
+  15i. The two-line row is unaffected: all ten `Sans9` digits advance 10, so
+  every two-digit score is exactly the 20px it is given.
+- **The landscape row was read, not photographed.** Every figure 15h and 15i
+  wrote down is untouched and the assertions that hold them still pass, but no
+  landscape board has been looked at since.
+- **`stacked` is false on a panel whose card cannot hold two lines**, and no
+  such panel exists to test it on. The branch is there so a narrower profile
+  panel draws the landscape form rather than two lines through each other; it
+  has never been taken.
+- **A rollout draws the same payload two ways.** `SportsBoardRow` and
+  `Sports::Game` are byte-for-byte what they were and no field was added,
+  removed or reinterpreted, so the 6-month compatibility gate is untouched. A
+  device without this draws one line to a row.
+- **`SPORTS_CARDS_V2_GENERIC_DESIGN.md` is in the other repository** and says
+  the row is five fields at fixed positions. It was already behind after 18e and
+  18f and this moves it further.
+
+---
+
 ## 19. The brand splash's one length, at both ends (2026-11-01)
 
 `Updater::cacheBrandAssets()` tested its write with `written <= 0`, so any 200
