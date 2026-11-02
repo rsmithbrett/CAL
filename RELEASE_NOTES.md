@@ -23,25 +23,6 @@ dated heading after.
 
 ## Unreleased
 
-### A display standing on its end spells the team names out - App
-
-On a display standing on its end, a scoreboard squeezed four columns of text across
-240 pixels and left the team names about 36 of them. "Hurricanes" came out as
-"Hur...", "Mammoth" as "Ma...", and on one photographed board seven of the eight
-names were cut. A row also drew a single line of text into 56 pixels of height, so a
-third of every row sat empty.
-
-A row is two lines now, one team each, with a brace drawn down the left to show the
-two are one game. One team per line means one column of names instead of two, and the
-name column goes from about 36 pixels to about 97. Every name on that board is spelled
-out, and longer ones like "Golden Knights" still shorten. What part of the game it is,
-"FINAL" or a period or a start time, sits once between the two lines, because it is
-one fact about the pair rather than about either team. A game that hasn't started
-keeps its blank where the score will go, on both of its lines.
-
-Still four games to a card. The score digits on a display standing on its end are one
-size smaller than they were, which is what makes room for the second line.
-
 ### Scores in the teens are drawn the same size as the rest - App
 
 A scoreboard gave each score a column 26 pixels wide, which holds two digits of the
@@ -94,6 +75,29 @@ team name.
 The measurement reads the text the way the panel draws it now. No device has been seen
 sending such a label, so this is a shape the server could send rather than something
 anybody watched happen.
+
+## v2026.11.02.0001
+
+Registered and current on both boards; eight displays took it over the air.
+
+### A display standing on its end spells the team names out - App
+
+On a display standing on its end, a scoreboard squeezed four columns of text across
+240 pixels and left the team names about 36 of them. "Hurricanes" came out as
+"Hur...", "Mammoth" as "Ma...", and on one photographed board seven of the eight
+names were cut. A row also drew a single line of text into 56 pixels of height, so a
+third of every row sat empty.
+
+A row is two lines now, one team each, with a brace drawn down the left to show the
+two are one game. One team per line means one column of names instead of two, and the
+name column goes from about 36 pixels to about 97. Every name on that board is spelled
+out, and longer ones like "Golden Knights" still shorten. What part of the game it is,
+"FINAL" or a period or a start time, sits once between the two lines, because it is
+one fact about the pair rather than about either team. A game that hasn't started
+keeps its blank where the score will go, on both of its lines.
+
+Still four games to a card. The score digits on a display standing on its end are one
+size smaller than they were, which is what makes room for the second line.
 
 ## v2026.11.01.0005
 
