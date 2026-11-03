@@ -618,6 +618,27 @@ correction note at the head of the README's "The numbers tonight rests on"
 section, and note that a 45KB block held for the whole uptime is in the way of
 the real 16,717-byte requirement just as squarely.
 
+**Correction, 2026-11-02 — 45,056 isn't the workspace, and the line above is
+where that figure entered the project.** The workspace is `sizeof(pngle_t)` and
+it is **44,408 bytes**: `0xad78` is the constant loaded for the `malloc` call in
+`lgfx_pngle_new`, disassembled from both built `App.ino.elf` images, and adding
+the struct's fields up from the installed LovyanGFX 1.2.28 source at 32-bit
+widths gives the same figure (`lz_buf[32768]`, a 10,992-byte
+`lgfx_tinfl_decompressor`, `read_buf[512]`, `out_buf[64]`, and 72 bytes of fields
+and padding).
+
+The 110,580 -> 65,524 pair is a real reading of a real window, but the window
+isn't a draw. It's the top of `setup()` to device 17's first telemetry report,
+which is how `DEVICE_MEMORY.md`'s boot budget reads the same two numbers, and it
+carries display init, WiFi and the TLS client. No PNG decoded inside it: the
+splash is a JPEG, and the JPEG decoder frees its 3,900 bytes on every exit path.
+So 45,056 measures a boot, the 648 bytes between the two figures are a
+coincidence of a window landing on exactly 44 KiB, and nothing has yet measured
+what a decode costs the largest block.
+
+The argument above doesn't change. A block held for the whole uptime sits in the
+way of a 16,717-byte record buffer whether it is 44,408 bytes or 45,056.
+
 One more capability worth recording, because it solves a problem this firmware
 currently solves badly: `drawJpg(Stream*, ...)` exists
 (`lgfx_filesystem_support.hpp:184-190`), so a JPEG can be decoded straight off
