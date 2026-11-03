@@ -7,7 +7,7 @@ somebody's head.
 
 **Almost nothing in this repository can have an automated test, and this file
 exists to be honest about that rather than to hide it.** The App is an Arduino
-sketch cross-compiled for an ESP32-WROOM-32E; its behaviour is a function of a
+sketch cross-compiled for an ESP32-WROOM-32E; its behavior is a function of a
 real heap, a real TLS stack, a real NVS partition, a real 2.8" panel and a real
 server on the other end of a real network. There is no host-runnable test
 target, no injectable clock, and no seam between the watchdogs and
@@ -18,7 +18,7 @@ also names a device.
 
 The server's own `TEST_PLAN.md` (in the DiscoverAroundMe repository) covers
 everything on the other side of the wire - the check-in gateway, telemetry
-ingestion, the firmware catalog, `/diag`. Where a firmware behaviour has a
+ingestion, the firmware catalog, `/diag`. Where a firmware behavior has a
 server-side consequence it is noted here and tracked there.
 
 ## How to observe anything at all
@@ -232,7 +232,7 @@ wrong figure routes a reader to the wrong work.
      for the figure printed beside it; `SdStorage.cpp` includes `Http.h` to do
      it. Closed.
    - `App/BootDiag.cpp` and `App/HeapRatchet.cpp` still carry 16717 inside
-     log-string prose. Harmless to behaviour, still a figure that can drift out
+     log-string prose. Harmless to behavior, still a figure that can drift out
      of step with the constant. Open.
 
    `grep -rn 16717 App/` is the check. Re-run it after any change to
@@ -269,7 +269,7 @@ one to catch.
 `Providers.Tests` / `MyListingsServiceTests` and `DeviceFacingPayloadTests` in
 the DiscoverAroundMe repository, which are what put `status` on the wire and
 keep `lastRefreshError` off it. Nothing tests the card. **Nothing can:** the
-behaviour under test is a branch taken inside `fetchMine()` on a parsed
+behavior under test is a branch taken inside `fetchMine()` on a parsed
 response, on hardware, with no test harness on either side of it - which is why
 every step below is a human at a bench, and why 3c exists at all.
 
@@ -684,7 +684,7 @@ the point of the change is a runtime figure the build output cannot show.
 
 1. A device with plenty of contiguous heap, debug stream **on**. Confirm from
    the `[health]` line that largest8 is comfortably above 33,434.
-2. Behaviour must be exactly as before: no heap marker in the stream, and a
+2. Behavior must be exactly as before: no heap marker in the stream, and a
    backlog that survives a brief network outage to arrive in full afterwards.
    This is what proves the cap followed the heap rather than simply making the
    buffer smaller for everybody.
@@ -815,7 +815,7 @@ table will look like a device with a broken journal.
 is the claim that the table change costs nothing, and it is worth proving once
 rather than assuming it on the whole lab:
 
-1. Note the device's installed App version and its WiFi behaviour first.
+1. Note the device's installed App version and its WiFi behavior first.
 2. Write the table alone: `esptool --chip esp32 --port COMx write_flash 0x8000
    build/esp32.esp32.esp32/CAL.ino.partitions.bin`.
 3. Power-cycle. The device must still hold its secret, still rejoin WiFi without
@@ -1028,7 +1028,7 @@ each time, until roughly 4 KB has accumulated.
 
 ## 7. CAL records why it restarted the device (`BootDiag.h`/`.cpp` at the repo root)
 
-The thing being tested is a sentence, not a behaviour: after this change an App
+The thing being tested is a sentence, not a behavior: after this change an App
 boot that followed a CAL handover must say **which** handover it was, and the
 server must sort it as deliberate rather than unexpected. See
 CAL_OTA_DESIGN.md §13 for the design and for why CAL's `BootDiag.h` is a
@@ -1173,7 +1173,7 @@ deferring to a record it did not write:
        CAL_SELF_INSTALL
 ```
 
-**What would be wrong:** a final boot reporting `OTA`. That was the behaviour
+**What would be wrong:** a final boot reporting `OTA`. That was the behavior
 before the release merge and it is the specific defect this case guards - `OTA`
 makes a three-restart, minutes-dark CAL replacement indistinguishable on
 telemetry from a routine single-restart App update. See CAL_OTA_DESIGN.md §13.7.
@@ -1518,7 +1518,7 @@ Let the card carrying the action announcement come up. Tap the middle of the gla
 Tap the middle of a card that is not showing a banner at all.
 
 - Nothing happens: no advance, no confirmation, nothing in the stream. This is the
-  behaviour `Hit::None` had before the change and it has to survive it.
+  behavior `Hit::None` had before the change and it has to survive it.
 
 ### 9f. A check-in with nothing cleared is unchanged
 
@@ -1690,7 +1690,7 @@ review is not evidence that iOS captive detection works on hardware.
 ## 12. The cannot-draw watchdog names itself, and stops after three tries
 
 Two changes, both bench-observable, and the second one is the one worth being
-careful about because its correct behaviour is a device **not** doing something.
+careful about because its correct behavior is a device **not** doing something.
 
 ### 12a. The cause reads `CANNOT_DRAW`
 
@@ -2790,7 +2790,7 @@ heap rather than the build, and that a refusal releases - it cannot see whether
 `heap_caps_realloc` actually placed the bytes in PSRAM. And which binary a
 deployed device is running is not known from here: CI builds stock while the
 workstation's core overlay builds asymmetric, so device 12's own demand is
-**Inferred** from its behaviour rather than read off the device.
+**Inferred** from its behavior rather than read off the device.
 
 ---
 
@@ -4090,7 +4090,7 @@ tree never carries an LF-only file. It is the same hazard the brief names for
 | L17 | the cut-name count says none crosses | the host test |
 
 **L16 is the one worth naming.** The sweeps run over an array, and an array that
-drops a state sweeps two thirds of the behaviour while every assertion in it
+drops a state sweeps two thirds of the behavior while every assertion in it
 still passes. `kScoreStateCount` is checked against the enum's own last value,
 so the array and the type cannot drift: a state added to `BoardScores` and not
 to the array stops the compile. That check exists because this exact mutation was
@@ -4741,9 +4741,26 @@ headers, so a host build of it needs a stub set larger than the thing it would
 test - the reason section 19d gives for `BrandSplash`. So a bare `++` on either
 counter compiles, links, passes every host test and reports a wrapped figure.
 This gate is what reads the increments. It checks the include, that neither
-reported counter is incremented any other way, that every `countOne()` call in
+reported counter is written any other way, that every `countOne()` call in
 the file names a counter the gate knows, that the count still runs after the
 id-list branch closes, and that the refetch budget keeps its cap check.
+
+**Amended 2026-11-03, after it passed the wrap it exists to prevent.** The write
+check enumerated `++x`, `x++` and `x += n`, so
+`gAllocationRefusals = gAllocationRefusals + 1;` placed beside the kept
+`countOne()` call printed `PASS` and exited 0. It now reads four shapes: `++x`
+or `x--` on either side, a compound assignment of any operator, and a plain
+assignment of anything but `0`. The `= 0` exception is the declaration and the
+clear `CheckIn.cpp` performs after a reported cycle; the comparison in `x == 0`
+is kept out by reading one character past the `=`.
+
+The flatten was brought in line with `ci/check-content-key-resolvers.sh` at the
+same time: `tr -d ' \t\r\n'` rather than `tr -d ' \n'`. Nothing was passing
+wrongly because of it on either runner reached so far, since Git Bash's `sed`
+drops the carriage returns on the way through and CI checks the files out LF. A
+tab or a carriage return left inside a joined statement stops every pattern below
+it from matching, and the gate would then pass by finding nothing rather than by
+checking anything.
 
 ### 21c. The runs
 
@@ -4782,6 +4799,17 @@ Against `App/Assets.cpp`, each judged by the gate:
 | the count moved inside the `kMaxReportedDecodeFailures` branch | 1 `ERROR` line. This is the defect no ceiling can see: the figure would stop at 4 and say nothing the id list does not already say |
 | `#include "ReportedCounter.h"` dropped | 1 `ERROR` line |
 | `gCheapRefetchCount >= kMaxCheapRefetches` dropped | 1 `ERROR` line. That comparison is both the fetch budget and the reason the third counter needs no ceiling |
+
+Five more on 2026-11-03, against the amended gate. The first is the one that
+passed before it:
+
+| Mutation | Result |
+|---|---|
+| `gAllocationRefusals = gAllocationRefusals + 1;` beside the kept `countOne()` call | 1 `ERROR` line naming the assignment. Before the amendment this printed `PASS` and exited 0 |
+| the same assignment in place of the `countOne()` call | 2 `ERROR` lines: the assignment, and the counter reaching `countOne()` nowhere |
+| `--gAllocationRefusals;` beside it | 1 `ERROR` line naming the decrement |
+| `gAllocationRefusals \|= 0x80;` beside it | 1 `ERROR` line naming the compound assignment |
+| `if (gAllocationRefusals == 0) { return; }` beside it | `PASS`, correctly. A comparison is not a write, and the check reads one character past the `=` to tell them apart |
 
 ### 21e. Known gaps, recorded rather than discovered later
 
@@ -4852,16 +4880,28 @@ the same state.
 bash ci/test-personal-photos-key.sh
 ```
 
-Nine cases. `App/PersonalPhotos.cpp` compiles as it ships against
-`tests/personal-photos-stubs/Arduino.h`; `Assets.h`, `Cards.h`, `Display.h`,
-`Log.h` and `PersonalPhotos.h` are the shipped declarations and the functions the
-module calls are defined in the test. The `Cards::registerCard` stub keeps the
-descriptor, which is how the test reaches a resolver sitting in an anonymous
-namespace - the same route `noteShowing()` takes.
+Ten cases, built and run twice. `App/PersonalPhotos.cpp` compiles as it ships
+against `tests/personal-photos-stubs/Arduino.h`; `Assets.h`, `Cards.h`,
+`Display.h`, `Log.h` and `PersonalPhotos.h` are the shipped declarations and the
+functions the module calls are defined in the test. The `Cards::registerCard`
+stub keeps the descriptor, which is how the test reaches a resolver sitting in an
+anonymous namespace - the same route `noteShowing()` takes.
 
 The `Log::printf` stub formats into the same 256-byte scratch production uses and
-keeps the lines, so the last two cases read back what reaches the remote stream
+keeps the lines, so the last three cases read back what reaches the remote stream
 rather than only what the resolver answered.
+
+**The second build is bounds-checked**, added 2026-11-03.
+`cardListingId()` opens with `itemIndex >= gCount`, and the drawability condition
+under it answers empty for every index past the set that the module's own state
+can reach, so the case about an item past the set read the same with that guard
+neutered to `itemIndex > 60000`: ten cases passed. What the guard holds is the
+read of `gOnCard[item]` and `gIds[item]`, not the answer, and the case asks for
+`kMaxPhotos` itself, which is one past both arrays. So the gate compiles a second
+binary with `-fsanitize=bounds -fsanitize-undefined-trap-on-error` and requires a
+`PASS` line out of that one too. The trap form needs no sanitizer runtime, which
+is what makes it run on this workstation's MinGW as well as on CI, and a trap
+stops the binary before its `PASS` line.
 
 - the card registers a resolver at all
 - a photograph on the card reports its own asset id, at three items
@@ -4877,6 +4917,11 @@ rather than only what the resolver answered.
   item of the set it was and which item holds the heap buffer instead, and the
   item that did draw writes no such line - added 2026-11-03, and it failed before
   the line existed
+- a cardless display holding nothing says nothing is held rather than naming an
+  item, added 2026-11-03. The line has two arms and both carry the word "heap",
+  so the earlier case asserting on that word alone passed with the branch forced
+  either way. Both cases now read the arm's own words and assert the other arm's
+  are absent
 - an item past the end of the set writes a line carrying the item and the set
   size, added the same day
 
@@ -4893,16 +4938,32 @@ bash ci/check-content-key-resolvers.sh
 
 Every file in `App/` calling `Cards::registerCard` is in one of three lists and
 the gate fails on a file in none of them: cards that resolve their own key
-(`Aircraft`, `FeaturedListings`, `Listings`, `PersonalPhotos`, `Sports`), cards
-whose content arrives on the policy so the `assetId` and `qrData` fallbacks
-answer for them (`Graphic`, `QrText`), and cards with nothing to name
-(`Announcement`, `Calendar`, `ClockDate`, `Forecast`, `HomeValue`, `IssFlyover`,
-`MoonPhase`, `SunMoon`, `Tides`). A new card is a new file calling
-`registerCard`, which lands in no list, so the decision gets made rather than
-defaulted.
+(`Aircraft`, `Announcement`, `FeaturedListings`, `HomeValue`, `Listings`,
+`PersonalPhotos`, `Sports`), cards whose content arrives on the policy so the
+`assetId` and `qrData` fallbacks answer for them (`Graphic`, `QrText`), and cards
+with nothing to name (`Calendar`, `ClockDate`, `Forecast`, `IssFlyover`,
+`MoonPhase`, `SunMoon`, `Tides`). `Announcement` and `HomeValue` were in the last
+list until the owner's 2026-11-03 call; 23b below is the move. A new card is a new
+file calling `registerCard`, which lands in no list, so the decision gets made
+rather than defaulted.
 
-Both directions. A file listed as resolving that assigns no `spec.listingId`
-fails, and a file listed as keyless that has gained one fails too, because then
+**The grading is per card descriptor, amended 2026-11-03.** It read each file as
+one run of text and asked whether `spec.listingId=` appeared anywhere in it, which
+left two ways through. A second card inside a file already listed as resolving
+passed on its neighbour's resolver, which is how `sportslive` reported nothing on
+907 draws out of `Sports.cpp`; and a resolver assigned through any other lvalue,
+`Cards::CardSpec& s = spec; s.listingId = &tideListingId;` in a file listed as
+keyless, satisfied the search for `spec.listingId=` and passed as well.
+
+Every `Cards::CardSpec` a file declares is now graded on its own. Each has to be
+handed to `Cards::registerCard()` by its own name, and the file's `listingId`
+assignments are counted and matched against the ones landing on a descriptor the
+gate can name, so a reference, a pointer or a dereference parts the two tallies
+and fails. A file whose cards genuinely differ would need these lists split per
+card id, and the failure message says so.
+
+Both directions. A file listed as resolving whose descriptor assigns no
+`listingId` fails, and a file listed as keyless that has gained one fails too, because then
 the list is what is wrong.
 
 It also pins what the host test cannot reach. `CardManager.cpp` names a graphics
@@ -4912,13 +4973,16 @@ hand-off are held as text, as is the attribute name `CheckIn.cpp` writes the key
 under. Dropping the `assetId` fallback takes the key off every graphic and every
 QR card in the fleet while both modules keep compiling and keep drawing.
 
-The gate prints how many registering files it graded and fails below 16, which
-was the count on 2026-11-03. A text gate that stops matching passes by finding
-nothing, and the count is the only way to see that from the outside.
+The gate prints how many registering files it graded and how many card
+descriptors it found in them, and fails below 16 files or 17 descriptors, which
+were the counts on 2026-11-03. A text gate that stops matching passes by finding
+nothing, and the counts are the only way to see that from the outside. Both
+figures are printed because the file count alone stayed at 16 through the whole
+time `sportslive` was reporting nothing.
 
 ### 22c. What was mutated, and what each mutation did
 
-Eight, each gated on `cmp` against a byte-for-byte copy taken first, with the
+Nine, each gated on `cmp` against a byte-for-byte copy taken first, with the
 file restored from that copy and `touch`ed afterwards. A mutation that never
 applied reads exactly like a passing test.
 
@@ -4933,6 +4997,19 @@ applied reads exactly like a passing test.
 | CRLF and the commented-out line together | the gate, which is what says the CRLF pass above was not a pattern that stopped matching |
 | the `assetId` fallback in `noteShowing()` replaced with an empty string | the gate's fallback pin |
 | the wire attribute renamed from `contentKey` | the gate's wire pin |
+
+Eight more on 2026-11-03, against the per-descriptor gate and the bounds-checked
+build. Four of them are the ones that passed before the amendments, and each was
+reproduced on the shipped files before anything was changed:
+
+| Mutation | Result |
+|---|---|
+| `Cards::CardSpec& s = spec; s.listingId = &tideListingId;` added to `App/Tides.cpp`, listed keyless | 1 `ERROR` line: one `listingId` assignment, none of them landing on a descriptor the gate can name. Before the amendment this printed the file and descriptor counts and its pass line, and exited 0 |
+| the same through a pointer, `p->listingId = ...`, and through `(*p).listingId = ...` | 1 `ERROR` line each, the same one |
+| `live.listingId` dropped from `App/Sports.cpp`, the `sportslive` defect put back | 1 `ERROR` line naming the descriptor `live`. Before the amendment this printed `16 files` and passed |
+| `live.listingId = nullptr;` instead | the same `ERROR` line. `= nullptr` is the one value that assigns no resolver |
+| `cardListingId()`'s `itemIndex >= gCount` neutered to `itemIndex > 60000` | the bounds-checked build, which traps and prints no `PASS` line. The first build still passes all ten cases, which is the measurement that says the guard holds a read rather than an answer |
+| the no-content line's `gRamItem == kNothingHeld` branch forced to each arm in turn | the host test, both times. Before the amendment both forced arms printed `PASS: personal photos content key (9 cases)` |
 
 ### 22d. What this does not cover
 
@@ -4958,12 +5035,353 @@ applied reads exactly like a passing test.
   `CARD_IMPRESSIONS_DESIGN.md` under "What an impression does not say" carries the
   measurement and describes the additive optional field that would report it
   upward. Nothing here builds one, and the wire is unchanged.
-- **`HomeValue` and `Announcement` are listed as keyless and are not the same
-  case as a clock.** Both report a summary on every draw and no key, so their
-  period rows carry a label and group as one. Whether either owes a key is an
-  open question for the owner rather than something this gate decided.
+- **`HomeValue` and `Announcement` were listed as keyless and are not the same
+  case as a clock.** Both reported a summary on every draw and no key, so their
+  period rows carried a label and grouped as one. The owner's call on 2026-11-03
+  is that all six owe a key; section 23 below is that change, and both files sit
+  in the gate's `RESOLVES` list now.
 - **Nothing was compiled with `arduino-cli`.** The host test and the gate are
   what ran. This workstation builds against the core overlay and CI builds
   stock, so CI is still the gate for either board.
 - **The other lane's two gates were not run.** `ci/test-reported-counter.sh` and
   `ci/check-asset-counters.sh` were mid-edit in the same tree.
+
+---
+
+## 23. The key a home-value and an announcement draw reports (2026-11-03)
+
+`App/HomeValue.cpp` and `App/Announcement.cpp` registered `describe` and no
+`listingId`, so every draw of the home-value card and of the five announcement
+slots reported a summary and no content key. Read off production on 2026-11-03,
+inside a read-only transaction: 128,455 `homevalue` draws, every one carrying a
+`summary` and none carrying a `contentKey`, and 24,543 draws across
+`announcement` and `announcement`2-5 with the same shape. `summary` is the only
+attribute name any of the six has ever sent. There is no `announcement1` id -
+the first slot is plain `announcement`, which is also what `KnownCards.cs`
+advertises.
+
+`card_impression_periods` is unique on
+`(DeviceId, CardId, ContentKey, PeriodStartUtc)`, so each address production
+holds and each notice a tenant writes collapsed into one keyless row
+per quarter hour. The owner's call is that all six owe a key.
+
+**The home-value key is the subject address.** It arrives on the check-in
+response as `homeValueAddress`, filled from `HomeValueResult.SubjectAddress`, and
+no subject id crosses the wire, so the address is the only thing identifying the
+property. The address and not the figure: `provider_homevalue_cache` holds five
+rows, read on 2026-11-03 at 11:23 UTC, and 300 Eatons Landing Dr sits in two of
+them under two `SubjectKey` spellings, `DR` and `DRIVE`, carrying the same
+834,000. 104 Virginia Ave has one row. Keying on the estimate would start a new
+row every time RentCast moved, so the figure keeps riding the summary.
+
+**The announcement key is a 64-bit FNV-1a digest of the text**, sixteen lowercase
+hex characters. The text is all a notice has: `CardPolicyEntry` carries `Id`,
+`Kind`, `Order`, `DwellSeconds`, `Text`, the asset, QR and location fields and an
+effectivity window, and none of them identifies a notice. Text runs to
+`Cards::kMaxTextLength` (280) and a content key is bounded at 64 in both
+`Impressions::kMaxContentKey` and `CardImpressionRollup.ContentOf`. Six distinct
+announcement texts have drawn in production, 74 to 77 characters each, re-read
+2026-11-03 at 11:30 UTC, so sending the text would have been truncated on the
+ordinary draw. That part is measured. Two notices sharing a prefix grouping as
+one row is what a prefix key allows rather than something these six do: they
+diverge by character 14, and a 64-character prefix tells all six apart. A digest
+does not parse as a GUID, so the rollup's asset-name lookup leaves the label
+alone and the reported summary stands.
+
+Both resolvers are gated on the conditions their own `draw()` puts content on the
+glass under, which is `PersonalPhotos.cpp`'s rule: home value answers nothing
+until it holds a real estimate and an address, and an announcement answers
+nothing when its instance's text is empty.
+
+No wire change. The key rides the attributes object that already exists, under
+the name `CardImpressionRollup.ContentKeyNames` already reads.
+
+### 23a. The host test
+
+```
+bash ci/test-announcement-and-home-value-keys.sh
+```
+
+Run by `build-and-release.yml` and `mut-host-test.yml` beside
+`ci/test-personal-photos-key.sh`.
+
+Eighteen cases, and the first sixteen were written before the resolvers. The first
+run failed on case 1 with "the home-value card registers no listingId". Cases 11
+and 15 were added after the adversarial review found what they close, and both
+failed before the review's own mutations were reverted.
+`App/HomeValue.cpp` and `App/Announcement.cpp` compile as they ship against
+`tests/announcement-and-home-value-stubs/Arduino.h`; `Cards.h`, `Display.h`,
+`Log.h`, `HomeValue.h` and `Announcement.h` are the shipped declarations. The
+`Cards::registerCard` stub keeps every descriptor, which is how the test reaches
+resolvers sitting in an anonymous namespace, and it also serves `Cards::indexOf`
+and `Cards::at`, which is how `Announcement.cpp` reads the text on its own policy
+entry.
+
+Home value:
+
+- the card registers a resolver at all
+- a draw reports the address the estimate was computed for, at two addresses
+- an estimate that moved reports the same key for the same house
+- a draw with no estimate reports no key
+- a valuation resolved from a position fix reports no key
+- an address that changed reports the new one
+- an item past the card's one reports nothing, at index 1 and at 97
+
+Announcements:
+
+- all five instances register a resolver
+- a configured notice reports sixteen lowercase hex characters
+- the digest matches the published FNV-1a 64 vector for a known notice
+- an accented notice digests its bytes unsigned
+- two different notices report different keys
+- two notices sharing their first 64 characters report different keys
+- the same notice on two instances reports the same key
+- two instances holding different notices report different keys
+- an unconfigured notice reports no key
+- a notice that changed reports the new key with no fetch
+- an item past the instance's one reports nothing
+
+The two golden vectors were computed outside this tree rather than by the
+algorithm under test. The published FNV-1a 64 vectors for `""`, `"a"` and `"abc"`
+are `cbf29ce484222325`, `af63dc4c8601ec8c` and `e71fa2190541574b`, an independent
+implementation reproduces all three, and it gives `abacb6c3112e90e4` for "Trash
+goes out tonight". Without that case the digest could change shape in a later
+edit while every other case here still passed, and every period row written
+before the change would stop matching the ones after it.
+
+The second vector exists because the first cannot see the `static_cast<uint8_t>`
+in `textDigest()`. `char` is signed on this target, so without the cast every
+byte above 0x7F sign-extends into the hash, and every ASCII case here passes
+either way - which is every notice in production today and every notice an
+English-speaking household writes. The accented case hashes the bytes
+`50 69 c3 b1 61 74 61 20 61 20 6c 61 73 20 73 65 69 73`, written into the test as
+explicit escapes so what is hashed does not depend on how the file was saved, and
+expects `0db4397fe9544d9f`. Dropping the cast gives `705e2c0f2b64b19f`, which the
+same independent implementation produces when it reads each byte as a signed
+char. A notice in Spanish or French is where that edit would otherwise have
+changed every key in the fleet with nothing failing.
+
+The `Arduino.h` stub carries `operator+` overloads returning `String`, which is
+what keeps `HomeValue.cpp`'s `hasRange() ? a + b : "--"` compiling: with only
+`std::string`'s own operators in scope the two arms come out as `std::string` and
+`String`, each convertible to the other. It also shims `gmtime_r`, which the
+ESP32 core's newlib declares and this host's `time.h` does not.
+
+### 23b. The resolver-coverage gate
+
+```
+bash ci/check-content-key-resolvers.sh
+```
+
+`Announcement.cpp` and `HomeValue.cpp` moved from `KEYLESS` to `RESOLVES`. Before
+the code change the gate printed "16 files in App/ register a card" and its pass
+line. With the resolvers in and the lists untouched it named both files as listed
+keyless and now assigning `spec.listingId`, which is the reverse direction it
+checks. After the lists moved it prints the same count and the same pass line.
+
+The `RESOLVES` remark now says why these two belong there without walking a feed:
+an announcement's words arrive on the card policy and a valuation's address on
+the check-in response, and neither lands in `assetId` or `qrData`, which are the
+only two fields `noteShowing()` falls back to.
+
+### 23c. What was mutated, and what each mutation did
+
+Eight here, plus fourteen more from the adversarial review, each gated on `cmp`
+against a byte-for-byte copy taken first, with the file restored from that copy,
+`cmp`ed again and `touch`ed afterwards.
+
+| Mutation | Caught by |
+|---|---|
+| `spec.listingId = cardListingId;` deleted from `HomeValue.cpp` | the gate, naming it as listed resolving and assigning none. The host test did not reach case 1: the orphaned resolver trips `-Werror=unused-function` first |
+| `spec.listingId = &listingId;` commented out in `Announcement.cpp` | the gate, which strips line comments before matching, and the host test's case 8 |
+| the home-value estimate and address gate reduced to the item check | the host test, the no-estimate case |
+| the FNV prime changed from `0x100000001b3` to `0x100000001b5` | the host test, the golden vector |
+| the digest stopped hashing after 64 characters | the host test, the shared-prefix case, which is the case that case exists for |
+| the announcement empty-text gate removed | the host test, the unconfigured-notice case |
+| the `static_cast<uint8_t>` dropped from the digest | the host test, the accented case, which is the case that case exists for |
+| the resolver reading slot one's text instead of its own instance's | the host test, the two-instances-differ case |
+
+A further attempt did not apply: a perl pattern anchored on `'\0'` inside the
+digest loop matched nothing, and `cmp` reported the file unchanged rather than the
+run reporting a pass. It was retried against a different anchor, which is the
+mutation in row five.
+
+Both files are CRLF in this checkout, so the commented-out row above is also what
+says the gate's comment stripping works on a carriage-return file rather than
+passing by finding nothing.
+
+**Three mutations nothing caught, all of them about the gate rather than these
+two cards.** They are the gate's own shape and they were there before this
+change:
+
+- A second card registered inside a file already listed in `RESOLVES`, with no
+  resolver of its own. The gate's unit is the file: one `spec.listingId=`
+  anywhere in the text marks the whole file as resolving, so a keyless card
+  hidden in any of the seven `RESOLVES` files reports nothing and nothing fails.
+  That is the `personalphotos` failure mode the gate exists to stop.
+- A new `App/` file registering through a namespace alias, `namespace Registry =
+  Cards;` then `Registry::registerCard(spec)`. The `grep -l 'Cards::registerCard'`
+  never sees it, the count still reads 16 rather than 17, and the file lands in no
+  list without the "decide what it reports" error firing. Matching
+  `registerCard(` instead of the qualified name would close it.
+- Dropping only the address half of the home-value gate. Behavior-equivalent
+  rather than a test weakness: `setValue()` assigns `gAddress` on any change
+  including an empty one, so returning `gAddress` with no address returns the same
+  empty String the guard returns. The clause is defensive and starts to matter if
+  the resolver ever returns something derived from the address.
+
+### 23d. What this does not cover
+
+- **No wire change and no server change.** The key travels in the attributes
+  object that already exists, under the name the rollup already reads. Nothing
+  was added to `CheckInRequest`, and the 6-month backward-compatibility mandate
+  is untouched.
+- **Keyless rows already written stay keyless.** The device never sent the key,
+  so there is nothing to backfill from.
+- **No new label.** Both cards already send a `summary` on every draw and that is
+  what fills `ContentLabel`. The announcement digest does not parse as a GUID, so
+  the rollup's asset lookup leaves it alone.
+- **Not seen on a device.** Neither resolver has run on hardware. What is
+  measured is the host test, the gate and the production read. The first device
+  reading would be a `homevalue` or `announcement` row arriving with a
+  `contentKey` in it, which needs a release carrying this and a display running
+  it.
+- **The announcement key is not resolvable back to its words on the server.**
+  `BOOT_BUTTON_AND_IMPRESSIONS_DESIGN.md` used to describe a short hash the server
+  could resolve to the exact string it had at the time; nothing stores that
+  mapping, and that paragraph now says so. The words are recoverable from the
+  summary on the same draw, and for a notice over 200 characters the summary is a
+  prefix, so a recompute from it would not reproduce the key. Nothing here builds
+  a registry.
+- **The address key carries the 64-character bound.** The device copies
+  `homeValueAddress` with no cap, `HomeValueCacheEntry.SubjectAddress` allows 300,
+  and `Impressions::beginShowing` and the server's `ContentOf` each cut at 64, so
+  both sides store the same cut-off string and nothing overflows. What two
+  properties agreeing for 64 characters lose is their separate rows. The longest
+  address in `provider_homevalue_cache` on 2026-11-03 is 55 characters and carries
+  no estimate, so it never draws a key, and the longest with one is 42. No test
+  covers an address over 64 characters, because the clamp is in
+  `Impressions::beginShowing` rather than in the resolver and the host test does
+  not reach it.
+- **A quarter in which the address or the notice changes writes two period rows.**
+  The unique index takes the key, so that is correct rather than a collision, and
+  the `impressions` subject's join to `device_periods` then repeats
+  `CardsInRotation`, `ActiveMs` and `TotalShows` across both. That fan-out already
+  exists for every keyed card.
+- **The simulator cannot drive the home-value key.** Its impressions textarea
+  splits attribute pairs on commas and every production address carries two or
+  three, so `homevalue contentKey=300 Eatons Landing Dr, Annapolis, MD 21401` is
+  parsed as `contentKey=300 Eatons Landing Dr` and the rest dropped. The
+  announcement digest goes through it end to end. That is a server-tree gap and
+  nothing here changes it.
+- **The `impressions` report subject's help for that column is now partly wrong.**
+  It reads "The listing's own identifier, for matching against a press", and
+  neither new key matches a press. `ReportQuerySeeder` leaves an existing subject
+  alone, so the text production serves would need editing rather than reseeding.
+  Server tree, not touched here.
+- **The draw-count caveat is unchanged.** A home-value draw with no estimate and
+  an announcement draw with no text still record an impression carrying the full
+  dwell, so `Shows` counts slots and not content. The key narrows that for these
+  six the way it does for `personalphotos` and does not close it.
+- **Only the two gates and the two host tests above were run.** The rest of
+  `ci/` was left alone.
+- **It compiles for the ESP32 and the S3 was not built.** `arduino-cli compile
+  --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs --libraries ../libraries`
+  over `App/` reports 1,582,791 bytes of program storage (80%) and 115,460 bytes
+  of globals. `compile-app.cmd` passes no `--libraries` and cannot build this tree
+  at all - `App/ConfigRequest.cpp` includes `<ConfigGesture.h>` from
+  `libraries/DamBoards`, which `ci/build-firmware.sh` puts on the path and that
+  wrapper does not. This workstation builds against the core overlay and CI builds
+  stock, so CI is still the gate for either board.
+
+---
+
+## 24. The key the live sports card reports, and three gates that passed what they exist to catch (2026-11-03)
+
+`App/Sports.cpp` registers four cards. Three go through `registerOne()`, which
+assigns `spec.listingId`, `spec.describe` and `spec.frameCountFor` from the
+`listingIdFor()`, `describeFor()` and `frameCountFor()` switches; the fourth,
+`sportslive`, is built by hand so it can carry its own item count and its notable
+dwell, and that descriptor assigned none of the three. So `sportsteam` and
+`sportsscores` reported a key on every draw and the live card out of the same
+file reported nothing, over 907 draws and 161 period rows counted on 2026-11-03.
+
+The owner's call that day is that it owes one. `listingId3`, `describe3` and
+`frameCount3` already existed and were already the `default` arm of each switch,
+so the change is three assignments. `CARD_IMPRESSIONS_DESIGN.md`, "Which cards
+report a key", and `BOOT_BUTTON_AND_IMPRESSIONS_DESIGN.md`, "The content key, per
+card family", are the record and were updated first.
+
+What makes the key mean something was on the glass is the card's own item count.
+`countLive()` returns zero unless `anyLive(3)` finds a game in progress, so the
+card leaves the rotation rather than drawing a card that says nothing is on, and
+`listingIdCardAt()` returns nothing for an index past the stored games or for a
+game with neither side named. That is `PersonalPhotos.cpp`'s rule reached through
+the item count rather than a per-item drawability test.
+
+### 24a. The three gates, and what each one passed
+
+Each hole was reproduced on the shipped files before anything was changed. Every
+mutation was gated on `cmp` against a byte-for-byte copy taken first, restored
+from that copy, confirmed with `cmp` again and `touch`ed, and applied by
+byte-literal `index`/`substr` replacement read from files rather than by `sed` or
+`perl` substitution: Git Bash's `sed` drops the carriage returns on a CRLF file,
+so a pattern built from one does not match its real bytes.
+
+| Gate | What it passed | What it reads now |
+|---|---|---|
+| `ci/check-content-key-resolvers.sh` | a resolver assigned through any other lvalue, and a keyless card beside a keyed one in the same file | every `Cards::CardSpec` a file declares, graded on its own, registered by its own name, with the file's `listingId` assignments counted and matched against the ones landing on a named descriptor |
+| `ci/check-asset-counters.sh` | `gAllocationRefusals = gAllocationRefusals + 1;` beside the kept `countOne()` call | `++x` and `x--` either side, a compound assignment of any operator, and a plain assignment of anything but `0` |
+| `ci/test-personal-photos-key.sh` | `cardListingId()`'s bounds guard neutered, and the no-content line's branch forced either way | a second bounds-checked build, and both arms of the line asserted on their own words with the other arm's absent |
+
+Sections 21b, 22a, 22b and 22c carry the per-gate detail and the mutation
+results.
+
+### 24b. The runs, read off each runner's own line
+
+| Run | Before | After |
+|---|---|---|
+| `ci/check-content-key-resolvers.sh` | `16 files in App/ register a card`, pass line, exit 0, with `sportslive` keyless | `16 files in App/ register a card, between them 17 card descriptors`, pass line |
+| `ci/check-asset-counters.sh` | `PASS` with the plain assignment in | `PASS` on the shipped file, and 1 `ERROR` line with that assignment back |
+| `ci/test-personal-photos-key.sh` | `PASS: personal photos content key (9 cases)` with the bounds guard neutered | `PASS: personal photos content key (10 cases)` from both builds |
+| the other twelve gates in `ci/` | not run | all pass, including the other lane's `ci/test-announcement-and-home-value-keys.sh` at 18 cases |
+
+### 24c. What this does not cover
+
+- **Nothing on the wire changed.** The key rides the existing attributes object
+  under the existing name `contentKey`, so the six-month backward-compatibility
+  mandate is untouched and an older server handles a keyed `sportslive` row the
+  way it already handles `sportsteam`.
+- **Not seen on a device.** No device was flashed or commanded. The first
+  reading would be a `sportslive` period row arriving with a key in it.
+- **The bounds guard's stated consequence was not reproducible.** A stale
+  `gOnCard[item]` past a shrunk set would read `gIds[item]`, but no sequence of
+  this module's own calls reaches that state: `fetch()` clears every slot from
+  `gCount` up on the same pass it fills the ones below, `setFromCheckIn()` clears
+  all ten, and `gRamItem` is only ever set to an index under `gCount`. So the
+  guard is a bounds check on the arrays rather than a condition the answer
+  depends on, and the bounds-checked build is what holds it. No behavioral case
+  can.
+- **`sportslive`'s own key has no host test.** `Sports.cpp` names LovyanGFX
+  through `Display.h` and does not compile on a host, so what holds it is the
+  per-descriptor gate plus the reading that `listingIdCardAt(3, i)` is the same
+  function the three keyed cards reach. The three-sibling path is the measured
+  one.
+- **The draw-count caveat is unchanged.** A `sportslive` draw still records an
+  impression carrying the full dwell, so `Shows` counts slots and not games.
+- **The key cannot reach the 64-character bound, so nothing is cut.**
+  `listingIdCardAt()` writes `YYYY-MM-DD:away@home` and `kMaxTeamNameLength` is
+  20, so the longest key this card can produce is 52 characters against
+  `Impressions::kMaxContentKey` of 64. Read off `App/Sports.h` and
+  `App/Impressions.h`.
+- **`live.frameCountFor` changes nothing on its own.** `frameCount3` returns 1
+  for a card that is not the board, and `CardManager::noteShowing()`'s frame loop
+  runs from index 1, so one frame and a `nullptr` hook behave identically. It is
+  assigned so the hand-built descriptor carries what `registerOne()` fills in,
+  rather than for an effect.
+- **It compiles for the ESP32 and the S3 was not built.** `arduino-cli compile
+  --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs --libraries ../libraries`
+  over `App/` reports 1,582,931 bytes of program storage (80%) and 115,460 bytes
+  of globals, with no error or warning line, against `ota_0` at 2,097,152. This
+  workstation builds against the core overlay and CI builds stock, so CI is still
+  the gate for either board.

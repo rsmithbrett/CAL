@@ -220,6 +220,38 @@ String cardDescribe(uint16_t /*itemIndex*/) {
   return summary;
 }
 
+/// The address the estimate on screen was computed for, or an empty string when
+/// the draw named no property.
+///
+/// This is the card's content key, and an impression reports it in its
+/// attributes. Nothing else can answer it: the address arrives on the check-in
+/// response as `homeValueAddress` rather than on the card policy, so the
+/// policy's `assetId` and `qrData` that CardManager::noteShowing falls back to
+/// are both empty for this card. No subject id crosses the wire, so the address
+/// is the one thing that identifies the property.
+///
+/// The address and not the figure. The server keys a quarter-hour period row on
+/// this, so a key carrying the estimate would start a new row every time
+/// RentCast moved and nothing could group two quarters of the same house. The
+/// figure rides cardDescribe() above, which is what a reader sees.
+///
+/// Gated on the two conditions cardDraw() puts a valuation on the glass under: a
+/// real estimate, which is what cardItemCount() gates the card itself on, and an
+/// address. A valuation the server resolved from a position fix has neither an
+/// address nor a headline row to draw it in, so it names no property a report
+/// could group on. noteShowing() runs immediately before the draw at every call
+/// site, which is what makes this and cardDraw() read the same state.
+///
+/// CARD_IMPRESSIONS_DESIGN.md in the server repository, "What a home-value and
+/// an announcement draw report", is the record.
+String cardListingId(uint16_t itemIndex) {
+  if (itemIndex != 0 || !hasEstimate() || gAddress.length() == 0) {
+    return String();
+  }
+
+  return gAddress;
+}
+
 [[maybe_unused]] const bool kRegistered = [] {
   Cards::CardSpec spec;
   spec.id = kCardId;
@@ -227,6 +259,11 @@ String cardDescribe(uint16_t /*itemIndex*/) {
   spec.fetch = cardFetch;
   spec.itemCount = cardItemCount;
   spec.describe = cardDescribe;
+
+  // What each draw reports as its content key. See cardListingId() above for why
+  // it is the address and not the estimate.
+  spec.listingId = cardListingId;
+
   spec.draw = cardDraw;
   spec.status = cardStatus;
   spec.order = 4;

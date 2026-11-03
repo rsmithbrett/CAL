@@ -186,13 +186,79 @@ Street, and they stay there after the listing sells and leaves the feed.
 | Real-estate listings | The listing itself, per item, for its own dwell |
 | QR code + text | The link |
 | Graphic / picture | The asset id already on the wire as `AssetId` |
-| Announcement | The text |
-| Sports: my team, scoreboard | The team or league |
-| Weather, tides, clock, sun, moon, aircraft, ISS, home value, calendar | The card is the content; no second key |
+| Household photographs | The asset id of the photograph that drew |
+| Announcement | The text, as a short hash of it |
+| Home value | The address the estimate was computed for |
+| Sports: my team, scoreboard, live game | The fixture, as its UTC start date with the two sides, or the two sides alone when the server sent no start time |
+| Weather, tides, clock, sun, moon, aircraft, ISS, calendar | The card is the content; no second key |
 
-Authored content is keyed by a short hash the server can resolve back to the exact
-string or asset it had at the time, so a report can name it — and so changing a QR link
-starts a new row rather than inheriting the old one's history.
+Authored content is keyed by a short hash, so changing a QR link or rewriting a
+notice starts a new row rather than inheriting the old one's history. The intent
+here was a hash the server could resolve back to the exact string it had at the
+time; nothing stores that mapping, and nothing below builds one. What names the
+content for a reader is the summary riding the same draw, which both the QR and the
+announcement cards send.
+
+**Home value and the five announcement slots were in the bottom row until
+2026-11-03**, reporting a summary on every draw and no key, so every address a
+display cycled through and every notice a tenant wrote collapsed into one period
+row per quarter hour. The owner's call that day is that both owe a key, and the
+two rows above are what they report now.
+
+A home-value draw is about one property and the check-in response carries the
+address it was valued for — `homeValueAddress`, which `HomeValueResult.SubjectAddress`
+fills. That string is the key. There is no subject id on the wire to prefer over it.
+Two quarter-hours of the same address group together on it, which is the whole gain;
+the figure keeps riding the summary, so an estimate that moves does not start a new
+row for the same house.
+
+An announcement holds its text and nothing else. The policy entry carries `Id`,
+`Kind`, `Order`, `DwellSeconds`, `Text` and the asset, QR and location fields, and
+none of them identifies a notice, so the text is the only thing that can. The text
+runs to 280 characters and a content key is bounded at 64 on both sides of the wire,
+so the key is a 64-bit FNV-1a digest of the exact text, written as sixteen lowercase
+hex characters. Six distinct announcement texts have drawn in production, 74 to 77
+characters each, read on 2026-11-03 at 11:30 UTC, so sending the first 64
+characters would have been cut on every draw rather than exceptionally. That is
+the measured half. Collapsing two notices sharing a prefix into one row is what a
+prefix key allows, not something these six do: they diverge by character 14, and a
+64-character prefix tells all six apart. The words themselves keep riding the
+summary, which is what a reader sees.
+
+**Both resolvers answer only for a draw that put the content up.** The announcement
+one returns nothing when the instance's text is empty, which is the one condition
+its `draw()` tests before drawing the no-content state. The home-value one returns
+nothing until the card holds both a real estimate and an address, which is stricter
+than its own draw: a valuation resolved from a position fix puts a figure up with no
+headline and reports no key, so for that card a keyed row is a row that drew and the
+reverse does not follow. That is `PersonalPhotos.cpp`'s rule applied as far as each
+card's state allows.
+
+The address key carries the 64-character bound rather than dodging it. A content key
+is cut at 64 by `Impressions::beginShowing` and again by the server's rollup, the
+subject address allows 300, and two properties agreeing for 64 characters would
+group as one row. The longest address in the valuation cache on 2026-11-03 is 55
+characters and has no estimate, so it never draws a key; the longest with one is 42.
+A readable address is worth more than collision-proofing a case no household has
+produced, and a digest is the fix if one ever does.
+
+**The live sports card reported no key until 2026-11-03.** `App/Sports.cpp`
+registers four cards. Three go through `registerOne()`, which assigns the
+resolver, the describe hook and the frame count from the shared
+`listingIdFor()`, `describeFor()` and `frameCountFor()` switches; the fourth,
+`sportslive`, is built by hand so that it can carry its own item count and its
+notable dwell, and that descriptor assigned none of the three. So the two team
+cards and the scoreboard reported a key on every draw and the live card out of
+the same file reported nothing on 907 of them, with 161 period rows holding
+nothing, counted on 2026-11-03. It now assigns all three, and the `default` arms
+of those switches already answered for index 3.
+
+What makes the key mean something was on the glass is the card's own item count.
+`countLive()` returns zero unless `anyLive(3)` finds a game in progress, so the
+card drops out of the rotation rather than drawing a card that says nothing is
+on, and `listingIdCardAt()` returns nothing for an index past the stored games or
+for a game with neither side named. That is the same rule `PersonalPhotos.cpp`
+applies, reached through the item count instead of a per-item drawability test.
 
 ## What the device records
 

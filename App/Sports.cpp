@@ -541,6 +541,16 @@ bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw
   live.order = 2;
   live.dwellSeconds = 12;
   live.notableDwellSeconds = 20;
+
+  // The same three hooks registerOne() assigns, from the same switches: index 3
+  // is the default arm of each. countLive() returns zero unless a game is in
+  // progress, so a draw of this card is a draw of one fixture, and
+  // listingIdCardAt() answers nothing for an index past the stored games or for a
+  // game with neither side named.
+  live.listingId = listingIdFor(3);
+  live.describe = describeFor(3);
+  live.frameCountFor = frameCountFor(3);
+
   const bool d = Cards::registerCard(live);
 
   return a && b && c && d;

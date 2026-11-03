@@ -82,6 +82,8 @@ jobs:
         run: bash ci/check-asset-counters.sh
       - name: Test the personal photographs content key on host
         run: bash ci/test-personal-photos-key.sh
+      - name: Test the announcement and home value content keys on host
+        run: bash ci/test-announcement-and-home-value-keys.sh
       - name: Check every card has decided what its draws report
         run: bash ci/check-content-key-resolvers.sh
 

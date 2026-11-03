@@ -21,6 +21,17 @@
 # since gained a resolver fails too, because then the list is what is wrong, and
 # a list nobody has to maintain stops describing anything.
 #
+# The grading is per card descriptor, not per file. A file can register several:
+# Sports.cpp has a helper three team cards share and a descriptor built by hand
+# for the live one. Reading the file as a whole passed the hand-built keyless
+# descriptor on the strength of its keyed neighbour, so sportslive reported
+# nothing on 907 draws out of a file this gate called resolving.
+#
+# Every Cards::CardSpec a file declares is graded, every one has to be handed to
+# Cards::registerCard() by its own name, and a resolver assigned through any
+# other lvalue fails. `Cards::CardSpec& s = spec; s.listingId = &f;` satisfies a
+# search for `spec.listingId=` while telling nobody which card got one.
+#
 # A text gate rather than a test, in the same spirit as ci/check-score-guard.sh
 # and ci/check-board-columns-call.sh beside it. CardManager.cpp names a graphics
 # library and does not compile on a host, so the fallback order it applies can
@@ -64,9 +75,14 @@ lacks() {
 
 # --- the three lists ---------------------------------------------------------
 #
-# Cards that resolve their own key, because what they draw comes off a feed and
-# only the module knows which item is up.
-RESOLVES="Aircraft.cpp FeaturedListings.cpp Listings.cpp PersonalPhotos.cpp Sports.cpp"
+# Cards that resolve their own key, because the module is the only thing that can
+# name what it drew. Most of these walk a feed and only the module knows which
+# item is up. Announcement.cpp and HomeValue.cpp are here for a narrower reason:
+# an announcement's words arrive on the card policy and a valuation's address
+# arrives on the check-in response, and neither lands in assetId or qrData, which
+# are the only two fields noteShowing() falls back to.
+RESOLVES="Aircraft.cpp Announcement.cpp FeaturedListings.cpp HomeValue.cpp Listings.cpp
+          PersonalPhotos.cpp Sports.cpp"
 
 # Cards whose content arrives on the card policy, so noteShowing()'s assetId and
 # qrData fallbacks answer for them and a resolver would repeat what is already in
@@ -78,11 +94,11 @@ POLICY_CONTENT="Graphic.cpp QrText.cpp"
 # are about a place and a time rather than a thing, and an empty key is the state
 # the period row has for them.
 #
-# HomeValue.cpp and Announcement.cpp are here and they are not the same case as
-# the rest: both report a summary on every draw and no key, so their period rows
-# carry a label and group as one. Whether either owes a key is an open question
-# for the owner, recorded in CARD_IMPRESSIONS_DESIGN.md rather than decided here.
-KEYLESS="Announcement.cpp Calendar.cpp ClockDate.cpp Forecast.cpp HomeValue.cpp
+# HomeValue.cpp and Announcement.cpp were here until 2026-11-03, reporting a
+# summary on every draw and no key. The owner's call that day is that both owe one,
+# so they sit in RESOLVES above; CARD_IMPRESSIONS_DESIGN.md, "What a home-value and
+# an announcement draw report", is the record.
+KEYLESS="Calendar.cpp ClockDate.cpp Forecast.cpp
          IssFlyover.cpp MoonPhase.cpp SunMoon.cpp Tides.cpp"
 
 listed() {
@@ -107,27 +123,57 @@ if [ -z "$REGISTRARS" ]; then
   exit 1
 fi
 
-# How many files were graded, printed whether or not anything failed. A gate
-# whose pattern stopped matching passes by finding nothing, and the only way to
-# see that from the outside is to have it say how much it looked at.
+# The names a file declares as a Cards::CardSpec of its own, one per card it
+# registers.
+#
+# Whitespace after the type is required, which is what keeps a reference or a
+# pointer declaration out: `Cards::CardSpec&` and `Cards::CardSpec*` both put a
+# character where that whitespace has to be. Those are not cards, they are second
+# names for one, and the assignment tally below is what refuses either as a route
+# to a resolver.
+specs_in() {
+  sed 's://.*::' "App/$1" \
+    | grep -oE 'Cards::CardSpec[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' \
+    | awk '{ print $NF }' | sort -u || true
+}
+
+# How many files were graded and how many descriptors in them, printed whether or
+# not anything failed. A gate whose pattern stopped matching passes by finding
+# nothing, and the only way to see that from the outside is to have it say how
+# much it looked at. Both figures matter: the file count alone stayed at 16 while
+# a keyless card hid inside one of them.
 REGISTRAR_COUNT=$(printf '%s\n' $REGISTRARS | wc -l | tr -d ' ')
-echo "    $REGISTRAR_COUNT files in App/ register a card"
+DESCRIPTOR_COUNT=0
+for file in $REGISTRARS; do
+  n=$(specs_in "$file" | wc -l | tr -d ' ')
+  DESCRIPTOR_COUNT=$((DESCRIPTOR_COUNT + n))
+done
+
+echo "    $REGISTRAR_COUNT files in App/ register a card, between them $DESCRIPTOR_COUNT card descriptors"
 if [ "$REGISTRAR_COUNT" -lt 16 ]; then
   echo "ERROR: only $REGISTRAR_COUNT registering files were found and there were 16 on
        2026-11-03. Either cards were removed, or the grep above stopped matching and
        this gate is checking less than it reads." >&2
   FAIL=1
 fi
+if [ "$DESCRIPTOR_COUNT" -lt 17 ]; then
+  echo "ERROR: only $DESCRIPTOR_COUNT card descriptors were found and there were 17 on
+       2026-11-03. Either cards were removed, or specs_in() stopped matching and every
+       grade below was handed out on a shorter list than the files hold." >&2
+  FAIL=1
+fi
 
 for file in $REGISTRARS; do
-  TEXT=$(cat "App/$file")
-  # Assigned, and not assigned nullptr. The five that resolve spell the
-  # right-hand side four different ways - `&cardListingId`, `cardListingId` and
-  # `listingIdFor(index)` among them - so the pin is the assignment rather than
-  # what it names, and `= nullptr` is the one value that assigns no resolver.
-  RESOLVER=no
-  if has "$TEXT" 'spec.listingId=' && lacks "$TEXT" 'spec.listingId=nullptr'; then
-    RESOLVER=yes
+  CODE=$(sed 's://.*::' "App/$file")
+  FLAT=$(printf '%s\n' "$CODE" | tr -d ' \t\r\n')
+  SPECS=$(specs_in "$file")
+
+  if [ -z "$SPECS" ]; then
+    say "App/$file" "calls Cards::registerCard and declares no Cards::CardSpec this gate
+         can name, so none of its cards were graded. Declare the descriptor as
+         'Cards::CardSpec <name>;' and fill it in, the way every other card module here
+         does."
+    continue
   fi
 
   if ! listed "$file"; then
@@ -138,21 +184,60 @@ for file in $REGISTRARS; do
     continue
   fi
 
-  if in_list "$file" "$RESOLVES" && [ "$RESOLVER" = no ]; then
-    say "App/$file" "is listed as resolving its own content key and assigns no
-         spec.listingId. Its draws report nothing, and the period rows for every item it
-         draws collapse into one."
+  # Every listingId assignment in the file lands on a descriptor named above.
+  # The count is the pin rather than the spelling: an assignment through a
+  # reference, a pointer or a dereference reads as a resolver to the compiler and
+  # names no card here, so the two tallies part company and this fails.
+  ASSIGNED_ANYWHERE=$(printf '%s' "$FLAT" | grep -oF 'listingId=' | wc -l | tr -d ' ' || true)
+  ASSIGNED_TO_SPECS=0
+  for spec in $SPECS; do
+    n=$(printf '%s' "$FLAT" | grep -oF "$spec.listingId=" | wc -l | tr -d ' ' || true)
+    ASSIGNED_TO_SPECS=$((ASSIGNED_TO_SPECS + n))
+  done
+  if [ "$ASSIGNED_ANYWHERE" != "$ASSIGNED_TO_SPECS" ]; then
+    say "App/$file" "has $ASSIGNED_ANYWHERE listingId assignment(s) and only
+         $ASSIGNED_TO_SPECS of them land on a Cards::CardSpec this gate can name
+         ($(echo $SPECS)). A resolver assigned through a reference, a pointer or a
+         dereference reaches the card and tells nobody which card got one. Assign it on
+         the descriptor by its own name."
   fi
 
-  if in_list "$file" "$POLICY_CONTENT" && [ "$RESOLVER" = yes ]; then
-    say "App/$file" "is listed as taking its key off the card policy and now assigns
-         spec.listingId. Move it to RESOLVES, because the list is what is wrong."
-  fi
+  for spec in $SPECS; do
+    if ! printf '%s' "$FLAT" | grep -qF "Cards::registerCard($spec)"; then
+      say "App/$file" "declares the card descriptor '$spec' and never hands it to
+           Cards::registerCard($spec). A descriptor registered through another name is
+           graded by nothing here."
+      continue
+    fi
 
-  if in_list "$file" "$KEYLESS" && [ "$RESOLVER" = yes ]; then
-    say "App/$file" "is listed as reporting no content key and now assigns
-         spec.listingId. Move it to RESOLVES, because the list is what is wrong."
-  fi
+    # Assigned, and not assigned nullptr. The seven that resolve spell the
+    # right-hand side four different ways - `&cardListingId`, `cardListingId` and
+    # `listingIdFor(index)` among them - so the pin is the assignment rather than
+    # what it names, and `= nullptr` is the one value that assigns no resolver.
+    RESOLVER=no
+    if printf '%s' "$FLAT" | grep -qF "$spec.listingId=" \
+       && ! printf '%s' "$FLAT" | grep -qF "$spec.listingId=nullptr"; then
+      RESOLVER=yes
+    fi
+
+    if in_list "$file" "$RESOLVES" && [ "$RESOLVER" = no ]; then
+      say "App/$file" "is listed as resolving its own content key and its descriptor
+           '$spec' assigns no listingId. That card's draws report nothing, and the period
+           rows for every item it draws collapse into one. A file whose cards genuinely
+           differ needs its lists here split per card id rather than per file."
+    fi
+
+    if in_list "$file" "$POLICY_CONTENT" && [ "$RESOLVER" = yes ]; then
+      say "App/$file" "is listed as taking its key off the card policy and its descriptor
+           '$spec' now assigns listingId. Move it to RESOLVES, because the list is what is
+           wrong."
+    fi
+
+    if in_list "$file" "$KEYLESS" && [ "$RESOLVER" = yes ]; then
+      say "App/$file" "is listed as reporting no content key and its descriptor '$spec' now
+           assigns listingId. Move it to RESOLVES, because the list is what is wrong."
+    fi
+  done
 done
 
 # --- and the fallback order the two policy cards rest on ---------------------

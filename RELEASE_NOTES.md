@@ -23,6 +23,34 @@ dated heading after.
 
 ## Unreleased
 
+### Your reports can say which home and which notice were on screen - App
+
+The home-value card and the five announcement cards recorded that they had been
+up and nothing about what they were showing, so a report could tell you the
+home-value card ran a hundred and twenty-eight thousand times and never which
+address it valued.
+
+The home-value card reports the address it was asked about now, and an
+announcement reports a short fingerprint of its own text, which tells two
+notices apart without putting a whole notice in a report column. Nothing to do,
+and nothing changes on either display. Reports covering draws from before this
+release still cannot name either one.
+
+### Your reports can say which game the live card was showing - App
+
+The card that appears while a team you follow is playing recorded that it had been
+up and nothing about which game was on it, so a report could say the card ran nine
+hundred times and never which match anybody watched. The two other sports cards
+already reported the game, out of the same part of the firmware.
+
+It reports the game now. Nothing to do, and nothing changes on the display itself.
+Reports covering draws from before this release still cannot name the game,
+because the device was the only thing that knew and it was not asked.
+
+---
+
+## v2026.11.03.0003
+
 ### Your reports can say which photograph was on screen - App
 
 The card showing your own photographs recorded that it had been up and nothing
@@ -747,7 +775,7 @@ records the reason the radio gives, so a refused password can be told apart
 from a phone that simply moved away.
 
 This changes the permanent CAL loader, not the downloadable App, and adds no
-behaviour: the setup network and the setup page work exactly as before.
+behavior: the setup network and the setup page work exactly as before.
 
 ### The setup network is protected again, as a bench test — CAL
 

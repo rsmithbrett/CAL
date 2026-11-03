@@ -130,10 +130,15 @@ using DescribeFn = String (*)(uint16_t itemIndex);
 /// Returning both from one function would mean every card that names something
 /// also had to say it has no id.
 ///
-/// Empty is the ordinary answer. Only the listings card returns anything, and
-/// only when the server resolved a pid for that item - see
-/// Listings::ListingInfo::compassPid. Called once per press, never on the draw
-/// path, for the same reason DescribeFn is.
+/// Empty is the ordinary answer, and it is what a card answers for an item that
+/// drew nothing: the listings card when the server resolved no pid for that item
+/// (see Listings::ListingInfo::compassPid), the photographs card when the item is
+/// neither cached nor the one in heap, the home-value card with no estimate or no
+/// address, an announcement slot nobody has written a notice into.
+///
+/// Called once per press and once per showing, never on the draw path itself -
+/// CardManager::noteShowing() asks for the item going up and reports the answer
+/// as that showing's content key.
 using ListingIdFn = String (*)(uint16_t itemIndex);
 
 /// How many entities one showing of this card is displaying at once. Called
@@ -278,7 +283,10 @@ struct CardSpec {
   /// a press notification, which is what a clock or a splash has.
   DescribeFn describe = nullptr;
 
-  /// Optional - see ListingIdFn. nullptr for every card but the listings one.
+  /// Optional - see ListingIdFn. nullptr for a card whose content key the policy
+  /// already names through assetId or qrData, and for a card with nothing to
+  /// name; assigned by the seven modules that are the only thing able to say what
+  /// they drew. ci/check-content-key-resolvers.sh holds which is which.
   ListingIdFn listingId = nullptr;
 
   /// How many distinct things this card puts on the glass in ONE showing.

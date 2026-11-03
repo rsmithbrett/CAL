@@ -30,6 +30,43 @@ static_assert(Cards::kMaxTextLength == 280,
               "Cards::kMaxTextLength must match CardPolicyEditing.MaxTextLength on the server (280) - "
               "see the comment on each for why, and update both together");
 
+/// FNV-1a over 64 bits, written as sixteen lowercase hex characters.
+///
+/// What an announcement's content key is built from. The text is the only thing
+/// that identifies a notice: a policy entry carries `id`, `kind`, `order`,
+/// `dwellSeconds`, the asset, QR and location fields and an effectivity window,
+/// and none of those says which notice this is. The text runs to
+/// Cards::kMaxTextLength while a content key is bounded at 64 characters on the
+/// device and again in the server's rollup, so sending the text itself would
+/// arrive truncated on an ordinary draw - every announcement drawing in
+/// production on 2026-11-03 was 74 to 77 characters - and two notices sharing a
+/// prefix would report one key and group as one period row. A digest separates
+/// them at any length.
+///
+/// Sixty-four bits rather than thirty-two. This runs once per showing, the wider
+/// multiply costs nothing beside the draw it precedes, and it settles how many
+/// notices a household can hold before two of them collide.
+///
+/// Built a nibble at a time rather than through snprintf, so this carries no
+/// dependence on a 64-bit length modifier in the core's own formatter.
+String textDigest(const char* text) {
+  uint64_t hash = 0xcbf29ce484222325ULL;
+  for (const char* at = text; *at != '\0'; ++at) {
+    hash ^= static_cast<uint8_t>(*at);
+    hash *= 0x100000001b3ULL;
+  }
+
+  static const char kHexDigits[] = "0123456789abcdef";
+  char digits[17];
+  for (int8_t place = 15; place >= 0; --place) {
+    digits[place] = kHexDigits[hash & 0xF];
+    hash >>= 4;
+  }
+  digits[16] = '\0';
+
+  return String(digits);
+}
+
 /// One notice card's worth of itemCount/draw logic, parameterized on `N`
 /// purely to give each instantiation its own registered id - the same
 /// Instance<N> idiom Graphic.cpp established. Unlike Graphic there is no
@@ -116,6 +153,33 @@ struct Instance {
   /// actually on screen, not the ones configured when this instance last drew.
   static String describe(uint16_t) { return String(currentText()); }
 
+  /// The digest of the words on screen, or an empty string when this instance
+  /// has no notice to draw.
+  ///
+  /// This is the card's content key, and an impression reports it in its
+  /// attributes. The server keys a quarter-hour period row on it, so without one
+  /// every notice a tenant ever wrote into this slot collapsed into one row per
+  /// quarter hour and a report could say the card was up and not which notice it
+  /// held. describe() above carries the words themselves, which is what a reader
+  /// sees; this is what two quarters of the same notice group on.
+  ///
+  /// Gated on the condition draw() tests before drawing the no-content state, so
+  /// a key names a notice that was on the glass. Re-read rather than cached, the
+  /// same way itemCount(), draw() and describe() read it: the policy can change
+  /// at any check-in, and noteShowing() runs immediately before the draw at every
+  /// call site, which is what makes this and draw() read the same text.
+  ///
+  /// CARD_IMPRESSIONS_DESIGN.md in the server repository, "What a home-value and
+  /// an announcement draw report", is the record.
+  static String listingId(uint16_t itemIndex) {
+    const char* const text = currentText();
+    if (itemIndex != 0 || strlen(text) == 0) {
+      return String();
+    }
+
+    return textDigest(text);
+  }
+
   /// Builds and registers this instance's descriptor. Called once per
   /// instantiation from the static-init block at the bottom of this file.
   static bool registerSelf(int16_t order, uint16_t interleaveEvery) {
@@ -131,6 +195,11 @@ struct Instance {
     spec.itemCount = &itemCount;
     spec.draw = &draw;
     spec.describe = &describe;
+
+    // What each draw reports as its content key. See listingId() above for why
+    // it is a digest of the text rather than the text.
+    spec.listingId = &listingId;
+
     spec.order = order;
     spec.dwellSeconds = 10;
     spec.interleaveEvery = interleaveEvery;

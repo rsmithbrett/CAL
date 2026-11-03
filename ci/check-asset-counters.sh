@@ -52,8 +52,14 @@ done
 # length, so a gate that read them would be satisfied by its own prose: it would
 # pass a recordDecodeFailure() whose body had been emptied as long as the
 # remarks above it still described what it used to do.
+#
+# Tab and carriage return go out with the spaces and the newlines, the way
+# ci/check-content-key-resolvers.sh flattens: this file is checked out CRLF under
+# core.autocrlf, and a carriage return left in the middle of a joined statement
+# stops every pattern below from matching, which would make this gate pass by
+# finding nothing rather than by checking anything.
 CODE=$(sed 's;//.*$;;' "$TARGET")
-FLAT=$(printf '%s\n' "$CODE" | tr -d ' \n')
+FLAT=$(printf '%s\n' "$CODE" | tr -d ' \t\r\n')
 
 # grep returning 1 is an answer here, not a failure, and this script runs under
 # pipefail - so every match is taken with || true and judged on its output.
@@ -68,16 +74,35 @@ if ! printf '%s\n' "$CODE" | grep -q '#include "ReportedCounter.h"'; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Neither reported counter is incremented any other way.
+# 2. Neither reported counter is written anywhere but countOne() and a reset.
 #
-#    ++x, x++ and x += n all read as an increment here. The ceiling lives in
-#    countOne() and nowhere else, so an increment written out beside it is the
-#    wrap by another route even when a guard happens to sit above it: a second
-#    copy of the ceiling is a second thing to keep right.
+#    ++x, x--, x += n and a compound assignment of any operator all read as a
+#    write here, and so does `x = <anything but 0>`. The ceiling lives in
+#    countOne() and nowhere else, so a write beside it is the wrap by another
+#    route even when a guard happens to sit above it: a second copy of the
+#    ceiling is a second thing to keep right.
+#
+#    `x = 0` is the one assignment that stays. It is the declaration and the
+#    clear CheckIn.cpp performs after a successful round trip, neither of which
+#    can overflow. Everything else is counted and compared, because a plain
+#    `gAllocationRefusals = gAllocationRefusals + 1;` sitting beside the kept
+#    countOne() call reads as a wrap and matched none of the operators above it.
 # ---------------------------------------------------------------------------
 for counter in gDecodeFailureCount gAllocationRefusals; do
-  if printf '%s' "$FLAT" | grep -qE "(\+\+$counter|$counter\+\+|$counter\+=)"; then
-    say "$counter is incremented directly. It has to go through ReportedCounter::countOne(), which is the only place the ceiling is written."
+  if printf '%s' "$FLAT" | grep -qE "((\+\+|--)$counter|$counter(\+\+|--))"; then
+    say "$counter is incremented or decremented directly. It has to go through ReportedCounter::countOne(), which is the only place the ceiling is written."
+  fi
+
+  if printf '%s' "$FLAT" | grep -qE "$counter(\+|-|\*|/|%|&|\||\^|<<|>>)="; then
+    say "$counter is written through a compound assignment. It has to go through ReportedCounter::countOne(), which is the only place the ceiling is written."
+  fi
+
+  # One character past the `=` so a comparison is not read as a write: `x == 0`
+  # flattens to `x==0` and would otherwise count as an assignment.
+  WRITES=$(count_matches "$counter=[^=]" || true)
+  CLEARS=$(count_matches "$counter=0;" || true)
+  if [ "$WRITES" != "$CLEARS" ]; then
+    say "$counter is assigned something other than 0 in $(( WRITES - CLEARS )) place(s). The only assignments it may carry are its declaration and the clear after a reported cycle; a figure computed into it is the wrap countOne() exists to hold, whether or not a countOne() call still sits beside it."
   fi
 
   if ! has "ReportedCounter::countOne($counter)"; then

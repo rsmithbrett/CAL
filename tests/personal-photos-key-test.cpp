@@ -326,11 +326,56 @@ void aDrawWithNoPictureNamesWhatTookTheGlass() {
     const std::string& line = named.front();
     assert(line.find("item " + std::to_string(item + 1) + " of 3") != std::string::npos &&
            "the line names which item of the set drew nothing");
-    assert(line.find("heap") != std::string::npos &&
-           "the line says where the bytes would have had to come from");
+
+    // The held item by number, not the word "heap". Both branches of production's
+    // line carry "heap", so an assertion on that word alone passes whichever one
+    // ran and says nothing about which state the display was in.
+    assert(line.find("item " + std::to_string(held + 1) + " is the one held in heap") !=
+               std::string::npos &&
+           "the line names which item holds the heap buffer instead");
+    assert(line.find("nothing is held in heap") == std::string::npos &&
+           "a display holding a picture must not report that nothing is held");
   }
 
   std::cout << "  a draw with no photograph names the item and what holds the glass\n";
+}
+
+/// A cardless display holding nothing says so, rather than naming a held item.
+///
+/// The other arm of the same line. A fetch that failed leaves the heap buffer
+/// empty, so every item of the set draws the no-content state and there is no
+/// held item to point at. Forcing production's branch either way satisfied an
+/// assertion on the word "heap", which both arms carry.
+void aDrawWithNothingHeldSaysNothingIsHeld() {
+  gOnCard.clear();
+  gRamFetchSucceeds = false;
+  gDrawCachedSucceeds = true;
+  resetTo({kFirst, kSecond});
+  runFetch();
+
+  for (uint16_t item = 0; item < 2; ++item) {
+    assert(keyFor(item).empty() && "a fetch that failed holds nothing to report");
+  }
+
+  const char* const ids[2] = {kFirst, kSecond};
+  for (uint16_t item = 0; item < 2; ++item) {
+    clearLog();
+    registered().draw(item);
+
+    const auto named = loggedMatching({"personalphotos", ids[item], "not drawn"});
+    assert(named.size() == 1 &&
+           "a draw with nothing held writes one line naming the photograph");
+    const std::string& line = named.front();
+    assert(line.find("item " + std::to_string(item + 1) + " of 2") != std::string::npos &&
+           "the line names which item of the set drew nothing");
+    assert(line.find("nothing is held in heap") != std::string::npos &&
+           "the line says the heap buffer holds nothing");
+    assert(line.find("is the one held in heap") == std::string::npos &&
+           "a display holding nothing must not name a held item");
+  }
+
+  gRamFetchSucceeds = true;
+  std::cout << "  a draw with nothing held says nothing is held, rather than naming an item\n";
 }
 
 /// An item past the end of the set says so too.
@@ -434,8 +479,9 @@ int main() {
   aChangedSetReportsNothingUntilTheNextFetch();
   aPhotographThatDidNotDecodeStopsReportingItsId();
   aDrawWithNoPictureNamesWhatTookTheGlass();
+  aDrawWithNothingHeldSaysNothingIsHeld();
   anItemPastTheSetSaysItDrewNothing();
 
-  std::cout << "PASS: personal photos content key (9 cases)\n";
+  std::cout << "PASS: personal photos content key (10 cases)\n";
   return 0;
 }
