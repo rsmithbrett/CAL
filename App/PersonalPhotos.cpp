@@ -197,6 +197,35 @@ void fetch() {
 
 uint16_t itemCount() { return gCount; }
 
+/// The asset id of the photograph this item puts on the glass, or an empty
+/// string when the item draws no picture.
+///
+/// This is the card's content key, and an impression reports it in its
+/// attributes. Nothing else can answer it: the ids arrive on the check-in
+/// response rather than the card policy, so the policy's `assetId` and `qrData`
+/// that CardManager::noteShowing falls back to are both empty for this card.
+///
+/// Gated on the two conditions draw() below tests, so an id is reported for a
+/// draw that put a photograph up and withheld for one that drew the no-content
+/// state. A display with no SD card holds one picture in heap and the rest of the
+/// set draws nothing, so an ungated id would name a photograph that was not on
+/// screen. noteShowing() runs immediately before the draw at every call site,
+/// which is what makes this and draw() read the same state.
+///
+/// PERSONAL_PHOTOS_DESIGN.md section 8.7 is the record.
+String cardListingId(uint16_t itemIndex) {
+  if (itemIndex >= gCount) {
+    return String();
+  }
+
+  const uint8_t item = static_cast<uint8_t>(itemIndex);
+  if (!gOnCard[item] && gRamItem != item) {
+    return String();
+  }
+
+  return String(gIds[item]);
+}
+
 void drawNoContent() {
   Display::showNoContent("No picture to show", "This photograph could not be loaded.");
 }
@@ -250,6 +279,11 @@ bool registerSelf() {
   spec.fetch = &fetch;
   spec.itemCount = &itemCount;
   spec.draw = &draw;
+
+  // What each draw reports as its content key. No describe(): the firmware holds
+  // the id and never the name a household typed, so a period row's label is
+  // resolved on the server. See PERSONAL_PHOTOS_DESIGN.md section 8.7.
+  spec.listingId = &cardListingId;
 
   // Behind the data cards and ahead of the decorative ones.
   spec.order = 4;

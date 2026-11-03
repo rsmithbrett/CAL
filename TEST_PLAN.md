@@ -4814,3 +4814,139 @@ Against `App/Assets.cpp`, each judged by the gate:
   `App/PersonalPhotos.cpp` was being edited by a second lane at the time. It
   proves `Assets.cpp` and `ReportedCounter.h` compile; it is not a clean-tree
   measurement of anything else.
+
+---
+
+## 22. The content key a card reports, and the cards that report none (2026-11-03)
+
+`App/PersonalPhotos.cpp` registered `fetch`, `itemCount`, `draw`, `order` and
+`dwellSeconds` and no `listingId`. Its photographs arrive on the check-in
+response rather than the card policy, so the `assetId` and `qrData` fallbacks
+`CardManager::noteShowing()` applies after the resolver were both empty, the key
+came out empty, `CheckIn.cpp` omitted the whole attributes object at its test for
+a non-empty key, and the server stored an empty document.
+
+Measured on production on 2026-11-03: 1,022 draws of the card across five
+displays, 0 carrying a content key, 1 distinct attributes document. The same
+table holds 263,243 of 263,299 `graphic` draws and 309,930 of 326,526 `listings`
+draws with a key, through the same wire field and the same ingest, which is what
+places the gap on the card rather than on the contract or the store.
+
+What it costs a reader is in CARD_IMPRESSIONS_DESIGN.md: `card_impression_periods`
+is unique on `(DeviceId, CardId, ContentKey, PeriodStartUtc)`, so every
+photograph a household chose collapses into one keyless row per quarter hour. A
+report can say the card was up and not which picture was up, and the draws are
+pruned at ninety days.
+
+`cardListingId()` now answers the item's asset id, and it is gated on the two
+conditions `draw()` itself tests - the item is cached on SD, or it is the one
+held in heap. A display with no SD card holds one picture at a time and the rest
+of the set draws the no-content state, so an ungated id would name a photograph
+that was not on the glass. `noteShowing()` runs immediately before the draw at
+all five of its call sites, which is what makes the resolver and the draw read
+the same state.
+
+### 22a. The host test
+
+```
+bash ci/test-personal-photos-key.sh
+```
+
+Seven cases. `App/PersonalPhotos.cpp` compiles as it ships against
+`tests/personal-photos-stubs/Arduino.h`; `Assets.h`, `Cards.h`, `Display.h`,
+`Log.h` and `PersonalPhotos.h` are the shipped declarations and the functions the
+module calls are defined in the test. The `Cards::registerCard` stub keeps the
+descriptor, which is how the test reaches a resolver sitting in an anonymous
+namespace - the same route `noteShowing()` takes.
+
+- the card registers a resolver at all
+- a photograph on the card reports its own asset id, at three items
+- a cardless display reports the one picture in heap and nothing for the other
+  two, over three fetch passes, which also pins that the key follows the buffer
+  rather than staying on item zero
+- a fetch that failed reports no key for any item
+- an item past the end of the set reports nothing, including at `kMaxPhotos`
+- a set that changed reports nothing until the next fetch
+- a photograph that failed to decode stops reporting its id, and its neighbour
+  keeps reporting
+
+The `Arduino.h` stub is a `String` class rather than the
+`using String = std::string` the stubs beside it use, because
+`invalidateDeparted()` appends an `unsigned` to a `String` and `std::string` has
+no `operator+=` for one.
+
+### 22b. The resolver-coverage gate
+
+```
+bash ci/check-content-key-resolvers.sh
+```
+
+Every file in `App/` calling `Cards::registerCard` is in one of three lists and
+the gate fails on a file in none of them: cards that resolve their own key
+(`Aircraft`, `FeaturedListings`, `Listings`, `PersonalPhotos`, `Sports`), cards
+whose content arrives on the policy so the `assetId` and `qrData` fallbacks
+answer for them (`Graphic`, `QrText`), and cards with nothing to name
+(`Announcement`, `Calendar`, `ClockDate`, `Forecast`, `HomeValue`, `IssFlyover`,
+`MoonPhase`, `SunMoon`, `Tides`). A new card is a new file calling
+`registerCard`, which lands in no list, so the decision gets made rather than
+defaulted.
+
+Both directions. A file listed as resolving that assigns no `spec.listingId`
+fails, and a file listed as keyless that has gained one fails too, because then
+the list is what is wrong.
+
+It also pins what the host test cannot reach. `CardManager.cpp` names a graphics
+library through `Display.h` and does not compile on a host, so
+`noteShowing()`'s resolver call, its two fallbacks and the `beginShowing()`
+hand-off are held as text, as is the attribute name `CheckIn.cpp` writes the key
+under. Dropping the `assetId` fallback takes the key off every graphic and every
+QR card in the fleet while both modules keep compiling and keep drawing.
+
+The gate prints how many registering files it graded and fails below 16, which
+was the count on 2026-11-03. A text gate that stops matching passes by finding
+nothing, and the count is the only way to see that from the outside.
+
+### 22c. What was mutated, and what each mutation did
+
+Eight, each gated on `cmp` against a byte-for-byte copy taken first, with the
+file restored from that copy and `touch`ed afterwards. A mutation that never
+applied reads exactly like a passing test.
+
+| Mutation | Caught by |
+|---|---|
+| `App/PersonalPhotos.cpp` replaced with `git show HEAD:` of itself, the card as it shipped | the host test, case 1 |
+| the drawability gate replaced with `if (false)`, so every item reports an id | the host test, the cardless case |
+| the `spec.listingId` line deleted | the gate |
+| the `spec.listingId` line commented out rather than deleted | the gate, which strips line comments before matching |
+| a new `App/ZzNewCard.cpp` registering a card with no resolver | the gate, naming it as in none of the three lists |
+| the whole file rewritten as CRLF | neither, correctly: the gate still found the resolver |
+| CRLF and the commented-out line together | the gate, which is what says the CRLF pass above was not a pattern that stopped matching |
+| the `assetId` fallback in `noteShowing()` replaced with an empty string | the gate's fallback pin |
+| the wire attribute renamed from `contentKey` | the gate's wire pin |
+
+### 22d. What this does not cover
+
+- **No wire change and no server change.** The key travels in the attributes
+  object that already exists, under the name
+  `CardImpressionRollup.ContentKeyNames` already reads, so an older server
+  handles the new rows the way it already handles `graphic`. Nothing was added to
+  `CheckInRequest`.
+- **Keyless rows already written stay keyless.** The device is the only party
+  that knew which photograph was up and it never sent it, so there is nothing to
+  backfill from.
+- **No label.** `ContentLabel` on a period row comes from a `summary`, `label`,
+  `title` or `name` attribute and the firmware holds only the id. The names a
+  household typed live in the server's own asset rows, so the label belongs in
+  the rollup and needs no firmware release. `graphic` reports no label either.
+- **Not seen on a device.** The resolver has not run on hardware. What is
+  measured is the host test and the gate; the first device reading would be a
+  `personalphotos` row arriving with a content key in it.
+- **`HomeValue` and `Announcement` are listed as keyless and are not the same
+  case as a clock.** Both report a summary on every draw and no key, so their
+  period rows carry a label and group as one. Whether either owes a key is an
+  open question for the owner rather than something this gate decided.
+- **Nothing was compiled with `arduino-cli`.** The host test and the gate are
+  what ran. This workstation builds against the core overlay and CI builds
+  stock, so CI is still the gate for either board.
+- **The other lane's two gates were not run.** `ci/test-reported-counter.sh` and
+  `ci/check-asset-counters.sh` were mid-edit in the same tree.
