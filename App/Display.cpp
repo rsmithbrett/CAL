@@ -5168,14 +5168,29 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
     const int pictureTop = y + 6;
     const int pictureHeight = factFloor - pictureTop;
     const int pictureWidthAcross = kContentRight() - kContentLeft();
+
+    // The same source choice the band makes above, and for the same reason: on a
+    // display with no SD card there is nothing cached to read back, so a
+    // cached-only draw refuses every card and the rows take the space back on
+    // all five. This branch was left on drawCachedInRect() when the band was
+    // wired to RAM, which is how the Wireless-Tag Portrait Prototype shipped
+    // fetching four pictures it then declined to draw.
     const bool drew =
         pictureHeight >= kMinPictureHeight
-        && Assets::drawCachedInRect(cachedImageId, kContentLeft(), pictureTop, pictureWidthAcross,
-                                    pictureHeight);
+        && (ramPicture != nullptr
+                ? Assets::drawRamInRect(cachedImageId, *ramPicture, kContentLeft(), pictureTop,
+                                        pictureWidthAcross, pictureHeight)
+                : Assets::drawCachedInRect(cachedImageId, kContentLeft(), pictureTop,
+                                           pictureWidthAcross, pictureHeight));
     if (!drew) {
-      Log::printf("[display] featuredlistings portrait picture '%s' not drawn in %dpx at y=%d - "
-                  "the held fact rows take the space back",
-                  cachedImageId.c_str(), pictureHeight, pictureTop);
+      // Where the bytes came from is named, because a RAM decode failure and a
+      // missing SD file are looked for in different places - and because this
+      // line reading the same either way is what made the cached-only draw hard
+      // to see on a card-less display.
+      Log::printf("[display] featuredlistings portrait picture '%s' not drawn from %s in %dpx at "
+                  "y=%d - the held fact rows take the space back",
+                  cachedImageId.c_str(), ramPicture != nullptr ? "RAM" : "the card", pictureHeight,
+                  pictureTop);
       if (pictureHeight > 0) {
         lcd.fillRect(kContentLeft(), pictureTop, pictureWidthAcross, pictureHeight, bg());
       }

@@ -23,6 +23,21 @@ dated heading after.
 
 ## Unreleased
 
+### The house-hunt photograph draws on a display standing on its end - App
+
+v2026.11.03.0001 fetched the photograph on a display with no memory card and then
+drew the card without it anyway, on a display standing on its end. The fetch was
+fixed and the drawing was not: the upright layout still asked the memory card for
+a picture that had only ever been held in memory, so it got nothing back and gave
+the space to the facts instead. A display lying flat was unaffected.
+
+The upright layout reads the picture from memory now, and keeps asking the card
+when there is one. Nothing to do.
+
+---
+
+## v2026.11.03.0001
+
 ### A scoreboard keeps its layout when a score arrives that is not a score - App
 
 A score below zero was drawn as if it were a scoreline, and because the board
