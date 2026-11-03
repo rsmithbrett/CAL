@@ -15,4 +15,17 @@ trap 'rm -rf "$TEST_BUILD_DIR"' EXIT
   -I. \
   tests/brand-splash-test.cpp -o "$TEST_BUILD_DIR/brand-splash-test"
 echo "==> Brand splash length"
-"$TEST_BUILD_DIR/brand-splash-test"
+# The binary's own Passed line is what says it ran, rather than its exit
+# status. A main() that returned without reaching an assertion exits 0 as
+# happily as one that passed every case, and a gate reading the status cannot
+# tell them apart. The line carries its own check count and its own failure
+# count. See the same lines in ci/test-config-request.sh.
+OUTPUT=$("$TEST_BUILD_DIR/brand-splash-test")
+echo "$OUTPUT"
+case "$OUTPUT" in
+  *"Passed! "*" checks, 0 failed"*) ;;
+  *)
+    echo "ERROR: the brand splash test exited 0 without printing its Passed line." >&2
+    exit 1
+    ;;
+esac

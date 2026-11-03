@@ -23,6 +23,10 @@ dated heading after.
 
 ## Unreleased
 
+---
+
+## v2026.11.03.0004
+
 ### Your reports can say which home and which notice were on screen - App
 
 The home-value card and the five announcement cards recorded that they had been
@@ -46,6 +50,18 @@ already reported the game, out of the same part of the firmware.
 It reports the game now. Nothing to do, and nothing changes on the display itself.
 Reports covering draws from before this release still cannot name the game,
 because the device was the only thing that knew and it was not asked.
+
+### Why a photographs card drew no photograph, in the log - App
+
+A display with no memory card holds one of your photographs at a time, so a set
+of three puts one picture up and gives the other two "No picture to show". The
+log said nothing on those two draws, so a card that came up blank could not be
+told from one that drew the picture it was asked for.
+
+The log now names the photograph that did not go up, which item of the set it
+was, and which item the display is holding instead. Nothing to do, and nothing
+changes on the display. A report still counts a blank draw as a show, because
+the card held the screen for its full turn either way.
 
 ---
 

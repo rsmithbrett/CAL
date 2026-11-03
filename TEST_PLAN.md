@@ -4446,6 +4446,23 @@ asserted twice over, as `static_assert` and again at runtime, so a widened
 predicate stops the compile on any toolchain and also prints a `Failed!` line
 under a runner.
 
+The script reads that line rather than the binary's exit status, the way
+`ci/test-config-request.sh` does - added 2026-11-03. Two host gates in `ci/`
+still run their binary as a bare last command and read no part of its output,
+`test-loader-order.sh` and `test-recovery-menu.sh`, and both of those binaries
+print a `PASS:` line nothing looks at. Proven by dropping the
+`Passed!` `printf` from `tests/brand-splash-test.cpp`, so `main()` returns 0
+having printed only its `==>` label: the script before the change printed that
+label and exited 0, and the script after it prints `ERROR: the brand splash test
+exited 0 without printing its Passed line.` and exits 1. The mutation was
+restored from a byte copy taken first, checked with `cmp`, and the file's mtime
+refreshed.
+
+Run on this workstation against the native `g++` 16.2.0 under
+`C:\Tools\mingw64\bin`, which section 19b predates; a clean tree prints
+`Passed! 16 checks, 0 failed`. CI compiles with GCC 13.3 on ubuntu-24.04 and
+neither the green run nor the mutation was measured there.
+
 | Check | What it pins |
 |---|---|
 | `bodyIsWholeAsset(57600)` | the asset is accepted |
@@ -5578,3 +5595,64 @@ tree unchanged, so nothing tracked was mutated to run this.
   of the two compilers emits is the same class of problem as the shim and this
   gate does not see it. `ubuntu-latest` is still the only reading of what the
   release lane's compiler says.
+
+---
+
+## 26. The release body that publishes twice (2026-11-03)
+
+RELEASE_NOTES.md's `## Unreleased` section is what `build-and-release.yml`
+composes a release body from, and nothing empties it, so an entry left there
+goes out again under the next tag. `v2026.10.18.0001` and `v2026.10.22.0001`
+published prose differing only in their checksum lines. `v2026.11.03.0004` did
+it again: its two entries were still under Unreleased after it shipped, and the
+file carried no `## v2026.11.03.0004` heading at all. The extraction the
+workflow runs over the shipped file reproduced 0004's published body byte for
+byte, both 1,286 bytes, same MD5.
+
+Both entries now sit under that heading, with a third for commit `1da34cc`,
+which shipped inside 0004 and published no entry of its own.
+
+### 26a. The gate
+
+```
+gh release view --json body --jq .body > prev-release-body.md
+PREV_BODY_FILE=prev-release-body.md bash ci/check-release-notes-rolled.sh
+```
+
+It compares `### ` heading lines. The previous release's body is the record of
+what published, so a heading out of it still sitting under Unreleased means that
+entry was never moved under its dated heading. The generated `### Installing
+this` and `### Checksums` are skipped, an empty Unreleased section passes, and a
+previous body carrying no entries passes.
+
+Five cases, run on this workstation with the real 0004 body off
+`api.github.com` and the real file at three states.
+
+| Case | Read |
+|---|---|
+| `PREV_BODY_FILE` unset | exit 1, naming the variable and how to fill it |
+| 0004's body against the rolled file | `PASS: release notes rolled, 2 shipped heading(s) checked against Unreleased` |
+| an empty previous body | passes, saying the previous release published no entries |
+| 0004's body against the file as it stood before the roll | exit 1, naming both headings and `2 entry/entries would publish a second time` |
+| the same, plus one new entry above them | exit 1, naming the same two and leaving the new one alone |
+
+The fourth case is the shipped defect exactly. The fifth is the shape the next
+one would take, since somebody adding an entry to a section nobody emptied gets
+a body that is not a byte-for-byte repeat, and a check comparing whole bodies
+would pass it.
+
+### 26b. Known gaps, recorded rather than discovered later
+
+- **No workflow calls it.** The step is written out in the lane's report and
+  nothing in `.github/` runs it, so the gate holds nothing until that lands. It
+  belongs in `build-and-release.yml` ahead of the compile, and reads the same on
+  a pull-request lane, where it would fail before main moves rather than after.
+- **It reads headings, not prose.** An entry re-worded into a new heading and
+  left under Unreleased publishes twice and passes this. A heading repeated on
+  purpose across two releases fails it.
+- **`gh` hangs on this workstation**, so every run here fed the body in from a
+  file fetched with `curl`. The `gh release view` line in the usage comment has
+  not been run anywhere.
+- **Not run on the release runner.** The script is `awk`, `sed`, `grep` and
+  `tr`; what CI's bash and coreutils make of it is unmeasured, the way
+  GCC 13.3 against 16.2.0 is unmeasured for section 19a.
