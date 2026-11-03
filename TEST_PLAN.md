@@ -5461,7 +5461,7 @@ an ordinary mutation push does not run it.
 | `check-asset-counters.sh` | wrapper | step + wrapper | step + wrapper |
 | `check-board-columns-call.sh` | wrapper | wrapper | step + wrapper |
 | `check-content-key-resolvers.sh` | step + wrapper | step + wrapper | step + wrapper |
-| `check-host-test-portability.sh` | step + wrapper | wrapper | wrapper |
+| `check-host-test-portability.sh` | step + wrapper | step + wrapper | wrapper |
 | `check-ram-budget-call.sh` | step | step | step |
 | `check-score-guard.sh` | wrapper | wrapper | step + wrapper |
 | `check-text-state.sh` | wrapper | wrapper | step + wrapper |
@@ -5759,3 +5759,294 @@ written down at its lines 21-24, and that workflow never runs on main.
 - **Nothing was committed, pushed or deployed.** The two commits already held
   unpushed in this tree, `01eb8a1` and `831e991`, were left alone.
 - **No device was flashed or commanded.**
+
+## 28. Six ways past the stub portability gate, and one false alarm (2026-11-03)
+
+Section 25c records `ci/check-host-test-portability.sh` as written earlier today.
+An adversarial read of it found six shapes it reported nothing on and one it
+reported wrongly. All seven were reproduced against the script as committed at
+`874f033` before anything changed.
+
+Each probe was an untracked file under `tests/`, written byte by byte with
+`WriteAllBytes` and `GetEncoding(28591)`, copied in with `cp`, gated on `cmp`
+against the copy, and deleted after. No tracked file was mutated to run any of
+this, and `git status` named only this lane's own edits at both ends. Every probe
+was CRLF, CR count equal to LF count, and `App/partitions.csv` was unmodified
+throughout.
+
+The baseline on the clean tree read `20 source files under tests/, across 5 stub
+directories` and then the pass line, exit 0.
+
+### 28a. The seven, reproduced before anything changed
+
+| Probe shape | Before | After |
+|---|---|---|
+| `gmtime_s` and `strcpy_s` in `tests/probe-portability.cc` | pass, exit 0, and the count still printed 20 | both reported at lines 8 and 9, exit 1 |
+| `static const char* kBlockOpen = "/*";` then a bare `gmtime_s` below it | pass, exit 0 | reported at line 7, exit 1 |
+| `#define WINFN(a, b) a##b` then `WINFN(gmtime, _s)(&t, &w);` | pass, exit 0 | pass, exit 0, open by decision |
+| `gmtime_s` under `#if defined(_WIN32) \|\| defined(__GLIBC__)` | pass, exit 0 | reported at line 7, exit 1 |
+| `gmtime_s` under `#ifdef _WIN32_WINNT_VISTA` | pass, exit 0 | reported at line 7, exit 1 |
+| `#if 1 /* keep */ && (gmtime_s(&t, &w) == 0)` | pass, exit 0 | reported at line 5, exit 1 |
+| `static const char* kNote = "this stub stands in for gmtime_s on Windows";` | reported at line 2, exit 1 | pass, exit 0 |
+
+### 28b. What changed, and what was left alone
+
+The compiler on ubuntu-24.04 is what decides this. It reads the macros, expands
+them and evaluates the conditionals, and its answer already arrives in the host
+test step. A text scan chasing token pasting, string concatenation, typedefs and
+function pointers is a preprocessor written in awk, and it would be wrong in ways
+nobody has listed yet. So five of the six closed on one missing piece each, the
+sixth is written into the script's header rather than chased, and the header now
+states what the script reads and what it leaves to the compiler. Its job is to
+name the reason in one line from `ci/build-firmware.sh` before a push, ahead of
+the step that decides, rather than to be a second opinion in CI.
+
+Comments, string literals and character literals come out of each line before
+the search. That closes the false alarm and the block-comment shape together: a
+name in a log string or a test name no longer fails the lane, and a `/*` inside a
+literal no longer opens a comment that runs to the end of the file.
+
+A quote with no partner on the same line stays in the output as itself rather
+than taking the rest of the line with it. A digit separator inside a numeric
+literal is one apostrophe, and swallowing from it would have hidden the code
+after it. That gap was opened by the literal handling, found by probe
+`keep-h.h`, and closed before the literal handling was kept.
+
+Ten extensions are read rather than three: `.h`, `.hpp`, `.hh`, `.hxx`, `.c`,
+`.cc`, `.cxx`, `.cpp`, `.inc` and `.ipp`.
+
+One enumeration of `tests/` is split between those extensions and a list of
+extensions that hold no code, so every file is either read or named, and a third
+spelling fails rather than going unread. The printed line reads `20 of 20 files
+under tests/ read, across 5 stub directories`, and the first figure is the scan's
+own count rather than what `find` handed it.
+
+A level is exempt only when its whole condition is one `_WIN32` test:
+`#ifdef _WIN32`, `#if defined(_WIN32)`, `#if _WIN32`, and the negated spelling of
+each. The old test was a substring, so `_WIN32_WINNT_VISTA` exempted its body and
+so did `defined(_WIN32) || defined(__GLIBC__)`. A condition mixing the test with
+another term is now read rather than exempted, which reports rather than skips,
+and nesting is the way to exempt such a body.
+
+A name on an `#if` or `#elif` line is read, except as the operand of `defined`,
+which asks whether a name exists rather than calling it.
+
+### 28c. The shapes that had to keep working, re-run after
+
+Nine more probes, same method. `#if defined(_WIN32)` without `#ifdef` stays
+quiet. A name nested under `#ifndef _WIN32` is reported. The `#else` of an
+`#ifdef _WIN32` is reported. Comments naming the functions stay quiet, and so
+does a plain C99 `snprintf`. A `#define` body holding `strcpy_s` is reported.
+`#if defined(gmtime_s)` stays quiet. A compound `_WIN32` condition is reported,
+which is the rule above rather than a defect. A bare `gmtime_s` is reported,
+which is the control. Reading `20 of 20` and the pass line on the clean tree
+before and after the whole sweep.
+
+Three more probes cover the counting. A file with an extension in neither list
+prints `20 of 21` and fails, naming the file. A `.md` file prints `20 of 21`,
+names itself as holding no code, and passes. A zero-byte header prints `20 of 21`
+and fails, because 21 files reached the scan and 20 produced a line.
+
+### 28d. Step order on the two lanes
+
+The portability step sat below the three host tests on `bench-cal.yml`, with a
+comment saying it ran before the compile so a Microsoft-only stub would not fail
+those tests with a wall of g++ output. A failing step ends the job, so the host
+test failed first and that diagnostic never arrived. It is now the first step
+after the two `uses:` lines on that lane.
+
+The release lane reached the gate only through `ci/build-firmware.sh`, which is
+its compile step, well below its own host tests, so the same ordering held there.
+It is now an unguarded step straight after checkout, which is how that lane runs
+every other gate, and the table in 25a reads `step + wrapper` under release for
+that row.
+
+`mut-host-test.yml` still reaches it through the wrapper in the `full-gate` job
+alone, which is opt-in by `[full-gate]` in the commit message. Left as it was.
+
+### 28e. What this does not cover
+
+- The token paste is open by decision. `#define WINFN(a, b) a##b` then
+  `WINFN(gmtime, _s)(&t, &w);` passes, and the script's header names token
+  pasting, a typedef, an alias and a function pointer among what it leaves to
+  the compiler.
+- No workflow ran. GitHub Actions can't be driven from here, and nothing was
+  committed or pushed. The three commits held unpushed in this tree, `01eb8a1`,
+  `831e991` and `874f033`, were left alone.
+- The script ran under Git Bash with GNU Awk 5.4.1. The awk program sticks to
+  POSIX features, with no `gensub`, no `ARGIND` and no three-argument `match`,
+  but which implementation `awk` resolves to on ubuntu-24.04 is unmeasured here.
+- A raw string literal, `R"(...)"`, is not understood. Its contents read as code,
+  which over-reports rather than under-reports, and nothing under `tests/` uses
+  one.
+- The other gate scripts under `ci/` were not re-read for the same two shapes.
+- No host test was compiled or run. What changed is one shell script and two
+  workflow files.
+- No device was flashed or commanded.
+
+## 29. Five ways past the content-key resolver gate (2026-11-03)
+
+`ci/check-content-key-resolvers.sh` grades per card descriptor as of section 24,
+which closed a keyless `sportslive` hiding in a file the gate called resolving.
+The grading only ever reached descriptors it could name, though, and the search
+for registering files read `App/*.cpp`. Five ways of registering a card went
+ungraded, and all five printed the gate's own baseline figures and its pass line.
+
+That is the same shape as the `sportslive` defect. The printed descriptor count
+stayed at 17 and the floor was `-lt 17`, exactly as the file count stayed at 16
+before. A floor that can't move when the thing it counts is hidden isn't a floor.
+
+### 29a. The five, reproduced on the shipped files
+
+Each was applied to `App/Aircraft.cpp`, which is CRLF and listed under `RESOLVES`,
+or written as a new file. Every mutation was gated on `cmp` against a byte-for-byte
+copy taken first, restored from that copy, confirmed with `cmp` again and
+`touch`ed. They were applied by byte-literal `ReadAllBytes`/`WriteAllBytes`
+through `[System.Text.Encoding]::GetEncoding(28591)` with CRLF in the anchor, not
+by `sed`: an LF anchor against a CRLF file matches nothing and writes nothing,
+and the run after it reads as a passing gate.
+
+The control for all five is a keyless `Cards::CardSpec extra;` registered as
+`Cards::registerCard(extra)`, which the gate already caught: `between them 18
+card descriptors` and `ERROR: App/Aircraft.cpp: is listed as resolving its own
+content key and its descriptor 'extra' assigns no listingId.`
+
+| What hid the descriptor | Why it hid | What the gate printed |
+|---|---|---|
+| the type `Cards::CardSpec` and the name `extra` on separate lines | `grep -oE` in `specs_in()` works per record | `16 files ... between them 17 card descriptors`, pass line |
+| `auto extra = Cards::CardSpec{};` | the regex wants `[[:space:]]+` after the type and `{` sits where that whitespace has to be | `16 files ... between them 17 card descriptors`, pass line |
+| `using Spec = Cards::CardSpec;` then `Spec extra;` | the name of the type at the declaration isn't `Cards::CardSpec` | `16 files ... between them 17 card descriptors`, pass line |
+| `App/ProbeCard.h` calling `Cards::registerCard(spec)` | `grep -l 'Cards::registerCard' App/*.cpp` reads no headers | `16 files ... between them 17 card descriptors`, pass line |
+| `App/extra/ProbeCard.cpp` | the glob is one directory level deep | `16 files ... between them 17 card descriptors`, pass line |
+
+In the first three the hidden descriptor assigns no `listingId`, so
+`ASSIGNED_ANYWHERE` and `ASSIGNED_TO_SPECS` stay equal and that tally never parts
+either. In the last two nothing about the file reached the gate at all.
+
+### 29b. What the gate reads now
+
+The registration calls are the census and the declarations are only how a
+registered card gets graded. Those two can disagree in one direction only: a
+descriptor spelled in a way the patterns don't recognise still has to be handed to
+`Cards::registerCard()` by name to become a card. So `Cards::registerCard(` is
+counted straight, every argument it names has to be a descriptor the gate
+recognised, and a spelling nobody thought of raises the registration tally
+without raising the descriptor tally. The two part company and the file fails
+naming the argument it can't place.
+
+Four declaration spellings are recognised: `Cards::CardSpec name;` including
+across a line break, `auto name = Cards::CardSpec{}`, and either alias form
+followed by `Alias name;`. Whitespace is squeezed to one space before any of that
+runs, so a wrapped statement reads like one that fitted while the space the type
+needs after it still keeps `Cards::CardSpec&` and `Cards::CardSpec*` out.
+
+`registerCard(` is also accounted for in full across every file swept. Each
+occurrence is either the declaration in `Cards.h`, the definition in
+`CardManager.cpp`, or a qualified call, and anything left over fails. That is what
+catches a call reaching the registry under another name.
+
+The file sweep is recursive and reads headers as well as translation units.
+`App/build` is pruned: it's gitignored output holding generated copies of the same
+files, and reading it would grade a stale duplicate of every card.
+
+Every figure printed is one the run measured, and all four floors come from the
+measurement:
+
+| Figure | On 2026-11-03 | What a fall means |
+|---|---|---|
+| source files swept under `App/` | 97 | files were removed, or the `find` stopped matching |
+| files registering a card | 16 | cards were removed, or the search for `Cards::registerCard` stopped matching |
+| card descriptors graded | 17 | cards were removed, or the declaration patterns stopped matching |
+| `Cards::registerCard()` calls | 17 | cards were removed, or the census the grading runs against stopped matching |
+
+The descriptor and registration counts also have to be equal, which is the figure
+a hidden descriptor can't leave alone. The `listingId` assignment total prints
+without a floor: it moves whenever a card legitimately changes lists, and a
+resolver going missing is already a named failure from the per-descriptor
+grading.
+
+### 29c. The runs, read off the gate's own lines
+
+| Run | Output |
+|---|---|
+| shipped files, before | `16 files in App/ register a card, between them 17 card descriptors`, pass line |
+| shipped files, after | `97 source files under App/, 16 of them register a card` / `17 card descriptors graded, 17 Cards::registerCard() calls, 8 listingId assignments`, pass line |
+| control, after | `18 card descriptors graded, 18 Cards::registerCard() calls`, 1 `ERROR` naming `'extra'` with no `listingId` |
+| type and name on separate lines | `18 ... 18`, the same `ERROR` naming `'extra'` |
+| `auto extra = Cards::CardSpec{};` | `18 ... 18`, the same `ERROR` naming `'extra'` |
+| `using Spec = Cards::CardSpec;` then `Spec extra;` | `18 ... 18`, the same `ERROR` naming `'extra'` |
+| `App/ProbeCard.h` | `98 source files ... 17 of them register a card` / `18 ... 18`, `ERROR: App/ProbeCard.h: registers a card and is in none of this gate's three lists.` |
+| `App/extra/ProbeCard.cpp` | `98 source files ... 17 of them register a card` / `18 ... 18`, `ERROR: App/extra/ProbeCard.cpp: registers a card and is in none of this gate's three lists.` |
+
+Every descriptor the new gate names matches what `specs_in()` named before it, one
+file at a time across all sixteen, which is how the rewrite was checked against
+the behaviour it replaces. The only descriptor it sees that the old one didn't is
+`gCards` in `CardManager.cpp`, the registry array itself, in a file that registers
+nothing and is therefore graded and counted nowhere.
+
+### 29d. Three more spellings, tried against the new gate
+
+None of these were on the list. They're what says the imbalance is a backstop
+rather than decoration.
+
+| Spelling | What the gate said |
+|---|---|
+| `Cards::CardSpec first, extra;` with both registered | `18 card descriptors graded, 19 Cards::registerCard() calls`, then `hands 'extra' to Cards::registerCard() and this gate cannot see where 'extra' was declared as a Cards::CardSpec` |
+| `using Cards::registerCard;` then `registerCard(extra);` | `18 ... 17`, then `reaches registerCard() 1 time(s) other than as Cards::registerCard(), as Cards.h's declaration, or as CardManager.cpp's definition` |
+| `Cards::registerCard(makeExtraSpec());` | `17 ... 18`, then `registers a Cards::CardSpec built in the call itself` |
+
+A declarator list names only the first descriptor, by decision. The second name
+then reaches the registration tally and the file fails on the imbalance, rather
+than on a parse of C++ declarators a shell script is in no position to write.
+
+### 29e. What it costs
+
+Wall clock on this workstation is unreadable right now with other lanes
+compiling, so this is CPU time, `user` plus `sys`, two runs apiece from the same
+shell.
+
+| | CPU time |
+|---|---|
+| before | 9.65s and 10.42s |
+| after | 2.00s and 2.07s |
+
+It got cheaper rather than dearer. The old version spawned `sed`, `grep`, `awk`
+and `sort` per file and then per descriptor; this one makes a single `awk` pass
+over all 97 files and does the list work in the shell with no further processes.
+The gate runs as a step on `build-and-release.yml` and `bench-cal.yml`, in the
+`full-gate` job of `mut-host-test.yml`, and from `ci/build-firmware.sh`, so the
+saving lands on every lane.
+
+### 29f. What this does not cover
+
+- A text gate is still what this is, and its patterns have now been widened twice
+  after one of them stopped matching. What would hold it outright is the registry:
+  `registerCard()` is the one function every card reaches, it has every descriptor
+  in its hand, and a decision passed to it as an argument would be checked by the
+  compiler at every call site whatever the spelling and whatever file it sat in.
+  `CardManager.cpp` names a graphics library and doesn't compile on a host, so
+  nothing in CI can walk that registry today, and that change would alter
+  `registerCard()`'s signature and all sixteen call sites. It needs the owner's
+  call and a design-document change first, and it wasn't made here.
+- A card that never calls `Cards::registerCard()` under any spelling of the name
+  is still invisible. The accounting above catches a `using` declaration and a
+  function pointer by count, but a registry reached some other way would leave
+  every figure where it is.
+- Comment stripping is a scan, not a parse. A `//` inside a string literal
+  truncates the rest of that line, which can only drop text and so can only
+  over-report a missing registration, and no raw string literal under `App/`
+  carries one of these patterns today. Every block comment under `App/` was read
+  for `Cards::CardSpec`, `Cards::registerCard` and `listingId` before the stripping
+  was added, and none carries any of the three, so no count moved because of it.
+- The script ran under Git Bash with GNU Awk 5.4.1. The awk program was also run
+  under `gawk --posix` and `gawk --traditional`, emitting the same 150 records
+  each time, so it reaches for no gawk extension. Which implementation `awk`
+  resolves to on ubuntu-24.04 is still unmeasured here.
+- The `97`, `16`, `17` and `17` floors were read on this date from this tree. Any
+  file added under `App/` raises the first and leaves the gate passing; removing
+  one trips it, which is the intent.
+- No firmware was compiled. What changed is one shell script. No workflow ran,
+  nothing was committed or pushed, and the three commits held unpushed in this
+  tree, `01eb8a1`, `831e991` and `874f033`, were left alone.
+- `App/partitions.csv` was unmodified at both ends, confirmed with `git status`.
+- No device was flashed or commanded.

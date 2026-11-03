@@ -49,9 +49,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # THE RELEASE DOES NOT PUBLISH OVER A FAILING HOST TEST. First step, before
-      # the core install, because it needs no toolchain and a failure here should
-      # cost seconds rather than the whole build.
+      # Above the host tests, because a stub reaching for a Microsoft-only
+      # interface fails those tests with a wall of g++ output naming the symbol
+      # and not the reason, and a failing step skips every later one, so a
+      # diagnostic below them never arrives. ci/build-firmware.sh runs this same
+      # script, and that is the compile step further down, which is after the
+      # host tests. Unguarded, the way this lane runs every gate, because here a
+      # missing gate script is itself the defect.
+      - name: Check the host test stubs use interfaces both runners have
+        run: bash ci/check-host-test-portability.sh
+
+      # THE RELEASE DOES NOT PUBLISH OVER A FAILING HOST TEST. Before the core
+      # install, because it needs no toolchain and a failure here should cost
+      # seconds rather than the whole build.
       #
       # bench-cal.yml runs the same script, but only on pull requests. Work that
       # reaches main by merge never re-ran it, and the test stopped linking on

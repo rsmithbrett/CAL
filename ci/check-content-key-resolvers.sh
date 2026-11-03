@@ -32,11 +32,74 @@
 # other lvalue fails. `Cards::CardSpec& s = spec; s.listingId = &f;` satisfies a
 # search for `spec.listingId=` while telling nobody which card got one.
 #
-# A text gate rather than a test, in the same spirit as ci/check-score-guard.sh
-# and ci/check-board-columns-call.sh beside it. CardManager.cpp names a graphics
-# library and does not compile on a host, so the fallback order it applies can
-# only be held this way. tests/personal-photos-key-test.cpp is what drives the
-# photograph card's resolver through its own cases.
+# --- what the census is anchored on ------------------------------------------
+#
+# The registration calls are the census and the descriptor declarations are only
+# how a registered card gets graded. That order matters, because the two can
+# disagree in exactly one direction: a descriptor declared in a spelling the
+# patterns below do not recognise still has to be handed to
+# Cards::registerCard() by name to become a card at all. So REGISTRATIONS is
+# counted straight off `Cards::registerCard(` and every argument it names has to
+# be a descriptor this gate recognised. A spelling nobody here thought of raises
+# the registration tally without raising the descriptor tally, the two part
+# company, and the file fails naming the argument it cannot place. A declaration
+# pattern that stops matching therefore fails loudly rather than grading a
+# shorter list.
+#
+# Four spellings are recognised as a declaration: `Cards::CardSpec name;`
+# including when the type and the name sit on separate lines, `auto name =
+# Cards::CardSpec{}`, and either alias form (`using A = Cards::CardSpec;` or
+# `typedef Cards::CardSpec A;`) followed by `A name;`. A declarator list
+# (`Cards::CardSpec a, b;`) names only the first, and that is deliberate: the
+# second name then reaches the registration tally and the file fails on the
+# imbalance rather than on a parse of C++ declarators this script is in no
+# position to write.
+#
+# Whitespace is squeezed to one space before any of that runs, so a statement
+# that wraps across lines reads the same as one that fits, and the whitespace the
+# type needs after it is still there to keep `Cards::CardSpec&` and
+# `Cards::CardSpec*` out. Those are not cards, they are second names for one, and
+# the assignment tally below is what refuses either as a route to a resolver.
+#
+# `registerCard(` is also accounted for in full across every file swept. Every
+# occurrence is either the declaration in Cards.h, the definition in
+# CardManager.cpp, or a qualified `Cards::registerCard(` call, and anything else
+# fails. That is what catches a call reaching the registry under another name,
+# through a `using` declaration or a function pointer, which no list here would
+# ever see.
+#
+# --- how much it read --------------------------------------------------------
+#
+# Every figure printed is one this run measured, and the floors are set from the
+# measurement rather than asserted ahead of it. A gate whose pattern stopped
+# matching passes by finding nothing, and the figures are the only way to see
+# that from the outside, so they print whether or not anything failed. The file
+# sweep's own breadth is in there for the same reason: the search was one level
+# deep and read no headers once, and a card registered from either place was
+# graded by nothing while every other figure stayed where it was.
+#
+# The listingId assignment total prints without a floor. It moves whenever a card
+# legitimately changes lists, and a resolver that goes missing is already a named
+# failure from the per-descriptor grading below.
+#
+# --- what this cannot hold ---------------------------------------------------
+#
+# This is a text gate, and the widening above is the second time its patterns
+# have been widened after one of them stopped matching. What would hold it
+# outright is the registry itself: registerCard() is the one function every card
+# reaches, it has every descriptor in its hand, and a decision passed to it as an
+# argument would be checked by the compiler at every call site no matter how the
+# descriptor was spelled or which file it sat in. CardManager.cpp names a
+# graphics library and does not compile on a host, so nothing in CI can walk that
+# registry today. Until something can, the figures above are the whole defence,
+# and they are a statement about what was read, not a proof that a card cannot
+# hide.
+#
+# A text gate in the same spirit as ci/check-score-guard.sh and
+# ci/check-board-columns-call.sh beside it. The fallback order noteShowing()
+# applies can only be held this way for the same compile reason.
+# tests/personal-photos-key-test.cpp is what drives the photograph card's
+# resolver through its own cases.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -50,7 +113,8 @@ say() {
 
 # A file read as one run of characters with the line comments, then the spacing
 # and the line breaks, taken out, so a statement that wraps reads the same as one
-# that fits.
+# that fits. Used by the noteShowing() and CheckIn.cpp checks at the bottom,
+# which are fixed-string matches against one statement apiece.
 #
 # Line comments go first because every pattern here is a fixed string and a fixed
 # string cannot tell a statement from a commented-out copy of one. These files
@@ -74,6 +138,9 @@ lacks() {
 }
 
 # --- the three lists ---------------------------------------------------------
+#
+# Keyed on the path under App/, so a file in a subdirectory is named by that path
+# and lands in no list until somebody puts it in one.
 #
 # Cards that resolve their own key, because the module is the only thing that can
 # name what it drew. Most of these walk a feed and only the module knows which
@@ -115,60 +182,283 @@ in_list() {
   return 1
 }
 
-# --- every file that registers a card ---------------------------------------
-REGISTRARS=$(grep -l 'Cards::registerCard' App/*.cpp 2>/dev/null | xargs -n1 basename | sort)
+# --- every source file under App/ -------------------------------------------
+#
+# Recursive, and headers as well as translation units, because a registration
+# reaches the registry from wherever it is written. App/build holds generated
+# copies of these same files and is pruned: it is gitignored output, and reading
+# it would grade a stale duplicate of every card.
+mapfile -t SOURCES < <(find App -type d -name build -prune -o -type f \
+  \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.c' -o -name '*.ino' \) \
+  -print | sort)
 
-if [ -z "$REGISTRARS" ]; then
-  echo "ERROR: no file in App/ calls Cards::registerCard, so this gate checked nothing." >&2
+SOURCE_COUNT=${#SOURCES[@]}
+
+if [ "$SOURCE_COUNT" -eq 0 ]; then
+  echo "ERROR: no source file was found under App/, so this gate read nothing." >&2
   exit 1
 fi
 
-# The names a file declares as a Cards::CardSpec of its own, one per card it
-# registers.
+# One pass over every file, reporting what each holds as tab-separated records.
 #
-# Whitespace after the type is required, which is what keeps a reference or a
-# pointer declaration out: `Cards::CardSpec&` and `Cards::CardSpec*` both put a
-# character where that whitespace has to be. Those are not cards, they are second
-# names for one, and the assignment tally below is what refuses either as a route
-# to a resolver.
-specs_in() {
-  sed 's://.*::' "App/$1" \
-    | grep -oE 'Cards::CardSpec[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' \
-    | awk '{ print $NF }' | sort -u || true
-}
+# Comments come out first, block as well as line, as a scan with the state
+# carried across records: these files explain their own registration in remarks
+# that quote it, and a fixed-string search cannot tell a statement from a
+# commented copy of one. \r goes with them, because a carriage return inside a
+# joined statement stops every pattern here from matching.
+#
+# Then two readings of the same file. SQUEEZED keeps one space wherever there was
+# any whitespace, which is what the declaration patterns need to separate a type
+# from a name. TIGHT has the spaces gone as well, which is what the registration
+# and assignment counts read, so `spec.listingId = &f` and `spec.listingId=&f`
+# count the same.
+RECORDS=$(awk '
+  function countOf(hay, needle,    n, p, start) {
+    n = 0
+    start = 1
+    while (1) {
+      p = index(substr(hay, start), needle)
+      if (p == 0) { return n }
+      n++
+      start = start + p - 1 + length(needle)
+    }
+  }
 
-# How many files were graded and how many descriptors in them, printed whether or
-# not anything failed. A gate whose pattern stopped matching passes by finding
-# nothing, and the only way to see that from the outside is to have it say how
-# much it looked at. Both figures matter: the file count alone stayed at 16 while
-# a keyless card hid inside one of them.
-REGISTRAR_COUNT=$(printf '%s\n' $REGISTRARS | wc -l | tr -d ' ')
+  function report(path,    rel, tight, i, rest, piece, name, k, total, strays,
+                  regs, tok, pos, q, a, cnt, nulls) {
+    rel = path
+    sub(/^App\//, "", rel)
+
+    # Runs of whitespace down to one space, which is what lets a declaration
+    # wrapped across lines read like one that fitted, and what leaves the space
+    # the type needs after it for the patterns below.
+    gsub(/[ \t]+/, " ", SQUEEZED)
+
+    tight = SQUEEZED
+    gsub(/ /, "", tight)
+
+    split("", decl)
+    split("", alias)
+
+    # `Cards::CardSpec name`, with the whitespace after the type keeping a
+    # reference or a pointer declaration out.
+    rest = SQUEEZED
+    while (match(rest, /Cards::CardSpec [A-Za-z_][A-Za-z0-9_]*/)) {
+      piece = substr(rest, RSTART, RLENGTH)
+      decl[substr(piece, length("Cards::CardSpec ") + 1)] = 1
+      rest = substr(rest, RSTART + RLENGTH)
+    }
+
+    # `auto name = Cards::CardSpec{}`, where the brace sits where the pattern
+    # above wants its whitespace.
+    rest = SQUEEZED
+    while (match(rest, /auto [A-Za-z_][A-Za-z0-9_]* ?= ?Cards::CardSpec/)) {
+      piece = substr(rest, RSTART, RLENGTH)
+      sub(/^auto /, "", piece)
+      sub(/ ?= ?Cards::CardSpec$/, "", piece)
+      decl[piece] = 1
+      rest = substr(rest, RSTART + RLENGTH)
+    }
+
+    # Either alias form, and then the names declared through the alias.
+    rest = SQUEEZED
+    while (match(rest, /using [A-Za-z_][A-Za-z0-9_]* ?= ?Cards::CardSpec ?;/)) {
+      piece = substr(rest, RSTART, RLENGTH)
+      sub(/^using /, "", piece)
+      sub(/ ?= ?Cards::CardSpec ?;$/, "", piece)
+      alias[piece] = 1
+      rest = substr(rest, RSTART + RLENGTH)
+    }
+    rest = SQUEEZED
+    while (match(rest, /typedef Cards::CardSpec [A-Za-z_][A-Za-z0-9_]* ?;/)) {
+      piece = substr(rest, RSTART, RLENGTH)
+      sub(/^typedef Cards::CardSpec /, "", piece)
+      sub(/ ?;$/, "", piece)
+      alias[piece] = 1
+      rest = substr(rest, RSTART + RLENGTH)
+    }
+    for (a in alias) {
+      rest = SQUEEZED
+      while (match(rest, "(^|[^A-Za-z0-9_:])" a " [A-Za-z_][A-Za-z0-9_]*")) {
+        piece = substr(rest, RSTART, RLENGTH)
+        k = index(piece, a " ")
+        decl[substr(piece, k + length(a) + 1)] = 1
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+    }
+
+    # Every registerCard( in the file, and the two forms that are the
+    # declaration and the definition rather than a call. What is left over is a
+    # call reaching the registry under some other name.
+    total = countOf(tight, "registerCard(")
+    regs = countOf(tight, "Cards::registerCard(")
+    strays = total - regs - countOf(tight, "registerCard(constCardSpec&")
+
+    printf "FILE\t%s\t%d\t%d\t%d\n", rel, regs, \
+      countOf(tight, "listingId="), strays
+
+    for (name in decl) { printf "DECL\t%s\t%s\n", rel, name }
+
+    # What each registration names. A token that is not a bare identifier is
+    # reported as it reads, so the message can quote it.
+    pos = 1
+    while (1) {
+      q = index(substr(tight, pos), "Cards::registerCard(")
+      if (q == 0) { break }
+      pos = pos + q - 1 + length("Cards::registerCard(")
+      rest = substr(tight, pos)
+      k = index(rest, ")")
+      if (k == 0) { tok = rest } else { tok = substr(rest, 1, k - 1) }
+      printf "ARG\t%s\t%s\n", rel, tok
+    }
+
+    for (name in decl) {
+      cnt = countOf(tight, name ".listingId=")
+      nulls = countOf(tight, name ".listingId=nullptr")
+      printf "ASSIGN\t%s\t%s\t%d\t%d\n", rel, name, cnt, nulls
+    }
+  }
+
+  FILENAME != current {
+    if (current != "") { report(current) }
+    current = FILENAME
+    SQUEEZED = ""
+    inblock = 0
+  }
+
+  {
+    line = $0
+    sub(/\r$/, "", line)
+
+    code = ""
+    i = 1
+    len = length(line)
+    while (i <= len) {
+      two = substr(line, i, 2)
+      if (inblock) {
+        if (two == "*/") { inblock = 0; i += 2 } else { i++ }
+        continue
+      }
+      if (two == "/*") { inblock = 1; i += 2; continue }
+      if (two == "//") { break }
+      code = code substr(line, i, 1)
+      i++
+    }
+
+    SQUEEZED = SQUEEZED " " code
+  }
+
+  END {
+    if (current != "") { report(current) }
+  }
+' "${SOURCES[@]}")
+
+declare -A FILE_REGS=() FILE_ASSIGNED=() FILE_STRAYS=()
+declare -A SPECS_OF=() ARGS_OF=() SPEC_ASSIGNED=() SPEC_NULLED=()
+
+REGISTRARS=""
+REGISTRATION_COUNT=0
 DESCRIPTOR_COUNT=0
+ASSIGNMENT_COUNT=0
+STRAY_COUNT=0
+
+while IFS=$'\t' read -r tag file a b c; do
+  case "$tag" in
+    FILE)
+      FILE_REGS["$file"]=$a
+      FILE_ASSIGNED["$file"]=$b
+      FILE_STRAYS["$file"]=$c
+      STRAY_COUNT=$((STRAY_COUNT + c))
+      if [ "$a" -gt 0 ]; then
+        REGISTRARS="$REGISTRARS $file"
+        REGISTRATION_COUNT=$((REGISTRATION_COUNT + a))
+        ASSIGNMENT_COUNT=$((ASSIGNMENT_COUNT + b))
+      fi
+      ;;
+    DECL)
+      SPECS_OF["$file"]="${SPECS_OF[$file]-} $a"
+      ;;
+    ARG)
+      ARGS_OF["$file"]="${ARGS_OF[$file]-} $a"
+      ;;
+    ASSIGN)
+      SPEC_ASSIGNED["$file/$a"]=$b
+      SPEC_NULLED["$file/$a"]=$c
+      ;;
+  esac
+done <<< "$RECORDS"
+
+REGISTRARS=$(printf '%s\n' $REGISTRARS | sort)
+REGISTRAR_COUNT=$(printf '%s\n' $REGISTRARS | grep -c . || true)
+
 for file in $REGISTRARS; do
-  n=$(specs_in "$file" | wc -l | tr -d ' ')
+  n=$(printf '%s\n' ${SPECS_OF[$file]-} | grep -c . || true)
   DESCRIPTOR_COUNT=$((DESCRIPTOR_COUNT + n))
 done
 
-echo "    $REGISTRAR_COUNT files in App/ register a card, between them $DESCRIPTOR_COUNT card descriptors"
+# --- what this run read ------------------------------------------------------
+echo "    $SOURCE_COUNT source files under App/, $REGISTRAR_COUNT of them register a card"
+echo "    $DESCRIPTOR_COUNT card descriptors graded, $REGISTRATION_COUNT Cards::registerCard() calls, $ASSIGNMENT_COUNT listingId assignments"
+
+if [ "$REGISTRAR_COUNT" -eq 0 ]; then
+  echo "ERROR: no file under App/ calls Cards::registerCard, so this gate checked nothing." >&2
+  exit 1
+fi
+
+if [ "$SOURCE_COUNT" -lt 97 ]; then
+  echo "ERROR: only $SOURCE_COUNT source files were swept under App/ and there were 97 on
+       2026-11-03. Either files were removed, or the find above stopped matching and the
+       grading below ran over less than App/ holds." >&2
+  FAIL=1
+fi
 if [ "$REGISTRAR_COUNT" -lt 16 ]; then
   echo "ERROR: only $REGISTRAR_COUNT registering files were found and there were 16 on
-       2026-11-03. Either cards were removed, or the grep above stopped matching and
-       this gate is checking less than it reads." >&2
+       2026-11-03. Either cards were removed, or the search for Cards::registerCard
+       stopped matching and this gate is checking less than it reads." >&2
   FAIL=1
 fi
 if [ "$DESCRIPTOR_COUNT" -lt 17 ]; then
-  echo "ERROR: only $DESCRIPTOR_COUNT card descriptors were found and there were 17 on
-       2026-11-03. Either cards were removed, or specs_in() stopped matching and every
-       grade below was handed out on a shorter list than the files hold." >&2
+  echo "ERROR: only $DESCRIPTOR_COUNT card descriptors were graded and there were 17 on
+       2026-11-03. Either cards were removed, or the declaration patterns stopped matching
+       and every grade below was handed out on a shorter list than the files hold." >&2
+  FAIL=1
+fi
+if [ "$REGISTRATION_COUNT" -lt 17 ]; then
+  echo "ERROR: only $REGISTRATION_COUNT Cards::registerCard() calls were found and there
+       were 17 on 2026-11-03. Either cards were removed, or the count stopped matching,
+       which takes the census this gate grades against with it." >&2
   FAIL=1
 fi
 
-for file in $REGISTRARS; do
-  CODE=$(sed 's://.*::' "App/$file")
-  FLAT=$(printf '%s\n' "$CODE" | tr -d ' \t\r\n')
-  SPECS=$(specs_in "$file")
+# The one figure a hidden descriptor cannot leave alone. Becoming a card means
+# being handed to Cards::registerCard(), so a descriptor the declaration patterns
+# above cannot see still raises this count, and the two part company here.
+if [ "$REGISTRATION_COUNT" != "$DESCRIPTOR_COUNT" ]; then
+  echo "ERROR: $REGISTRATION_COUNT Cards::registerCard() calls against $DESCRIPTOR_COUNT
+       descriptors this gate could name. Every registration has to name a descriptor
+       declared as 'Cards::CardSpec <name>;', and every descriptor has to be registered by
+       its own name, so these two figures are the same number or something registered here
+       was graded by nothing. The per-file errors below name which." >&2
+  FAIL=1
+fi
 
-  if [ -z "$SPECS" ]; then
+if [ "$STRAY_COUNT" -ne 0 ]; then
+  for file in $(printf '%s\n' "${!FILE_STRAYS[@]}" | sort); do
+    if [ "${FILE_STRAYS[$file]}" -ne 0 ]; then
+      say "App/$file" "reaches registerCard() ${FILE_STRAYS[$file]} time(s) other than as
+           Cards::registerCard(), as Cards.h's declaration, or as CardManager.cpp's
+           definition. A call arriving through a using declaration or a function pointer
+           registers a card that no list here names and no grade below reaches. Call it as
+           Cards::registerCard(<descriptor>)."
+    fi
+  done
+fi
+
+for file in $REGISTRARS; do
+  SPECS=${SPECS_OF[$file]-}
+  ARGS=${ARGS_OF[$file]-}
+
+  if [ -z "${SPECS// /}" ]; then
     say "App/$file" "calls Cards::registerCard and declares no Cards::CardSpec this gate
          can name, so none of its cards were graded. Declare the descriptor as
          'Cards::CardSpec <name>;' and fill it in, the way every other card module here
@@ -184,15 +474,43 @@ for file in $REGISTRARS; do
     continue
   fi
 
+  # Every registration names a descriptor this gate graded. This is where a
+  # declaration spelling the patterns above do not recognise comes out: the
+  # registration still has to name the thing, and the name lands nowhere.
+  for arg in $ARGS; do
+    if in_list "$arg" "$SPECS"; then
+      continue
+    fi
+    # The argument is read as far as the first closing parenthesis, so anything
+    # built in the call arrives here with its own punctuation attached and gets
+    # the message that fits it.
+    case "$arg" in
+      [A-Za-z_]*)
+        if [ -z "${arg//[A-Za-z0-9_]/}" ]; then
+          say "App/$file" "hands '$arg' to Cards::registerCard() and this gate cannot see
+               where '$arg' was declared as a Cards::CardSpec, so that card was graded by
+               nothing. The descriptors it can name here are ($(echo $SPECS)). Declare it
+               as 'Cards::CardSpec $arg;' and fill it in, the way every other card module
+               here does."
+          continue
+        fi
+        ;;
+    esac
+    say "App/$file" "registers a Cards::CardSpec built in the call itself, as
+         'Cards::registerCard($arg...'. A descriptor with no name of its own is graded by
+         nothing here, because every check below is per descriptor and reaches one through
+         its name. Declare it as 'Cards::CardSpec <name>;', fill it in, and hand that name
+         to Cards::registerCard()."
+  done
+
   # Every listingId assignment in the file lands on a descriptor named above.
   # The count is the pin rather than the spelling: an assignment through a
   # reference, a pointer or a dereference reads as a resolver to the compiler and
   # names no card here, so the two tallies part company and this fails.
-  ASSIGNED_ANYWHERE=$(printf '%s' "$FLAT" | grep -oF 'listingId=' | wc -l | tr -d ' ' || true)
+  ASSIGNED_ANYWHERE=${FILE_ASSIGNED[$file]}
   ASSIGNED_TO_SPECS=0
   for spec in $SPECS; do
-    n=$(printf '%s' "$FLAT" | grep -oF "$spec.listingId=" | wc -l | tr -d ' ' || true)
-    ASSIGNED_TO_SPECS=$((ASSIGNED_TO_SPECS + n))
+    ASSIGNED_TO_SPECS=$((ASSIGNED_TO_SPECS + ${SPEC_ASSIGNED[$file/$spec]-0}))
   done
   if [ "$ASSIGNED_ANYWHERE" != "$ASSIGNED_TO_SPECS" ]; then
     say "App/$file" "has $ASSIGNED_ANYWHERE listingId assignment(s) and only
@@ -203,7 +521,7 @@ for file in $REGISTRARS; do
   fi
 
   for spec in $SPECS; do
-    if ! printf '%s' "$FLAT" | grep -qF "Cards::registerCard($spec)"; then
+    if ! in_list "$spec" "$ARGS"; then
       say "App/$file" "declares the card descriptor '$spec' and never hands it to
            Cards::registerCard($spec). A descriptor registered through another name is
            graded by nothing here."
@@ -215,8 +533,8 @@ for file in $REGISTRARS; do
     # `listingIdFor(index)` among them - so the pin is the assignment rather than
     # what it names, and `= nullptr` is the one value that assigns no resolver.
     RESOLVER=no
-    if printf '%s' "$FLAT" | grep -qF "$spec.listingId=" \
-       && ! printf '%s' "$FLAT" | grep -qF "$spec.listingId=nullptr"; then
+    if [ "${SPEC_ASSIGNED[$file/$spec]-0}" -gt 0 ] \
+       && [ "${SPEC_NULLED[$file/$spec]-0}" -eq 0 ]; then
       RESOLVER=yes
     fi
 
