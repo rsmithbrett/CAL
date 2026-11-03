@@ -4679,3 +4679,138 @@ photographs are the record that the screen was looked at.
   12.3 were computed by hand and are arithmetic, not a test.
 - **No device has been touched.** Every step above is a human at a bench with a
   powered unit, and none of them has been performed.
+---
+
+## 21. A reported count that rolled over (2026-11-03)
+
+`Assets.cpp`'s `recordDecodeFailure()` incremented `gDecodeFailureCount` with a
+bare `++` on a `uint8_t`. `gAllocationRefusals`, declared nine lines below it in
+the same anonymous namespace, guarded the same type with
+`if (gAllocationRefusals < UINT8_MAX)`. The file held two shapes for one
+problem, and the unguarded one was on the counter whose value leaves the device.
+
+The figure rides the check-in request as `assetDecodeFailureCount`, and the
+4-id cap beside it is a cap on the id list rather than on the count: the dedup
+drops a repeat of an id already listed, so each listed asset counts once, and a
+fifth bad asset never reaches the list and counts again on every redraw. One
+card failing all day is what takes the figure past 255. Wrapped it reads as
+fewer failures than occurred, and at exactly 256, 512 and so on it reads as 0 -
+which is what `CheckIn.cpp` tests, twice. A count of 0 withholds
+`assetDecodeFailureIds` with it and skips `clearDecodeFailures()` after a
+successful round trip, so the ids pin and the next cycle opens on a count that
+is already wrong.
+
+Both counters now go through `ReportedCounter::countOne()` in
+`App/ReportedCounter.h`, which holds at `ReportedCounter::kCeiling`. 255 means
+"255 or more", and the refusal log line says `or more` when it is there.
+`gCheapRefetchCount` is deliberately left alone: it is compared against
+`kMaxCheapRefetches` before it is incremented, so it cannot reach the end of its
+type, and that comparison is also the per-boot fetch budget.
+
+### 21a. The host test
+
+```
+bash ci/test-reported-counter.sh
+```
+
+No stubs: `ReportedCounter.h` includes only `<stdint.h>`. `countOne()` and
+`atCeiling()` are `constexpr`, so every case is asserted twice over - as a
+`static_assert` over a `constexpr` walk and again at runtime - and a widened
+predicate stops the compile on any toolchain as well as printing a failure under
+a runner.
+
+| Check | What it pins |
+|---|---|
+| `after(n) == n` for every `n` from 0 to 255 | every occurrence inside the range is counted. A ceiling that bit early would be the id-list cap again by another name |
+| `after(256) == 255`, and `!= afterWrapping(256)` | the occurrence that matters most. `CheckIn.cpp` reads 0 as nothing to report, so this is where the id list and the clear were lost |
+| `after(n) == 255` for the 64 occurrences past the end | it holds, rather than holding once and then moving |
+| `afterWrapping(257) == 1`, `(260) == 4`, `(511) == 255` | a wrapped figure is a plausible small number at every step, which is why nothing in a report says it is not the real one |
+| `fromCeiling(1)`, `fromCeiling(50)` | counting on from a value already at the ceiling, which is the state the next occurrence arrives in |
+| `kCeiling == UINT8_MAX` | the ceiling is the field's own limit. One chosen beside the type can be lower than what the field carries |
+| `atCeiling(0)`, `(254)`, `(255)` | what lets the log line say "or more" |
+
+### 21b. The call-site gate
+
+```
+bash ci/check-asset-counters.sh
+```
+
+Nothing in 21a reads `App/Assets.cpp`, and nothing can: that translation unit
+names `SD`, `HTTPClient`, `NetworkClientSecure`, `mbedtls` and two ESP-IDF
+headers, so a host build of it needs a stub set larger than the thing it would
+test - the reason section 19d gives for `BrandSplash`. So a bare `++` on either
+counter compiles, links, passes every host test and reports a wrapped figure.
+This gate is what reads the increments. It checks the include, that neither
+reported counter is incremented any other way, that every `countOne()` call in
+the file names a counter the gate knows, that the count still runs after the
+id-list branch closes, and that the refetch budget keeps its cap check.
+
+### 21c. The runs
+
+Read off each runner's own line, not an exit status. `ci/check-asset-counters.sh`
+was written and run **before** the fix, against the shipped `Assets.cpp`: 7
+`ERROR` lines and no `PASS` line. The host test came after the header, and the
+header was then mutated back to the shipped shape to prove the test bites, which
+is 21d.
+
+| Run | Result |
+|---|---|
+| `ci/check-asset-counters.sh` on the shipped `Assets.cpp`, before the fix | 7 `ERROR` lines, no `PASS` line |
+| `ci/test-reported-counter.sh` on `ReportedCounter.h` as it ships | `PASS: reported counter - every occurrence to 255 counted, and the 64 past it hold` |
+| `ci/check-asset-counters.sh` after the fix | `PASS: asset counters - both reported counters go through countOne(), the count stays outside the id-list branch, the refetch budget keeps its cap check` |
+
+### 21d. The mutations, and what each one did
+
+Run on this workstation's `g++ 16.2.0`. Each mutation was gated on `cmp`
+against a copy of the file before it was judged, because a pattern that never
+applied reads as a passing test, and each file was restored and its mtime
+refreshed afterwards.
+
+Against `App/ReportedCounter.h`:
+
+| Mutation | Result |
+|---|---|
+| `countOne()` back to a bare `++count` - the shipped defect | 7 `static_assert`s fail, and the compile stops before the runtime walk. The reductions printed are `(0 == 255)` at 256, `(1 == 255)` at 257, `(232 == 255)` at 1,000 |
+| `kCeiling` lowered to 200 | 12 `static_assert`s fail, starting at `after(254) == 254`. A ceiling under the field withholds counts the report has room for, and `ci/check-asset-counters.sh` names it too |
+
+Against `App/Assets.cpp`, each judged by the gate:
+
+| Mutation | Result |
+|---|---|
+| `gDecodeFailureCount++` put back | 3 `ERROR` lines: incremented directly, never reaches `countOne()`, and the count no longer sits after the id-list branch |
+| `gAllocationRefusals` guarded inline with `if (... < UINT8_MAX)` instead | 2 `ERROR` lines. A second copy of the ceiling is a second thing to keep right, so the gate refuses it even though it counts correctly today |
+| the count moved inside the `kMaxReportedDecodeFailures` branch | 1 `ERROR` line. This is the defect no ceiling can see: the figure would stop at 4 and say nothing the id list does not already say |
+| `#include "ReportedCounter.h"` dropped | 1 `ERROR` line |
+| `gCheapRefetchCount >= kMaxCheapRefetches` dropped | 1 `ERROR` line. That comparison is both the fetch budget and the reason the third counter needs no ceiling |
+
+### 21e. Known gaps, recorded rather than discovered later
+
+- **No device has been touched, flashed or commanded.** The defect was found by
+  reading and the fix is checked by compilation and arithmetic.
+- **Nothing has reported 255.** No device has been observed at or past the
+  ceiling; the figures in 21a are the type's range, not a measurement. What a
+  wrapped count looked like on the wire is read off `CheckIn.cpp`, not out of a
+  stored request.
+- **The gate cannot see what the device reports.** It knows which function each
+  increment runs through. That `assetDecodeFailureCount` carries the value
+  `decodeFailureCount()` returns is read off the source.
+- **The gate is a text match, not a parser.** Its placement check reads that the
+  count comes after the id-list branch closes, which a `countOne()` wrapped in
+  some other condition further down would also satisfy. It catches the move
+  into the branch, which is the mutation it was written for, and it would pass a
+  count made conditional on something else.
+- **The wire contract is unchanged and the server was not touched.** The field
+  is the same optional 8-bit integer it was, omitted when the count is 0. What
+  changes is which values it can hold: 255 now means "255 or more" where before
+  the figure could be any wrapped value. No `CheckInResponse` or simulator
+  change goes with it. A server that wanted to tell 255 from 4,000 apart would
+  need an additive optional field of its own, and nothing asks for one.
+- **One board compiled, and not on CI.** `arduino-cli compile` of `App` for
+  `esp32:esp32:esp32:PartitionScheme=min_spiffs` finished with 0 errors: 1,581,551
+  bytes of program storage (80%) and 115,460 bytes of globals. The S3 was not
+  compiled. This workstation builds against the core overlay and CI builds
+  stock, so that figure is this machine's, not CI's, and CI is still the gate.
+- **That compile ran over a tree holding another lane's work in progress.**
+  `App/PersonalPhotos.cpp` was being edited by a second lane at the time. It
+  proves `Assets.cpp` and `ReportedCounter.h` compile; it is not a clean-tree
+  measurement of anything else.

@@ -3359,7 +3359,22 @@ not just `Graphic.cpp`.
 Server-side, `CheckInGatewayService.ProcessCheckInAsync` records a failed
 `AssetDecodeFailure` audit event when this is non-empty - same "audited,
 not merely logged" treatment `CardPolicyMismatch` already gets on
-`/diag/audit`, for the different silent failure this one is.
+`/diag/audit`, for the different unreported failure this one is.
+
+**The count holds at 255 rather than rolling over.** Four ids is the cap on the
+id list, not on the count. The dedup drops a repeat of an id already listed, so
+each listed asset counts once; everything else counts, and a fifth bad asset
+never reaches the list, so it counts again on every redraw. One card failing all
+day therefore runs the figure well past the four ids beside it, which is the
+difference the count exists to show. It rides the check-in request as an 8-bit
+field. Both that counter and the allocation-refusal counter beside it go through
+`ReportedCounter::countOne()` in `App/ReportedCounter.h`, which holds at
+`ReportedCounter::kCeiling`. A device reporting 255 is saying "255 or more",
+which is a floor on what happened rather than a measurement of it. A figure
+that wrapped would read as fewer failures than occurred, and at exactly 256
+occurrences it would read as none - which also withholds the id list and skips
+the clear that a successful check-in performs, so the ids pin and the next
+cycle's report starts from a count that is already wrong.
 
 ## The likely root cause: the SD card's SPI lines are shared with the display's, by hardware design
 

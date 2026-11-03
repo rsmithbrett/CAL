@@ -49,6 +49,18 @@ jobs:
       - name: Check what a score below zero does
         if: ${{ hashFiles('ci/check-score-guard.sh') != '' }}
         run: bash ci/check-score-guard.sh
+      - name: Test the reported counters past the end of a uint8_t on host
+        if: ${{ hashFiles('ci/test-reported-counter.sh') != '' }}
+        run: bash ci/test-reported-counter.sh
+      - name: Check the asset counters' call sites
+        if: ${{ hashFiles('ci/check-asset-counters.sh') != '' }}
+        run: bash ci/check-asset-counters.sh
+      - name: Test the personal photographs content key on host
+        if: ${{ hashFiles('ci/test-personal-photos-key.sh') != '' }}
+        run: bash ci/test-personal-photos-key.sh
+      - name: Check every card has decided what its draws report
+        if: ${{ hashFiles('ci/check-content-key-resolvers.sh') != '' }}
+        run: bash ci/check-content-key-resolvers.sh
 
   full-gate:
     # The arduino-cli half of the release gate, for mutations that only a real
@@ -75,6 +87,9 @@ jobs:
       - name: Test the RAM picture budget against the TLS pool on host
         if: ${{ hashFiles('ci/test-ram-picture-budget.sh') != '' }}
         run: bash ci/test-ram-picture-budget.sh
+      - name: Test the reported counters past the end of a uint8_t on host
+        if: ${{ hashFiles('ci/test-reported-counter.sh') != '' }}
+        run: bash ci/test-reported-counter.sh
       - name: Compile against production toolchain and check real partitions
         run: bash ci/build-firmware.sh
       # The byte counts, so a branch can be compared with another branch's run.

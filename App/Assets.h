@@ -295,6 +295,18 @@ uint16_t cachedCount();
 /// per reporting cycle so one card redrawing the same bad asset every dwell
 /// (Graphic.cpp's cards stop retrying after one failure, but an aircraft
 /// logo overlay does not) cannot balloon the pending report.
+///
+/// **The 4-id cap is not a cap on the count.** The dedup drops a repeat of an
+/// id already in the list, so each listed asset counts once. Everything else
+/// counts, and once four ids fill the list a fifth bad asset is never listed -
+/// so it counts again on every redraw, which is how the figure runs well past
+/// the number of assets involved. That is what the count is for: it separates
+/// four bad assets from one card failing all day.
+///
+/// The count holds at ReportedCounter::kCeiling, so a count at the ceiling
+/// means "that many or more" rather than exactly that many. See
+/// App/ReportedCounter.h for what rolling over instead would report, and
+/// CheckIn.cpp for the two places a count of zero is read as "nothing to send".
 uint8_t decodeFailureCount();
 String decodeFailureIds();
 

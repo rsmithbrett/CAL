@@ -76,6 +76,14 @@ jobs:
         run: bash ci/test-ram-picture-budget.sh
       - name: Check the RAM budget's call site
         run: bash ci/check-ram-budget-call.sh
+      - name: Test the reported counters past the end of a uint8_t on host
+        run: bash ci/test-reported-counter.sh
+      - name: Check the asset counters' call sites
+        run: bash ci/check-asset-counters.sh
+      - name: Test the personal photographs content key on host
+        run: bash ci/test-personal-photos-key.sh
+      - name: Check every card has decided what its draws report
+        run: bash ci/check-content-key-resolvers.sh
 
       - name: Install arduino-cli
         uses: arduino/setup-arduino-cli@v2

@@ -12,6 +12,7 @@
 #include "Identity.h"
 #include "Log.h"
 #include "RamPictureBudget.h"
+#include "ReportedCounter.h"
 #include "SdStorage.h"
 
 // RamPictureBudget.h takes every figure as an argument so it compiles on the
@@ -78,6 +79,13 @@ static_assert(kTlsDemand.largestSingleBytes == Http::kTlsRecordBufferBytes,
 
 /// State for decodeFailureCount()/decodeFailureIds()/clearDecodeFailures() -
 /// see Assets.h's own remarks on why this exists and how CheckIn.cpp uses it.
+///
+/// kMaxReportedDecodeFailures caps the id list, not the count. The count keeps
+/// counting every failure the dedup lets through, which is why it goes through
+/// ReportedCounter::countOne() rather than `++`: a fifth bad asset never
+/// reaches the list, so it counts again on every redraw and the figure can pass
+/// 255 inside one reporting cycle. ReportedCounter.h holds what a wrapped
+/// figure reports.
 constexpr uint8_t kMaxReportedDecodeFailures = 4;
 String gDecodeFailureIds;
 uint8_t gDecodeFailureCount = 0;
@@ -89,6 +97,10 @@ uint8_t gDecodeFailureCount = 0;
 /// has. Logged rather than sent - see giveUpOnDecodeFailure() for what reporting
 /// it would take. Cleared with the decode-failure report so the figure in the
 /// log line stays per reporting cycle rather than per boot.
+///
+/// Through ReportedCounter::countOne() for the same reason the count above is:
+/// the log line says how many refusals this reporting cycle, and a wrapped
+/// figure says a smaller number instead.
 uint8_t gAllocationRefusals = 0;
 
 /// How many times drawFullScreen()/drawCachedInRect()/drawCached() retry a
@@ -148,7 +160,7 @@ void recordDecodeFailure(const String& assetId) {
     }
     gDecodeFailureIds += assetId;
   }
-  gDecodeFailureCount++;
+  ReportedCounter::countOne(gDecodeFailureCount);
 }
 
 /// Defined below, declared here for the refusal branch of
@@ -247,17 +259,16 @@ bool reFetchIfCheap(const String& id) {
 /// CheckIn.cpp and the gateway together.
 void giveUpOnDecodeFailure(const String& id) {
   if (Display::lastDrawFailedOnAllocation()) {
-    if (gAllocationRefusals < UINT8_MAX) {
-      ++gAllocationRefusals;
-    }
+    ReportedCounter::countOne(gAllocationRefusals);
     if (reFetchIfCheap(id)) {
       return;
     }
     Log::printf("[assets] '%s' could not be drawn after %u attempt(s) - keeping the cached copy "
                 "and not reporting it as a decode failure, this heap had no block to draw it with "
-                "(%u refusal(s) this reporting cycle)",
+                "(%u%s refusal(s) this reporting cycle)",
                 id.c_str(), static_cast<unsigned>(kMaxDrawAttempts),
-                static_cast<unsigned>(gAllocationRefusals));
+                static_cast<unsigned>(gAllocationRefusals),
+                ReportedCounter::atCeiling(gAllocationRefusals) ? " or more" : "");
     return;
   }
 

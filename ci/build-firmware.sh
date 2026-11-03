@@ -347,6 +347,14 @@ bash ci/check-board-columns-call.sh
 # this gate's. TEXT_LAYOUT_DESIGN.md section 15m.
 bash ci/check-score-guard.sh
 
+# The sixth. Assets.cpp keeps two counters whose values leave the device - one
+# on the check-in request, one in a log line - and App/ReportedCounter.h's host
+# sweep past the end of a uint8_t reads neither call site. A bare ++ on either
+# compiles, links, passes every host test and reports a wrapped figure, and at
+# exactly 256 occurrences the decode-failure report reads as nothing to send.
+# TEST_PLAN.md section 21.
+bash ci/check-asset-counters.sh
+
 echo "==> Compiling CAL for the ESP32-2432S028"
 arduino-cli compile --fqbn "$FQBN" --libraries "$LIBRARIES_DIR" --export-binaries .
 
