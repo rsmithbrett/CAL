@@ -1582,6 +1582,88 @@ inferring it from the absence of the ordinary SD-cache log line. A
 healthy-SD device's behaviour is completely unchanged: this fallback only
 ever runs after `ensureCached()` has already failed.
 
+**The house-hunt card reached this five weeks late, and it is budgeted.** The
+graphic cards got the fallback above on 2026-09-08 and the aircraft logo on
+2026-10-26. The featured-listings card was written on 2026-10-13, after the
+first and before the second, and wired to neither: its picture was reachable
+only through `Assets::ensureCachedFrom()`, which returns false on its first
+line when `Sd::isReady()` is false. So on a card-less display the draw path
+ended there and no request for the picture was ever issued. Device 44's debug
+stream on 2026-11-02 shows it five times per rotation, `picture ... is not on
+the card, drawing without it`, with no `[assets] GET` line beside it, while two
+graphic cards and an aircraft logo on the same display in the same minutes
+fetch straight to RAM and draw. `Assets::fetchToRamFrom()` is the path-taking
+sibling of `fetchToRam()` that closes it, aimed at
+`/api/featuredlistings/image/{contentKey}` rather than the asset route, because
+a household's picture is scoped more narrowly than an account and cannot be an
+asset.
+
+Two things make this card's version different from the graphic cards'. The
+acquisition moved to the fetch path, where `Cards.h` says it belongs: the one
+`ensureCachedFrom()` call used to sit in `cardDraw()`, which an SD-backed
+display got away with because the miss happens once and every later draw is an
+`SD.exists()`, and which would have cost a card-less display a network fetch on
+every draw of every card. And it asks `RamPictureBudget::fitsBesideTls()`
+before it allocates, which the graphic cards do not.
+
+That check is there because of how many pictures this card holds. A graphic card
+holds one and an aircraft logo a few thousand bytes; this one holds up to five,
+at a measured 9,923 to 24,512 bytes each. On a board whose heap is internal DRAM
+only, those bytes come out of the pool `mbedtls_ssl_setup()` allocates its
+record buffers from, and spending it draws the picture once and then takes the
+display off the network, which is the failure `Assets.h`'s `releaseRamBuffer()`
+records. So the allocation is restricted to PSRAM with
+`heap_caps_realloc(MALLOC_CAP_SPIRAM)` where PSRAM is registered, and refused
+where the internal pool cannot carry the picture and a session together. The two
+Panellan boards place the picture in PSRAM, where it costs the handshake nothing.
+`FeaturedListings::releaseRamBuffers()` hands all five back on the check-in
+failure path beside `Graphic::releaseRamBuffers()`, and so does a fetch that
+comes back with no properties in it.
+
+**The graphic cards and the aircraft logo got a guard too, and it is a different
+one.** They had none at all. The obvious move was to give them the rule above,
+and it would have withdrawn pictures that work. Proto 2 holds 4,750 + 11,187 +
+4,368 bytes of them while its largest internal block reads 17,396, and that
+figure does not move when a picture is allocated: 129 heaptrace readings on
+2026-11-02, every one 17,396, through `beforeAssetFetch`, `afterResponseHeaders`
+and `afterRamAlloc` alike, while `freeInt` moved from 32,168 to 24,848
+underneath it. Those pictures are not carved out of that block, and the device
+logged 25 check-ins and no handshake failures while holding them.
+
+So that path gets `RamPictureBudget::leavesHandshakePossible()`, which reads the
+pool **after** the allocation and asks only whether the largest internal block
+is still at or above one record buffer. On Proto 2 the answer stays yes and
+nothing changes. When an allocation genuinely does eat the block the buffer goes
+straight back, rather than being held until a check-in fails. A prediction where
+the model is false and a measurement where it is not: the two rules disagree
+about Proto 2 on purpose, and `tests/ram-picture-budget-test.cpp` asserts that
+they do, so turning one into the other fails rather than passing quietly.
+
+**And the figure a session needs is derived per build rather than assumed.** The
+two trees disagree by 12,288 bytes. The ESP32 build sets
+`MBEDTLS_ASYMMETRIC_CONTENT_LEN` with IN 16384 and OUT 4096 plus
+`MBEDTLS_DYNAMIC_BUFFER`, so 16,717 in and 4,429 out, 21,146, released around
+each handshake. The Panellan build is stock symmetric with no dynamic buffer, so
+16,717 twice, 33,434, standing. `Assets.cpp` reads those options and
+static_asserts the result is one of the two. A hardcoded "twice over" is wrong on
+the ESP32 tree in the strict direction, and on the asymmetric figure
+Workstation's 32,756 leaves 11,610 above the demand, so the smallest picture the
+server produces fits there. "Neither board can hold one at any size" was read off
+the stock figure and is wrong for that board on that build.
+
+`releaseRamBuffer()`'s own log line was reporting the bare `MALLOC_CAP_8BIT`
+figure until this pass, which on the Panellan spans PSRAM: device 44's stream on
+2026-11-02 has it announcing 1,998,836 bytes of recovered headroom beside a
+heaptrace stage reading `largestInt=86004`. It now leads with the internal pool
+and keeps the bare figure second and labelled, since that is what the existing
+wire fields mean.
+
+Unverified on hardware, all of it: no device has fetched a house-hunt picture to
+RAM, decoded one from RAM, or drawn the band from one. The two rules have a host
+test and the call site has a text gate (`ci/test-ram-picture-budget.sh` and
+`ci/check-ram-budget-call.sh`, TEST_PLAN section 16j); everything past the
+decision has only the compiler.
+
 ### An announcement card: admin-typed text, chosen by the server
 
 `App/Announcement.h`/`.cpp` is the text equivalent of the picture card just

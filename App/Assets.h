@@ -171,6 +171,35 @@ struct RamAssetBuffer {
 /// should trust; `buffer.size` is only valid after a true return.
 bool fetchToRam(const String& id, RamAssetBuffer& buffer);
 
+/// What ensureCachedFrom() is to ensureCached(), this is to fetchToRam(): the
+/// same direct-to-RAM fetch, aimed at a route the caller names rather than the
+/// asset route.
+///
+/// **This is what lets a device with no SD card show a house-hunt picture at
+/// all.** The picture was only ever reached through ensureCachedFrom(), which
+/// returns false on its first line when Sd::isReady() is false, so on a
+/// card-less display the draw path ended there and no fetch was ever issued -
+/// the debug stream recorded `picture ... is not on the card, drawing without
+/// it` with no GET line beside it. The graphic cards have had their fallback
+/// since fetchToRam() arrived and the aircraft logo got one on 2026-10-26;
+/// this card was written after both and wired to neither.
+///
+/// **Unlike fetchToRam(), this one is budgeted**, and the difference is how
+/// many pictures are held at once. A graphic card holds one and an aircraft
+/// logo a few thousand bytes; this card holds up to FeaturedListings::kMaxCards
+/// of them across the next handshake, at a measured nine to twenty-five
+/// kilobytes each. So RamPictureBudget::fitsBesideTls() is asked once the
+/// response's Content-Length is known, and the allocation is restricted to
+/// PSRAM where PSRAM is registered. On a board with none, the internal pool
+/// would have to hold the picture and both mbedTLS record buffers, which
+/// neither ESP32-2432S028 in this fleet can do at any picture size - so those
+/// keep drawing the card text-only, which is what they do today, rather than
+/// drawing one picture and then failing every handshake.
+///
+/// Returns false under every condition fetchToRam() does, plus a refusal from
+/// the budget check. The caller draws its card without the picture either way.
+bool fetchToRamFrom(const String& fetchPath, const String& cacheId, RamAssetBuffer& buffer);
+
 /// Hands a RamAssetBuffer's memory back, against the "static, grow-only,
 /// never freed" discipline every other buffer in this codebase follows.
 ///

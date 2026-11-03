@@ -4873,7 +4873,8 @@ void showListingsCard(const String& address, const String& propertyType, int pri
 void showFeaturedListingCard(const String& title, const String& headline, const String& subhead,
                       int32_t price, int32_t previousPrice, const FactLine* facts,
                       uint8_t factCount, const String& updatedAt,
-                      const String& cachedImageId) {
+                      const String& cachedImageId,
+                      const Assets::RamAssetBuffer* ramPicture) {
   lcd.fillScreen(bg());
   drawCardBanner("YOUR SEARCH", kListingsBanner, 150);
 
@@ -4891,8 +4892,13 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   // The wire is unchanged: the key still arrives, Assets still caches the file, and a panel
   // turned back to landscape draws the picture on its next repaint.
   //
-  // Empty means there is none, or that caching it failed - FeaturedListings.cpp has already decided
-  // and said so in the log. Either way the layout below simply gets the full width back.
+  // Empty means there is none, or that neither holding it failed - FeaturedListings.cpp has
+  // already decided and said so in the log. Either way the layout below simply gets the full
+  // width back.
+  //
+  // `ramPicture` carries the same picture held in RAM instead of on the card, which is the
+  // only place it can live on a display with no SD card. The band is the same width and the
+  // same rectangle either way; only the call that fills it differs.
   const int bandWidth = (!gPortrait && cachedImageId.length() > 0) ? kScaledWidth(104) : 0;
   const int bandLeft = kContentRight() - bandWidth;
   const int bandHeight = gContentBottom - 48;
@@ -4903,12 +4909,17 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   // clears the band first, because a decode can paint scanlines before it stops.
   bool bandDrawn = false;
   if (bandWidth > 0) {
-    bandDrawn = Assets::drawCachedInRect(cachedImageId, bandLeft, 40, bandWidth, bandHeight);
+    bandDrawn = ramPicture != nullptr
+                    ? Assets::drawRamInRect(cachedImageId, *ramPicture, bandLeft, 40, bandWidth,
+                                            bandHeight)
+                    : Assets::drawCachedInRect(cachedImageId, bandLeft, 40, bandWidth, bandHeight);
     if (!bandDrawn) {
       // The id is what somebody needs to find the file. Assets tracks decode failures by id
-      // for the same reason.
-      Log::printf("[display] featuredlistings picture '%s' did not decode - the text takes the "
-                  "band back", cachedImageId.c_str());
+      // for the same reason. Where the bytes came from is named too, because a decode failure
+      // from RAM and one from the card are investigated in different places.
+      Log::printf("[display] featuredlistings picture '%s' did not decode from %s - the text "
+                  "takes the band back",
+                  cachedImageId.c_str(), ramPicture != nullptr ? "RAM" : "the card");
       lcd.fillRect(bandLeft, 40, bandWidth, bandHeight, bg());
     }
   }

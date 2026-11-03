@@ -75,6 +75,10 @@ size_t getArduinoLoopTaskStackSize(void) {
 #include "CheckIn.h"
 #include "Config.h"
 #include "Display.h"
+// For FeaturedListings::releaseRamBuffers() on the check-in failure path,
+// beside Graphic::releaseRamBuffers(). Up to five pictures, which is the
+// largest single claim any card makes on a display with no SD card.
+#include "FeaturedListings.h"
 // For Graphic::releaseRamBuffers() on the check-in failure path. This is the
 // only reason App.ino knows about a specific card module at all - every other
 // card registers itself and is reached solely through CardManager - and it is
@@ -2041,6 +2045,7 @@ void performCheckIn() {
       Graphic::releaseRamBuffers();
       Aircraft::releaseRamBuffer();
       PersonalPhotos::releaseRamBuffer();
+      FeaturedListings::releaseRamBuffers();
       return;
     }
 
@@ -2090,6 +2095,7 @@ void performCheckIn() {
     Graphic::releaseRamBuffers();
     Aircraft::releaseRamBuffer();
     PersonalPhotos::releaseRamBuffer();
+    FeaturedListings::releaseRamBuffers();
     return;
   }
 

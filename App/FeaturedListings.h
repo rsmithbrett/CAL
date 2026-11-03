@@ -148,4 +148,19 @@ struct Result {
 /// like every other card module.
 Result fetch();
 
+/// Hands back every picture this card is holding in RAM, the same trade
+/// Graphic::releaseRamBuffers() and Aircraft::releaseRamBuffer() make and on
+/// the same call path.
+///
+/// Up to kMaxCards of them at a measured nine to twenty-five kilobytes each,
+/// which is the largest single claim this card makes on the heap and the reason
+/// it is worth a call of its own. Only ever called after a check-in has already
+/// failed, never speculatively: on a display that is reaching the server the
+/// buffers are doing their job, and a display that is not reaching it needs the
+/// contiguous block more than it needs the photographs.
+///
+/// A picture cached on the SD card is untouched - there is nothing held for it
+/// to release, and the next draw reads the file as it always did.
+void releaseRamBuffers();
+
 }  // namespace FeaturedListings

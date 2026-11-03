@@ -23,6 +23,26 @@ dated heading after.
 
 ## Unreleased
 
+### A display with no memory card now shows the photograph on your house-hunt card - App
+
+If your display has no memory card in it, the card showing properties your agent sent you
+has been drawing the address, the price and the facts with an empty space where the
+photograph belongs. Nothing was failing: the picture was only ever read from the memory
+card, so a display without one had nowhere to read it from and drew the rest.
+
+It now fetches the photograph straight into memory instead, the same way the picture cards
+and the airline logos already did. Nothing to do - next time the card comes round, the
+photograph is on it.
+
+Displays with a memory card are unchanged, and so is every other card.
+
+**Two displays will keep drawing this card without a photograph**, and that is a decision
+rather than a leftover. A property photograph is nine to twenty-five kilobytes, and on the
+older board the same pool of memory holds a picture and the encryption a check-in needs.
+Holding one that big there would show the photograph once and then leave the display unable
+to reach the server at all - no check-in, no new cards, no updates. That is not worth a
+picture, so on those two the card stays as it is.
+
 ## v2026.11.02.0002
 
 ### Scores in the teens are drawn the same size as the rest - App

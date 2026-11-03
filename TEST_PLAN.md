@@ -2297,8 +2297,9 @@ would attempt the mount on the board that has no slot. The same trap
 [CAL_GPIO_DIAGNOSTICS.md](CAL_GPIO_DIAGNOSTICS.md).
 
 **This was the one part of this repository with a host-runnable test, and there
-are four of them now**: `ci/test-recovery-menu.sh`, `ci/test-loader-order.sh`,
-`ci/test-config-request.sh` and `ci/test-card-columns.sh`. It still gets a
+are six of them now**: `ci/test-recovery-menu.sh`, `ci/test-loader-order.sh`,
+`ci/test-config-request.sh`, `ci/test-card-columns.sh`,
+`ci/test-brand-splash.sh` and `ci/test-ram-picture-budget.sh`. It still gets a
 section that is mostly about a test rather than mostly about a bench.
 `RecoveryState.h` has no Arduino or display dependency, so the input state
 machine compiles and runs on a workstation with a fake clock, a fake finger and
@@ -2306,17 +2307,31 @@ stubbed NVS. The App's half of the same gesture is 16h.
 
 ### 16a. What runs, and where
 
-Four scripts, each building and running one host target:
+Six scripts, each building and running one host target:
 `ci/test-recovery-menu.sh` (CAL's `Recovery.cpp`, once per board),
 `ci/test-loader-order.sh` (`App/Loader.cpp`), `ci/test-config-request.sh`
-(`App/ConfigRequest.cpp`, 16h) and `ci/test-card-columns.sh`
-(`App/CardColumns.h`, 18d). The last three run once rather than once per board,
-because nothing in them is behind a target macro. All four are in the release
-gate and the pull-request bench, and all four are in
-`.github/workflows/mut-host-test.yml`, which runs them on a push to a `mut/**`
-or `test/**` branch so a mutation can be measured without a token to dispatch
-the bench with. None of them can run on this workstation: there is no host C++
-compiler here.
+(`App/ConfigRequest.cpp`, 16h), `ci/test-card-columns.sh`
+(`App/CardColumns.h`, 18d), `ci/test-brand-splash.sh` and
+`ci/test-ram-picture-budget.sh` (`App/RamPictureBudget.h`, 16j). All but the
+first run once rather than once per board, because nothing in them is behind a
+target macro. All six are in the release gate and the pull-request bench, and
+all six are in `.github/workflows/mut-host-test.yml`, which runs them on a push
+to a `mut/**` or `test/**` branch so a mutation can be measured without a token
+to dispatch the bench with.
+
+Beside them are the call-site gates, which are text checks rather than host
+targets: `ci/check-text-state.sh`, `ci/check-board-columns-call.sh`,
+`ci/check-score-guard.sh` and `ci/check-ram-budget-call.sh` (16j). **Only the
+last of those four is in the release gate and the bench**; the other three run
+on `mut-host-test.yml` alone, so a release can carry a call site none of them
+has read. That gap is older than 16j and is recorded here rather than closed by
+it.
+
+**There is a host compiler on this workstation now** - `g++` 16.2.0 at
+`C:\Tools\mingw64\bin`, so each of these builds and runs here in seconds. This
+paragraph said none of them could until 2026-11-02. CI is still the gate: it
+builds on Linux `g++`, where size and ABI differ, and 16's own notes on the
+controller's layout there still apply.
 
 `tests/recovery-menu-test.cpp` links against production `Recovery.cpp` with
 stubs for touch, drawing, NVS, the partition table and `esp_restart()`. Its
@@ -2666,6 +2681,116 @@ so it cannot mask what that was reading.
   on its end is `Display::begin()`'s `kScreenW = lcd.width()`, and that is
   device work.
 - Nothing here has been on glass. No device was flashed or commanded.
+
+### 16j. Whether a picture may be held in RAM beside a handshake (2026-11-02)
+
+Two rules in `App/RamPictureBudget.h`, graded by
+`ci/test-ram-picture-budget.sh` against `tests/ram-picture-budget-test.cpp`,
+plus a call-site gate in `ci/check-ram-budget-call.sh`. One PASS line each.
+
+The house-hunt card's picture was reachable only through
+`Assets::ensureCachedFrom()`, which returns false on its first line when
+`Sd::isReady()` is false, so a display with no SD card drew the card text-only
+and never issued a request for the picture at all. Device 44's debug stream on
+2026-11-02 carries `picture ... is not on the card, drawing without it` five
+times per rotation with no `[assets] GET` line beside it, while four other
+picture-bearing cards on the same display in the same minutes fetch straight to
+RAM and draw. `Assets::fetchToRamFrom()` closes that, and these rules decide
+whether holding the bytes is affordable.
+
+**What they are guarding.** On a board whose heap is internal DRAM only, a held
+picture comes out of the pool `mbedtls_ssl_setup()` allocates its record
+buffers from. Spending it draws the picture once and then takes the display off
+the network - no check-in, no card policy, no firmware update.
+
+**Why there are two rules, which is the part worth reading.** The first draft
+had one: predict before allocating, modelling the picture as coming out of the
+largest free block. Retrofitting that onto the graphic cards and the aircraft
+logo, which have shipped without any guard since 2026-09-08, would have
+withdrawn pictures that work.
+
+Proto 2 holds 4,750 + 11,187 + 4,368 bytes of those buffers while its largest
+internal block reads **17,396 - and that figure does not move when a picture is
+allocated.** 129 heaptrace readings on 2026-11-02, every one 17,396, through
+`beforeAssetFetch`, `afterResponseHeaders` and `afterRamAlloc` alike, while
+`freeInt` moved from 32,168 to 24,848 underneath it. The pictures are not carved
+out of that block. The same device logged 25 check-ins and zero handshake
+failures in the same window. So the prediction's model is one that device
+disproves, and the prediction refuses all three of its pictures.
+
+`leavesHandshakePossible()` is therefore a measurement taken after the
+allocation, asking only the question that can be proved: is a handshake still
+possible, meaning is the largest internal block still at or above one record
+buffer. On Proto 2 the answer stays yes and nothing changes. It bites when an
+allocation genuinely eats the block, and the buffer then goes straight back
+instead of being held until a check-in fails.
+
+**The demand is derived per build, not hardcoded.** The two trees disagree by
+12,288 bytes: the ESP32 build sets `MBEDTLS_ASYMMETRIC_CONTENT_LEN` (IN 16384,
+OUT 4096) with `MBEDTLS_DYNAMIC_BUFFER`, so 16,717 + 4,429 = 21,146 and
+transient; the Panellan build is stock symmetric with no dynamic buffer, so
+16,717 twice = 33,434 and standing. Read from both generated sdkconfigs on
+2026-11-02. A hardcoded "twice over" is wrong on the ESP32 tree in the strict
+direction, which is the direction that silently withdraws a working picture.
+`Assets.cpp` derives it with `#if` on those options and static_asserts the
+result is one of those two figures.
+
+**A correction this made to 16j's own first draft**: "neither
+`Esp32_2432S028` can hold a picture at any size" is wrong. That was read off
+the stock 33,434 figure. On the asymmetric build Workstation's 32,756 leaves
+11,610 above the demand, so the smallest picture the server has produced (9,923)
+fits there and the mean and largest do not. The test asserts the boundary at
+11,610 rather than the flat claim.
+
+The figures the cases are written against, read from `device_telemetry`,
+`imported_listing_images` and the devices' own heaptrace lines on 2026-11-02,
+row counts on a date rather than standing facts: Proto 2 at 17,396 and
+Workstation at 32,756 bytes of largest internal block, both `Esp32_2432S028`
+with no PSRAM; devices 43 and 44 on `PanellanZx2d80Ce02S` with 2MB registered,
+both at 81,908; pictures of 9,923 to 24,512 bytes, mean 20,502, over the 117
+approved on their account.
+
+**Written after the code, and proven by mutation rather than by having failed
+first.** The headers, the test and the gate were written together, so neither
+ever ran against an unfixed implementation. What stands in for that: fourteen
+mutations, each gated on `cmp` so one that did not apply cannot read as a pass -
+MEMORY's own note that CRLF defeats an anchored pattern earned its keep here,
+three of them silently failing to apply on the first run. Six against the rules
+and eight against the call site, each caught.
+
+| mutation | caught by |
+|---|---|
+| PSRAM approves below the ALWAYSINTERNAL threshold | a 4,096-byte picture refused on Proto 2's pool |
+| `<=` to `<` on the reserve boundary | a threshold-sized picture allowed on a pool sized for it |
+| the zero-byte refusal removed | a zero-byte picture refused on a pool holding exactly the reserve |
+| the comparison written as an addition on the picture | a `SIZE_MAX` picture refused rather than wrapping into allowed |
+| an underived demand passes `handshakePossible()` | a zeroed `TlsDemand` refused |
+| the measurement graded on the total rather than the floor | Proto 2's 17,396 allowed |
+| the bare 8-bit figure into `fitsBesideTls()` | the gate's pool-argument check |
+| the bare 8-bit figure into `leavesHandshakePossible()` | the same |
+| placement read from `CONFIG_SPIRAM` rather than the heap | the gate's runtime-read check |
+| the chunked grow drops `externalOnly` | the gate's grow-count comparison |
+| the refusal stops releasing its buffer | the gate's release check |
+| the measurement no longer gated on `!budgeted` | the gate's scope check |
+| a hardcoded demand in the first budget call | the gate's demand-count comparison |
+| a hardcoded demand in the second | the same |
+
+The gate strips `//` comments before it reads anything, because its own remarks
+name every function and argument it checks and would otherwise satisfy it: an
+emptied `fetchToRamImpl()` passed an earlier draft on the strength of the prose
+above it. The demand check counts calls rather than looking for one occurrence,
+after a mutation replaced the demand in one call with a literal and the
+surviving `kTlsDemand` in the other satisfied the check.
+
+**What none of this says.** Nothing here has been on glass. No device has
+fetched a house-hunt picture to RAM, decoded one from RAM, or drawn the band
+from one, and no device was flashed or commanded. The gate is a text check: it
+knows which function each figure comes from, that placement is read from the
+heap rather than the build, and that a refusal releases - it cannot see whether
+`heap_caps_realloc` actually placed the bytes in PSRAM. And which binary a
+deployed device is running is not known from here: CI builds stock while the
+workstation's core overlay builds asymmetric, so device 12's own demand is
+**Inferred** from its behaviour rather than read off the device.
 
 ---
 

@@ -208,6 +208,106 @@ Result gLast;
 bool gEverFetched = false;
 unsigned long gLastOkMs = 0;
 
+/// Where this card's picture is, once the fetch has settled it.
+enum class PictureHeld : uint8_t {
+  None,  // no picture arrived, or neither place could hold it
+  Card,  // cached on the SD card, read back by Assets::drawCachedInRect()
+  Ram,   // held in the slot below, the only place a display with no SD card has
+};
+
+/// One picture slot per card, because the rotation draws any of the five and a
+/// draw must not fetch.
+///
+/// **A slot per card rather than one shared, for Graphic.cpp's reason.** Unlike
+/// an SD file, which is an independently persisted copy per id, a RAM buffer
+/// has nowhere else to live between the fetch that filled it and the draws that
+/// read it - and a card's draws run many times before the next refresh. One
+/// shared buffer would let the fifth card's fetch overwrite the first card's
+/// still-needed bytes.
+///
+/// `key` is the imageKey the buffer currently holds, which is what makes the
+/// slot safe to read: the server builds that key so it CHANGES when the picture
+/// changes, so a slot whose key no longer matches the card's is stale and is
+/// not drawn. Checking the key rather than trusting the index is what keeps a
+/// replaced photograph from showing the one it replaced.
+struct PictureSlot {
+  Assets::RamAssetBuffer buffer;
+  char key[kMaxImageKey + 1] = {0};
+  PictureHeld held = PictureHeld::None;
+};
+
+PictureSlot gPictures[kMaxCards];
+
+/// Acquires one card's picture, and says where it ended up.
+///
+/// **The SD cache first, and RAM only when there is no SD cache to use.** An
+/// SD-backed picture is fetched once ever and read back on every draw; a RAM
+/// one is re-fetched on every refresh for as long as the fallback stays active,
+/// because a RAM buffer is the one cache nothing can invalidate. So the
+/// cheaper, invalidatable path is tried first and the fallback is what happens
+/// when it answers no - which on a display with no SD card is immediately and
+/// always, since Assets::ensureCachedFrom() returns false on its first line
+/// when the card is not ready.
+PictureHeld acquirePicture(const Card& card, PictureSlot& slot) {
+  if (card.imageKey[0] == '\0') {
+    return PictureHeld::None;
+  }
+
+  const String path = String(kImagePathPrefix) + card.contentKey;
+
+  if (Assets::ensureCachedFrom(path, card.imageKey)) {
+    return PictureHeld::Card;
+  }
+
+  if (Assets::fetchToRamFrom(path, card.imageKey, slot.buffer)) {
+    return PictureHeld::Ram;
+  }
+
+  return PictureHeld::None;
+}
+
+/// Fills every slot for the result now in gLast.
+///
+/// **On the fetch path, not the draw path.** This used to be one
+/// ensureCachedFrom() call inside cardDraw(), which Cards.h's own remarks rule
+/// out: a call that fetches on a miss makes stepping backwards through the
+/// rotation a network operation. An SD-backed display got away with it because
+/// the miss happens once and every later draw is an SD.exists() - a display
+/// with no SD card would have paid a network fetch on every single draw of
+/// every card.
+void acquirePictures() {
+  for (uint8_t i = 0; i < kMaxCards; ++i) {
+    PictureSlot& slot = gPictures[i];
+
+    if (i >= gLast.count) {
+      slot.held = PictureHeld::None;
+      slot.key[0] = '\0';
+      continue;
+    }
+
+    const Card& card = gLast.cards[i];
+    slot.held = acquirePicture(card, slot);
+
+    if (slot.held == PictureHeld::None) {
+      slot.key[0] = '\0';
+      if (card.imageKey[0] != '\0') {
+        Log::printf("[featuredlistings] picture '%s' is in neither the card cache nor RAM, "
+                    "drawing without it",
+                    card.imageKey);
+      }
+      continue;
+    }
+
+    strlcpy(slot.key, card.imageKey, sizeof(slot.key));
+
+    if (slot.held == PictureHeld::Ram) {
+      Log::printf("[featuredlistings] picture '%s' is held in RAM (%u bytes) - no SD card "
+                  "available",
+                  slot.key, static_cast<unsigned>(slot.buffer.size));
+    }
+  }
+}
+
 String describeFreshness(unsigned long fetchedAtMs) {
   const unsigned long ageMinutes = (millis() - fetchedAtMs) / 60000UL;
   if (ageMinutes == 0) {
@@ -249,7 +349,20 @@ void cardFetch() {
     Log::printf("[featuredlistings] card updated: %u propert%s, first '%s'",
                 static_cast<unsigned>(gLast.count), gLast.count == 1 ? "y" : "ies",
                 gLast.cards[0].headline.c_str());
+    acquirePictures();
+    return;
   }
+
+  // The server answered, and the answer has no properties in it - a refusal, a
+  // disabled provider, nothing current for this household. cardDraw() draws a
+  // status screen rather than a listing from here on, so nothing will read the
+  // pictures again, and up to five of them is too much to leave allocated
+  // until a check-in happens to fail.
+  //
+  // The unreachable case does not reach this line: it returns above with gLast
+  // untouched, because the card goes on drawing the last good listings and
+  // their pictures with them.
+  releaseRamBuffers();
 }
 
 uint16_t cardItemCount() {
@@ -322,24 +435,27 @@ void cardDraw(uint16_t itemIndex) {
       lines[i].value = card.facts[i].value;
     }
 
-    // Cached on the card, not held in RAM. The download streams through a 512-byte stack
-    // buffer and the decoder reads the file block by block, so a picture costs essentially
-    // nothing of the contiguous heap this board's TLS session needs - see
-    // Assets::ensureCachedFrom. A failure here is drawn as a card with no picture rather
-    // than as an error: the address and the price are what the household came for.
-    const bool hasPicture =
-        card.imageKey[0] != '\0'
-        && Assets::ensureCachedFrom(String(kImagePathPrefix) + card.contentKey, card.imageKey);
+    // Where the picture is was settled on the fetch path - see acquirePictures(). Nothing
+    // here fetches: a draw runs on every pass through the rotation, including a step
+    // backwards, and Cards.h rules out making that a network operation.
+    //
+    // The slot's key has to match this card's. The server builds an imageKey that changes
+    // when the picture changes, so a slot still holding the previous key holds the previous
+    // photograph, and drawing it would show a correction's predecessor.
+    const PictureSlot& slot = gPictures[itemIndex];
+    const bool slotMatches = card.imageKey[0] != '\0' && strcmp(slot.key, card.imageKey) == 0;
 
-    if (card.imageKey[0] != '\0' && !hasPicture) {
-      Log::printf("[featuredlistings] picture '%s' is not on the card, drawing without it",
-                  card.imageKey);
-    }
+    // A card picture read from the SD cache, a card picture held in RAM, or none - and a
+    // card with none draws its text rather than an error, because the address and the price
+    // are what the household came for.
+    const bool hasPicture = slotMatches && slot.held != PictureHeld::None;
+    const Assets::RamAssetBuffer* ramPicture =
+        (hasPicture && slot.held == PictureHeld::Ram) ? &slot.buffer : nullptr;
 
     Display::showFeaturedListingCard(card.title, card.headline, card.subhead, card.price,
                               card.previousPrice, lines, card.factCount,
                               describeFreshness(gLastOkMs),
-                              hasPicture ? card.imageKey : "");
+                              hasPicture ? card.imageKey : "", ramPicture);
     return;
   }
 
@@ -387,5 +503,24 @@ void cardDraw(uint16_t itemIndex) {
 }();
 
 }  // namespace
+
+void releaseRamBuffers() {
+  for (uint8_t i = 0; i < kMaxCards; ++i) {
+    PictureSlot& slot = gPictures[i];
+    if (slot.held != PictureHeld::Ram) {
+      continue;
+    }
+
+    Assets::releaseRamBuffer(slot.buffer);
+
+    // The slot's own belief about its contents has to go with the memory.
+    // Assets::releaseRamBuffer() zeroes size and capacity but cannot reach
+    // this, and a key left behind would make cardDraw() hand a freed pointer
+    // to the decoder on the next pass through the rotation - the exact mistake
+    // that function's own remarks warn about.
+    slot.key[0] = '\0';
+    slot.held = PictureHeld::None;
+  }
+}
 
 }  // namespace FeaturedListings

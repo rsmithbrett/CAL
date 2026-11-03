@@ -6,14 +6,75 @@
 
 #include "Config.h"
 #include "Display.h"
+#include "HeapPools.h"
 #include "HeapTrace.h"
 #include "Http.h"
 #include "Identity.h"
 #include "Log.h"
+#include "RamPictureBudget.h"
 #include "SdStorage.h"
+
+// RamPictureBudget.h takes every figure as an argument so it compiles on the
+// host with no Arduino headers, and tests/ram-picture-budget-test.cpp repeats
+// them for the same reason. This is the one translation unit that sees both, so
+// it is where they are held together: if Http.h's constant moves, the build
+// stops here rather than leaving the test grading the rule against a number the
+// firmware no longer uses.
+static_assert(Http::kTlsRecordBufferBytes == 16717,
+              "Http::kTlsRecordBufferBytes moved. Update the kTlsRecord constant in "
+              "tests/ram-picture-budget-test.cpp to match, then update this assertion.");
 
 namespace Assets {
 namespace {
+
+/// What a handshake asks of the internal pool on THIS build, derived from the
+/// generated sdkconfig rather than assumed.
+///
+/// **The two trees this repository builds disagree by 12,288 bytes**, and a
+/// hardcoded "two record buffers" is wrong on one of them in the strict
+/// direction - the direction that withdraws a picture that works. The ESP32
+/// build sets MBEDTLS_ASYMMETRIC_CONTENT_LEN with IN 16384 and OUT 4096, so
+/// 16,717 in and 4,429 out; the Panellan build is stock symmetric, so 16,717
+/// twice. CLAUDE.md's firmware section carries the same arithmetic, and
+/// HeapPools.h carries why the pool is internal DRAM either way.
+///
+/// The 333 is the record framing Http::kTlsRecordBufferBytes already includes
+/// over MBEDTLS_SSL_MAX_CONTENT_LEN's 16384, taken from that constant rather
+/// than retyped so the two cannot drift.
+constexpr size_t kTlsRecordOverheadBytes = Http::kTlsRecordBufferBytes - 16384;
+
+#if defined(CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN)
+constexpr size_t kTlsOutRecordBytes =
+    static_cast<size_t>(CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN) + kTlsRecordOverheadBytes;
+#else
+constexpr size_t kTlsOutRecordBytes = Http::kTlsRecordBufferBytes;
+#endif
+
+// CONFIG_MBEDTLS_DYNAMIC_BUFFER is set on the ESP32 build and absent from the
+// Panellan one, read from both generated sdkconfigs on 2026-11-02. Where it is
+// set the record buffers are allocated around a handshake and released after
+// it, so the total is a brief peak rather than a standing reservation.
+#if defined(CONFIG_MBEDTLS_DYNAMIC_BUFFER)
+constexpr bool kTlsBuffersTransient = true;
+#else
+constexpr bool kTlsBuffersTransient = false;
+#endif
+
+constexpr RamPictureBudget::TlsDemand kTlsDemand{
+    Http::kTlsRecordBufferBytes, Http::kTlsRecordBufferBytes + kTlsOutRecordBytes,
+    kTlsBuffersTransient};
+
+// The derivation above has exactly two right answers in this fleet, and landing
+// on neither means a core tree changed one of the options underneath it. Better
+// to stop the build than to gate two card families on a third figure nobody has
+// measured.
+static_assert(kTlsDemand.totalBytes == 21146 || kTlsDemand.totalBytes == 33434,
+              "The derived TLS total is neither 21,146 (asymmetric IN 16384 / OUT 4096) nor "
+              "33,434 (stock symmetric). A core tree has changed an MBEDTLS content-length "
+              "option, so re-derive the figure before this gates a picture.");
+static_assert(kTlsDemand.largestSingleBytes == Http::kTlsRecordBufferBytes,
+              "The largest single TLS allocation must stay the inbound record buffer: it is "
+              "what makes handshakePossible() a proof rather than an estimate.");
 
 /// State for decodeFailureCount()/decodeFailureIds()/clearDecodeFailures() -
 /// see Assets.h's own remarks on why this exists and how CheckIn.cpp uses it.
@@ -360,11 +421,28 @@ void writeSplashSourceId(const String& id) {
 /// than operating on a single module-global precisely because it is not a
 /// single module-global - see RamAssetBuffer's own remarks in Assets.h for
 /// why each caller needs its own.
-bool ensureRamBufferCapacity(RamAssetBuffer& buffer, size_t needed) {
+/// Grows a RAM buffer, optionally restricting where the bytes may live.
+///
+/// `externalOnly` is what makes RamPictureBudget::fitsBesideTls()'s
+/// `placedInExternalRam` argument a fact rather than a hope.
+/// `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` steers plain `realloc()` toward
+/// PSRAM for an allocation this size, but steering is not a guarantee: with
+/// PSRAM full it falls back to internal DRAM, which is the one pool the budget
+/// rule was protecting. `heap_caps_realloc()` with `MALLOC_CAP_SPIRAM` either
+/// places the buffer in PSRAM or fails, and failing is the answer the caller
+/// can act on.
+///
+/// Plain `realloc()` otherwise, unchanged, which is what every existing caller
+/// gets - see fetchToRam()'s own remarks on why the graphic cards and the
+/// aircraft logo keep the behaviour they shipped with.
+bool ensureRamBufferCapacity(RamAssetBuffer& buffer, size_t needed, bool externalOnly = false) {
   if (needed <= buffer.capacity) {
     return true;
   }
-  uint8_t* grown = static_cast<uint8_t*>(realloc(buffer.data, needed));
+  uint8_t* grown = externalOnly
+                       ? static_cast<uint8_t*>(
+                             heap_caps_realloc(buffer.data, needed, MALLOC_CAP_SPIRAM))
+                       : static_cast<uint8_t*>(realloc(buffer.data, needed));
   if (grown == nullptr) {
     return false;
   }
@@ -729,7 +807,23 @@ bool fetchToCard(const String& fetchId, const String& cacheId, const String& fet
 /// or SD readback-verify step, because there is nothing on SD to rename or
 /// read back. See Assets.h's own remarks on fetchToRam() for why this
 /// exists and the network-cost tradeoff it accepts.
-bool fetchToRamImpl(const String& id, RamAssetBuffer& buffer) {
+/// `url` is the whole request URL rather than an id this builds one from,
+/// because the two callers address different routes: an asset lives under
+/// /api/assets/{id}/content and a house-hunt picture under
+/// /api/featuredlistings/image/{contentKey}, which is scoped to one household
+/// and cannot be an asset at all (see ensureCachedFrom()). `id` stays as the
+/// name every log line and HeapTrace stage carries, so a trace reads the same
+/// whichever route the bytes came from.
+///
+/// `budgeted` applies RamPictureBudget::fitsBesideTls() once the response's
+/// Content-Length is known, and restricts the allocation to PSRAM. Off for the
+/// graphic cards and the aircraft logo, which shipped without it: retrofitting
+/// a gate onto those would stop a card-less device drawing pictures it draws
+/// today, and App.ino already releases those buffers when a check-in fails.
+/// On for the house-hunt card, where five pictures are held at once rather
+/// than one and the pool is spent five times over before anything hands it
+/// back.
+bool fetchToRamImpl(const String& id, const String& url, RamAssetBuffer& buffer, bool budgeted) {
   // Stage 1 of 8 - see HeapTrace.h. This path is under measurement because it
   // is the only mechanism left unexplained on a card-less device, and this is
   // the baseline every later stage subtracts from. assetBytes is 0 because no
@@ -741,7 +835,6 @@ bool fetchToRamImpl(const String& id, RamAssetBuffer& buffer) {
     return false;
   }
 
-  const String url = String("https://") + Config::kServiceHost + kFetchPathPrefix + id + kFetchPathSuffix;
   if (!Http::beginRequest(url)) {
     Log::printf("[assets] could not begin direct-to-RAM request for '%s'", id.c_str());
     return false;
@@ -776,17 +869,95 @@ bool fetchToRamImpl(const String& id, RamAssetBuffer& buffer) {
   HeapTrace::mark(HeapTrace::Stage::AfterResponseHeaders, id.c_str(),
                   expectedSize > 0 ? static_cast<size_t>(expectedSize) : 0);
 
+  // Whether this device can hold the picture without spending the contiguous
+  // internal DRAM a handshake needs. Asked here because this is the first
+  // point the size is known and the last point before anything is allocated.
+  //
+  // Refusing draws the card without its picture, which is what a card-less
+  // device does today. Allocating anyway would draw the picture once and then
+  // take the device off the network - unable to check in, unable to be sent a
+  // policy, unable to be updated - so a refusal is the better of the two, and
+  // the figures it is read from are named on the line rather than inferred
+  // from the outcome.
+  const bool externalRam = HeapPools::externalRamInHeap();
+  if (budgeted && expectedSize > 0) {
+    const size_t pictureBytes = static_cast<size_t>(expectedSize);
+    if (!RamPictureBudget::fitsBesideTls(pictureBytes, HeapPools::largestTlsBlockBytes(),
+                                         kTlsDemand, externalRam)) {
+      http.end();
+      // The figure named is the INTERNAL pool, which is the one mbedTLS
+      // allocates from whatever the board carries. anyPoolLabel() says what the
+      // device's heap spans beside it, so a reader of the debug stream can tell
+      // a board with PSRAM from one without knowing which it is.
+      Log::printf(
+          "[assets] not holding a %u-byte picture '%s' in RAM - largest internal block is %u "
+          "and a session needs %u of it (heap spans %s)",
+          static_cast<unsigned>(pictureBytes), id.c_str(),
+          static_cast<unsigned>(HeapPools::largestTlsBlockBytes()),
+          static_cast<unsigned>(kTlsDemand.totalBytes), HeapPools::anyPoolLabel());
+      return false;
+    }
+  }
+
   // Grow up front when the server told us how big this is (the ordinary
   // case) - one allocation instead of one per 512-byte chunk below. A
   // chunked response with no Content-Length still works: ensureRamBufferCapacity()
   // is called again inside the loop as bytes actually arrive.
-  if (expectedSize > 0 && !ensureRamBufferCapacity(buffer, static_cast<size_t>(expectedSize))) {
+  //
+  // A budgeted fetch is restricted to PSRAM, so the allocation cannot quietly
+  // come out of the pool the check above just cleared it against.
+  const bool externalOnly = budgeted && externalRam;
+  if (expectedSize > 0
+      && !ensureRamBufferCapacity(buffer, static_cast<size_t>(expectedSize), externalOnly)) {
     http.end();
     Log::printf(
         "[assets] out of memory for a %d-byte direct-to-RAM fetch of '%s' (freeHeap=%u "
         "maxAllocHeap=%u)",
         expectedSize, id.c_str(), static_cast<unsigned>(ESP.getFreeHeap()),
         static_cast<unsigned>(ESP.getMaxAllocHeap()));
+    return false;
+  }
+
+  // THE OTHER GUARD, and it is a measurement rather than a prediction.
+  //
+  // The graphic cards and the aircraft logo shipped with no budget at all, and
+  // retrofitting the prediction above onto them would withdraw pictures that
+  // work: device 12 holds 15,937 bytes of them while its largest internal block
+  // sits at 17,396, and that block does not move when a picture is allocated -
+  // 129 heaptrace readings on 2026-11-02, every one 17,396, while freeInt moved
+  // from 32,168 to 24,848 underneath it. The pictures are not carved out of it.
+  // That device had 25 check-ins and no handshake failures in the same window,
+  // so the prediction's model is one it disproves.
+  //
+  // So this reads the pool AFTER the allocation and asks only the question that
+  // can be proved: is a handshake still possible. On device 12 the answer stays
+  // yes and nothing changes. It bites when an allocation genuinely does eat the
+  // block, which is the case that takes a device off the network, and then the
+  // buffer goes straight back rather than being held until a check-in fails.
+  //
+  // Only for the unbudgeted callers: a budgeted fetch was already cleared
+  // against the stricter rule and its bytes are in PSRAM.
+  //
+  // One wrinkle for whoever reads a heap trace: releaseRamBuffer() emits stage
+  // 8, so a fetch refused here prints stages 1, 2, 3 and then 8 with no 4
+  // through 7 between them. That is not a broken sequence, it is a fetch that
+  // handed its buffer back before streaming a byte, and the refusal line below
+  // says so. Going through releaseRamBuffer() rather than freeing here is
+  // deliberate: that function is the only place all three fields are cleared
+  // together, and a null pointer beside a non-zero size is exactly the shape
+  // every readiness check reads as usable.
+  if (!budgeted && expectedSize > 0
+      && !RamPictureBudget::leavesHandshakePossible(HeapPools::largestTlsBlockBytes(), kTlsDemand,
+                                                    externalRam)) {
+    const size_t handedBack = buffer.capacity;
+    releaseRamBuffer(buffer);
+    http.end();
+    Log::printf(
+        "[assets] handed back a %u-byte RAM buffer for '%s' - holding it left the largest "
+        "internal block at %u, under the %u a handshake needs (heap spans %s)",
+        static_cast<unsigned>(handedBack), id.c_str(),
+        static_cast<unsigned>(HeapPools::largestTlsBlockBytes()),
+        static_cast<unsigned>(kTlsDemand.largestSingleBytes), HeapPools::anyPoolLabel());
     return false;
   }
 
@@ -823,7 +994,11 @@ bool fetchToRamImpl(const String& id, RamAssetBuffer& buffer) {
     if (read <= 0) {
       continue;
     }
-    if (!ensureRamBufferCapacity(buffer, written + static_cast<size_t>(read))) {
+    // Same placement restriction as the up-front grow above. A chunked
+    // response reaches here without a Content-Length, so the budget check was
+    // skipped and this is the only thing keeping a budgeted fetch's bytes out
+    // of the TLS pool.
+    if (!ensureRamBufferCapacity(buffer, written + static_cast<size_t>(read), externalOnly)) {
       outOfMemory = true;
       Log::printf(
           "[assets] out of memory growing the direct-to-RAM buffer past %u bytes for '%s' "
@@ -1086,7 +1261,22 @@ bool fetchToRam(const String& id, RamAssetBuffer& buffer) {
   if (!isSafeId(id)) {
     return false;
   }
-  return fetchToRamImpl(id, buffer);
+  return fetchToRamImpl(
+      id, String("https://") + Config::kServiceHost + kFetchPathPrefix + id + kFetchPathSuffix,
+      buffer, /*budgeted=*/false);
+}
+
+bool fetchToRamFrom(const String& fetchPath, const String& cacheId, RamAssetBuffer& buffer) {
+  // Same bound and allowlist as fetchToRam()'s, for the same reason: cacheId
+  // names this picture in every log line and HeapTrace stage below. The path
+  // is built by the caller from a server-minted content key rather than
+  // arriving from anywhere a device could influence, and it is checked for
+  // emptiness the way ensureCachedFrom() checks it.
+  if (!isSafeId(cacheId) || fetchPath.length() == 0) {
+    return false;
+  }
+  return fetchToRamImpl(cacheId, String("https://") + Config::kServiceHost + fetchPath, buffer,
+                        /*budgeted=*/true);
 }
 
 void releaseRamBuffer(RamAssetBuffer& buffer) {
@@ -1104,11 +1294,26 @@ void releaseRamBuffer(RamAssetBuffer& buffer) {
   buffer.capacity = 0;
   buffer.size = 0;
 
-  Log::printf("[assets] released a %u-byte RAM asset buffer - largest 8BIT block now %u "
-              "(a new TLS session needs %u contiguous for EACH of two record buffers)",
+  // THE INTERNAL POOL IS THE FIGURE THAT MEANS ANYTHING HERE. This line read
+  // the bare MALLOC_CAP_8BIT until 2026-11-02, which is the mistake HeapPools.h
+  // exists to prevent: on the Panellan that spans PSRAM and reported 1,998,836
+  // while the pool a handshake allocates from held 86,004 - a release that
+  // recovered nothing for TLS, announcing two megabytes of headroom. Device
+  // 44's stream carries both figures side by side on 2026-11-02, this line
+  // saying 1,998,836 and the heaptrace stage beside it saying largestInt=86004.
+  //
+  // The bare figure is kept, second and labelled, because it is what the
+  // existing wire fields mean and dropping it would make this line stop
+  // matching telemetry. The demand is this build's own derived total rather than
+  // "twice over", which is only right on the stock tree.
+  Log::printf("[assets] released a %u-byte RAM asset buffer - largest internal block now %u "
+              "(a new TLS session needs %u of internal, %u of it in one piece); heap spans %s "
+              "and its largest block there is %u",
               static_cast<unsigned>(released),
-              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
-              static_cast<unsigned>(Http::kTlsRecordBufferBytes));
+              static_cast<unsigned>(HeapPools::largestTlsBlockBytes()),
+              static_cast<unsigned>(kTlsDemand.totalBytes),
+              static_cast<unsigned>(kTlsDemand.largestSingleBytes), HeapPools::anyPoolLabel(),
+              static_cast<unsigned>(HeapPools::largestAnyBlockBytes()));
 
   // STAGE 8 OF 8, AND THE WHOLE POINT OF THE SEQUENCE.
   //

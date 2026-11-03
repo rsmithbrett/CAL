@@ -5,6 +5,14 @@
                    // include Sports.h already carries rather than relying on
                    // Arduino.h to drag it in.
 
+/// Declared rather than included. Assets.cpp includes this header, so including
+/// Assets.h here would close a cycle; showFeaturedListingCard() takes a pointer
+/// to one of these and never reads through it, so the declaration is all this
+/// header needs. Display.cpp includes Assets.h for the definition.
+namespace Assets {
+struct RamAssetBuffer;
+}
+
 /// Everything the App draws.
 ///
 /// Unlike CAL's Display, this one renders actual product content (the weather
@@ -730,10 +738,22 @@ struct FactLine {
 /// which is the ordinary case and draws nothing. The card compares the two
 /// figures for nothing and reads no date: a listing carries this only when its
 /// own alert named both figures.</para>
+///
+/// <para>`ramPicture`, when given, is the same picture held in RAM rather than
+/// cached on the SD card, and the band is filled from it instead. A display
+/// with no SD card has nowhere to cache a picture, so this is the only way one
+/// reaches the glass there - see Assets::fetchToRamFrom(). Null means read the
+/// cached file, which is what every SD-backed display does.</para>
+///
+/// <para>The band is drawn before anything measures against it, which is why
+/// this is a parameter rather than something the caller layers on afterwards
+/// the way Aircraft.cpp does its logo: the fact budget and every text column
+/// below are laid out against the width the picture actually took.</para>
 void showFeaturedListingCard(const String& title, const String& headline, const String& subhead,
                       int32_t price, int32_t previousPrice, const FactLine* facts,
                       uint8_t factCount, const String& updatedAt,
-                      const String& cachedImageId = String());
+                      const String& cachedImageId = String(),
+                      const Assets::RamAssetBuffer* ramPicture = nullptr);
 
 void showListingsStatus(const String& headline, const String& detail, bool isProblem);
 

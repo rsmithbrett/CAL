@@ -34,12 +34,18 @@ jobs:
       - name: Test the scoreboard's column arithmetic on host
         if: ${{ hashFiles('ci/test-card-columns.sh') != '' }}
         run: bash ci/test-card-columns.sh
+      - name: Test the RAM picture budget against the TLS pool on host
+        if: ${{ hashFiles('ci/test-ram-picture-budget.sh') != '' }}
+        run: bash ci/test-ram-picture-budget.sh
       - name: Check the panel's text state
         if: ${{ hashFiles('ci/check-text-state.sh') != '' }}
         run: bash ci/check-text-state.sh
       - name: Check the scoreboard's call into the column arithmetic
         if: ${{ hashFiles('ci/check-board-columns-call.sh') != '' }}
         run: bash ci/check-board-columns-call.sh
+      - name: Check the RAM budget's call site
+        if: ${{ hashFiles('ci/check-ram-budget-call.sh') != '' }}
+        run: bash ci/check-ram-budget-call.sh
       - name: Check what a score below zero does
         if: ${{ hashFiles('ci/check-score-guard.sh') != '' }}
         run: bash ci/check-score-guard.sh
@@ -66,6 +72,9 @@ jobs:
       - name: Test the scoreboard's column arithmetic on host
         if: ${{ hashFiles('ci/test-card-columns.sh') != '' }}
         run: bash ci/test-card-columns.sh
+      - name: Test the RAM picture budget against the TLS pool on host
+        if: ${{ hashFiles('ci/test-ram-picture-budget.sh') != '' }}
+        run: bash ci/test-ram-picture-budget.sh
       - name: Compile against production toolchain and check real partitions
         run: bash ci/build-firmware.sh
       # The byte counts, so a branch can be compared with another branch's run.

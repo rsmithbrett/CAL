@@ -72,6 +72,10 @@ jobs:
         run: bash ci/test-card-columns.sh
       - name: Test the brand splash length on host
         run: bash ci/test-brand-splash.sh
+      - name: Test the RAM picture budget against the TLS pool on host
+        run: bash ci/test-ram-picture-budget.sh
+      - name: Check the RAM budget's call site
+        run: bash ci/check-ram-budget-call.sh
 
       - name: Install arduino-cli
         uses: arduino/setup-arduino-cli@v2
