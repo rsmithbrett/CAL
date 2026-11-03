@@ -355,6 +355,20 @@ bash ci/check-score-guard.sh
 # TEST_PLAN.md section 21.
 bash ci/check-asset-counters.sh
 
+# The seventh. CardManager.cpp resolves what a draw reports three ways in order
+# and names a graphics library, so it does not compile on a host and the order it
+# applies is held as text. A card module that offers no resolver and draws content
+# the policy does not name reports an empty key, and nothing else here fails.
+# CARD_IMPRESSIONS_DESIGN.md, "Which attribute says what the draw was about".
+bash ci/check-content-key-resolvers.sh
+
+# The eighth, and the only one that reads tests/ rather than App/. The host tests
+# build with whatever g++ the machine has, so a stub standing in for a POSIX
+# function with a Microsoft one compiles here and not on ubuntu-latest. This runs
+# where the difference is invisible, which is the machine that has the Microsoft
+# interface to reach for.
+bash ci/check-host-test-portability.sh
+
 echo "==> Compiling CAL for the ESP32-2432S028"
 arduino-cli compile --fqbn "$FQBN" --libraries "$LIBRARIES_DIR" --export-binaries .
 

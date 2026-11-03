@@ -2321,11 +2321,16 @@ to dispatch the bench with.
 
 Beside them are the call-site gates, which are text checks rather than host
 targets: `ci/check-text-state.sh`, `ci/check-board-columns-call.sh`,
-`ci/check-score-guard.sh` and `ci/check-ram-budget-call.sh` (16j). **Only the
-last of those four is in the release gate and the bench**; the other three run
-on `mut-host-test.yml` alone, so a release can carry a call site none of them
-has read. That gap is older than 16j and is recorded here rather than closed by
-it.
+`ci/check-score-guard.sh` and `ci/check-ram-budget-call.sh` (16j). All four are
+in the release gate and the bench. The last is its own step in both; the other
+three are called from `ci/build-firmware.sh`, which both lanes run, so they
+arrive by the wrapper rather than by a step and a reader looking only at the two
+workflow files does not see them. This paragraph said until 2026-11-03 that only
+`check-ram-budget-call.sh` reached either lane and that a release could carry a
+call site none of the others had read; `build-firmware.sh` lines 330, 338 and 348
+are what make that wrong. What the wrapper route does mean is ordering: it runs
+after the host-test steps, so a host test that fails stops the release before any
+of the three is read. Section 25 carries the whole matrix.
 
 **There is a host compiler on this workstation now** - `g++` 16.2.0 at
 `C:\Tools\mingw64\bin`, so each of these builds and runs here in seconds. This
@@ -5405,3 +5410,171 @@ results.
   of globals, with no error or warning line, against `ota_0` at 2,097,152. This
   workstation builds against the core overlay and CI builds stock, so CI is still
   the gate for either board.
+
+## 25. The pull-request lane, and the gates it did not run (2026-11-03)
+
+A host test shipped to main with a `gmtime_r` shim defined over `gmtime_s`, which
+is Microsoft's. It passed here and failed on `ubuntu-latest` twice over: glibc has
+no `gmtime_s` to call, and it already declares `gmtime_r` `noexcept`, so the
+definition clashed on the exception specifier. `-Werror` made both of those
+errors. CI went red on main at `8cb5023`, every later step was skipped and no
+release published. `c7be107` put the shim behind `#ifdef _WIN32` and
+`v2026.11.03.0004` published at 13:27 UTC.
+
+What let it reach main is that `bench-cal.yml`, the pull-request lane, ran four of
+the gates the release lane runs and reached none of them by any route. Read off
+`HEAD` at `c7be107`: neither `bench-cal.yml` nor `ci/build-firmware.sh` names
+`ci/test-reported-counter.sh`, `ci/test-personal-photos-key.sh`,
+`ci/test-announcement-and-home-value-keys.sh` or
+`ci/check-content-key-resolvers.sh`. `mut-host-test.yml` runs the last three, and
+its own header says it never runs on main and triggers on `mut/**` and `test/**`
+alone. So for work arriving by pull request the first execution of those steps was
+on main, where failing one costs the release.
+
+### 25a. What each lane runs now
+
+Measured by globbing each workflow's `run:` lines and `ci/build-firmware.sh`'s
+own calls, rather than read. "wrapper" means the gate arrives through
+`ci/build-firmware.sh`, which all three lanes invoke; on `mut-host-test.yml` that
+is the `full-gate` job, which is opt-in by `[full-gate]` in the commit message, so
+an ordinary mutation push does not run it.
+
+| Gate | bench-cal | release | mut-host |
+|---|---|---|---|
+| `check-asset-counters.sh` | wrapper | step + wrapper | step + wrapper |
+| `check-board-columns-call.sh` | wrapper | wrapper | step + wrapper |
+| `check-content-key-resolvers.sh` | step + wrapper | step + wrapper | step + wrapper |
+| `check-host-test-portability.sh` | step + wrapper | wrapper | wrapper |
+| `check-ram-budget-call.sh` | step | step | step |
+| `check-score-guard.sh` | wrapper | wrapper | step + wrapper |
+| `check-text-state.sh` | wrapper | wrapper | step + wrapper |
+| `test-announcement-and-home-value-keys.sh` | step | step | step |
+| `test-brand-splash.sh` | step | step | - |
+| `test-card-columns.sh` | step | step | step |
+| `test-config-request.sh` | step | step | step |
+| `test-loader-order.sh` | step | step | step |
+| `test-personal-photos-key.sh` | step | step | step |
+| `test-ram-picture-budget.sh` | step | step | step |
+| `test-recovery-menu.sh` | step | step | step |
+| `test-reported-counter.sh` | step | step | step |
+
+Four rows changed: the three content-key gates and `test-reported-counter.sh` read
+`-` under bench-cal before this. `check-host-test-portability.sh` is new, below.
+`test-brand-splash.sh` still runs on neither mutation job, which is older than
+this and is left alone.
+
+The four new steps carry `if: ${{ hashFiles('<script>') != '' }}`, the way
+`mut-host-test.yml` guards its own, so a branch cut before one of these scripts
+existed runs the rest rather than failing on a file it never had. The release lane
+keeps them unguarded, because there a missing gate script is itself the defect.
+
+### 25b. The paths filter
+
+`bench-cal.yml`'s `paths:` decides whether the lane runs at all, and a gate in a
+workflow that does not trigger reads nothing. The filter named 27 patterns and
+reached 11 of the 36 files the four gates read.
+
+Each gate's real input set was taken from the compiler rather than from the
+scripts' own comments: `g++ -MM` over each host test's translation units, and
+`grep -l 'Cards::registerCard' App/*.cpp` for the resolver gate, which grades
+every file that registers a card and also pins `App/CardManager.cpp` and
+`App/CheckIn.cpp`. Then a script translated each filter pattern to an anchored
+regex under GitHub's own rules - `*` stops at `/`, `**` does not - and matched it
+against those 36 paths. It reports 36 of 36 after the change and reported 11
+before. The same script over a control list puts `README.md` and
+`.github/workflows/build-and-release.yml` outside the filter and `Recovery.h`,
+`RecoveryMenu.cpp` and `libraries/DamBoards/deep/nested/Board.h` inside it, which
+is what says the matcher is matching rather than agreeing.
+
+Eleven patterns were added. `App/*.cpp` is one of them, in place of the sixteen
+card files it matches today, because a new card is a new file and a list of
+sixteen here is the one place nobody updates; it also covers `CardManager.cpp` and
+`CheckIn.cpp`. Seven headers the host tests compile against are named
+individually, the way the filter already names `App/Display.h`.
+
+The filter also missed `App/partitions.csv`, `App/partitions-panellan-8mb.csv` and
+the root `partitions-panellan-8mb.csv`. The bare `partitions.csv` already there is
+CAL's own at the repository root and matches nothing under `App/` - `*` does not
+cross a `/`. `ci/build-firmware.sh` reads the table out of the build directory and
+compares the compiled size against it, so a resized App partition changed what
+that check allows without the bench running. All three are in the filter now. That
+is a second hole in the same filter rather than part of the four gates, and it is
+called out here so it is not read as one of them.
+
+### 25c. The stub portability gate
+
+`ci/check-host-test-portability.sh` is new. It reads every `.h`, `.cpp` and `.hpp`
+under `tests/` and fails on `gmtime_s`, `localtime_s`, `ctime_s`, `asctime_s`,
+`strcpy_s`, `sprintf_s` or `_snprintf` outside an `#ifdef _WIN32` block. Those
+seven are in Microsoft's C runtime and not in glibc, and the first two shadow a
+POSIX function that takes its arguments the other way round.
+
+It strips line and block comments before searching, because these stubs name the
+Windows function they stand in for and a scan of the raw text reports every such
+remark. It tracks the preprocessor conditionals as a stack, so the `#else` of an
+`#ifdef _WIN32` and the body of an `#ifndef _WIN32` both count as outside. It
+strips `\r` per line, because a carriage return at the end of a directive stops
+the patterns matching and the gate would then pass by recognizing nothing. It
+prints how many files and stub directories it read, with a floor of 20 and 5 as of
+this date, for the same reason.
+
+It runs as a step on `bench-cal.yml` and from `ci/build-firmware.sh`, which puts
+it on all three lanes and on any local wrapper run. The wrapper is where it earns
+its keep: on `ubuntu-latest` the host test fails on its own, so the machine that
+needs telling is the one with the Microsoft interface to reach for.
+
+### 25d. The runs, read off each runner's own line
+
+`g++` 16.2.0 at `C:\Tools\mingw64\bin`, from the repository root, the way each
+workflow invokes it.
+
+| Run | Output |
+|---|---|
+| `ci/test-personal-photos-key.sh` | `PASS: personal photos content key (10 cases)`, twice, the second build bounds-checked |
+| `ci/test-announcement-and-home-value-keys.sh` | `PASS: announcement and home value content keys (18 cases)` |
+| `ci/check-content-key-resolvers.sh` | `16 files in App/ register a card, between them 17 card descriptors`, then its pass line |
+| `ci/test-reported-counter.sh` | `PASS: reported counter - every occurrence to 255 counted, and the 64 past it hold` |
+| `ci/check-host-test-portability.sh` | `20 source files under tests/, across 5 stub directories`, then `PASS: host test stubs use no Windows-only interface outside an #ifdef _WIN32 block` |
+
+The portability gate was made to fail before it was made to pass. A throwaway
+stub directory under `tests/` carried seven cases at once, and the gate reported
+four and only four: an unguarded `gmtime_s`, which is the shipped defect's own
+shape; a `ctime_s` inside `#ifndef _WIN32`; a `strcpy_s` in the `#else` of an
+`#ifdef _WIN32`; and a `_snprintf`. It stayed quiet on a line comment naming
+`gmtime_s` and `strcpy_s`, on a block comment spanning two lines naming
+`localtime_s` and `sprintf_s`, on the real guarded shim, and on a plain C99
+`snprintf`. Repeated with the whole probe rewritten CRLF: the same four, at the
+same line numbers. The probe was deleted and `git status` confirmed the tracked
+tree unchanged, so nothing tracked was mutated to run this.
+
+### 25e. What this does not cover
+
+- **No workflow has run.** GitHub Actions cannot be driven from here and nothing
+  was pushed. That each script runs and passes from the repository root is
+  measured; that `bench-cal.yml` now catches the next one of these is read off the
+  file. The first evidence either way is a pull request's own step output.
+- **The YAML was not parsed by a YAML parser.** There is none on this
+  workstation - no Python, Node, Ruby, `yq` or cached `YamlDotNet`, and
+  `bench-cal.yml`'s own image check calls `python3`, which exists on the runner
+  and not here. What was checked is structural: no tabs, every indent even, every
+  `${{ }}` closing on its line, no key repeated inside one mapping, the `paths:`
+  sequence resolving to 38 entries, and the `steps:` sequence resolving to 17
+  steps with the five new ones between `check-ram-budget-call.sh` and the compile,
+  each carrying an `if` and a `run`. A real parse is still owed.
+- **The two host tests were not added to `ci/build-firmware.sh`.** Only the two
+  text gates were. That script has never called a host test: it is the build
+  procedure, it is meant to run wherever `arduino-cli` runs, and every gate in it
+  is a `grep`, `sed` or `awk` over the tree. A host test there would make the
+  build need a host `g++` as well. The host tests reach both CI lanes as steps
+  instead.
+- **`mut-host-test.yml` was not touched.** It already ran three of the four, and
+  the portability gate reaches its `full-gate` job through the wrapper. Its
+  `host-test` job still does not read `tests/` for this.
+- **The gate holds seven names and not a category.** A Windows-only interface
+  nobody here has met yet passes it, and so does a difference in behaviour rather
+  than in availability. The seven are the ones that have cost something or sit one
+  keystroke from a POSIX function.
+- **GCC 13.3 against 16.2.0 is not covered by any of this.** A warning only one
+  of the two compilers emits is the same class of problem as the shim and this
+  gate does not see it. `ubuntu-latest` is still the only reading of what the
+  release lane's compiler says.

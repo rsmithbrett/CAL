@@ -26,6 +26,30 @@ on:
       - "App/CardColumns.h"
       - "App/Display.cpp"
       - "App/Display.h"
+      # What the content-key gates read. ci/check-content-key-resolvers.sh grades
+      # every file in App/ that calls Cards::registerCard, so the entry is the
+      # glob rather than the sixteen names it matches today: a new card is a new
+      # file, and a list here would be the one place nobody updates. That glob
+      # also covers the CardManager.cpp fallback order and the CheckIn.cpp
+      # attribute name the same gate pins. The two host tests compile
+      # PersonalPhotos.cpp, Announcement.cpp and HomeValue.cpp against the
+      # headers below, and the reported-counter test compiles ReportedCounter.h.
+      - "App/*.cpp"
+      - "App/Announcement.h"
+      - "App/Assets.h"
+      - "App/Cards.h"
+      - "App/HomeValue.h"
+      - "App/Log.h"
+      - "App/PersonalPhotos.h"
+      - "App/ReportedCounter.h"
+      # The App's own partition tables and the second board's. ci/build-firmware.sh
+      # reads the table out of the build directory and compares the compiled size
+      # against it, so a resized partition changes what that check allows. The
+      # bare partitions.csv below is CAL's own, at the repository root, and matches
+      # nothing under App/.
+      - "App/partitions.csv"
+      - "App/partitions-panellan-8mb.csv"
+      - "partitions-panellan-8mb.csv"
       - "Provisioning.cpp"
       - "Identity.cpp"
       - "Identity.h"
@@ -67,6 +91,37 @@ jobs:
         run: bash ci/test-ram-picture-budget.sh
       - name: Check the RAM budget's call site
         run: bash ci/check-ram-budget-call.sh
+
+      # The rest of what build-and-release.yml runs before it publishes. These
+      # four ran nowhere on a pull request, so the first time any of them ran
+      # against work reaching main was on main, where failing one skips every
+      # later step and publishes no release. The step names match that
+      # workflow's so the two lanes read as the same list.
+      #
+      # Guarded by hashFiles, the way mut-host-test.yml guards its own: a branch
+      # cut before one of these scripts existed runs the rest rather than
+      # failing on a file it never had, which would read as the branch being at
+      # fault. The release lane keeps them unguarded, because there a missing
+      # gate script is itself the defect.
+      - name: Test the reported counters past the end of a uint8_t on host
+        if: ${{ hashFiles('ci/test-reported-counter.sh') != '' }}
+        run: bash ci/test-reported-counter.sh
+      - name: Test the personal photographs content key on host
+        if: ${{ hashFiles('ci/test-personal-photos-key.sh') != '' }}
+        run: bash ci/test-personal-photos-key.sh
+      - name: Test the announcement and home value content keys on host
+        if: ${{ hashFiles('ci/test-announcement-and-home-value-keys.sh') != '' }}
+        run: bash ci/test-announcement-and-home-value-keys.sh
+      - name: Check every card has decided what its draws report
+        if: ${{ hashFiles('ci/check-content-key-resolvers.sh') != '' }}
+        run: bash ci/check-content-key-resolvers.sh
+
+      # Before the compile, because what it reads needs no toolchain and because
+      # a stub reaching for a Microsoft-only interface fails the host tests above
+      # with a wall of g++ output that names the symbol and not the reason.
+      - name: Check the host test stubs use interfaces both runners have
+        if: ${{ hashFiles('ci/check-host-test-portability.sh') != '' }}
+        run: bash ci/check-host-test-portability.sh
 
       - name: Compile against production toolchain and check real partitions
         run: bash ci/build-firmware.sh
