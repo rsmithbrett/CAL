@@ -23,6 +23,20 @@ dated heading after.
 
 ## Unreleased
 
+### A scoreboard keeps its layout when a score arrives that is not a score - App
+
+A score below zero was drawn as if it were a scoreline, and because the board
+sizes all four of its rows together, one such value shrank the score digits on
+every game on the card. No league the device follows reports a negative score,
+so this was a shape the server could send rather than something anybody watched
+happen.
+
+A value below zero, or above the range a score can hold, now draws nothing where
+the number would go, the same blank a game that has not started already uses,
+and the value is named in the device's diagnostic stream. Nil-nil still draws,
+because that is a real scoreline. Nothing changes for any score a provider
+actually sends.
+
 ### A display with no memory card now shows the photograph on your house-hunt card - App
 
 If your display has no memory card in it, the card showing properties your agent sent you
