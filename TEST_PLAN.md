@@ -5656,3 +5656,106 @@ would pass it.
 - **Not run on the release runner.** The script is `awk`, `sed`, `grep` and
   `tr`; what CI's bash and coreutils make of it is unmeasured, the way
   GCC 13.3 against 16.2.0 is unmeasured for section 19a.
+
+## 27. Two host gates that read none of their binary's output (2026-11-03)
+
+`ci/test-loader-order.sh` and `ci/test-recovery-menu.sh` each ran their compiled
+binary as a bare command and gated on exit status. Both binaries print a `PASS:`
+line that nothing looked at, `tests/loader-order-test.cpp:117` and
+`tests/recovery-menu-test.cpp:460`, so a `main()` returning 0 having printed
+nothing passed both. Section 19's `ci/test-brand-splash.sh` had the same gap and
+closed it an hour earlier; these two carry the same guard now, spelled the way
+`ci/test-config-request.sh` spells it.
+
+Both gates are steps in `build-and-release.yml` and `bench-cal.yml`, so until now
+neither lane could tell a passing test from a test that stopped running.
+
+### 27a. What each gate reads now
+
+| Gate | Pattern it requires | What it says when the pattern is absent |
+|---|---|---|
+| `ci/test-loader-order.sh` | `*"PASS: loader NVS write order"*` | `ERROR: the loader order test exited 0 without printing its PASS line.` |
+| `ci/test-recovery-menu.sh` | `*"PASS: recovery gesture"*`, per board | `ERROR: the recovery menu test exited 0 at $BOARD without printing its PASS line.` |
+
+The recovery guard sits inside the `for BOARD` loop, so each target's run is read
+on its own and the message names the board. A build that prints the line at
+`esp32` and not at `esp32s3` is caught at the second iteration rather than
+averaged away.
+
+### 27b. The mutations, and what each one did
+
+The `PASS:` line was commented out in each test source so `main()` returned 0
+having printed only what the script's own `echo` put there. Every mutation was
+gated on `cmp` against a byte-for-byte copy taken first, restored from that copy,
+confirmed identical with `cmp` again and `touch`ed, and applied by byte-literal
+replacement through `[System.IO.File]::ReadAllBytes` / `WriteAllBytes` with
+`GetEncoding(28591)` round-tripping rather than by `sed` or `perl`: Git Bash's
+`sed` drops the carriage returns on a CRLF file, so a pattern built from one does
+not match its real bytes.
+
+| Run | Output |
+|---|---|
+| `ci/test-loader-order.sh`, before the guard, `PASS` line dropped | `==> Loader NVS write order` and nothing after it, exit 0 |
+| `ci/test-loader-order.sh`, after the guard, same mutation | the `ERROR` line above |
+| `ci/test-loader-order.sh`, after the guard, source restored | `PASS: loader NVS write order, all three paths and a missing factory partition` |
+| `ci/test-recovery-menu.sh`, before the guard, `PASS` line dropped | `Controller RAM: 20 bytes (host ABI)` at both boards and no `PASS` line, exit 0 |
+| `ci/test-recovery-menu.sh`, after the guard, same mutation | the `ERROR` line above, naming `esp32`, stopping at the first board |
+| `ci/test-recovery-menu.sh`, after the guard, source restored | `PASS: recovery gesture, ...` then `Controller RAM: 20 bytes (host ABI)`, at both boards |
+
+The recovery run is the clearer of the two. The mutated binary still printed a
+line, so a gate asking whether anything came back would have passed it. What the
+guard requires is that specific line.
+
+Byte counts across the pass. `tests/loader-order-test.cpp` read 4,315 bytes and
+118 CRs before, 4,318 and 118 mutated, 4,315 and 118 restored.
+`tests/recovery-menu-test.cpp` read 20,039 and 462 before, 20,042 and 462
+mutated, 20,039 and 462 restored. The two gate scripts went from 644 bytes and 15
+CRs to 1,142 and 27, and from 585 and 14 to 1,222 and 28. Both are stored LF in
+the index and checked out CRLF here, so the release runner sees LF.
+
+### 27c. The rest of `ci/`, read for the same shape
+
+Nineteen scripts in `ci/`. Nine build and run a host binary; seven of those
+already read its output and the two above were the rest, so nothing else in that
+family is open. Four findings of the other shape, where a check can pass by
+matching nothing rather than by checking something, were left alone:
+
+- **`ci/build-firmware.sh`'s `RestartCause` comparison.** Lines 238-243 `diff`
+  two `sed`/`grep` extractions of the enum and nothing asserts either came back
+  non-empty. `diff` of two empty streams returns 0. The pattern is pinned to
+  exactly two leading spaces, so re-indenting either header, wrapping either in a
+  namespace or renaming the enum turns the gate off while it stays green. Twelve
+  values extract from each header today, so it has real work to do. This is the
+  one worth closing next, because what it holds is two binaries on one device
+  agreeing on a number nothing else can notice.
+- **`ci/build-firmware.sh`'s `Motion` entry-point list.** Lines 164-182 loop over
+  a literal heredoc of six names rather than over `App/Motion.h`, which declares
+  twelve. A seventh entry point lands in no list. The zero-caller arm below it is
+  unreachable under `set -euo pipefail`, so an unwired entry point exits non-zero
+  with no message rather than with its own.
+- **`ci/check-release-notes-rolled.sh`'s Unreleased anchor.** Line 52 extracts the
+  section with a pattern anchored `^## Unreleased$` and never tests the result for
+  emptiness. Reword that heading and the comparison matches nothing for every
+  heading, while the pass line still reports a count taken from the previous
+  release's body.
+- **`ci/check-text-state.sh`'s scanned-unit count.** Both rules are absence checks
+  and neither prints how many function units it read. The column-zero opener means
+  a namespace wrap scans nothing. It does assert positively that
+  `restoreDefaultTextState()` exists and sets scale 1, which is a real anchor, so
+  this is the weakest of the four.
+
+`.github/workflows/mut-host-test.yml` guards every step with `hashFiles`, so a
+step whose script is missing is skipped rather than failed. That is deliberate and
+written down at its lines 21-24, and that workflow never runs on main.
+
+### 27d. What this does not cover
+
+- **Not run on the release runner.** Everything here ran under Git Bash with
+  GCC 16.2.0 from `C:\Tools\mingw64\bin`. CI compiles GCC 13.3 on ubuntu-24.04.
+  The change is shell rather than C++, so what moves is `bash`'s `case` and
+  `$(...)`, and that is unmeasured there.
+- **The four findings in 27c are reported, not fixed.** None was reproduced with a
+  mutation; they are readings of the scripts.
+- **Nothing was committed, pushed or deployed.** The two commits already held
+  unpushed in this tree, `01eb8a1` and `831e991`, were left alone.
+- **No device was flashed or commanded.**

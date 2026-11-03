@@ -10,5 +10,19 @@ for BOARD in esp32 esp32s3; do
     -Itests/recovery-stubs -I. -Ilibraries/DamBoards/src \
     Recovery.cpp tests/recovery-menu-test.cpp -o "$TEST_BUILD_DIR/recovery-menu-test"
   echo "==> Recovery tests: $BOARD"
-  "$TEST_BUILD_DIR/recovery-menu-test"
+  # The binary's own PASS line is what says it ran, rather than its exit
+  # status. A main() that returned without reaching an assertion exits 0 as
+  # happily as one that passed every case, and a gate reading the status cannot
+  # tell them apart. Each board's run is read, so a build that prints the line
+  # at one target and not the other is named. See the same lines in
+  # ci/test-config-request.sh.
+  OUTPUT=$("$TEST_BUILD_DIR/recovery-menu-test")
+  echo "$OUTPUT"
+  case "$OUTPUT" in
+    *"PASS: recovery gesture"*) ;;
+    *)
+      echo "ERROR: the recovery menu test exited 0 at $BOARD without printing its PASS line." >&2
+      exit 1
+      ;;
+  esac
 done
