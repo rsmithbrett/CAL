@@ -23,6 +23,33 @@ dated heading after.
 
 ## Unreleased
 
+### Your reports can say which photograph was on screen - App
+
+The card showing your own photographs recorded that it had been up and nothing
+about which picture was on it, so a report could say the card ran five hundred
+times and never which of your pictures anybody saw. Every other picture card
+already reported this.
+
+It reports the picture now. Nothing to do, and nothing changes on the display
+itself. Reports covering draws from before this release still cannot name the
+picture, because the device was the only thing that knew and it was not asked.
+
+### A count of pictures that would not draw keeps counting past 255 - App
+
+A display tells the server which pictures it could not draw and how many times.
+That count was held in a space with room for 255, and the 256th wrapped it back
+to zero, which the device read as nothing to report: it sent no count, sent no
+list of which pictures, and kept the list it already had rather than clearing it.
+The next stretch then opened on a figure that had already moved.
+
+The count stops at 255 and holds there, so a figure of 255 means 255 or more.
+Nothing to do. A display that has never had that many pictures fail was never
+affected.
+
+---
+
+## v2026.11.03.0002
+
 ### The house-hunt photograph draws on a display standing on its end - App
 
 v2026.11.03.0001 fetched the photograph on a display with no memory card and then
