@@ -234,6 +234,8 @@ void drawNoContent() {
 /// entry points, where drawFullScreen would reach for the network on a miss.
 void draw(uint16_t itemIndex) {
   if (itemIndex >= gCount) {
+    Log::printf("[%s] item %u drew no picture - the set holds %u", kCardId,
+                static_cast<unsigned>(itemIndex + 1), static_cast<unsigned>(gCount));
     drawNoContent();
     return;
   }
@@ -265,6 +267,25 @@ void draw(uint16_t itemIndex) {
 
   // Not on the card and not the one in heap. Ordinary on a cardless display
   // holding one of several, and the next fetch moves the buffer along.
+  //
+  // Named the way the featured-listings portrait band names a picture it did not
+  // draw: which item, where the bytes would have had to come from, and what holds
+  // the space instead. A set of three on a cardless display reaches this twice a
+  // pass and records an impression carrying the full dwell for each of them, so
+  // this line is what tells those draws apart from the one that put a photograph
+  // up. One line per draw rather than one per pass, because the item is what
+  // differs between them.
+  if (gRamItem == kNothingHeld) {
+    Log::printf("[%s] photograph '%s' (item %u of %u) not drawn - it is not on the card and "
+                "nothing is held in heap, so the no-content state takes the dwell",
+                kCardId, id, static_cast<unsigned>(item + 1), static_cast<unsigned>(gCount));
+  } else {
+    Log::printf("[%s] photograph '%s' (item %u of %u) not drawn - it is not on the card and "
+                "item %u is the one held in heap, so the no-content state takes the dwell",
+                kCardId, id, static_cast<unsigned>(item + 1), static_cast<unsigned>(gCount),
+                static_cast<unsigned>(gRamItem + 1));
+  }
+
   drawNoContent();
 }
 

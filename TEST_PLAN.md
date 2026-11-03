@@ -4852,12 +4852,16 @@ the same state.
 bash ci/test-personal-photos-key.sh
 ```
 
-Seven cases. `App/PersonalPhotos.cpp` compiles as it ships against
+Nine cases. `App/PersonalPhotos.cpp` compiles as it ships against
 `tests/personal-photos-stubs/Arduino.h`; `Assets.h`, `Cards.h`, `Display.h`,
 `Log.h` and `PersonalPhotos.h` are the shipped declarations and the functions the
 module calls are defined in the test. The `Cards::registerCard` stub keeps the
 descriptor, which is how the test reaches a resolver sitting in an anonymous
 namespace - the same route `noteShowing()` takes.
+
+The `Log::printf` stub formats into the same 256-byte scratch production uses and
+keeps the lines, so the last two cases read back what reaches the remote stream
+rather than only what the resolver answered.
 
 - the card registers a resolver at all
 - a photograph on the card reports its own asset id, at three items
@@ -4869,6 +4873,12 @@ namespace - the same route `noteShowing()` takes.
 - a set that changed reports nothing until the next fetch
 - a photograph that failed to decode stops reporting its id, and its neighbour
   keeps reporting
+- a draw that put no photograph up writes one line naming the photograph, which
+  item of the set it was and which item holds the heap buffer instead, and the
+  item that did draw writes no such line - added 2026-11-03, and it failed before
+  the line existed
+- an item past the end of the set writes a line carrying the item and the set
+  size, added the same day
 
 The `Arduino.h` stub is a `String` class rather than the
 `using String = std::string` the stubs beside it use, because
@@ -4940,7 +4950,14 @@ applied reads exactly like a passing test.
   the rollup and needs no firmware release. `graphic` reports no label either.
 - **Not seen on a device.** The resolver has not run on hardware. What is
   measured is the host test and the gate; the first device reading would be a
-  `personalphotos` row arriving with a content key in it.
+  `personalphotos` row arriving with a content key in it. The same goes for the
+  no-content line: it is measured on a host and has not run on a display.
+- **The line explains the count and does not correct it.** A draw that put no
+  photograph up still records an impression carrying the full dwell, so `Shows`
+  counts slots and not pictures, and nothing in this change alters that.
+  `CARD_IMPRESSIONS_DESIGN.md` under "What an impression does not say" carries the
+  measurement and describes the additive optional field that would report it
+  upward. Nothing here builds one, and the wire is unchanged.
 - **`HomeValue` and `Announcement` are listed as keyless and are not the same
   case as a clock.** Both report a summary on every draw and no key, so their
   period rows carry a label and group as one. Whether either owes a key is an

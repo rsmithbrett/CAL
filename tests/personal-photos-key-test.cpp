@@ -22,6 +22,8 @@
 // not on the glass.
 
 #include <cassert>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -52,6 +54,32 @@ bool gDrawCachedSucceeds = true;
 /// Bytes the RAM stub hands out, so the module's release path has something to
 /// clear.
 uint8_t gRamBytes[16] = {};
+
+/// Every line the module logged since the last clearLog(), formatted the way
+/// Log::printf formats it. A draw that put no picture up is only readable on the
+/// remote stream, so what it writes there is as much the subject of this file as
+/// the content key is.
+std::vector<std::string> gLogLines;
+
+void clearLog() { gLogLines.clear(); }
+
+/// Lines holding every one of `fragments`.
+std::vector<std::string> loggedMatching(const std::vector<std::string>& fragments) {
+  std::vector<std::string> found;
+  for (const auto& line : gLogLines) {
+    bool all = true;
+    for (const auto& fragment : fragments) {
+      if (line.find(fragment) == std::string::npos) {
+        all = false;
+        break;
+      }
+    }
+    if (all) {
+      found.push_back(line);
+    }
+  }
+  return found;
+}
 
 /// The descriptor PersonalPhotos registered, in a function-local static so
 /// nothing depends on the order two translation units initialise in. The module
@@ -254,6 +282,77 @@ void aPhotographThatDidNotDecodeStopsReportingItsId() {
   std::cout << "  a photograph that did not decode stops reporting its id\n";
 }
 
+/// A draw that put no photograph up says so, and names which item held the glass
+/// instead.
+///
+/// This is the half of the card that a reader cannot get at any other way. A
+/// cardless display holds one picture, the other items of the set draw
+/// "No picture to show", and the impression recorded against each of them carries
+/// the full dwell - so the count on the card reads higher than the pictures it
+/// put up and nothing on the stream distinguished the two. The draws that fail to
+/// decode already wrote a line; these did not.
+void aDrawWithNoPictureNamesWhatTookTheGlass() {
+  gOnCard.clear();
+  gRamFetchSucceeds = true;
+  gDrawCachedSucceeds = true;
+  resetTo({kFirst, kSecond, kThird});
+  runFetch();
+
+  // Whichever item the heap buffer landed on is the one that drew. The resolver
+  // answers for exactly that item, which is what ties this case to the key.
+  int held = -1;
+  for (uint16_t item = 0; item < 3; ++item) {
+    if (!keyFor(item).empty()) {
+      held = static_cast<int>(item);
+    }
+  }
+  assert(held >= 0 && "a cardless display should hold one picture after a fetch");
+
+  assert(registered().draw != nullptr);
+  const char* const ids[3] = {kFirst, kSecond, kThird};
+
+  for (uint16_t item = 0; item < 3; ++item) {
+    clearLog();
+    registered().draw(item);
+
+    const auto named = loggedMatching({"personalphotos", ids[item], "not drawn"});
+    if (static_cast<int>(item) == held) {
+      assert(named.empty() && "the photograph that drew must not report itself as not drawn");
+      continue;
+    }
+
+    assert(named.size() == 1 &&
+           "a draw that put no photograph up writes one line naming the photograph");
+    const std::string& line = named.front();
+    assert(line.find("item " + std::to_string(item + 1) + " of 3") != std::string::npos &&
+           "the line names which item of the set drew nothing");
+    assert(line.find("heap") != std::string::npos &&
+           "the line says where the bytes would have had to come from");
+  }
+
+  std::cout << "  a draw with no photograph names the item and what holds the glass\n";
+}
+
+/// An item past the end of the set says so too.
+///
+/// CardManager asks for items under itemCount(), so this is the path that means
+/// the two disagree. It drew the no-content state and wrote nothing.
+void anItemPastTheSetSaysItDrewNothing() {
+  gOnCard = {kFirst};
+  gRamFetchSucceeds = true;
+  resetTo({kFirst});
+  runFetch();
+
+  clearLog();
+  assert(registered().draw != nullptr);
+  registered().draw(4);
+
+  const auto named = loggedMatching({"personalphotos", "item 5", "set holds 1"});
+  assert(named.size() == 1 &&
+         "a draw past the end of the set writes one line naming the item and the set size");
+  std::cout << "  an item past the set reports the item and the set size\n";
+}
+
 }  // namespace
 
 // --- the production file's dependencies -------------------------------------
@@ -313,7 +412,16 @@ void showNoContent(const String& headline, const String& detail) {
 
 namespace Log {
 
-void printf(const char* format, ...) { (void)format; }
+/// The same 256-byte scratch and the same vsnprintf production formats into, so
+/// a line this test reads back is the line that reaches the stream.
+void printf(const char* format, ...) {
+  char scratch[256];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(scratch, sizeof(scratch), format, args);
+  va_end(args);
+  gLogLines.push_back(scratch);
+}
 
 }  // namespace Log
 
@@ -325,7 +433,9 @@ int main() {
   anItemPastTheSetReportsNothing();
   aChangedSetReportsNothingUntilTheNextFetch();
   aPhotographThatDidNotDecodeStopsReportingItsId();
+  aDrawWithNoPictureNamesWhatTookTheGlass();
+  anItemPastTheSetSaysItDrewNothing();
 
-  std::cout << "PASS: personal photos content key (7 cases)\n";
+  std::cout << "PASS: personal photos content key (9 cases)\n";
   return 0;
 }
