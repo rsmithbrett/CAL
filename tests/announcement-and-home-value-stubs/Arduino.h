@@ -23,13 +23,18 @@
 
 #include <string>
 
-// The ESP32 core's newlib declares gmtime_r and this host's time.h does not, so
-// HomeValue.cpp's updatedAtText() has nothing to call without this. gmtime_s
-// takes its two arguments the other way round and answers an error code rather
-// than a pointer.
+// What HomeValue.cpp's updatedAtText() calls. gmtime_r is POSIX, so glibc
+// declares it and the ESP32 core's newlib defines it; a Windows time.h carries
+// gmtime_s instead, which takes its two arguments the other way round and
+// answers an error code rather than a pointer. So this stands in on Windows and
+// the platform's own function serves everywhere else: glibc declares gmtime_r
+// noexcept, and a definition here would clash with it on the exception
+// specifier even where gmtime_s existed to call.
+#ifdef _WIN32
 inline struct tm* gmtime_r(const time_t* when, struct tm* into) {
   return gmtime_s(into, when) == 0 ? into : nullptr;
 }
+#endif
 
 class String : public std::string {
  public:

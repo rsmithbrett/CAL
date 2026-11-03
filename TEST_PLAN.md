@@ -5164,8 +5164,28 @@ changed every key in the fleet with nothing failing.
 The `Arduino.h` stub carries `operator+` overloads returning `String`, which is
 what keeps `HomeValue.cpp`'s `hasRange() ? a + b : "--"` compiling: with only
 `std::string`'s own operators in scope the two arms come out as `std::string` and
-`String`, each convertible to the other. It also shims `gmtime_r`, which the
-ESP32 core's newlib declares and this host's `time.h` does not.
+`String`, each convertible to the other. It also shims `gmtime_r`, and only
+under `_WIN32`. That function is POSIX, so glibc declares it and the ESP32
+core's newlib defines it; MinGW's `time.h` carries `gmtime_s` instead, which
+takes its two arguments the other way round and answers an error code rather
+than a pointer.
+
+The shim was unguarded when the gate first ran on main, which compiled on this
+workstation and failed on `ubuntu-latest` two ways at once: glibc declares
+`gmtime_r` `noexcept`, so an unguarded definition clashes on the exception
+specifier, and `gmtime_s` is a Microsoft interface glibc has no declaration for.
+Run `41633721293` on commit `8cb5023` failed there and skipped both board builds
+and the release. Reproduced two ways without a Linux host: this workstation's
+g++ 16.2.0 with a force-included header shaped like glibc's `time.h`, which
+raises both errors, and the ESP32 toolchain's own GCC 14.2.0, whose newlib
+headers declare `gmtime_r` and raise the `gmtime_s` one. That second compiler
+also defines no `_WIN32`, so it is what says the guard leaves the platform's own
+`gmtime_r` in place.
+
+Both halves of that read off glibc's own `time/time.h`, which declares
+`extern struct tm *gmtime_r (const time_t *__restrict, struct tm *__restrict)
+__THROW;` and carries no `gmtime_s` anywhere in the file. `__THROW` expands to
+`noexcept (true)` under C++11 and later, per `misc/sys/cdefs.h`.
 
 ### 23b. The resolver-coverage gate
 
