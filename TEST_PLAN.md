@@ -6333,7 +6333,7 @@ stayed at five and the gate says no such number.
 Not fixed. `ci/build-firmware.sh` is another lane's file today. What it needs is
 the census printed and floored the way the Motion gate beside it now does, and the
 pattern widened from `lcd.` to any receiver, so a second name for the panel raises
-the count rather than leaving it.
+the count rather than leaving it. Section 33 is the fix.
 
 ### 31e. What the other sixteen read
 
@@ -6581,3 +6581,147 @@ were re-run one at a time.
   `no matching function` and `candidate expects`, but the ubuntu wording is
   unmeasured here.
 - Nothing was committed or pushed. No device was flashed or commanded.
+
+## 33. The bounded-string gate, and what cannot be renamed away (2026-11-03)
+
+Section 31d found `ci/build-firmware.sh`'s bounded-string check passing on
+nothing and left it there, because the file belonged to another lane that day.
+This is the fix.
+
+The gate ran as its own extracted lines throughout and never as part of the
+script, for the reason section 30 gives: line 551 copies
+`partitions-panellan-8mb.csv` over `partitions.csv` for the Panellan compile and
+restores at 612, so an interrupted end-to-end run leaves the wrong table in the
+tree. Every mutation was `App/Display.cpp` rewritten with `WriteAllBytes` and
+`GetEncoding(28591)`, gated on a byte comparison against a copy taken first,
+restored from that copy, confirmed byte-identical, and the timestamp pushed
+forward. `App/Display.cpp` was 387,205 bytes with 7,465 CR and 7,465 LF at both
+ends. `App/partitions.csv` was sha256
+`47B808966BFC8F6A0ADE8D08516D824F5B6BA473183AA7F674D16F5168F34850` and
+`App/partitions-panellan-8mb.csv` `782F5361A4E4D641CF5ED217F06707FFB430114FD718B36205957EFF7E6D27E3`
+at both ends, and both were clean under `git status`.
+
+### 33a. Reproduced
+
+The gate as committed at `076734f` greps `lcd.drawString(` and subtracts the
+literal draws and the `LAYOUT-PRIMITIVE` ones. It asserts nothing positively,
+prints no figure, and has no floor on a census it could take: six
+receiver-qualified `drawString` calls in that file, five of them call sites and
+all five sanctioned, plus `LgfxCanvas`'s one hand-off to LovyanGFX.
+
+Adding to `showFailure()`
+
+```
+  auto& panel = lcd;
+  panel.drawString(whatToDo, 10, 200);
+```
+
+draws a server-supplied string raw into no box, which is the failure the gate's
+own error text describes as how "Houston Astros" reached a wall reading "Houston
+Astr". The gate printed its heading and exited 0. Its census stayed at five and
+it says no such number.
+
+### 33b. What cannot be skipped
+
+The receiver is a spelling. Three readings are the route, and each was measured
+off the file rather than assumed:
+
+| Reading | On 2026-11-03 | What a fall means |
+|---|---|---|
+| calls of a method named `drawString`, any receiver, by name or through a pointer | 6 | `Canvas`'s one text virtual was renamed, so what is counted is no longer the route |
+| of those, `panelDevice.drawString`, which is `LgfxCanvas`'s hand-off | 1 | a second hand-off is a second route, and the sanction reads neither of them as a call site |
+| lines naming `panelDevice` inside the driver block | 38, and 0 outside it | the panel object was renamed, or the block moved out from between the two markers |
+
+`Canvas`, at `App/Display.cpp:141`, declares exactly one text-drawing virtual,
+`drawString(const char*, int, int)`, plus a `String` overload that forwards to
+it. `LgfxCanvas` at 274 is its one implementation. All 38 lines naming
+`panelDevice` sit between the file's own `// ---- The driver` marker at 211 and
+`// ---- What the rest of this file draws on` at 397, which is what that block's
+own comment claims and what nothing checked until now. No file outside
+`App/Display.cpp` calls `drawString` at all. So `Canvas` is the chokepoint, and
+the three readings are that rather than a spelling of it.
+
+The declaration is read as well as the references, because "panelDevice is named
+nowhere outside the driver block" is an absence check and reads clean the moment
+the object is called something else. `LGFX panelDevice;` has to appear once
+inside the block, and that is the floor which makes the zero mean something.
+
+### 33c. What bites it
+
+Every row ran against both the gate as committed and the gate as it stands.
+
+| Mutation | Before | After |
+|---|---|---|
+| `auto& panel = lcd; panel.drawString(whatToDo, 10, 200);` in `showFailure()` | heading, exit 0, census unreported | `7 drawString calls ... 5 of 6 call sites sanctioned`, line 2390 named, exit 1 |
+| `drawString` renamed to `putString` throughout the file | heading, exit 0 | `0 drawString calls`, named as having read nothing at all, exit 1 |
+| `panelDevice.setCursor()` and `panelDevice.print()` added to `showFailure()` | heading, exit 0 | `2 outside it`, both lines named, exit 1 |
+| `panelDevice` renamed to `gGlass` throughout the file | heading, exit 0 | the hand-off reads 0, the driver's own line reads as an unsanctioned call site, `LGFX panelDevice;` is not declared, exit 1 |
+
+The third is the one no `drawString` pattern can see, in either version.
+`panelDevice` carries LovyanGFX's own `print()`, `setCursor()`,
+`drawCenterString()` and `drawRightString()`, and the driver-boundary reading is
+the only thing here that holds them.
+
+The fourth is the floor test. `0 outside it` is what that rename produces, and on
+its own it would have read as a pass.
+
+On a clean tree the gate prints
+
+```
+==> Checking every bounded string in App/Display.cpp goes through layoutText()
+    6 drawString calls read out of App/Display.cpp: 1 the driver's hand-off, 5 of 5 call sites sanctioned
+    panelDevice named on 38 lines inside the driver block (lines 211-397), 0 outside it
+```
+
+### 33d. Why it is still a text gate, and what would retire it
+
+A permit the compiler checks is the durable answer, and it is not built:
+`Canvas::drawString()` private, taking a tag type only the four sanctioned
+functions can construct, so `panel.drawString(whatToDo, 10, 200)` fails to build
+under any receiver name. That is the move that retired the key-policy gate in
+section 32.
+
+It is a change to what a card can draw, so `TEXT_LAYOUT_DESIGN.md` section 7 goes
+first, and it reorders the top of a 7,465-line file, because the friend list needs
+`TextBox` and `TextResult` declared above `Canvas` at line 141 rather than around
+1150. `App/Display.cpp` names LovyanGFX, so it does not compile on the host g++
+and the only proof available is a full `arduino-cli` App compile. None of that was
+done here.
+
+It would not retire the gate either. A `drawString` permit says nothing about
+`panelDevice.print()`, so the driver-boundary reading stays whatever happens to
+the virtual. What neither the permit nor the gate sees is a second text method
+added to `Canvas` and forwarded by `LgfxCanvas`: the hand-off count stays at one
+for `drawString`, nothing leaves the driver block, and no pattern here counts the
+new name. That is the residual, and holding it is the compiler's.
+
+### 33e. What this does not cover
+
+- **No firmware was compiled and no device was involved.** `App/Display.cpp` is
+  back at its committed contents, so the only files changed are
+  `ci/build-firmware.sh`, `TEXT_LAYOUT_DESIGN.md` and this one. `Display.cpp`
+  names a graphics library and reaches no host test, so no compile ran either
+  way, and `bash -n` over the whole script is all the checking the shell got.
+- **The script was not run end to end**, for the partition-table reason above.
+  Nothing else in `build-firmware.sh` was exercised and the compile steps from
+  line 541 on were not reached.
+- **Everything ran under Git Bash with GCC 16.2.0 from `C:\Tools\mingw64\bin`.**
+  CI runs GNU tools on ubuntu-24.04 against an LF checkout. What changed is
+  `grep -E`, `sed -n` and one `awk` field comparison; the working tree here is
+  CRLF and no pattern is anchored at end of line, so neither checkout should read
+  differently, but the ubuntu behaviour is unmeasured.
+- **The floors are readings from this tree on this date.** 6 drawString calls, 1
+  hand-off, and 38 `panelDevice` lines against a floor of 20. The 20 sits well
+  below 38 on purpose, because the shape wrappers in `LgfxCanvas` come and go
+  while a rename takes the reading to zero. Adding a sanctioned call site raises
+  the first figure and leaves the gate passing; removing one trips the floor,
+  which is the intent.
+- **The sentinel is still a comment somebody can write.** A new unbounded draw
+  passes the moment `// LAYOUT-PRIMITIVE` goes on its line. That is the sanction
+  working as designed, and it is also the whole of what a reviewer has to catch.
+- **`TEXT_LAYOUT_DESIGN.md` is in this repository, not the server tree.** It is at
+  the root of `CAL`, fifteen sections, section 7 being the one these gates cite.
+  `MOTION_AWARE_DISPLAY_DESIGN.md` and `CARD_ATTENTION_DESIGN.md` are the two in
+  the server tree. A first search for it was run from the server tree and found
+  nothing, which is section 30d's blind spot pointing the other way.
+- **Nothing was committed or pushed.** No device was flashed or commanded.

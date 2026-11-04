@@ -431,20 +431,79 @@ fi
 # A compiler cannot catch a sixth appearing. `lcd.drawString(someWireString, x,
 # y)` is perfectly legal and draws perfectly happily until the string is long,
 # which is the day nobody is looking. So it is checked the only way it can be,
-# the same way the Motion entry points above are: every lcd.drawString() in
+# the same way the Motion entry points above are: every drawString() call in
 # App/Display.cpp must either pass a string literal, which is bounded because
 # the programmer can see it, or carry the LAYOUT-PRIMITIVE sentinel that marks
 # the few places allowed to draw raw - inside layoutText() itself, the corner
 # clock, the clock card's hero, and drawTemperature's cursor walk.
 #
-# Deliberately a grep and nothing cleverer, in the same spirit as the Motion
-# gate: it does not know whether the text will fit, it knows the difference
-# between "went through the routine" and "did not", which is the failure that
-# actually happened and the one worth a gate.
+# What is counted is the method name and the driver boundary, not the receiver.
+# The pattern read lcd.drawString( and nothing else until 2026-11-03, which is a
+# spelling rather than a route, and
+#
+#     auto& panel = lcd;
+#     panel.drawString(whatToDo, 10, 200);
+#
+# added to showFailure() drew a server string into no box - the failure the
+# paragraph above describes - while this gate read its five sites and passed.
+#
+# The receiver can be called anything. The route cannot. Canvas declares one
+# text-drawing virtual, drawString(); LgfxCanvas is its one implementation and
+# holds the one hand-off to LovyanGFX; and the block between the file's own
+# "---- The driver" and "---- What the rest of this file draws on" markers is the
+# only one that names the panel object, which is what leaves Canvas as the only
+# way a string reaches the glass from anywhere else in the file. So both of those
+# are read below, both are printed, and both carry a floor, because a pattern
+# that stops matching returns nothing and an absence reads as a pass.
+#
+# A permit the compiler checks would be better: drawString() private on Canvas,
+# taking a tag only the four sanctioned functions can construct, so an unbounded
+# draw fails to build under any receiver name. That is a change to what a card
+# can draw, so TEXT_LAYOUT_DESIGN.md goes first and that document is in the
+# server tree. It would not retire this gate, because panelDevice carries
+# LovyanGFX's own print() and drawCenterString() and a drawString permit says
+# nothing about either; the boundary reading below is what holds those. What
+# neither reading sees is a second text method added to Canvas, and that is the
+# part only the compiler can hold.
 echo "==> Checking every bounded string in App/Display.cpp goes through layoutText()"
-RAW_DRAWS=$(grep -n 'lcd\.drawString(' App/Display.cpp \
+display_draw_calls() {
+  # Calls of a method named drawString on any receiver, named or through a
+  # pointer. Canvas's own declaration and the forwarding call in its String
+  # overload carry no receiver and match nothing here.
+  grep -nE '[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(\.|->)[[:space:]]*drawString[[:space:]]*\(' App/Display.cpp
+}
+DRAW_CALLS=$(display_draw_calls || true)
+DRAW_CALL_COUNT=$(printf '%s\n' "$DRAW_CALLS" | grep -c . || true)
+DRIVER_HANDOFF=$(printf '%s\n' "$DRAW_CALLS" | grep -c 'panelDevice\.drawString' || true)
+# The driver's hand-off to LovyanGFX is not a call site. Everything else is.
+CALL_SITES=$(printf '%s\n' "$DRAW_CALLS" | grep -v 'panelDevice\.drawString' || true)
+CALL_SITE_COUNT=$(printf '%s\n' "$CALL_SITES" | grep -c . || true)
+RAW_DRAWS=$(printf '%s\n' "$CALL_SITES" \
             | grep -v 'LAYOUT-PRIMITIVE' \
-            | grep -v 'lcd\.drawString("' || true)
+            | grep -vE '(\.|->)[[:space:]]*drawString[[:space:]]*\("' || true)
+RAW_DRAW_COUNT=$(printf '%s\n' "$RAW_DRAWS" | grep -c . || true)
+SANCTIONED_COUNT=$((CALL_SITE_COUNT - RAW_DRAW_COUNT))
+echo "    $DRAW_CALL_COUNT drawString calls read out of App/Display.cpp: $DRIVER_HANDOFF the driver's hand-off, $SANCTIONED_COUNT of $CALL_SITE_COUNT call sites sanctioned"
+
+TEXT_DRAW_FAIL=0
+if [ "$DRAW_CALL_COUNT" -eq 0 ]; then
+  echo "ERROR: no drawString call was found in App/Display.cpp, so this gate read" >&2
+  echo "       nothing at all. The pattern above stopped matching the file." >&2
+  TEXT_DRAW_FAIL=1
+elif [ "$DRAW_CALL_COUNT" -lt 6 ]; then
+  echo "ERROR: only $DRAW_CALL_COUNT drawString calls were read out of App/Display.cpp, and there" >&2
+  echo "       were 6 on 2026-11-03 - five call sites and the driver's one hand-off." >&2
+  echo "       Either call sites went away, or Canvas's text virtual was renamed and" >&2
+  echo "       what is counted here is no longer the route a string takes to the glass." >&2
+  TEXT_DRAW_FAIL=1
+fi
+if [ "$DRIVER_HANDOFF" -ne 1 ]; then
+  echo "ERROR: App/Display.cpp names panelDevice.drawString() on $DRIVER_HANDOFF lines, and LgfxCanvas" >&2
+  echo "       is the one implementation of Canvas's one text virtual. A second hand-off" >&2
+  echo "       is a second route to the glass, and the sanction above reads neither of" >&2
+  echo "       them as a call site. See TEXT_LAYOUT_DESIGN.md section 7." >&2
+  TEXT_DRAW_FAIL=1
+fi
 if [ -n "$RAW_DRAWS" ]; then
   echo "ERROR: App/Display.cpp draws a non-literal string without going through" >&2
   echo "       layoutText(). Such a string is measured against nothing and is clipped" >&2
@@ -454,6 +513,51 @@ if [ -n "$RAW_DRAWS" ]; then
   echo "       Use layoutText()/layoutLine() with a TextBox, or, if this genuinely" >&2
   echo "       cannot be expressed as a box, say why in a comment and add the" >&2
   echo "       LAYOUT-PRIMITIVE sentinel. See TEXT_LAYOUT_DESIGN.md section 7." >&2
+  TEXT_DRAW_FAIL=1
+fi
+
+# The boundary the reading above rests on. The declaration is counted as well as
+# the references, because "panelDevice is named nowhere outside the driver" is an
+# absence check and reads clean the moment the object is called something else.
+DRIVER_START=$(grep -n '^// ---- The driver' App/Display.cpp | head -1 | cut -d: -f1 || true)
+DRIVER_END=$(grep -n '^// ---- What the rest of this file draws on' App/Display.cpp | head -1 | cut -d: -f1 || true)
+if [ -z "$DRIVER_START" ] || [ -z "$DRIVER_END" ]; then
+  echo "ERROR: App/Display.cpp no longer carries both of the section markers that bound" >&2
+  echo "       the driver, '// ---- The driver' and '// ---- What the rest of this file" >&2
+  echo "       draws on', so there is no boundary here to read anything against." >&2
+  TEXT_DRAW_FAIL=1
+else
+  PANEL_DECL=$(sed -n "${DRIVER_START},${DRIVER_END}p" App/Display.cpp | grep -c '^LGFX panelDevice;' || true)
+  PANEL_INSIDE=$(sed -n "${DRIVER_START},${DRIVER_END}p" App/Display.cpp | grep -c 'panelDevice' || true)
+  PANEL_TOTAL=$(grep -c 'panelDevice' App/Display.cpp || true)
+  PANEL_OUTSIDE=$((PANEL_TOTAL - PANEL_INSIDE))
+  echo "    panelDevice named on $PANEL_INSIDE lines inside the driver block (lines $DRIVER_START-$DRIVER_END), $PANEL_OUTSIDE outside it"
+  if [ "$PANEL_DECL" -ne 1 ]; then
+    echo "ERROR: the driver block of App/Display.cpp does not declare 'LGFX panelDevice;'," >&2
+    echo "       so the figure beside it counts a name this file no longer uses and reads" >&2
+    echo "       zero wherever the panel object now lives. Declare it there, or teach" >&2
+    echo "       this gate the new name." >&2
+    TEXT_DRAW_FAIL=1
+  elif [ "$PANEL_INSIDE" -lt 20 ]; then
+    echo "ERROR: panelDevice is named on only $PANEL_INSIDE lines inside the driver block, and on 38" >&2
+    echo "       on 2026-11-03. The floor sits well below that figure because the shape" >&2
+    echo "       wrappers come and go, so a reading this low means the block moved out" >&2
+    echo "       from between the two markers rather than that it got smaller." >&2
+    TEXT_DRAW_FAIL=1
+  fi
+  if [ "$PANEL_OUTSIDE" -ne 0 ]; then
+    echo "ERROR: App/Display.cpp names panelDevice outside the driver block:" >&2
+    grep -n 'panelDevice' App/Display.cpp \
+      | awk -F: -v s="$DRIVER_START" -v e="$DRIVER_END" '$1 < s || $1 > e' >&2 || true
+    echo "       That reaches LovyanGFX straight, which skips Canvas and so skips every" >&2
+    echo "       reading above - panelDevice carries print(), setCursor() and" >&2
+    echo "       drawCenterString(), none of which any pattern here counts. The panel" >&2
+    echo "       object stays in the driver block and the rest of the file draws on" >&2
+    echo "       Canvas. See TEXT_LAYOUT_DESIGN.md section 7." >&2
+    TEXT_DRAW_FAIL=1
+  fi
+fi
+if [ "$TEXT_DRAW_FAIL" -ne 0 ]; then
   exit 1
 fi
 

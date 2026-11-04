@@ -407,15 +407,40 @@ three separate times. There is no name left to call.
 by omitting an argument. Declaring the budget is the price of drawing text.
 
 **Three CI gates, in `ci/build-firmware.sh`.** The compiler cannot catch a new
-`lcd.drawString(someServerString, x, y)`, and the firmware has no unit test
-harness, so it is checked the only way it can be, which is the same way that
-script already checks that every public `Motion` entry point has a caller.
+`lcd.drawString(someServerString, x, y)` as the file stands, and the firmware has
+no unit test harness, so it is checked the only way it can be, which is the same
+way that script already checks that every public `Motion` entry point has a
+caller.
 
-The first gate:
+The first gate, **amended 2026-11-03**:
 
-> Every `lcd.drawString(` in `App/Display.cpp` must either pass a string literal
-> as its first argument, or sit on a line carrying the `LAYOUT-PRIMITIVE`
-> sentinel comment.
+> Every call of a method named `drawString` in `App/Display.cpp`, on any
+> receiver, must either pass a string literal as its first argument, or sit on a
+> line carrying the `LAYOUT-PRIMITIVE` sentinel comment. `LgfxCanvas`'s own
+> hand-off to LovyanGFX is the one exception, and it appears exactly once. The
+> panel object is named nowhere outside the driver block.
+
+It read `lcd.drawString(` and nothing else until that date, which is a spelling
+rather than a route. Adding `auto& panel = lcd;` and
+`panel.drawString(whatToDo, 10, 200);` to `showFailure()` draws a server string
+into no box, and the gate passed it with its census still reading five and no
+figure printed.
+
+The receiver can be called anything. Three things cannot be renamed away without
+the gate saying so, and it now reads all three, prints each figure and floors
+each one: the method name, because `Canvas` declares one text-drawing virtual;
+the single hand-off inside `LgfxCanvas`; and the driver block, which is what
+leaves `Canvas` as the only way a string reaches the glass from the rest of the
+file. A pattern that stops matching now fails instead of finding nothing.
+`TEST_PLAN.md` section 33 has the mutations and the figures.
+
+A permit the compiler checks would be better, and it is not built: `drawString()`
+private on `Canvas`, taking a tag type only the four sanctioned functions can
+construct, so an unbounded draw fails to build under any receiver name. It would
+not retire the gate, because `panelDevice` also carries LovyanGFX's own
+`print()`, `setCursor()` and `drawCenterString()`, which a `drawString` permit
+says nothing about and the driver-boundary reading is what holds. A second text
+method added to `Canvas` is what neither the permit nor the gate would see.
 
 A literal is bounded because the programmer can see it. The sentinel marks four
 places (five call sites, since `drawTemperature` draws twice), each with a
