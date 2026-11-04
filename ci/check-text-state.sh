@@ -49,6 +49,13 @@
 # Deliberately a grep and two awks, in the same spirit as the two text gates in
 # build-firmware.sh: it does not know what the panel looks like, it knows the
 # difference between a function that put the scale back and one that did not.
+#
+# Both rules report absence, so the figure each one reports is how many function
+# units it read. A unit opener that stops matching reads nothing, finds nothing
+# and reports nothing, and that count is the only way to see it from the outside:
+# a namespace wrapping this file indents every definition past the first column
+# and takes both rules with it. The two awks apply the same opener, so their
+# counts have to agree as well as clear the floor.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -70,19 +77,39 @@ if ! awk '
 fi
 
 # --- rule 1: the restore is not inside a branch -------------------------------
-LEAKS=$(awk '
+#
+# A unit runs from a line that starts a top-level definition to the line that
+# closes it. Comments, preprocessor lines, namespaces and type definitions are
+# not units: their members carry their own indentation and are read as part of
+# whatever unit encloses them.
+#
+# A leading `static` or `inline` is stepped over rather than refused. Both
+# qualify a definition, and a qualifier on the signature used to take the whole
+# function out of the scan: `static void showFailure(...)` opened no unit, so
+# every line of its body was read with nothing open and both rules passed it
+# whatever it did with the scale. The type keywords stay out, and so do the forms
+# that declare a constant, because those carry no body for a scale to leak from.
+UNIT_OPENER='
+  function opensUnit(line,   head) {
+    if (line !~ /^[A-Za-z_~]/) { return 0 }
+    head = line
+    sub(/^(static|inline)[ \t]+/, "", head)
+    sub(/^(static|inline)[ \t]+/, "", head)
+    if (head !~ /^[A-Za-z_~]/) { return 0 }
+    if (head ~ /^(namespace|struct|class|enum|union|using|typedef|template|extern|constexpr|const |static |inline )/) { return 0 }
+    return 1
+  }
+'
+
+LEAKS_RAW=$(awk "$UNIT_OPENER"'
   function closeUnit() {
     if (scaled > 0 && restored < scaled) {
       printf "%s:%d: %s\n", FILENAME, scaled, signature
     }
     open = 0
   }
-  # A unit runs from a line that starts a top-level definition to the line that
-  # closes it. Comments, preprocessor lines, namespaces and type definitions are
-  # not units: their members carry their own indentation and are read as part of
-  # whatever unit encloses them.
-  !open && /^[A-Za-z_~]/ && !/^(namespace|struct|class|enum|union|using|typedef|template|extern|constexpr|const |static |inline )/ {
-    open = 1; signature = $0; scaled = 0; restored = 0; opener = FNR
+  !open && opensUnit($0) {
+    open = 1; units++; signature = $0; scaled = 0; restored = 0; opener = FNR
   }
   open {
     if (/lcd\.setTextSize\(/ && !/lcd\.setTextSize\(1\)/) { scaled = FNR }
@@ -91,8 +118,26 @@ LEAKS=$(awk '
     # a brace in the first column.
     if (/^\}/ || (FNR == opener && /\{/ && /\}[ \t]*$/)) { closeUnit() }
   }
-  END { if (open) closeUnit() }
+  END { if (open) closeUnit(); printf "#units:%d\n", units }
 ' "$TARGET" || true)
+
+UNITS=$(printf '%s\n' "$LEAKS_RAW" | sed -n 's/^#units:\(.*\)$/\1/p')
+LEAKS=$(printf '%s\n' "$LEAKS_RAW" | sed '/^#units:/d')
+
+if [ -z "$UNITS" ]; then
+  echo "ERROR: rule 1's scan of $TARGET printed no unit count, so what it read is unknown." >&2
+  exit 1
+fi
+
+echo "    $UNITS function units read in $TARGET"
+
+if [ "$UNITS" -lt 120 ]; then
+  echo "ERROR: only $UNITS function units were read in $TARGET and 129 were read on" >&2
+  echo "       2026-11-03. Both rules below report absence, so a unit opener that stopped" >&2
+  echo "       matching passes by scanning nothing. A namespace around this file indents" >&2
+  echo "       every definition past the first column and does exactly that." >&2
+  exit 1
+fi
 
 if [ -n "$LEAKS" ]; then
   echo "ERROR: a function in $TARGET selects a text scale other than 1 and does not" >&2
@@ -112,9 +157,9 @@ fi
 # sentence with the word "return" in it is not a path out; the strip wants
 # whitespace or the start of the line before the slashes, so a "://" in a string
 # is left alone.
-EXITS=$(awk '
-  !open && /^[A-Za-z_~]/ && !/^(namespace|struct|class|enum|union|using|typedef|template|extern|constexpr|const |static |inline )/ {
-    open = 1; signature = $0; opener = FNR; dirty = 0; dirtyLine = 0
+EXITS_RAW=$(awk "$UNIT_OPENER"'
+  !open && opensUnit($0) {
+    open = 1; units++; signature = $0; opener = FNR; dirty = 0; dirtyLine = 0
   }
   open {
     line = $0
@@ -129,7 +174,20 @@ EXITS=$(awk '
     }
     if (line ~ /^\}/ || (FNR == opener && line ~ /\{/ && line ~ /\}[ \t]*$/)) { open = 0 }
   }
+  END { printf "#units:%d\n", units }
 ' "$TARGET" || true)
+
+EXIT_UNITS=$(printf '%s\n' "$EXITS_RAW" | sed -n 's/^#units:\(.*\)$/\1/p')
+EXITS=$(printf '%s\n' "$EXITS_RAW" | sed '/^#units:/d')
+
+# The two rules apply one opener, so they read one list. A figure that drifts
+# means one of the two stopped opening units where the other still does.
+if [ "$EXIT_UNITS" != "$UNITS" ]; then
+  echo "ERROR: rule 1 read $UNITS function units in $TARGET and rule 2 read $EXIT_UNITS." >&2
+  echo "       Both apply the same opener, so one of them is scanning a shorter list than" >&2
+  echo "       the file holds and reporting absence over it." >&2
+  exit 1
+fi
 
 if [ -n "$EXITS" ]; then
   echo "ERROR: a function in $TARGET returns while a text scale other than 1 is" >&2

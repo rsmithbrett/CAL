@@ -499,7 +499,7 @@ void cardDraw(uint16_t itemIndex) {
   // real figure per card on the policy.
   spec.dwellSeconds = 14;
 
-  return Cards::registerCard(spec);
+  return Cards::registerCard(spec, Cards::KeyPolicy::Resolves);
 }();
 
 }  // namespace

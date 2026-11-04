@@ -911,7 +911,7 @@ String cardDescribe(uint16_t) {
   spec.order = 2;
   spec.dwellSeconds = 8;
   spec.notableDwellSeconds = 20;
-  return Cards::registerCard(spec);
+  return Cards::registerCard(spec, Cards::KeyPolicy::Resolves);
 }();
 
 }  // namespace

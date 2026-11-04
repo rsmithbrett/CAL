@@ -493,7 +493,7 @@ struct Instance {
     spec.status = &status;
     spec.order = order;
     spec.dwellSeconds = 10;
-    return Cards::registerCard(spec);
+    return Cards::registerCard(spec, Cards::KeyPolicy::Keyless);
   }
 };
 

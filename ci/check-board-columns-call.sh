@@ -58,6 +58,22 @@ read_function() {
 BOARD=$(read_function showSportsBoard)
 WIDEST=$(read_function widestBoardStatus)
 SCORESTATE=$(read_function boardScoreState)
+DRAWN=$(read_function drawnTextWidth)
+BREAKSPACE=$(read_function isBreakSpace)
+SLICE=$(read_function copySlice)
+BRACE=$(read_function drawRowBrace)
+NAV=$(read_function drawNavAffordances)
+
+# How much of the file the pins below were read against. Every check here is a
+# fixed string over one of those eight bodies, so a body that came back empty is
+# a block of checks that matched nothing, and the count is the only way to see
+# that from the outside. Each empty one is named on its own below; this is the
+# figure, and the line count beside it says the read reached the file at all.
+FOUND=0
+for body in "$BOARD" "$WIDEST" "$SCORESTATE" "$DRAWN" "$BREAKSPACE" "$SLICE" "$BRACE" "$NAV"; do
+  [ -n "$body" ] && FOUND=$((FOUND + 1))
+done
+echo "    $FOUND of 8 pinned functions located in $TARGET, $(wc -l < "$TARGET" | tr -d ' ') lines read"
 
 if [ -z "$BOARD" ]; then
   say "showSportsBoard() not found, so nothing below checked anything."
@@ -78,10 +94,24 @@ fi
 # names the field. Naming the line and not the loop leaves the bound, the seed
 # and the return free, and each of those draws a wrong board on its own - the
 # bound reading row 0 only, the seed starting at the ceiling, the return
-# throwing the fold away. `tr` first, so a wrapped line reads the same as one
-# that fits.
+# throwing the fold away.
+#
+# Line comments come out before the spacing, and that is not tidiness. Every
+# pattern below is a fixed string and a fixed string cannot tell a statement from
+# a commented-out copy of one. This file quotes its own code in remarks, so
+# without the strip a fold deleted and left behind as
+# `// if (measured > widest) { widest = measured; }` satisfies the check that
+# pins it while the line underneath keeps the last row's measurement. Tab and
+# carriage return go with the spaces and the newlines, the way
+# ci/check-score-guard.sh flattens: this file is checked out CRLF under
+# core.autocrlf, and a carriage return in the middle of a joined statement stops
+# every pattern below from matching.
+flatten() {
+  sed 's://.*::' | tr -d ' \t\r\n'
+}
+
 has() {
-  printf '%s\n' "$1" | tr -d ' \n' | grep -q "$2"
+  printf '%s\n' "$1" | flatten | grep -q "$2"
 }
 
 # The face, selected on the line before the fold that measures, so the
@@ -129,7 +159,6 @@ fi
 # function layoutText() draws through, and it has to measure the copy rather
 # than its argument. Its own loop over isBreakSpace() would pass a second copy
 # of the rule, which is the shape the defect had.
-DRAWN=$(read_function drawnTextWidth)
 if [ -z "$DRAWN" ]; then
   say "drawnTextWidth() not found, so the measurement above cannot be the drawn one."
 else
@@ -189,7 +218,6 @@ fi
 # the rule the measurement is supposed to agree with. Single-token changes to
 # either put the measure path and the draw path back out of step with nothing
 # firing, which is the defect TEXT_LAYOUT_DESIGN.md section 15k is about.
-BREAKSPACE=$(read_function isBreakSpace)
 if [ -z "$BREAKSPACE" ]; then
   say "isBreakSpace() not found, so the break-space rule below checked nothing."
 elif ! has "$BREAKSPACE" 'returnstatic_cast<unsignedchar>(c)<=0x20;'; then
@@ -198,13 +226,13 @@ elif ! has "$BREAKSPACE" 'returnstatic_cast<unsignedchar>(c)<=0x20;'; then
        drawn as spaces."
 fi
 
-SLICE=$(read_function copySlice)
 if [ -z "$SLICE" ]; then
   say "copySlice() not found, so the substitution below checked nothing."
 else
-  # Matched on the raw text rather than through has(), which strips spaces and
-  # would read the ' ' literal as ''. The space is the whole substitution.
-  if ! printf '%s\n' "$SLICE" | grep -qF "buffer[i] = isBreakSpace(c) ? ' ' : c;"; then
+  # Matched on the text with its comments out but its spacing kept, rather than
+  # through has(), which strips spaces and would read the ' ' literal as ''. The
+  # space is the whole substitution.
+  if ! printf '%s\n' "$SLICE" | sed 's://.*::' | grep -qF "buffer[i] = isBreakSpace(c) ? ' ' : c;"; then
     say "copySlice() does not substitute a space for a break-space byte. That substitution is
        what drawnTextWidth() measures and what the panel draws, and the two have to be the
        same rule."
@@ -416,7 +444,6 @@ if ! has "$BOARD" 'if(stacked){drawRowBrace(boardStackedBraceLeft(),awayTextY,ho
        line to the bottom of the second, which is what says the two are one game."
 fi
 
-BRACE=$(read_function drawRowBrace)
 if [ -z "$BRACE" ]; then
   say "drawRowBrace() not found, so the brace below checked nothing."
 elif ! has "$BRACE" 'static_assert(kNoseDepth+kTipLength+1==kBoardBraceWidth'; then
@@ -426,15 +453,14 @@ fi
 
 # The layout: the panel it is on, the board's own score state, and the widest
 # status the board holds, in one call.
-if ! printf '%s\n' "$BOARD" | tr -d ' \n' |
-     grep -q 'boardColumnsForBoard(kScreenW,scores,widestBoardStatus(rows,count))'; then
+if ! has "$BOARD" 'boardColumnsForBoard(kScreenW,scores,widestBoardStatus(rows,count))'; then
   say "the columns are not boardColumnsForBoard(kScreenW, scores, widestBoardStatus(rows, count)).
        Those three arguments are what App/CardColumns.h's assertions were written against:
        the panel it is on, what the widest score on it needs, and the widest
        status string on it."
 fi
 
-if ! printf '%s\n' "$BOARD" | tr -d ' \n' | grep -q 'scores=boardScoreState(rows,count)'; then
+if ! has "$BOARD" 'scores=boardScoreState(rows,count)'; then
   say "scores is not boardScoreState(rows, count). It is the board's question and not
        a row's: one game under way gives every row of the card a score column."
 fi
@@ -451,6 +477,7 @@ fi
 # And the folds run over the rows that will be drawn. Above the clamp, a fifth
 # row the card drops still widens the status column it paid for.
 if ! printf '%s\n' "$BOARD" | awk '
+  /^[[:space:]]*\/\//                        { next }
   /count = kMaxRows;/                        { clamped = 1 }
   /const BoardColumns columns =/ && !seen    { seen = 1; ordered = clamped }
   END                                        { exit ordered ? 0 : 1 }
@@ -524,7 +551,7 @@ fi
 # The whole predicate, not the comparison. `text[0] != '\0'` flipped to `==`
 # leaves this grep matching and turns the ladder off for every real string,
 # which is the mechanism the score column half of section 15k depends on.
-if ! printf '%s\n' "$(cat "$TARGET")" | tr -d ' \n' |
+if ! printf '%s\n' "$(cat "$TARGET")" | flatten |
      grep -qF "width>0&&text!=nullptr&&text[0]!='\0'&&drawnTextWidth(text)>width;"; then
   say "layoutLine()'s overflow test is not
        'width > 0 && text != nullptr && text[0] != '\\0' && drawnTextWidth(text) > width'.
@@ -542,7 +569,6 @@ fi
 # the card; it says nothing about the two tips agreeing, so a right tip written
 # without the -1 is a pixel nearer the glass than the left one with nothing
 # firing.
-NAV=$(read_function drawNavAffordances)
 if [ -z "$NAV" ]; then
   say "drawNavAffordances() not found, so the chevron tips below checked nothing."
 elif ! has "$NAV" 'leftTipX=kChevronInset;' ||

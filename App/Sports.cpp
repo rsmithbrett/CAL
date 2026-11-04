@@ -513,7 +513,7 @@ bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw
   spec.listingId = listingIdFor(index);
   spec.describe = describeFor(index);
   spec.frameCountFor = frameCountFor(index);
-  return Cards::registerCard(spec);
+  return Cards::registerCard(spec, Cards::KeyPolicy::Resolves);
 }
 
 /// Self-registering at static-init time, the same way every other card module
@@ -551,7 +551,7 @@ bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw
   live.describe = describeFor(3);
   live.frameCountFor = frameCountFor(3);
 
-  const bool d = Cards::registerCard(live);
+  const bool d = Cards::registerCard(live, Cards::KeyPolicy::Resolves);
 
   return a && b && c && d;
 }();

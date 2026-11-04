@@ -87,8 +87,13 @@ lacks() {
 # first occurrence and never looks again, so a second assignment appended after
 # the guarded one - what a bad merge leaves behind - passes every check while the
 # last write wins. Where a thing has to appear exactly once, this is what says so.
+#
+# Zero is an answer, so grep's 1 is taken rather than propagated. This script
+# runs under pipefail and set -e, and without the `|| true` a count of zero ended
+# the script at exit 1 before the comparison below could name which string had
+# gone: the figure that says "declared 0 times, not once" is the one worth having.
 count() {
-  printf '%s\n' "$1" | flatten | grep -oF "$2" | wc -l | tr -d ' '
+  printf '%s\n' "$1" | flatten | { grep -oF "$2" || true; } | wc -l | tr -d ' '
 }
 
 read_function() {

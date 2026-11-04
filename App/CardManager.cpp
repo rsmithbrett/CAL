@@ -38,11 +38,29 @@
 namespace {
 Cards::CardSpec gCards[Cards::kMaxCards];
 uint8_t gCardCount = 0;
+
+/// The line a registration gets when the key policy it states and the resolver
+/// its descriptor holds disagree. Names both, so a stream says which card and
+/// which way round without anybody reading the file.
+void logKeyPolicyRefusal(const Cards::CardSpec& spec, Cards::KeyPolicy keyPolicy) {
+  Log::printf("[cards] card '%s' registers as %s and %s a listingId resolver - NOT registered",
+              spec.id, Cards::keyPolicyName(keyPolicy),
+              spec.listingId != nullptr ? "assigns" : "assigns no");
+}
 }  // namespace
 
 namespace Cards {
 
-bool registerCard(const CardSpec& spec) {
+bool registerCard(const CardSpec& spec, KeyPolicy keyPolicy) {
+  // The policy the call states against the resolver the descriptor holds. The
+  // compiler already required the argument; this is the half of the claim it
+  // cannot read, because a descriptor is filled in field by field at static-init
+  // and is no constant expression. Before the cap, so a registration that
+  // contradicts itself is reported whether or not there was room for it.
+  if (!keyPolicyHolds(spec, keyPolicy)) {
+    logKeyPolicyRefusal(spec, keyPolicy);
+    return false;
+  }
   if (gCardCount >= kMaxCards) {
     // Logged rather than silently dropped. On firmware with no tests, a card
     // that quietly never appears is close to undiagnosable.

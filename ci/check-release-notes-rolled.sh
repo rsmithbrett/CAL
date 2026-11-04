@@ -47,10 +47,28 @@ fi
 
 echo "==> Shipped notes rolled under their own heading"
 
+# The heading the extraction below keys on, before the extraction runs. Reword it
+# or re-level it and the extraction reads nothing, every comparison below matches
+# nothing, and the pass line reports a count taken off the previous release's body
+# rather than off the thing that stopped matching. Exactly one, because a second
+# `## Unreleased` is a second section and the awk stops at the first `## ` after
+# the first of them.
+UNRELEASED_HEADINGS=$(grep -c '^## Unreleased$' RELEASE_NOTES.md || true)
+if [ "$UNRELEASED_HEADINGS" != "1" ]; then
+  echo "ERROR: RELEASE_NOTES.md carries $UNRELEASED_HEADINGS lines reading exactly" >&2
+  echo "       '## Unreleased', and the extraction below needs one. build-and-release.yml" >&2
+  echo "       keys on that spelling too, so a reworded or re-levelled heading publishes an" >&2
+  echo "       empty body and passes every comparison here by reading nothing." >&2
+  exit 1
+fi
+
 # The same extraction build-and-release.yml composes the body from, so what is
 # read here is what would publish.
 UNRELEASED=$(awk '/^## Unreleased$/{on=1; next} on && /^## /{exit} on' RELEASE_NOTES.md \
   | sed '/^---$/d')
+UNRELEASED_LINES=$(printf '%s' "$UNRELEASED" | grep -c '' || true)
+UNRELEASED_ENTRIES=$(printf '%s\n' "$UNRELEASED" | grep -c '^### ' || true)
+echo "    $UNRELEASED_LINES line(s) under Unreleased, $UNRELEASED_ENTRIES of them an entry heading"
 
 # Carriage returns, because the previous body arrives over HTTP and the file is
 # read off a filesystem that may hold either ending.
@@ -83,5 +101,8 @@ if [ "$REPEATED" -ne 0 ]; then
   exit 1
 fi
 
+# Both figures, because one of them alone says nothing. The shipped count is how
+# many headings were looked for; the entry count is how many the Unreleased
+# section held to look through.
 PREV_COUNT=$(printf '%s\n' "$PREV_HEADINGS" | grep -c '^### ')
-echo "PASS: release notes rolled, $PREV_COUNT shipped heading(s) checked against Unreleased"
+echo "PASS: release notes rolled, $PREV_COUNT shipped heading(s) checked against $UNRELEASED_ENTRIES entry heading(s) under Unreleased"

@@ -338,7 +338,12 @@ void anItemPastANoticeReportsNothing() {
 
 namespace Cards {
 
-bool registerCard(const CardSpec& spec) {
+bool registerCard(const CardSpec& spec, KeyPolicy keyPolicy) {
+  // The check production's registerCard() applies, reached through the same
+  // predicate, so a module compiled here that states a policy its descriptor
+  // does not satisfy stops this test rather than a device. Both modules below
+  // register as Resolves and both assign a listingId.
+  assert(keyPolicyHolds(spec, keyPolicy));
   if (registry().size() >= registry().capacity()) {
     return false;
   }

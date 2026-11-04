@@ -86,7 +86,7 @@ void cardDraw(uint16_t) {
   spec.order = 5;
   spec.dwellSeconds = 10;
   spec.interleaveEvery = 10;
-  return Cards::registerCard(spec);
+  return Cards::registerCard(spec, Cards::KeyPolicy::Keyless);
 }();
 
 }  // namespace

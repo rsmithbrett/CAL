@@ -438,7 +438,12 @@ void invalidate(const String& id) { (void)id; }
 
 namespace Cards {
 
-bool registerCard(const CardSpec& spec) {
+bool registerCard(const CardSpec& spec, KeyPolicy keyPolicy) {
+  // The check production's registerCard() applies, reached through the same
+  // predicate, so a module compiled here that states a policy its descriptor
+  // does not satisfy stops this test rather than a device. PersonalPhotos.cpp
+  // registers as Resolves and assigns a listingId.
+  assert(keyPolicyHolds(spec, keyPolicy));
   registered() = spec;
   wasRegistered() = true;
   return true;

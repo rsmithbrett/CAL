@@ -285,8 +285,9 @@ struct CardSpec {
 
   /// Optional - see ListingIdFn. nullptr for a card whose content key the policy
   /// already names through assetId or qrData, and for a card with nothing to
-  /// name; assigned by the seven modules that are the only thing able to say what
-  /// they drew. ci/check-content-key-resolvers.sh holds which is which.
+  /// name; assigned by the modules that are the only thing able to say what they
+  /// drew. Which of the three a card is comes in as registerCard()'s KeyPolicy
+  /// argument, and that call refuses a descriptor disagreeing with it.
   ListingIdFn listingId = nullptr;
 
   /// How many distinct things this card puts on the glass in ONE showing.
@@ -503,12 +504,58 @@ struct CardSpec {
 // written here rather than left to be rediscovered.
 static constexpr uint8_t kMaxCards = 35;
 
+/// What a card's draws report as their content key, named at the registration.
+///
+/// The three values cover every card in the fleet: a module that can name the
+/// item it put up, a card whose content arrives on its own policy entry, and a
+/// card that is its own content. See BOOT_BUTTON_AND_IMPRESSIONS_DESIGN.md,
+/// "The decision is an argument".
+enum class KeyPolicy : uint8_t {
+  /// The module assigns CardSpec::listingId, and that function names the item
+  /// on the glass for the showing going up.
+  Resolves,
+  /// The policy entry's assetId or qrData names the content, which is what
+  /// CardManager::noteShowing() falls back to when a card resolves nothing. The
+  /// descriptor assigns no resolver.
+  PolicyContent,
+  /// Nothing to name beyond the card itself, so a draw reports an empty key and
+  /// every showing of the card groups into one period row per quarter hour.
+  Keyless,
+};
+
+/// Whether a descriptor's listingId agrees with the policy its registration
+/// states. Resolves wants a resolver assigned; the other two want none.
+constexpr bool keyPolicyHolds(const CardSpec& spec, KeyPolicy policy) {
+  return (policy == KeyPolicy::Resolves) == (spec.listingId != nullptr);
+}
+
+/// The policy's own name, for the line registerCard() logs when it refuses one.
+constexpr const char* keyPolicyName(KeyPolicy policy) {
+  switch (policy) {
+    case KeyPolicy::Resolves:
+      return "Resolves";
+    case KeyPolicy::PolicyContent:
+      return "PolicyContent";
+    case KeyPolicy::Keyless:
+      return "Keyless";
+  }
+  return "an unnamed KeyPolicy";
+}
+
 /// Called from each card module's own translation unit at static-init time
 /// (see the `kRegistered` idiom at the bottom of Weather.cpp/Aircraft.cpp),
 /// so App.ino never names a specific card. Returns false, and logs, if the
-/// registry is full - a silently-dropped card would be very hard to notice
+/// registry is full - a dropped card with no trace would be very hard to notice
 /// on firmware with no tests.
-bool registerCard(const CardSpec& spec);
+///
+/// `keyPolicy` carries no default, so every call site states what the card's
+/// draws report and a registration that states nothing does not compile. The
+/// value is checked against the descriptor through keyPolicyHolds() and then
+/// dropped rather than stored: noteShowing() reads the descriptor itself, and a
+/// second copy of the decision on the card is a second thing to keep in step.
+/// A descriptor disagreeing with the policy is refused and logged, so that card
+/// stays out of the rotation instead of drawing and reporting nothing.
+bool registerCard(const CardSpec& spec, KeyPolicy keyPolicy);
 
 uint8_t count();
 CardSpec& at(uint8_t index);

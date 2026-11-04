@@ -203,7 +203,7 @@ struct Instance {
     spec.order = order;
     spec.dwellSeconds = 10;
     spec.interleaveEvery = interleaveEvery;
-    return Cards::registerCard(spec);
+    return Cards::registerCard(spec, Cards::KeyPolicy::Resolves);
   }
 };
 

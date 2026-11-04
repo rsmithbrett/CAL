@@ -280,14 +280,14 @@ if [ "$SCANNED" -ne "${#FILES[@]}" ]; then
   echo "       to find." >&2
   FAIL=1
 fi
-if [ "$STUB_DIR_COUNT" -lt 5 ]; then
-  echo "ERROR: only $STUB_DIR_COUNT stub directories were found and there were 5 on" >&2
+if [ "$STUB_DIR_COUNT" -lt 6 ]; then
+  echo "ERROR: only $STUB_DIR_COUNT stub directories were found and there were 6 on" >&2
   echo "       2026-11-03. Either stubs were removed, or the find above stopped matching" >&2
   echo "       and this script read less than tests/ holds." >&2
   FAIL=1
 fi
-if [ "$SCANNED" -lt 20 ]; then
-  echo "ERROR: only $SCANNED files were read under tests/ and 20 were read on 2026-11-03." >&2
+if [ "$SCANNED" -lt 23 ]; then
+  echo "ERROR: only $SCANNED files were read under tests/ and 23 were read on 2026-11-03." >&2
   echo "       Either tests were retired, or the extension list above stopped matching" >&2
   echo "       what they are named." >&2
   FAIL=1

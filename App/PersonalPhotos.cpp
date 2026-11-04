@@ -309,7 +309,7 @@ bool registerSelf() {
   // Behind the data cards and ahead of the decorative ones.
   spec.order = 4;
   spec.dwellSeconds = 10;
-  return Cards::registerCard(spec);
+  return Cards::registerCard(spec, Cards::KeyPolicy::Resolves);
 }
 
 [[maybe_unused]] const bool kRegistered = registerSelf();

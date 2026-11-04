@@ -61,7 +61,10 @@ jobs:
       - name: Test the announcement and home value content keys on host
         if: ${{ hashFiles('ci/test-announcement-and-home-value-keys.sh') != '' }}
         run: bash ci/test-announcement-and-home-value-keys.sh
-      - name: Check every card has decided what its draws report
+      - name: Test a card cannot register without naming a key policy
+        if: ${{ hashFiles('ci/test-key-policy.sh') != '' }}
+        run: bash ci/test-key-policy.sh
+      - name: Check the content key reaches the wire
         if: ${{ hashFiles('ci/check-content-key-resolvers.sh') != '' }}
         run: bash ci/check-content-key-resolvers.sh
 

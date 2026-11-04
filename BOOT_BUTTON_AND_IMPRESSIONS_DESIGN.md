@@ -260,6 +260,45 @@ on, and `listingIdCardAt()` returns nothing for an index past the stored games o
 for a game with neither side named. That is the same rule `PersonalPhotos.cpp`
 applies, reached through the item count instead of a per-item drawability test.
 
+### The decision is an argument
+
+Every card module hands its descriptor to `Cards::registerCard()`, and since
+2026-11-03 that call takes a second argument naming what the card's draws
+report: `Cards::registerCard(spec, Cards::KeyPolicy::Resolves)`.
+
+Three values, one per family in the table above. `Resolves` says the module
+assigns `CardSpec::listingId` and its own answer names what drew.
+`PolicyContent` says the key arrives on the card policy, so `noteShowing()`'s
+`assetId` and `qrData` fallbacks answer for it and a resolver would repeat what
+is already in front of it. `Keyless` says there is nothing to name, which is the
+bottom row.
+
+The argument has no default, so a registration that states nothing does not
+compile. That holds whatever the descriptor is called, however it was declared,
+and wherever its file sits, because the registry is the one function every card
+goes through to become a card.
+
+What the argument states and what the descriptor holds are two separate claims,
+and only the first one the compiler can see. `registerCard()` checks the second
+when the registration runs: `Resolves` with a null `listingId` is refused, and
+so is `PolicyContent` or `Keyless` with one assigned. Refused means the card is
+not stored and a log line names it, so it stays out of the rotation rather than
+drawing and reporting nothing. Registration happens at static-init over a
+descriptor filled in field by field, so there is no constant expression for a
+`static_assert` to read; the rule lives in `Cards::keyPolicyHolds()` in
+`Cards.h`, and `ci/test-key-policy.sh` drives it on a host through every
+combination of the three policies against a resolver present and absent.
+
+`ci/check-content-key-resolvers.sh` carried the per-card decision as three lists
+of filenames until this change, and a text scan over C++ is what let
+`sportslive` hide between a keyed neighbour and a hand-built descriptor. The
+lists are retired. What is left in that script is the part no compiler can
+reach: the fallback order `noteShowing()` applies, that the resolved key reaches
+`Impressions::beginShowing()`, that `CheckIn.cpp` sends it under the name the
+rollup reads, and that `registerCard()` still calls `keyPolicyHolds()` on the
+way in. Those stay text checks because `CardManager.cpp` names a graphics
+library and does not compile on a host.
+
 ## What the device records
 
 Per showing:

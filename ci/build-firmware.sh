@@ -159,32 +159,144 @@ require_committed_partition_tables
 # the call is in the right place, or reached on the right branch - it knows the
 # difference between "wired" and "not wired at all", which is the failure that
 # actually happened and the one worth a gate.
+#
+# The names come out of App/Motion.h rather than out of a list written here. A
+# list written here is a list that stops growing: six names sat in one while the
+# header declared twelve, so half the module was outside the gate and the
+# thirteenth entry point would have landed outside it too. Reading the header
+# makes the figure move on its own, and the floor below is what says the reading
+# worked.
 echo "==> Checking every public Motion entry point is called from somewhere"
+motion_entry_points() {
+  # Function declarations in App/Motion.h: a return type, a name, an argument
+  # list, and ');' on the same line. Leading whitespace is allowed, so indenting
+  # the namespace body changes the indentation and not the list. Struct fields and
+  # enum members carry no argument list and match nothing here.
+  grep -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_:<>&* ]*\**[A-Za-z0-9_]+\(.*\);[[:space:]]*$' App/Motion.h \
+    | sed -E 's/^.*[^A-Za-z0-9_]([A-Za-z_][A-Za-z0-9_]*)\(.*$/\1/'
+}
+MOTION_ENTRY_POINTS=$(motion_entry_points || true)
+MOTION_ENTRY_COUNT=$(printf '%s\n' "$MOTION_ENTRY_POINTS" | grep -c . || true)
+echo "    $MOTION_ENTRY_COUNT entry points read out of App/Motion.h"
+
+if [ "$MOTION_ENTRY_COUNT" -eq 0 ]; then
+  echo "ERROR: no function declaration was found in App/Motion.h, so this gate read" >&2
+  echo "       nothing at all. The pattern above stopped matching the header." >&2
+  exit 1
+fi
+if [ "$MOTION_ENTRY_COUNT" -lt 12 ]; then
+  echo "ERROR: only $MOTION_ENTRY_COUNT entry points were read out of App/Motion.h and there were" >&2
+  echo "       12 on 2026-11-03. Either entry points were removed, or the pattern stopped" >&2
+  echo "       matching and the loop below ran over less than the header declares." >&2
+  exit 1
+fi
+
+# ENTRY POINTS A DESIGN DOCUMENT CLAIMS BEFORE ANY CODE CALLS THEM.
+#
+# "Called from nowhere in this repository" and "unused" are not the same reading,
+# and the difference is a second repository. CAL's design documents live beside
+# the server tree, so a grep run from here sees neither the document that names an
+# entry point nor the feature waiting to call it.
+#
+# hasEverDetectedMotion() was read as dead on 2026-11-03 and very nearly removed.
+# CARD_ATTENTION_DESIGN.md section 2, in the server tree, excludes a display that
+# has never confirmed motion from every denominator and carries that fact into the
+# day row as SensorConfirmed, naming this accessor as the one thing in the firmware
+# that can support a claim of Present. Section 3 lists it again among the five
+# Motion entry points that design reads. SensorConfirmed was not built because the
+# day row was not built. Removing the accessor would leave that design re-deriving
+# Present from GPIO35, which is the thing both documents forbid.
+#
+# So the exemption is a name plus the reason, and the reason is here because this
+# is the file somebody reads when they want the name out. Two readings keep the
+# list from outliving what it exempts: a name App/Motion.h no longer declares
+# fails, and so does a name that has acquired a caller, because the exemption is
+# then spent. Taking a name out while it still has no caller fails on the ordinary
+# arm below, which is the point.
+motion_exemptions() {
+  cat <<'EXEMPT'
+hasEverDetectedMotion|CARD_ATTENTION_DESIGN.md sections 2 and 3, server tree: SensorConfirmed on the day row, not built
+EXEMPT
+}
+MOTION_EXEMPT_NAMES=$(motion_exemptions | cut -d'|' -f1)
+
+for FN in $MOTION_EXEMPT_NAMES; do
+  if ! printf '%s\n' "$MOTION_ENTRY_POINTS" | grep -qx "$FN"; then
+    echo "ERROR: the exemption list names Motion::$FN(), which App/Motion.h no longer" >&2
+    echo "       declares. It was exempt because:" >&2
+    motion_exemptions | grep "^$FN|" | cut -d'|' -f2 | sed 's/^/       /' >&2
+    echo "       Either the declaration came back or the exemption goes with it." >&2
+    exit 1
+  fi
+done
+
+# Every caller writes Motion::<name>(, which is the only spelling counted below.
+# An unqualified call would need a using declaration to compile, and this is what
+# keeps one from appearing and reading as no caller at all.
+if grep -rqE 'using namespace Motion|using Motion::' --include='*.cpp' --include='*.ino' App/ 2>/dev/null; then
+  echo "ERROR: something under App/ pulls Motion's names into its own scope." >&2
+  grep -rnE 'using namespace Motion|using Motion::' --include='*.cpp' --include='*.ino' App/ >&2 || true
+  echo "       The caller count below reads Motion::<name>( and nothing else, so a call" >&2
+  echo "       made through a using declaration reads here as no caller. Call it as" >&2
+  echo "       Motion::<name>()." >&2
+  exit 1
+fi
+
 MOTION_UNWIRED=0
+MOTION_WIRED=0
+MOTION_UNWIRED_NAMES=
+MOTION_EXEMPT_UNWIRED=0
+MOTION_EXEMPT_SPENT=
 while read -r FN; do
   [ -z "$FN" ] && continue
-  # Call sites anywhere in App/ other than Motion's own two files. grep -w so
-  # state() does not match operatingState(), and the Motion.* exclusion so a
-  # function calling itself, or its own declaration, never counts as a caller.
-  CALLERS=$(grep -rl --include='*.cpp' --include='*.ino' -w "$FN" App/ 2>/dev/null \
-            | grep -v 'App/Motion\.' | wc -l)
-  if [ "$CALLERS" -eq 0 ]; then
-    echo "ERROR: Motion::$FN() is declared in App/Motion.h but called from nowhere." >&2
+  # Files holding a Motion::<name>( call, anywhere in App/ other than Motion's own
+  # two files, so a function calling itself, or its own declaration, never counts
+  # as a caller. The Motion:: prefix is what keeps state() apart from
+  # operatingState() and from a local variable of the same name. The '|| true'
+  # keeps a grep that matches nothing from taking the script down through pipefail
+  # before the arm below can name the function.
+  CALLERS=$(grep -rlF --include='*.cpp' --include='*.ino' "Motion::$FN(" App/ 2>/dev/null \
+            | grep -v 'App/Motion\.' | wc -l || true)
+  if printf '%s\n' "$MOTION_EXEMPT_NAMES" | grep -qx "$FN"; then
+    if [ "$CALLERS" -eq 0 ]; then
+      MOTION_EXEMPT_UNWIRED=$((MOTION_EXEMPT_UNWIRED + 1))
+    else
+      MOTION_EXEMPT_SPENT="$MOTION_EXEMPT_SPENT $FN"
+    fi
+  elif [ "$CALLERS" -eq 0 ]; then
     MOTION_UNWIRED=1
+    MOTION_UNWIRED_NAMES="$MOTION_UNWIRED_NAMES $FN"
+  else
+    MOTION_WIRED=$((MOTION_WIRED + 1))
   fi
-done <<'FNLIST'
-begin
-applyPolicy
-service
-noteTouchAndShouldSwallow
-capabilityToReport
-clearReportedCounters
+done <<FNLIST
+$MOTION_ENTRY_POINTS
 FNLIST
 
+echo "    $MOTION_WIRED of $MOTION_ENTRY_COUNT called from outside the module, $MOTION_EXEMPT_UNWIRED exempt and still uncalled"
+motion_exemptions | sed 's/|/: /' | sed 's/^/    exempt: /'
+
+if [ -n "$MOTION_EXEMPT_SPENT" ]; then
+  for FN in $MOTION_EXEMPT_SPENT; do
+    echo "ERROR: Motion::$FN() is on the exemption list and now has a caller, so the" >&2
+    echo "       exemption is spent. It was exempt because:" >&2
+    motion_exemptions | grep "^$FN|" | cut -d'|' -f2 | sed 's/^/       /' >&2
+    echo "       Take the name off the list and let the ordinary count hold it." >&2
+  done
+  exit 1
+fi
+
 if [ "$MOTION_UNWIRED" -ne 0 ]; then
-  echo "       A motion entry point with no caller is a feature that silently does not run," >&2
-  echo "       and in the touch-wake case it is a panel a household cannot recover. Wire it" >&2
-  echo "       (see MOTION_AWARE_DISPLAY_DESIGN.md section 9) or remove it from the header." >&2
+  for FN in $MOTION_UNWIRED_NAMES; do
+    echo "ERROR: Motion::$FN() is declared in App/Motion.h but called from nowhere." >&2
+  done
+  echo "       A motion entry point with no caller is a feature that does not run and" >&2
+  echo "       reports nothing, and in the touch-wake case it is a panel a household" >&2
+  echo "       cannot recover. CAL's design documents are in the server tree rather than" >&2
+  echo "       this repository - MOTION_AWARE_DISPLAY_DESIGN.md section 9 and" >&2
+  echo "       CARD_ATTENTION_DESIGN.md are both there - so read them before calling this" >&2
+  echo "       dead. Then wire it, take it out of the header, or put it on the exemption" >&2
+  echo "       list above with the document and section that claims it." >&2
   exit 1
 fi
 
@@ -232,15 +344,66 @@ fi
 # because the missing one at least says so (see CAL_OTA_DESIGN.md section 13).
 #
 # Checked the same way the partition tables above are checked, and for the same
-# reason: the invariant is real, the failure is silent, and a comment in each file
-# asking the next person to be careful is not a mechanism.
+# reason: the invariant is real, the failure reports nothing, and a comment in
+# each file asking the next person to be careful is not a mechanism.
+#
+# A text comparison because there is nowhere to put a compile-time one. The two
+# enums carry the same fully qualified name, BootDiag::RestartCause, so no
+# translation unit can see both and a static_assert has nothing to stand in.
+# Generating both from one list would give the compiler the answer, and it would
+# also undo the separation CAL_OTA_DESIGN.md section 13 asks for and throw away
+# the per-value documentation each file keeps in its own words. A list of
+# static_asserts would be a third hand-written census of the same names, which is
+# the thing that went wrong here in the first place. So the comparison stays
+# textual, and what it reads is counted and floored, because a pattern that stops
+# matching returns no values and two empty readings compare equal.
 echo "==> Checking the two RestartCause enums agree"
 restart_causes() {
   # $1: path to a BootDiag.h. Emits "Name = N" per line, in declaration order,
-  # from that file's enum body only.
-  sed -n '/enum class RestartCause/,/^};/p' "$1" | grep -oE '^  [A-Za-z]+ = [0-9]+'
+  # from that file's enum body only. Leading whitespace comes off after the match
+  # rather than being part of it, so re-indenting a header, or wrapping it in a
+  # namespace, changes the indentation and not the list.
+  sed -n '/enum class RestartCause/,/^[[:space:]]*};/p' "$1" \
+    | grep -oE '^[[:space:]]*[A-Za-z][A-Za-z0-9_]* = [0-9]+' \
+    | sed 's/^[[:space:]]*//'
 }
-if ! diff -q <(restart_causes BootDiag.h) <(restart_causes App/BootDiag.h) >/dev/null; then
+restart_cause_members() {
+  # Member lines in the same body, counted whether or not they carry a number, so
+  # a value taking its number from its position is counted here and not above.
+  sed -n '/enum class RestartCause/,/^[[:space:]]*};/p' "$1" \
+    | grep -cE '^[[:space:]]*[A-Za-z][A-Za-z0-9_]*[[:space:]]*(=[^,]+)?,[[:space:]]*$'
+}
+CAL_CAUSES=$(restart_causes BootDiag.h || true)
+APP_CAUSES=$(restart_causes App/BootDiag.h || true)
+CAL_CAUSE_COUNT=$(printf '%s\n' "$CAL_CAUSES" | grep -c . || true)
+APP_CAUSE_COUNT=$(printf '%s\n' "$APP_CAUSES" | grep -c . || true)
+CAL_MEMBER_COUNT=$(restart_cause_members BootDiag.h || true)
+APP_MEMBER_COUNT=$(restart_cause_members App/BootDiag.h || true)
+echo "    $CAL_CAUSE_COUNT numbered values read from BootDiag.h, $APP_CAUSE_COUNT from App/BootDiag.h"
+
+RESTART_CAUSE_FAIL=0
+if [ "$CAL_CAUSE_COUNT" -eq 0 ] || [ "$APP_CAUSE_COUNT" -eq 0 ]; then
+  echo "ERROR: BootDiag.h read as $CAL_CAUSE_COUNT RestartCause values and App/BootDiag.h as" >&2
+  echo "       $APP_CAUSE_COUNT, so the comparison below had nothing to compare. The enum was" >&2
+  echo "       renamed, moved, or laid out some way the pattern above no longer matches." >&2
+  RESTART_CAUSE_FAIL=1
+elif [ "$CAL_CAUSE_COUNT" -lt 12 ] || [ "$APP_CAUSE_COUNT" -lt 12 ]; then
+  echo "ERROR: BootDiag.h gave $CAL_CAUSE_COUNT RestartCause values and App/BootDiag.h gave" >&2
+  echo "       $APP_CAUSE_COUNT, and there were 12 in each on 2026-11-03. A value here never goes" >&2
+  echo "       away - the server holds rows carrying these tokens back to September, and" >&2
+  echo "       the six-month compatibility mandate is what keeps them readable - so a" >&2
+  echo "       count that falls means the pattern stopped matching the header." >&2
+  RESTART_CAUSE_FAIL=1
+fi
+if [ "$CAL_CAUSE_COUNT" -ne "$CAL_MEMBER_COUNT" ] || [ "$APP_CAUSE_COUNT" -ne "$APP_MEMBER_COUNT" ]; then
+  echo "ERROR: BootDiag.h declares $CAL_MEMBER_COUNT RestartCause members of which $CAL_CAUSE_COUNT carry a" >&2
+  echo "       number, and App/BootDiag.h declares $APP_MEMBER_COUNT of which $APP_CAUSE_COUNT do. One" >&2
+  echo "       binary writes these numbers to NVS and the other reads them back, so every" >&2
+  echo "       value is spelled out as '= N' in both files. A member taking its number" >&2
+  echo "       from its position is compared by nothing here." >&2
+  RESTART_CAUSE_FAIL=1
+fi
+if [ "$CAL_CAUSES" != "$APP_CAUSES" ]; then
   echo "ERROR: BootDiag.h and App/BootDiag.h disagree on RestartCause." >&2
   echo "       These values are the wire format between two binaries on one device:" >&2
   echo "       CAL writes the number to NVS before restarting, the App reads it on the" >&2
@@ -248,7 +411,10 @@ if ! diff -q <(restart_causes BootDiag.h) <(restart_causes App/BootDiag.h) >/dev
   echo "       exactly the restart that installed it, and no compiler will catch it." >&2
   echo "       Add the value in BOTH files with the SAME number, and never renumber." >&2
   echo "       See CAL_OTA_DESIGN.md section 13 and TEST_PLAN.md section 7a." >&2
-  diff <(restart_causes BootDiag.h) <(restart_causes App/BootDiag.h) >&2 || true
+  diff <(printf '%s\n' "$CAL_CAUSES") <(printf '%s\n' "$APP_CAUSES") >&2 || true
+  RESTART_CAUSE_FAIL=1
+fi
+if [ "$RESTART_CAUSE_FAIL" -ne 0 ]; then
   exit 1
 fi
 
@@ -357,8 +523,11 @@ bash ci/check-asset-counters.sh
 
 # The seventh. CardManager.cpp resolves what a draw reports three ways in order
 # and names a graphics library, so it does not compile on a host and the order it
-# applies is held as text. A card module that offers no resolver and draws content
-# the policy does not name reports an empty key, and nothing else here fails.
+# applies is held as text, along with the registry's own check on the key policy
+# a registration states. Which cards owe a key is the compiler's as of
+# 2026-11-03 - Cards::registerCard() takes a KeyPolicy with no default, and
+# ci/test-key-policy.sh proves an omitted one does not build - so this gate no
+# longer carries a list of them.
 # CARD_IMPRESSIONS_DESIGN.md, "Which attribute says what the draw was about".
 bash ci/check-content-key-resolvers.sh
 

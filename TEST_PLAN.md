@@ -1048,12 +1048,13 @@ grep -A30 'enum class RestartCause' BootDiag.h     | grep -oE '[A-Za-z]+ = [0-9]
 grep -A80 'enum class RestartCause' App/BootDiag.h | grep -oE '[A-Za-z]+ = [0-9]+'
 ```
 
-Both must print, in order and identically:
+Both must print, in order and identically — twelve values as of 2026-11-03:
 
 ```
 None = 0, LowHeap = 1, Ota = 2, Reprovision = 3, SelfTest = 4,
 Unreachable = 5, LowHeapResponse = 6, CalHandover = 7,
-CalInstalledApp = 8, CalSelfInstall = 9
+CalInstalledApp = 8, CalSelfInstall = 9, OrientationChanged = 10,
+CannotDraw = 11
 ```
 
 A difference here is not a style issue. CAL writes the number and the App reads
@@ -1220,10 +1221,12 @@ after a missing call site that is not missing.
   this change fixes. Acceptable only because the two binaries ship together and
   the project is not in production; it stops being acceptable the moment a
   device can run mismatched halves.
-- **No automated test covers 7a.** The agreement between the two enums is held
-  by a comment in each file and by this section. `ci/build-firmware.sh` already
-  gates on `partitions.csv` matching between the two sketches for the same class
-  of reason, and this invariant has no equivalent gate.
+- **7a is covered by a text gate, not by a compiler.** `ci/build-firmware.sh`
+  extracts both enum bodies and compares them, and section 30 records what that
+  reads and the floors under it. The two enums carry the same fully qualified
+  name, so no translation unit sees both and there is nowhere to put a
+  `static_assert`. The hand check above is still the one that reads the spellings
+  `describe()` and `describeCause()` emit, which the gate does not touch.
 - **CAL's own restarts are invisible unless an App eventually runs.** A device
   that never reaches a working App reports no cause to the server at all; the
   `callog` journal is the only record and it needs a cable.
@@ -5469,6 +5472,7 @@ an ordinary mutation push does not run it.
 | `test-brand-splash.sh` | step | step | - |
 | `test-card-columns.sh` | step | step | step |
 | `test-config-request.sh` | step | step | step |
+| `test-key-policy.sh` | step | step | step |
 | `test-loader-order.sh` | step | step | step |
 | `test-personal-photos-key.sh` | step | step | step |
 | `test-ram-picture-budget.sh` | step | step | step |
@@ -6050,3 +6054,530 @@ saving lands on every lane.
   tree, `01eb8a1`, `831e991` and `874f033`, were left alone.
 - `App/partitions.csv` was unmodified at both ends, confirmed with `git status`.
 - No device was flashed or commanded.
+
+## 30. Two gates in the firmware build that passed on nothing (2026-11-03)
+
+`ci/build-firmware.sh` holds two checks that reported nothing while the thing
+they check was in front of them. Both were reproduced against the script as
+committed at `f206a2c` before anything changed, by extracting the block's own
+lines out of the live file and running those lines alone — the script swaps
+`partitions-panellan-8mb.csv` over `partitions.csv` at line 551 and restores at
+612, so an interrupted end-to-end run leaves the wrong partition table in the
+tree.
+
+Every mutation was a tracked file rewritten with `WriteAllBytes` and
+`GetEncoding(28591)`, gated on `cmp` against a byte-for-byte copy taken first,
+restored from that copy, confirmed byte-identical with `cmp`, and the timestamp
+pushed forward. CR count equalled LF count on every file at both ends:
+`BootDiag.h` 147, `App/BootDiag.h` 375, `App/Motion.h` 141, `App/Motion.cpp`
+531, `App/Telemetry.cpp` 601. `partitions.csv` and `App/partitions.csv` were
+unmodified at both ends, confirmed with `git status`.
+
+### 30a. The RestartCause comparison, reproduced
+
+The extraction was pinned to exactly two leading spaces, and `diff` of two empty
+streams exits 0. Re-indenting **one** header by one space fails the gate, because
+the other header still matches. Re-indenting **both**, which is what a formatter
+pass over the repository does, took both readings to zero values and the gate
+printed its heading and passed, with twelve values sitting in each file.
+
+| Mutation | Before | After |
+|---|---|---|
+| Both enum bodies re-indented by one space | heading, exit 0, nothing compared | `12 numbered values read from BootDiag.h, 12 from App/BootDiag.h`, exit 0 |
+| `enum class RestartCause` renamed in both headers | heading, exit 0 | both readings 0, named as nothing to compare, exit 1 |
+| `CannotDraw = 11` loses its number in both headers | heading, exit 0 | 11 against a floor of 12, and 12 members against 11 numbered, exit 1 |
+| One value removed from one header | exit 1 | exit 1, list diff printed |
+
+### 30b. The Motion entry-point loop, reproduced
+
+The loop read a heredoc of six names. `App/Motion.h` declared twelve, so six were
+outside it: `hasEverDetectedMotion`, `state`, `fault`, `eventsSinceReport`,
+`lastDetectedAgeSeconds` and `operatingState`. A thirteenth declaration,
+`uint32_t stuckHighHoldSeconds();`, added to the header with no caller anywhere
+under `App/`, went unreported and the gate exited 0.
+
+### 30b-i. The entry point that reads as dead from inside this repository
+
+Widening the loop made it name `Motion::hasEverDetectedMotion()`, declared in
+`App/Motion.h` and defined in `App/Motion.cpp` with no caller anywhere under
+`App/`. It was read as the same shape as the `noteTouchAndShouldSwallow()` failure
+this gate exists for, and **it was removed from both files, which was wrong.**
+
+`CARD_ATTENTION_DESIGN.md` names it. That document is in the server tree at the
+root of `C:\Users\Administrator\Documents\Claude-working folder`, not in this
+repository, so a grep run from here cannot see it. Its section 2 excludes a
+display that has never confirmed motion from every denominator rather than
+counting it as a zero, and carries that fact into the day row as
+`SensorConfirmed`, naming this accessor as the only thing in the firmware that can
+support a claim of `Present`. Section 3 lists it again among the five `Motion`
+entry points that design reads, with a note that it adds no second reader of
+GPIO35. `SensorConfirmed` was not built as of 2026-10-29 because the day row was
+not built, so the accessor has no caller yet by schedule rather than by neglect.
+Re-deriving `Present` from the pin is what both documents forbid, so removing the
+accessor would have left that design unbuildable as written.
+
+Both hunks were restored with `git checkout --`, confirmed against `HEAD` with
+`git diff`, confirmed byte-identical with `cmp` against the copy taken before any
+edit, and timestamped forward. `App/Motion.h` is back at 6,840 bytes and 141 CRs,
+`App/Motion.cpp` at 24,473 bytes and 531 CRs, CR equal to LF in both.
+
+The reading to carry forward is that "no caller in this repository" and "unused"
+are different statements, and what sits between them is a second repository. The
+gate's error text now says so, and names the exemption list as the third answer
+beside wiring it and removing it.
+
+### 30b-ii. The exemption list, and the readings that keep it from rotting
+
+The gate carries one exemption, as a name and its reason on one line, in
+`ci/build-firmware.sh` beside the loop, because that is the file somebody opens
+when they want the name off the list. The reason prints on every run, so a passing
+build log carries it:
+
+```
+    12 entry points read out of App/Motion.h
+    11 of 12 called from outside the module, 1 exempt and still uncalled
+    exempt: hasEverDetectedMotion: CARD_ATTENTION_DESIGN.md sections 2 and 3, server tree: SensorConfirmed on the day row, not built
+```
+
+| Mutation | Before | After |
+|---|---|---|
+| `uint32_t stuckHighHoldSeconds();` added, no caller | exit 0, unreported | named, `11 of 13 called from outside the module, 1 exempt`, exit 1 |
+| Three declarations taken out of the header | exit 0 | `8 entry points` against a floor of 12, exit 1 |
+| `using namespace Motion;` added to `App/Telemetry.cpp` | exit 0 | the using declaration named with its line, exit 1 |
+| Exempt declaration removed from the header | exit 0 | the floor fires first at `11 entry points`, exit 1 |
+| Exempt declaration renamed to `hasConfirmedMotion()`, count still 12 | exit 0 | `the exemption list names Motion::hasEverDetectedMotion(), which App/Motion.h no longer declares`, reason printed, exit 1 |
+| A `Motion::hasEverDetectedMotion()` call added to `App/Telemetry.cpp` | exit 0 | `on the exemption list and now has a caller, so the exemption is spent`, exit 1 |
+| The exemption line dropped while the name is still uncalled | n/a | the ordinary arm names it, exit 1 |
+
+The last one ran against a copy of the block's own lines with the single exemption
+line filtered out, so no file in the repository was mutated for it. The exemption
+shelters exactly the name on it: a thirteenth uncalled entry point is still
+reported with the list in place.
+
+The `CALLERS -eq 0` arm was unreachable. `grep`'s exit 1 on no match propagated
+through the pipeline under `pipefail` and killed the script at the assignment, so
+the function was never named and the build log carried no reason. Probed directly
+with a name nothing declares: no output and exit 1, where the arm should have
+printed. `|| true` on the pipeline is what makes the arm reachable, and the
+thirteenth-entry-point mutation above is what shows it printing.
+
+### 30c. Why both stayed text gates
+
+The two `RestartCause` enums carry the same fully qualified name,
+`BootDiag::RestartCause`, so no translation unit can see both and a
+`static_assert` has nothing to stand in. Generating both from one list would hand
+the comparison to the compiler and would also undo the separation
+`CAL_OTA_DESIGN.md` section 13 asks for, along with the per-value documentation
+each file keeps in its own words. A list of `static_assert`s would be a third
+hand-written census of the same names, which is what went wrong here. For the
+Motion loop the compiler answers nothing at all: an uncalled non-static function
+in a linked module is legal C++ and warns about nothing, which the gate's own
+header already says.
+
+So both read text, and what they read is counted and printed. The Motion list is
+now derived from `App/Motion.h` rather than written in the script, so the figure
+moves on its own, and the floor is what says the reading worked.
+
+### 30d. What this does not cover
+
+- **No firmware was compiled.** `App/Motion.h` and `App/Motion.cpp` are back at
+  their committed contents, so nothing in the App changed and only the shell
+  script and this file did. Neither Motion file is reachable from a host test,
+  because `App/Motion.cpp` needs the core, so no compile was run either way.
+- **The script was not run end to end.** Each gate was run as its own lines, for
+  the partition-table reason above. Nothing else in `build-firmware.sh` was
+  exercised.
+- **Everything ran under Git Bash with GCC 16.2.0 from `C:\Tools\mingw64\bin`.**
+  CI compiles GCC 13.3 on ubuntu-24.04. What changed is shell, so what moves
+  there is `grep -E`, `sed -E` and the heredoc, and that is unmeasured.
+- **Both floors are 12, read on this date from this tree.** Adding an entry point
+  or a cause raises the reading and leaves the gate passing; removing one trips
+  it, which is the intent.
+- **The exemption list is one name deep and is not a mechanism for finding more.**
+  Nothing here sweeps the server tree for other entry points a design document
+  claims. The next one will read as dead the same way this one did, and the error
+  text asking the reader to check is all that stands between it and a removal.
+- **`MOTION_AWARE_DISPLAY_DESIGN.md` was reported missing earlier today and it is
+  not missing.** It is at the root of the server tree, 46,100 bytes, thirteen
+  sections, section 9 being the one the gate cites. The first reading was a grep
+  run from inside this repository, which is the same blind spot that nearly took
+  `hasEverDetectedMotion()` out. It does not name that accessor;
+  `CARD_ATTENTION_DESIGN.md` does. Six files here cite it, `App/CheckIn.cpp`,
+  `App/Motion.cpp`, `App/Motion.h`, `CAL_OTA_DESIGN.md`, `ci/build-firmware.sh`
+  and this file, and the gate's error text now says where it lives.
+- **Nothing was committed or pushed.** No device was flashed or commanded.
+
+## 31. A sweep of every gate under ci/, and four more that passed on nothing (2026-11-03)
+
+Twenty `.sh` files under `ci/` read one at a time, against one question: when the
+pattern a gate greps for stops matching, does it say so or does it print its pass
+line? Sections 24, 27, 28, 29 and 30 cover the gates found that way earlier
+today. This is the rest of them.
+
+Four more were holed. Each was reproduced with a mutation, fixed, and the same
+mutation re-run against the fix. Every mutation was a tracked file rewritten with
+`WriteAllBytes` and `GetEncoding(28591)`, gated on `cmp` against a byte-for-byte
+copy taken first, restored from that copy, confirmed byte-identical with `cmp`,
+and the timestamp pushed forward. `App/partitions.csv` and `partitions.csv` were
+md5 `d1c88bba83a060df5add8cca68a975b3` at both ends and both clean under
+`git status`. `ci/build-firmware.sh` was never run end to end, for the reason
+section 30 gives.
+
+CR counts equalled LF counts on every CRLF file touched, at both ends:
+`App/Display.cpp` 7465, `App/CardColumns.h` 962, `ci/check-text-state.sh` 203,
+`ci/check-board-columns-call.sh` 587, `ci/check-score-guard.sh` 341,
+`ci/check-release-notes-rolled.sh` 108. `RELEASE_NOTES.md` is LF and carried 0 CR
+at both ends.
+
+### 31a. The text-state gate read past whatever carried a qualifier
+
+`ci/check-text-state.sh` asserts `restoreDefaultTextState()` exists and sets a
+scale of 1, and that assertion is a real anchor. Its other two rules report
+absence over "function units", and the opener that finds a unit refused any line
+beginning `static`, `inline`, `constexpr`, `const`, `extern` or `template`. For a
+definition qualified `static` that meant no unit opened, so every line of its body
+was read with nothing open and both rules passed it whatever it did with the
+scale. Nothing was printed about how many units either rule read, and there was no
+floor, so a namespace indenting the file past the first column read nothing and
+reported nothing.
+
+Reproduced on `App/Display.cpp`. `showFailure()`'s in-function
+`lcd.setTextSize(1);` became a second `setTextSize(2)` and its
+`restoreDefaultTextState();` went, which is a function leaving a scale of 2 on the
+panel. Rule 1 named it at line 2385, so the rule works. Adding `static` to the
+same signature and changing nothing else produced `==> App/Display.cpp returns the
+default text scale from every draw function` and exit 0.
+
+The namespace shape was reproduced separately: lines 3000 to 4300 indented two
+spaces, which is what a wrap leaves. The gate as committed at `f206a2c` passed
+that file. Its opener saw 93 units where it had seen 109, and said neither figure.
+
+Fixed. The opener steps over a leading `static` or `inline` rather than refusing
+the line, which is 129 units against the old 109 on this tree. Both rules count
+what they open, rule 1 prints the figure, the two counts have to agree, and a
+reading below 120 fails. Under the indent mutation the fixed gate reports 113 and
+fails. Under the `static` mutation it names line 2385 again.
+
+### 31b. The board-columns gate could not tell a statement from a comment
+
+`ci/check-board-columns-call.sh` is twenty-odd fixed-string pins over eight
+function bodies in `App/Display.cpp`. Its matcher took spaces and newlines out and
+left the comments in, which `ci/check-score-guard.sh` and the resolver gate beside
+it both strip and for the reason their own remarks give. So a pinned statement
+deleted and left behind on one line as a comment satisfied the pin.
+
+Reproduced. `widestBoardStatus()`'s fold became
+
+```
+    // if (measured > widest) { widest = measured; }
+    widest = measured;
+```
+
+which sizes the board's status column off the last row rather than the widest, and
+is the defect that check's error text describes. The gate printed
+`==> showSportsBoard() lays one grid for the board, measured in the face it draws
+in` and exited 0.
+
+Fixed. The matcher is now the same `flatten()` the two gates beside it use, which
+takes line comments out before the spacing, and tab and carriage return with it.
+The three raw pipes that bypassed the matcher go through it too, the ordering awk
+skips comment lines, and the `copySlice()` space-substitution check strips
+comments while keeping its spacing, because the space is the whole substitution.
+It also prints how many of its eight pinned functions it located and how many
+lines it read. Under the same mutation the fixed gate names the fold and exits 1.
+
+### 31c. The release-notes gate counted the previous release's headings
+
+`ci/check-release-notes-rolled.sh` extracts the `## Unreleased` section with an
+awk keyed on that exact heading and never tests what came back. Reword or re-level
+the heading and the extraction yields nothing, every `grep -Fxq` matches nothing,
+and the pass line prints a count read off the previous release body rather than
+off the thing that stopped matching.
+
+Reproduced with a previous-release body holding
+`### Your reports can say which home and which notice were on screen - App` and
+that same heading left under Unreleased. The gate named it and exited 1, so the
+comparison works. Changing `## Unreleased` to `## Unreleased changes` and leaving
+the stale entry where it was produced `PASS: release notes rolled, 1 shipped
+heading(s) checked against Unreleased` and exit 0. The 1 is the previous body's
+heading count. The entry that would publish twice was still there, and the body
+the workflow would compose was empty.
+
+Fixed. The heading has to appear exactly once as `^## Unreleased$` before the
+extraction runs, and the gate prints how many lines and how many entry headings it
+read out of that section. The pass line now carries both counts. Under the
+reworded heading it fails naming the spelling; under the stale entry it still
+names the entry, now with `4 line(s) under Unreleased, 1 of them an entry heading`
+above it.
+
+### 31d. The bounded-string gate in the firmware build, reported not fixed
+
+`ci/build-firmware.sh` lines 383 to 396 check that every bounded string in
+`App/Display.cpp` goes through `layoutText()`, by grepping `lcd.drawString(` and
+subtracting the literal draws and the `LAYOUT-PRIMITIVE` ones. It is absence only.
+It prints no figure, and there is no floor on a census it could take: five
+`lcd.drawString(` call sites in that file today, all five sanctioned.
+
+Reproduced by adding to `showFailure()`
+
+```
+  auto& panel = lcd;
+  panel.drawString(whatToDo, 10, 200);
+```
+
+which is a server-supplied string drawn raw into no box, the failure the gate's
+own error text describes as how "Houston Astros" reached a wall reading "Houston
+Astr". Run as its own lines, the gate found nothing. The `lcd.drawString(` census
+stayed at five and the gate says no such number.
+
+Not fixed. `ci/build-firmware.sh` is another lane's file today. What it needs is
+the census printed and floored the way the Motion gate beside it now does, and the
+pattern widened from `lcd.` to any receiver, so a second name for the panel raises
+the count rather than leaving it.
+
+### 31e. What the other sixteen read
+
+Judged sound, each requiring a positive match and reporting what it read:
+
+- `ci/check-partition-fit.sh`, `ci/check-asset-counters.sh`,
+  `ci/check-ram-budget-call.sh`, `ci/check-host-test-portability.sh` and
+  `ci/check-score-guard.sh`. Each one floors its counts or compares two tallies
+  against each other, so a renamed symbol fails rather than passing.
+- The ten `ci/test-*.sh` runners and `ci/test-key-policy.sh`. All eleven read
+  their binary's own PASS or `Passed!` line rather than its exit status, build
+  with `-Werror`, and `ci/test-key-policy.sh` reads the object file's presence in
+  both directions plus the compiler's own diagnostic, so a compile that failed for
+  an unrelated reason does not read as a refusal.
+
+One thing fixed in `ci/check-score-guard.sh` while reading it: its `count()` ran
+under `pipefail` with no `|| true`, so a fixed string that had gone to zero ended
+the script at exit 1 before the comparison could name which one. That is a failure
+rather than a pass, but it arrives with no message. It now takes grep's 1 as the
+answer and reports `declared 0 times, not once`. The predicate mutation
+`score >= 0` to `score > 0` was run against the fixed gate and it names the
+predicate.
+
+### 31f. What this does not cover
+
+- **No firmware was compiled and no device was involved.** Every gate was run on
+  its own. `ci/build-firmware.sh` was not run end to end.
+- **Two host runners are red for a reason outside this sweep.**
+  `ci/test-announcement-and-home-value-keys.sh` and
+  `ci/test-personal-photos-key.sh` fail to link against
+  `Cards::registerCard(Cards::CardSpec const&, Cards::KeyPolicy)`, which is the
+  registry change in flight in another lane. Their stub directories have not
+  caught up. Not reproduced against a clean tree and not this sweep's to fix.
+- **`ci/check-content-key-resolvers.sh` was rewritten under this sweep.** The
+  version read here was the census-anchored one; it is now five pinned statements
+  with a floor of 5, and the per-card decision moved to the compiler through
+  `ci/test-key-policy.sh`. The reading above is of the file as it stood, not as it
+  stands.
+- **Everything ran under Git Bash with GCC 16.2.0 from `C:\Tools\mingw64\bin`.**
+  Both the `gawk` 5.4.1 and the `sed` on this workstation strip a carriage return
+  from a line they read, confirmed by byte count. CI runs GNU tools on
+  ubuntu-24.04 against an LF checkout, so what the `tr -d '\r'` in these gates is
+  for is unmeasured here either way.
+- **The floors are readings from this tree on this date.** 120 against 129 units
+  for the text-state gate, and 8 pinned functions for the board-columns gate.
+  Adding a draw function raises the reading and leaves the gate passing; a wrap or
+  a rename drops it and trips the floor, which is the intent.
+- **Nothing was committed or pushed.** No device was flashed or commanded.
+
+## 32. The compiler holds the content-key decision (2026-11-03)
+
+Section 29f named the change that would hold outright what a text scan over C++
+kept nearly holding, and said it was not made there. This is it.
+`Cards::registerCard()` takes a second argument naming what a card's draws
+report, with no default, so a registration that names nothing does not compile.
+
+### 32a. The API
+
+In `App/Cards.h`:
+
+| What | Shape |
+|---|---|
+| the decision | `enum class KeyPolicy : uint8_t { Resolves, PolicyContent, Keyless }` |
+| the rule | `constexpr bool keyPolicyHolds(const CardSpec&, KeyPolicy)` |
+| the name in a log line | `constexpr const char* keyPolicyName(KeyPolicy)` |
+| the registry | `bool registerCard(const CardSpec& spec, KeyPolicy keyPolicy)` |
+
+The three values are the three groupings the retired `RESOLVES`,
+`POLICY_CONTENT` and `KEYLESS` lists held. `keyPolicyHolds()` is one expression:
+`Resolves` wants `listingId` assigned and the other two want it null.
+
+Nothing stores the policy on the descriptor. `noteShowing()` reads
+`CardSpec::listingId` itself, and a copy of the decision on the card would be a
+second thing to keep in step with the first.
+
+Seventeen call sites across sixteen modules now state one. Read off each
+module's own source and then checked against the list the gate carried, which
+agreed in all seventeen:
+
+| Policy | Modules |
+|---|---|
+| `Resolves` | `Aircraft.cpp`, `Announcement.cpp`, `FeaturedListings.cpp`, `HomeValue.cpp`, `Listings.cpp`, `PersonalPhotos.cpp`, `Sports.cpp` (both registrations) |
+| `PolicyContent` | `Graphic.cpp`, `QrText.cpp` |
+| `Keyless` | `Calendar.cpp`, `ClockDate.cpp`, `Forecast.cpp`, `IssFlyover.cpp`, `MoonPhase.cpp`, `SunMoon.cpp`, `Tides.cpp` |
+
+`Sports.cpp`'s two registrations both assign a resolver as of section 24, the
+shared `registerOne()` and the hand-built `live` descriptor, so both state
+`Resolves`.
+
+### 32b. Where the refusal lives, and why both halves exist
+
+A registration makes two claims, and the compiler can only read one of them.
+
+The first is that a decision was made at all. That is the argument, and it is
+settled at compile time for every call site whatever the descriptor is called,
+however it was declared, and wherever its file sits. Five of the six spellings
+section 29 found were about declarations; none of them can hide the call.
+
+The second is that the descriptor agrees with what was stated. That one cannot
+be a `static_assert`, and the proposer was right about why: registration runs at
+static-init over a descriptor filled in field by field, and `Sports.cpp` goes
+further by taking its resolver from a switch on a runtime index. There is no
+constant expression to read. `registerCard()` checks it when the registration
+runs, refuses a disagreement in either direction, and logs the card id with the
+policy and which way round. Refused means the card is not stored, so it stays
+out of the rotation rather than drawing and reporting nothing.
+
+Compile time for the decision, registration for the contents, and nothing at
+either end that restates the other.
+
+### 32c. The compile failure, which is the point of the change
+
+`ci/test-key-policy.sh` compiles `tests/key-policy-signature.cpp` twice from one
+source. The second run defines `KEY_POLICY_OMITTED`, which drops the argument,
+and the compiler has to refuse it:
+
+```
+==> A registration naming its key policy
+    compiled, 31733 bytes of object
+==> The same registration with the key policy left out
+    tests/key-policy-signature.cpp: In function 'bool registerSomething()':
+    tests/key-policy-signature.cpp:26:29: error: too few arguments to function 'bool Cards::registerCard(const CardSpec&, KeyPolicy)'
+       26 |   return Cards::registerCard(spec);
+          |          ~~~~~~~~~~~~~~~~~~~^~~~~~
+    In file included from tests/key-policy-signature.cpp:13:
+    App/Cards.h:558:6: note: declared here
+      558 | bool registerCard(const CardSpec& spec, KeyPolicy keyPolicy);
+          |      ^~~~~~~~~~~~
+PASS: a card registers with a key policy or it does not compile
+```
+
+Both runs are read off what they produced rather than off an exit status: the
+object file has to exist for the first and not exist for the second. The second
+also has to say something about the argument count, because a compile that
+failed for its own reason - a stub that stopped parsing, a header that moved -
+refuses the call too and would read as this test passing.
+
+The first run of the script is `tests/key-policy-test.cpp`, which drives
+`keyPolicyHolds()` over all three policies against a descriptor with a resolver
+and one without, nine runtime cases and two `static_assert`s, and prints its own
+PASS line. `tests/key-policy-stubs/Arduino.h` is the sixth stub directory under
+`tests/`; it supplies `String` as `std::string`, which is enough because
+`Cards.h` performs no String operation of its own.
+
+The test was written after the header change, not before. What stands in for the
+usual order is 32d.
+
+### 32d. What bites it
+
+Every mutation was gated on `cmp` against a byte-for-byte copy taken first,
+restored from that copy and `touch`ed, and the restore confirmed with
+`git diff --numstat`.
+
+| Mutation | What failed |
+|---|---|
+| `KeyPolicy keyPolicy = KeyPolicy::Keyless` in `Cards.h` | `ERROR: Cards::registerCard(spec) compiled with no key policy named.` |
+| `keyPolicyHolds()` returns `true` always | `static assertion failed: an empty descriptor cannot satisfy Resolves` |
+| the second parameter deleted from the declaration | `error: too many arguments to function`, then `ERROR: tests/key-policy-signature.cpp did not compile` |
+| `keyPolicyName(PolicyContent)` returns `"Keyless"` | `FAIL: PolicyContent names itself in the refusal line`, `1 case(s) failed`, no PASS line |
+| `if (false && !keyPolicyHolds(...))` in `CardManager.cpp` | `ERROR: App/CardManager.cpp: registerCard() does not open with ...` |
+| `PersonalPhotos.cpp` states `Keyless` while assigning a resolver | `Assertion failed: keyPolicyHolds(spec, keyPolicy), file tests/personal-photos-key-test.cpp, line 446` |
+
+The last one is the contents half caught on a host, in a test that was already
+there. Both existing content-key host tests fake `Cards::registerCard()`, and
+both fakes now take the policy and `assert(keyPolicyHolds(spec, keyPolicy))`
+through the same predicate production reaches, so a module they compile that
+states a policy its descriptor does not satisfy stops the test. That is also
+what the API change broke: the two fakes carried the one-argument signature and
+would not link. After the fix they read 10 cases and 18 cases off their own PASS
+lines, which is what they read before it.
+
+### 32e. What ci/check-content-key-resolvers.sh holds now
+
+The three lists are gone, and so are the file sweep, the descriptor grading, the
+registration census and its four floors. All of that was about which cards owe a
+key, which is the compiler's answer now, and a second record of it beside the
+first is how `sportslive` sat between a list and a document.
+
+What is left is five fixed-string pins across two files that do not compile on a
+host, four of them already there:
+
+| Pin | What it holds |
+|---|---|
+| `if(!keyPolicyHolds(spec,keyPolicy)){logKeyPolicyRefusal(spec,keyPolicy);returnfalse;}` | the registry reads the argument the compiler required |
+| `StringcontentKey=card.listingId!=nullptr?card.listingId(gCurrent.item):String();` | a card's own resolver is asked first, and asked by item |
+| the `assetId` then `qrData` fallback | `Graphic` and `QrText` report a key without a resolver |
+| `Impressions::beginShowing(card.id,contentKey.c_str(),...)` | a key computed is a key passed |
+| `attributes["contentKey"]=drawn.contentKey;` in `CheckIn.cpp` | the name the rollup reads |
+
+It prints `5 statements pinned across App/CardManager.cpp and App/CheckIn.cpp`
+and floors that count at 5, so a pin deleted trips it.
+
+`ci/check-host-test-portability.sh`'s floors moved with the three new files under
+`tests/`: 20 files to 23, and 5 stub directories to 6.
+
+### 32f. Both boards
+
+Compiled in a detached `git worktree` at `f206a2c` holding only this lane's
+files, because three other lanes were live in the shared tree and the first
+attempt there failed on `'state' is not a member of 'Motion'` from a mid-edit
+`App/Motion.h` that has the name in it.
+
+| Board | FQBN | Program | Globals |
+|---|---|---|---|
+| Panellan ZX2D80CE02S | `esp32:esp32:esp32s3:PSRAM=enabled,CDCOnBoot=cdc,PartitionScheme=custom` with `build.flash_size=8MB` | 1,480,911 bytes, 8% of 16,777,216 | 113,328 bytes, 214,352 left |
+| 4MB fleet board | `esp32:esp32:esp32:PartitionScheme=min_spiffs` | 1,583,215 bytes, 80% of 1,966,080 | 115,460 bytes, 212,220 left |
+
+`ci/check-partition-fit.sh` reads the Panellan image at 1,481,072 bytes against
+`ota_0` at 2,621,440, 56%, and the fleet image at 1,583,376 against `ota_0` at
+2,097,152, 75%, each from the table in its own build directory. The Panellan
+table swap happened inside the worktree only; `App/partitions.csv` in the
+working tree was never touched.
+
+The two compiles were first launched together and collided in Arduino's shared
+sketch cache: the second run removed object files the first was still linking
+against, and the fleet board's run died on `ld.exe: cannot find
+.../Aircraft.cpp.o` and twenty more. Nothing to do with this change, and they
+were re-run one at a time.
+
+### 32g. What this does not cover
+
+- The three lines inside `registerCard()` that act on the refusal are not
+  compiled on a host. `App/CardManager.cpp` names a graphics library through
+  `Display.h`'s drawing path, and moving the registry to its own translation
+  unit would mean routing twenty-five direct reads of `gCards` in the scheduler
+  through `Cards::at()`, which is a change to a central file for a different
+  reason. So the rule those lines apply is host-tested and their wiring is
+  pinned as text, which is the proposer's second limit standing in part rather
+  than falling.
+- A card that reaches the registry without calling `Cards::registerCard()` is
+  still outside all of this. The old gate counted strays through a `using`
+  declaration or a function pointer; nothing counts them now, and a card that
+  never registers draws nothing anyway.
+- Whether a module's chosen policy is the right answer for that card is a
+  judgement nothing here makes. The compiler requires a decision and the
+  registry requires the descriptor to match it. Writing `Keyless` on a card that
+  walks a feed compiles, registers and reports nothing, which is what
+  `BOOT_BUTTON_AND_IMPRESSIONS_DESIGN.md`'s table is for.
+- No wire shape changed. `KeyPolicy` never leaves the device, the check-in
+  request and response are byte-identical, and the six-month backward
+  compatibility mandate is untouched.
+- CI compiles GCC 13.3 on ubuntu-24.04, and this ran under MinGW-w64 GCC 16.2.0
+  locally and xtensa GCC 14.2.0 for the boards. `too few arguments to function`
+  is a GCC diagnostic of long standing, and the script also accepts
+  `no matching function` and `candidate expects`, but the ubuntu wording is
+  unmeasured here.
+- Nothing was committed or pushed. No device was flashed or commanded.

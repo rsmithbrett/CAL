@@ -269,7 +269,7 @@ String cardListingId(uint16_t itemIndex) {
   spec.order = 4;
   spec.dwellSeconds = 10;
   spec.interleaveEvery = 6;
-  return Cards::registerCard(spec);
+  return Cards::registerCard(spec, Cards::KeyPolicy::Resolves);
 }();
 
 }  // namespace

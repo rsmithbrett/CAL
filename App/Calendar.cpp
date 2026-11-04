@@ -1001,7 +1001,7 @@ void cardDraw(uint16_t itemIndex) {
   spec.order = 1;
   spec.dwellSeconds = 10;
   spec.notableDwellSeconds = 18;
-  return Cards::registerCard(spec);
+  return Cards::registerCard(spec, Cards::KeyPolicy::Keyless);
 }();
 
 }  // namespace

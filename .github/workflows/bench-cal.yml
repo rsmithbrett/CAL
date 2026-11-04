@@ -26,14 +26,15 @@ on:
       - "App/CardColumns.h"
       - "App/Display.cpp"
       - "App/Display.h"
-      # What the content-key gates read. ci/check-content-key-resolvers.sh grades
-      # every file in App/ that calls Cards::registerCard, so the entry is the
-      # glob rather than the sixteen names it matches today: a new card is a new
-      # file, and a list here would be the one place nobody updates. That glob
-      # also covers the CardManager.cpp fallback order and the CheckIn.cpp
-      # attribute name the same gate pins. The two host tests compile
-      # PersonalPhotos.cpp, Announcement.cpp and HomeValue.cpp against the
-      # headers below, and the reported-counter test compiles ReportedCounter.h.
+      # What the content-key gates read. Every file in App/ that calls
+      # Cards::registerCard, as a glob rather than the sixteen names it matches
+      # today: a new card is a new file, and a list here would be the one place
+      # nobody updates. The glob also covers the CardManager.cpp fallback order
+      # and the CheckIn.cpp attribute name ci/check-content-key-resolvers.sh
+      # pins. Cards.h below is what ci/test-key-policy.sh compiles for the
+      # KeyPolicy argument. The two host tests compile PersonalPhotos.cpp,
+      # Announcement.cpp and HomeValue.cpp against the headers below, and the
+      # reported-counter test compiles ReportedCounter.h.
       - "App/*.cpp"
       - "App/Announcement.h"
       - "App/Assets.h"
@@ -122,7 +123,10 @@ jobs:
       - name: Test the announcement and home value content keys on host
         if: ${{ hashFiles('ci/test-announcement-and-home-value-keys.sh') != '' }}
         run: bash ci/test-announcement-and-home-value-keys.sh
-      - name: Check every card has decided what its draws report
+      - name: Test a card cannot register without naming a key policy
+        if: ${{ hashFiles('ci/test-key-policy.sh') != '' }}
+        run: bash ci/test-key-policy.sh
+      - name: Check the content key reaches the wire
         if: ${{ hashFiles('ci/check-content-key-resolvers.sh') != '' }}
         run: bash ci/check-content-key-resolvers.sh
 
