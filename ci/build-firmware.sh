@@ -628,14 +628,23 @@ bash ci/check-asset-counters.sh
 # The seventh. CardManager.cpp resolves what a draw reports three ways in order
 # and names a graphics library, so it does not compile on a host and the order it
 # applies is held as text, along with the registry's own check on the key policy
-# a registration states. Which cards owe a key is the compiler's as of
-# 2026-11-03 - Cards::registerCard() takes a KeyPolicy with no default, and
+# a registration states. That a registration states one at all is the compiler's
+# as of 2026-11-03 - Cards::registerCard() takes a KeyPolicy with no default, and
 # ci/test-key-policy.sh proves an omitted one does not build - so this gate no
 # longer carries a list of them.
 # CARD_IMPRESSIONS_DESIGN.md, "Which attribute says what the draw was about".
 bash ci/check-content-key-resolvers.sh
 
-# The eighth, and the only one that reads tests/ rather than App/. The host tests
+# The eighth, and the other half of that one. Stating a policy is required and
+# the descriptor has to agree with it, and neither says the policy stated is the
+# right answer for that card: Keyless on a card that walks a feed agrees with
+# itself and passes both, which is what sportslive was for 907 draws. This gate
+# carries the decision per card id and compares it against the ids App/ defines
+# and the policies its registrations state.
+# BOOT_BUTTON_AND_IMPRESSIONS_DESIGN.md, "Which card owes which policy".
+bash ci/check-card-key-decisions.sh
+
+# The ninth, and the only one that reads tests/ rather than App/. The host tests
 # build with whatever g++ the machine has, so a stub standing in for a POSIX
 # function with a Microsoft one compiles here and not on ubuntu-latest. This runs
 # where the difference is invisible, which is the machine that has the Microsoft

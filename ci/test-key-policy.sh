@@ -23,6 +23,11 @@
 # recognised, and widening its patterns twice is what it cost; the compiler
 # reads the call whatever the descriptor is called and wherever it sits.
 #
+# What it replaced those lists with is a decision stated, not the right decision.
+# Keyless on a card that walks a feed states something, agrees with its own
+# descriptor and passes every run here. Which cards owe a key is held per card id
+# by ci/check-card-key-decisions.sh.
+#
 # Compiled and not linked for runs 2 and 3: registerCard()'s definition is in
 # App/CardManager.cpp, which names a graphics library and does not compile on a
 # host, and a signature is a question for the front end anyway.

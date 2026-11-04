@@ -190,7 +190,8 @@ Street, and they stay there after the listing sells and leaves the feed.
 | Announcement | The text, as a short hash of it |
 | Home value | The address the estimate was computed for |
 | Sports: my team, scoreboard, live game | The fixture, as its UTC start date with the two sides, or the two sides alone when the server sent no start time |
-| Weather, tides, clock, sun, moon, aircraft, ISS, calendar | The card is the content; no second key |
+| Aircraft overhead | The aeroplane's registration, which belongs to the airframe for its life, falling back to the callsign where no registration arrived |
+| Weather, tides, clock, sun, moon, ISS, calendar | The card is the content; no second key |
 
 Authored content is keyed by a short hash, so changing a QR link or rewriting a
 notice starts a new row rather than inheriting the old one's history. The intent
@@ -298,6 +299,58 @@ reach: the fallback order `noteShowing()` applies, that the resolved key reaches
 rollup reads, and that `registerCard()` still calls `keyPolicyHolds()` on the
 way in. Those stay text checks because `CardManager.cpp` names a graphics
 library and does not compile on a host.
+
+### Which card owes which policy
+
+The argument makes every registration state a policy. It does not say whether
+the policy stated is the right one for that card. `Keyless` on a card that walks
+a feed is self-consistent: it states there is nothing to name, it assigns no
+resolver, `keyPolicyHolds()` agrees with it, and every gate passes. That is the
+shape `sportslive` was for 907 draws. No compiler can read it, because which
+cards owe a key is a judgement about what a card puts on the glass rather than a
+property of the code that puts it there.
+
+So the judgement is written down per card id, in
+`ci/check-card-key-decisions.sh`, as a census of all 35 ids this firmware
+registers against the policy each one owes. The table higher up is the
+reasoning. The census is the same decision in a form a runner can compare
+against `App/`, and it is keyed on the card rather than on the file, which is
+where the retired lists went wrong.
+
+The gate reads `App/` rather than trusting the census, and compares the two both
+ways:
+
+- Every card id `App/` defines has to appear in the census. A new card is a new
+  `kCardId` constant or a new entry in `Sports.cpp`'s `kCardIds[]`, so until
+  somebody writes down what it owes the gate names the id and fails. Adding a
+  card as `Keyless` is no way past that, because the failure is about an id the
+  census does not name and not about the policy stated for it.
+- Every census id has to be defined by the module the census names against it. A
+  card renamed or retired leaves a row describing nothing, and the gate fails on
+  that row rather than grading a shorter list.
+- Every module calling `Cards::registerCard()` has to appear in the census, so a
+  new module registering under ids this gate cannot read fails as well.
+- For each module, the set of policies its registrations state has to equal the
+  set the census owes for the cards that module registers. Flipping
+  `Sports.cpp`'s live registration to `Keyless` leaves the module stating
+  `Keyless` and `Resolves` where the census owes `Resolves` alone, and the gate
+  names the module, both sets, and the ids the census read them from.
+
+Both sides have to move together, which is the point of keeping them apart.
+Editing the census alone fails the comparison, editing a call site alone fails
+the same comparison, and the two edits land in different files where a review
+reads them as one decision.
+
+The grading is per module rather than per descriptor, and it rests on an
+invariant the gate checks instead of assuming: the cards a module registers owe
+one policy between them. All sixteen modules do today. A module whose cards owed
+two would let the set comparison pass on a swap, so the gate fails on the first
+census module naming more than one policy and says the grading has to become per
+descriptor before that module can land.
+
+Nothing about the device changed. `registerCard()` still checks the descriptor
+against the policy its own call stated and reads no census, so a census this
+gate is wrong about fails a runner and cannot take a card off a display.
 
 ## What the device records
 

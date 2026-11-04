@@ -67,6 +67,9 @@ jobs:
       - name: Check the content key reaches the wire
         if: ${{ hashFiles('ci/check-content-key-resolvers.sh') != '' }}
         run: bash ci/check-content-key-resolvers.sh
+      - name: Check every card owes the key policy its registration states
+        if: ${{ hashFiles('ci/check-card-key-decisions.sh') != '' }}
+        run: bash ci/check-card-key-decisions.sh
 
   full-gate:
     # The arduino-cli half of the release gate, for mutations that only a real

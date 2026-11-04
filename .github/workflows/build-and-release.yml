@@ -98,6 +98,8 @@ jobs:
         run: bash ci/test-key-policy.sh
       - name: Check the content key reaches the wire
         run: bash ci/check-content-key-resolvers.sh
+      - name: Check every card owes the key policy its registration states
+        run: bash ci/check-card-key-decisions.sh
 
       - name: Install arduino-cli
         uses: arduino/setup-arduino-cli@v2

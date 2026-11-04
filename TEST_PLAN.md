@@ -6725,3 +6725,158 @@ new name. That is the residual, and holding it is the compiler's.
   the server tree. A first search for it was run from the server tree and found
   nothing, which is section 30d's blind spot pointing the other way.
 - **Nothing was committed or pushed.** No device was flashed or commanded.
+
+## 34. Which cards owe a key, back under a gate (2026-11-03)
+
+Section 32g names the gap this closes, in its own words: "Whether a module's
+chosen policy is the right answer for that card is a judgement nothing here
+makes. The compiler requires a decision and the registry requires the descriptor
+to match it. Writing `Keyless` on a card that walks a feed compiles, registers
+and reports nothing."
+
+`076734f` retired three lists of filenames from
+`ci/check-content-key-resolvers.sh` and put `Cards::KeyPolicy` in
+`registerCard()`'s signature in their place. That made stating a policy
+mandatory and made a policy that contradicts its own descriptor a refusal. It
+left nothing holding *which* cards owe a key, and a self-consistent `Keyless`
+card is exactly the shape `sportslive` was for 907 draws and 161 period rows.
+
+### 34a. Added
+
+**`ci/check-card-key-decisions.sh`**, run after
+`ci/check-content-key-resolvers.sh` in `ci/build-firmware.sh` and in all three
+workflows. It carries a census of 35 rows - one per card id this firmware
+registers, naming the policy the card owes and the module that defines it - and
+compares that census against `App/` in both directions:
+
+| What it compares | What it catches |
+|---|---|
+| Census rows against `Cards::kMaxCards` | A card added or retired on one side only. That constant is kept exactly equal to the registration count, by its own remarks in `App/Cards.h`, so a new card bumps it |
+| Every card id `App/` defines against the census | A card added without a row saying what its draws report. The failure is about the id and not about the policy stated, so adding one as `Keyless` is no way past it |
+| Every census id against the module named for it | A card renamed or retired leaving a row that describes nothing |
+| Every module calling `Cards::registerCard()` against the census | A new module registering under ids this gate cannot read |
+| The policies a module states against the policies the census owes it | A registration changed to a policy that card does not owe, and a census row changed on its own |
+| `App/Cards.h`'s `KeyPolicy` enumerators against the policies the census uses | A fourth value added and no card censused for it, and a renamed one |
+| Every census module owing one policy across its cards | The invariant the comparison above rests on, checked rather than assumed |
+
+The last row is the limit stated out loud. The policy comparison is per module
+because `Announcement.cpp` registers five cards from one templated call site and
+`Sports.cpp` registers four from two, so there is no registration to pair each id
+with. All sixteen modules owe one policy today. A module owing two would let the
+set comparison pass on a swap, and the gate fails on the first such census module
+rather than grading it.
+
+Ids are read in the three shapes `App/` writes them: a `kCardId` constant
+including the numbered ones the four five-instance modules carry, a literal
+straight onto the descriptor, and the `kCardIds` array `Sports.cpp` keeps its
+four in. A fourth shape raises nothing and is caught by the `kMaxCards`
+comparison instead.
+
+Nothing on the device changed. `registerCard()` reads no census, so a census this
+gate is wrong about fails a runner rather than taking a card off a display. No
+file under `App/` was modified and no wire shape moved.
+
+### 34b. Made to fail first
+
+Five mutations. Every one was applied through perl in raw mode against a byte
+copy taken first, gated on `cmp` reporting a difference before the gates ran,
+restored from that copy, confirmed byte-identical by `cmp` and by sha256, and the
+mtime pushed forward. **Git Bash `sed -i` is not usable for this**: the first
+attempt took `App/Sports.cpp` from 30,762 bytes to 30,103 and all 658 carriage
+returns to zero, which is a 658-line mutation riding on the one intended.
+`App/Sports.cpp` was sha256
+`060bbdcba6a0d6bb304a05c5ae6f0c6da5d62fc292d953828c087fa702aad04d` with 658 CR
+and 658 LF at both ends; `App/Forecast.cpp`
+`74a6062c1f2a24c75573df108a313a4aeec23b4b365b0a364913afa0dcfd2572` with 548 of
+each. Every mutation applied, and the applies and restores are quoted below as
+the harness printed them.
+
+| # | Mutation | Applied | The four gates that existed | This gate |
+|---|---|---|---|---|
+| M1 | `Sports.cpp`'s live registration stating `Keyless`, resolver left assigned | yes, 30,762 to 30,761 bytes | all pass | fails |
+| M2 | The same, plus `live.listingId = listingIdFor(3);` commented out, which is `sportslive` reproduced | yes, 30,762 to 30,764 bytes | all pass | fails |
+| M3 | A sixth forecast id, `kCardId6 = "forecast6"`, census untouched | yes, 24,882 to 24,924 bytes | all pass | fails |
+| M4 | The census row for `sportslive` changed to `Keyless` on its own | yes, 26,472 bytes both ways | n/a | fails twice |
+| M5 | `kMaxCards` bumped to 36, census untouched | yes, 42,417 bytes both ways | all pass | fails |
+
+The four that existed are `ci/test-key-policy.sh`,
+`ci/check-content-key-resolvers.sh`, `ci/test-personal-photos-key.sh` and
+`ci/test-announcement-and-home-value-keys.sh`. M2 is the headline: a card that
+states `Keyless` and genuinely assigns no resolver passes every one of them,
+which is the whole reason this section exists.
+
+What M2 printed:
+
+```
+ERROR: App/Sports.cpp: states Keyless Resolves where the census owes Resolves for
+       sportslive sportsscores sportsteam sportsteam2.
+       Either the registration is wrong about what those draws report, or the census
+       is, and whichever it is the other one has to be changed with it.
+```
+
+M4 fails twice, on the one-policy invariant and on the set comparison, which is
+the point of keeping the census and the call sites apart: a one-sided edit to
+either fails, and only the pair together passes.
+
+### 34c. The figures it prints, and their floors
+
+Printed on every run whether or not anything failed, because a gate whose
+patterns stopped matching passes by finding nothing and these counts are the
+only way to see that from outside:
+
+```
+    97 source files under App/, 19 naming the registry, 16 registering a card
+    35 card ids censused against kMaxCards 35, 35 read out of App/
+    17 Cards::registerCard() calls, 17 policies stated, 3 in the enum
+```
+
+Floors are those readings, except the files naming the registry, floored at 18
+against 19 read: `App/Cards.h` and `App/CardManager.cpp` are in that figure and
+neither registers anything, so the floor sits below it rather than on it.
+
+### 34d. What it costs
+
+1.1 to 1.6 seconds on this workstation. The first draft was 37 seconds, and all
+of it was process startup: sixteen modules against five comparisons apiece came
+to about a hundred subshells under Git Bash. The comparisons are now one awk pass
+over the census rows and the scan records together. The character scan is
+narrowed to the files naming the registry rather than all 97 under `App/`, which
+is what took the first run past two minutes on `App/Display.cpp` alone.
+
+### 34e. One defect found in the documents
+
+`BOOT_BUTTON_AND_IMPRESSIONS_DESIGN.md`'s content-key table listed `aircraft` in
+the row reading "The card is the content; no second key". `App/Aircraft.cpp`
+assigns `cardListingId` and registers as `Resolves`, and
+`CARD_IMPRESSIONS_DESIGN.md` in the server tree counts 280,127 keyed aircraft
+draws out of 388,562. The table was wrong, and the aircraft card now has its own
+row naming the airframe's registration with the callsign as the fallback. That is
+what writing the decision down the second time found.
+
+### 34f. What this does not cover
+
+- **The runs, read off each runner's own output line.** 17 of CAL's host gates
+  before this change and 18 after, every one printing its own `PASS` or `==>`
+  line, nothing failing either way. `ci/test-brand-splash.sh` prints two `==>`
+  lines and no `PASS` line of its own, which is a separate gap already noted.
+- **No `arduino-cli` compile ran.** Nothing under `App/` changed, so no binary
+  moved, but that also means neither board was compiled here.
+- **`awk` on the runner is unmeasured.** This ran under GNU Awk 5.4.1 locally and
+  the runner's `awk` is probably mawk. Nothing here uses `ENDFILE`, `gensub`,
+  `asorti` or a regex `RS`, and the stderr marker exists so that nothing has to
+  open `/dev/stderr`, but ubuntu behaviour was not observed.
+- **An id written in a fourth shape still raises nothing of its own.** The
+  `kMaxCards` comparison is what catches it, and that rests on `App/Cards.h`
+  continuing to be bumped card by card, which is a convention and not a check.
+- **A card that reaches the registry without calling `Cards::registerCard()` is
+  outside all of this**, as section 32g already says.
+- **The census is a judgement and this gate holds it, not justifies it.** Whether
+  `tides` ought to resolve something is a question for the owner and the two
+  design documents; what the gate does is stop the answer changing on one side
+  only.
+- **`TEST_PLAN.md`'s first line is corrupt and was left alone.** A benchmark
+  table row is glued onto the `# CAL / App test plan` heading with no newline
+  between them, committed that way as of `2d859b7`, so the document has no H1. It
+  belongs to whichever lane added those run ids.
+- **Nothing was pushed.** No device was flashed or commanded, and no server was
+  started or stopped.

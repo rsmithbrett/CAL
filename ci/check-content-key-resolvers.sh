@@ -31,6 +31,14 @@
 # BOOT_BUTTON_AND_IMPRESSIONS_DESIGN.md, "The decision is an argument", is the
 # record.
 #
+# Which cards owe a key came back as its own gate on the same day, after that
+# argument turned out to hold a decision stated rather than the right decision:
+# ci/check-card-key-decisions.sh carries it per card id, not per filename, and
+# compares it against the ids App/ defines and the policies its registrations
+# state. Nothing about it is in this script, which is the point of its being
+# somewhere else. BOOT_BUTTON_AND_IMPRESSIONS_DESIGN.md, "Which card owes which
+# policy".
+#
 # --- what is left, and why it is still text ---------------------------------
 #
 # App/CardManager.cpp names a graphics library through Display.h's drawing path
