@@ -459,8 +459,8 @@ fi
 # A permit the compiler checks would be better: drawString() private on Canvas,
 # taking a tag only the four sanctioned functions can construct, so an unbounded
 # draw fails to build under any receiver name. That is a change to what a card
-# can draw, so TEXT_LAYOUT_DESIGN.md goes first and that document is in the
-# server tree. It would not retire this gate, because panelDevice carries
+# can draw, so TEXT_LAYOUT_DESIGN.md goes first, at the root of this
+# repository. It would not retire this gate, because panelDevice carries
 # LovyanGFX's own print() and drawCenterString() and a drawString permit says
 # nothing about either; the boundary reading below is what holds those. What
 # neither reading sees is a second text method added to Canvas, and that is the
