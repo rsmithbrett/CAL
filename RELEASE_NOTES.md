@@ -23,6 +23,19 @@ dated heading after.
 
 ## Unreleased
 
+### Nothing on a display changes in this one - CAL and App
+
+Both binaries are built from the same sources as the release before it. No card
+draws differently, nothing new is reported, and a device that installs this
+behaves exactly as it did.
+
+What changed is what the build refuses to publish. Two checks were passing by
+finding nothing. One read text draws through a single variable name, so a string
+drawn into no box under any other name went unseen. The other could not tell a
+card that genuinely has no content key from one that ought to have a key and
+doesn't - the shape that left the live sports card reporting nothing about the
+game it was showing. Both fail the build now.
+
 ---
 
 ## v2026.11.03.0004
