@@ -7,6 +7,13 @@ from a window on its startup splash, without reaching the BOOT button. This adds
 recovery controls to the loader; it does not add a menu to the running product
 App.
 
+**The App has one drawn control of its own, and it is not this menu.** Every
+WiFi attempt and failure screen in both binaries carries a button that opens
+network setup after a confirmation: one action, no corner gesture, no rows. See
+[WIFI_SETUP_BUTTON_DESIGN.md](WIFI_SETUP_BUTTON_DESIGN.md). Nothing below
+changes, and this menu stays a loader feature whose gesture reaches none of the
+App's screens.
+
 Available on:
 
 - The Wi-Fi setup QR in the captive-portal flow.
