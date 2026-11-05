@@ -6880,3 +6880,76 @@ what writing the decision down the second time found.
   belongs to whichever lane added those run ids.
 - **Nothing was pushed.** No device was flashed or commanded, and no server was
   started or stopped.
+
+# 35. A drawn button on every WiFi attempt, and the confirmation in front of it
+
+The reported case: a household whose display cannot reach WiFi is told to hold a
+button for three seconds. The gesture works. What it cannot do is tell somebody
+standing in front of the display that it exists, and on the Panellan it may name
+a button that is not fitted - `kBootButtonPin` is 0 with no board guard in either
+binary, unlike `kActionButtonPin`, and `BoardPanellan.h` says its pin map has
+never been verified against hardware. The touchscreen recovery menu does not
+help: `CAL_TOUCH_RECOVERY_MENU.md` scopes it to the loader and says application
+screens do not listen for the corner gesture.
+
+`WIFI_SETUP_BUTTON_DESIGN.md` went in before the code, and the recovery menu's
+scope paragraph was corrected in the same commit because this made it wrong.
+
+## What is built
+
+`App/WifiSetupButton.{h,cpp}`, drawn on the App's "Could not join WiFi" screen
+and polled in the retry loop beside the BOOT pin. Both reach the same two calls -
+`BootDiag::recordRestartIntent(RestartCause::Reprovision)` then
+`Loader::returnToLoaderForReprovisioning()` - so there is one definition of what
+"set up WiFi again" does rather than a touch path and a button path that could
+drift. The BOOT hold is unchanged and stays, because it is the route for a panel
+whose touch controller is the broken thing.
+
+Drawn through `Display::drawActionButtons()` with `Display::actionButtonZone()`
+publishing the rectangle, the pair a card's buttons already use, so the drawing
+and the hit test cannot disagree and the 44px floor comes for free: the row is
+60px.
+
+## `ci/test-wifi-setup-button.sh` - `tests/wifi-setup-button-test.cpp`, 17 checks
+
+Only the decision. `WifiSetupButton.cpp` draws through `App/Display.h`, which
+names LovyanGFX, so nothing under `tests/` can link it - the same wall
+`ci/test-personal-photos-key.sh` records against `CardManager::noteShowing()`.
+`answerFor()` is `constexpr` in the header for that reason and the confirmation
+loop calls it, so the loop and the test read one rule.
+
+- A poll with no tap is `NoTap`, whatever index is left in the struct.
+- Index 0 is Yes, index 1 is Cancel, in the order the labels are drawn.
+- **A timeout is a Cancel and never a Confirm**, said as a property over every
+  index and both tap states rather than as three cases.
+- An index nobody drew is a Cancel. Two buttons are drawn; a third is a bug
+  rather than an approval.
+
+**Made to fail before it was trusted.** Making a timeout confirm on index 0
+failed with `FAIL: a timeout is a Cancel`, exit 1. The mutation was gated on
+`cmp` and `App/WifiSetupButton.h` restored byte-identical after.
+
+## Figures
+
+`Sketch uses 1584487 bytes (80%) of program storage space`, against 1,582,931
+recorded before, so the button costs **1,556 bytes** of flash. Globals 115,508
+(35%), leaving 212,172. Read off the compiler's own line on an
+`esp32:esp32:esp32:PartitionScheme=min_spiffs` build with nothing else running -
+an earlier attempt reported exit code 0 while its log ended
+`Error during build: exit status 1`, because two compiles were racing one build
+directory.
+
+## Not covered
+
+- **Nobody has put a finger on this.** Every check is a host test against a
+  simulated answer. Whether the rectangle is where a thumb goes, whether the
+  label reads at arm's length on a wall, and whether a tap reaches `Touch` at all
+  are bench questions.
+- **CAL's own join ladder has no button yet.** `Provisioning.cpp` still draws
+  only the BOOT prompt, so which binary is running still changes the answer to
+  "how do I fix this". The design asks for both and this is half.
+- **The Panellan's GPIO0 button is still unknown.** This makes it not matter for
+  WiFi recovery without answering it, and the pin stays unguarded in both
+  binaries.
+- **A panel whose touch controller has failed** reaches none of this, which is
+  why the BOOT hold stays.

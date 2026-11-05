@@ -116,6 +116,7 @@ size_t getArduinoLoopTaskStackSize(void) {
 #include "Tides.h"
 #include "Telemetry.h"
 #include "WifiJoin.h"
+#include "WifiSetupButton.h"
 
 namespace {
 
@@ -689,8 +690,17 @@ void ensureWifiConnected() {
   }
 
   while (!WifiJoin::joinStoredNetwork()) {
+    // THE BUTTON IS DRAWN AFTER THE SCREEN, every time the screen is drawn.
+    // Touch::setActionZones() holds whatever it was last handed, so a screen that
+    // drew no button would otherwise inherit the previous one's rectangle - see
+    // WifiSetupButton's own remarks.
+    //
+    // The BOOT line stays in the text. The hold still works, it is the route for a
+    // panel whose touch controller is the broken thing, and a household that
+    // already knows the gesture should not have to learn another.
     Display::showFailure("Could not join WiFi",
-                         "Hold BOOT for 3 seconds to set up WiFi again.");
+                         "Tap Set up WiFi, or hold BOOT for 3 seconds.");
+    WifiSetupButton::draw();
     Log::line("[wifi] still not connected, retrying in 30s");
 
     // Same ~30s pace as the old delay(30000), but polled in short
@@ -698,6 +708,25 @@ void ensureWifiConnected() {
     // at boot - actually reaches wifiResetRequested().
     const uint32_t waitDeadline = millis() + 30000;
     while (millis() < waitDeadline) {
+      // The drawn button, polled beside the pin. Both reach the same two calls,
+      // so there is one definition of what "set up WiFi again" does rather than a
+      // touch path and a button path that could drift.
+      const auto answer = WifiSetupButton::poll();
+      if (answer == WifiSetupButton::Answer::Confirmed) {
+        BootDiag::recordRestartIntent(BootDiag::RestartCause::Reprovision);
+        Loader::returnToLoaderForReprovisioning();
+        // Unreachable: the call above never returns.
+      }
+      if (answer == WifiSetupButton::Answer::Cancelled) {
+        // ONLY on a cancel. The question was painted over the failure screen so
+        // it has to be put back, but redrawing on every poll instead would
+        // repaint ten times a second for thirty seconds, which is a flicker
+        // rather than a screen. Same courtesy the abandoned BOOT hold gets below.
+        Display::showFailure("Could not join WiFi",
+                             "Tap Set up WiFi, or hold BOOT for 3 seconds.");
+        WifiSetupButton::draw();
+      }
+
       if (digitalRead(kBootButtonPin) == LOW) {
         if (wifiResetRequested()) {
           // So the next boot reads SOFTWARE_RESET + REPROVISION - see BootDiag.h.
@@ -713,7 +742,8 @@ void ensureWifiConnected() {
         // wait, so the screen never claims a hold is still in progress
         // when it isn't.
         Display::showFailure("Could not join WiFi",
-                             "Hold BOOT for 3 seconds to set up WiFi again.");
+                             "Tap Set up WiFi, or hold BOOT for 3 seconds.");
+        WifiSetupButton::draw();
         // This site does its own cleanup - the line above IS the restore - so
         // the flag is cleared here rather than left standing for
         // restoreHeldBootScreen(), which has already run by the time this loop
@@ -724,6 +754,14 @@ void ensureWifiConnected() {
       delay(100);
     }
   }
+
+  // LEAVING CLEARS THE ZONE. Touch::setActionZones() holds whatever it was last
+  // handed until a draw replaces it, so a rectangle left standing here would sit
+  // under the first card drawn after the join succeeded, and a tap in that corner
+  // would reach a handler for a screen that is no longer up. CardManager sets its
+  // own zones on every card draw, but the first card is drawn after this returns
+  // and nothing promises the order.
+  WifiSetupButton::clear();
 }
 
 uint32_t lastUpdateCheckMs = 0;

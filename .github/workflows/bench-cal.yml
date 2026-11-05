@@ -117,6 +117,9 @@ jobs:
       - name: Test the reported counters past the end of a uint8_t on host
         if: ${{ hashFiles('ci/test-reported-counter.sh') != '' }}
         run: bash ci/test-reported-counter.sh
+      - name: Test the WiFi setup confirmation on host
+        if: ${{ hashFiles('ci/test-wifi-setup-button.sh') != '' }}
+        run: bash ci/test-wifi-setup-button.sh
       - name: Test the personal photographs content key on host
         if: ${{ hashFiles('ci/test-personal-photos-key.sh') != '' }}
         run: bash ci/test-personal-photos-key.sh
