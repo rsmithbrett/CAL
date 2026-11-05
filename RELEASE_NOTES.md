@@ -23,18 +23,30 @@ dated heading after.
 
 ## Unreleased
 
-### Nothing on a display changes in this one - CAL and App
+---
 
-Both binaries are built from the same sources as the release before it. No card
-draws differently, nothing new is reported, and a device that installs this
-behaves exactly as it did.
+## v2026.11.04.0002
 
-What changed is what the build refuses to publish. Two checks were passing by
-finding nothing. One read text draws through a single variable name, so a string
-drawn into no box under any other name went unseen. The other could not tell a
-card that genuinely has no content key from one that ought to have a key and
-doesn't - the shape that left the live sports card reporting nothing about the
-game it was showing. Both fail the build now.
+### What you get depends on which build the display is on - CAL and App
+
+Against `v2026.11.04.0001`, nothing. The binaries are built from the same
+sources, no card draws differently, and a device that installs this behaves
+exactly as it did.
+
+**Against `v2026.11.03.0002`, which is what the fleet is running,** this
+carries everything published since: reports can name the home, the notice, the
+game and the photograph that were on screen rather than only that a card ran;
+a photographs card that drew nothing says why in the log; and a count of
+pictures that would not draw stops at 255 instead of wrapping to 0 and reading
+as a clean slate. Those entries are below, under `v2026.11.03.0003` and
+`v2026.11.03.0004`. Nothing needs doing on the device either way.
+
+What changed in this release is what the build refuses to publish. Two checks
+were passing by finding nothing. One read text draws through a single variable
+name, so a string drawn into no box under any other name went unseen. The
+other could not tell a card that genuinely has no content key from one that
+ought to have a key and doesn't - the shape that left the live sports card
+reporting nothing about the game it was showing. Both fail the build now.
 
 ---
 
