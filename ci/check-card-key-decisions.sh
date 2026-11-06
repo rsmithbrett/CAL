@@ -249,7 +249,21 @@ fi
 # `kCardId2 = "x"` reads the same as `kCardId2="x"`. A string literal holding a
 # space is joined up by this too; no card id has one, and a mangled literal
 # cannot produce an id the census would accept.
-RECORDS=$(awk '
+# A WALL CLOCK ON THE PARSE, because a gate that hangs is worse than one that
+# fails. The four match() loops below advance `rest` by hand, and one that does
+# not advance finds the same match for ever while allocating a new `piece` every
+# pass - an infinite loop that eats memory rather than spinning quietly.
+#
+# That is not a hypothetical. Two copies of a DRAFT of this script, started
+# 2026-11-03 at 21:49 and 21:52 and never committed, were still running two days
+# later at 6.3GB and 7.8GB. Together they starved the production service until it
+# could not answer its own 30-second start timeout, and nothing noticed for two
+# days because nothing was watching and the script could not stop itself.
+#
+# 120 seconds against the 1-2 seconds this takes on 99 files. A kill exits
+# non-zero, `set -euo pipefail` carries that out, and the gate fails - which is
+# a red check somebody reads, instead of a machine somebody has to rescue.
+RECORDS=$(timeout 120 awk '
   function countOf(hay, needle,    n, p, start) {
     n = 0
     start = 1
