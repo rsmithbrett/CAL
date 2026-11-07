@@ -90,6 +90,7 @@ size_t getArduinoLoopTaskStackSize(void) {
 #include "HeapRatchet.h"
 #include "HomeValue.h"
 #include "Http.h"
+#include "UnreachableHoldOff.h"
 #include "PowerProbe.h"
 #include "Identity.h"
 #include "IssFlyover.h"
@@ -195,6 +196,16 @@ void releaseBluetoothMemory() {
 // a rare event a household sees once when they unbox the thing - on the worst
 // devices it is most of what they ever see it do.
 //
+// **That cadence is history, re-measured 2026-11-07.** Over fourteen days of
+// device_telemetry_history the wall units ran 25 to 47 hours between boots -
+// Whitey three boots in 53.5 hours, Test2 four in 54.8. What still reboots often
+// is the desk prototypes being handled: Wireless-Tag Portrait Prototype eighteen
+// boots in 87 hours. Nothing below is changed by this, because every threshold
+// here was chosen to sit above the worst case and still does. The figure is
+// corrected rather than deleted because it was being read as current, and a
+// stale measurement quoted as live is how a reboot every twenty minutes stops
+// looking like a fault.
+//
 // The distinction that matters is the one BootDiag.h already draws: power was
 // applied, versus this firmware restarted itself to get unstuck. They want
 // opposite treatment on screen, and until now got identical treatment.
@@ -266,7 +277,8 @@ void releaseBluetoothMemory() {
 /// one poisoned TLS session produces exactly one self-restart and then the
 /// device runs for hours - that must never be narrated, and with a budget of
 /// three it never is, not even if it happens twice more in the same day. A
-/// device genuinely cycling at the observed 13-27 minute cadence spends three
+/// device genuinely cycling at the 13-27 minute cadence observed on 2026-09-11
+/// (see the boot-screen note above for what the fleet does now) spends three
 /// restarts inside about an hour and starts explaining itself, which is soon
 /// enough to be reported and late enough that nothing transient reaches it.
 constexpr uint8_t kMaxSilentSelfRestarts = 3;
@@ -283,9 +295,11 @@ constexpr uint8_t kMaxSilentSelfRestarts = 3;
 /// absence of the next restart, and the only way to observe an absence is to
 /// wait.
 ///
-/// An hour is comfortably past the worst observed cycle (a restart every 13-27
-/// minutes), so a device in that state never reaches it and its count keeps
-/// climbing, while a device that recovered clears on its first quiet hour.
+/// An hour is comfortably past the worst cycle ever observed (a restart every
+/// 13-27 minutes, 2026-09-11), so a device in that state never reaches it and its
+/// count keeps climbing, while a device that recovered clears on its first quiet
+/// hour. The fleet now runs 25 to 47 hours between boots and clears it easily,
+/// which is the healthy outcome rather than a reason to shorten the hour.
 constexpr uint32_t kSelfRestartRecoveredUptimeMs = 60UL * 60UL * 1000UL;
 
 /// How many self-restarts in a row with no check-in between them before the
@@ -1206,6 +1220,45 @@ constexpr uint32_t kMaxMsDisassociated = 10UL * 60UL * 1000UL;
 /// rather than inheriting the first one's clock.
 uint32_t gWifiDownSinceMs = 0;
 
+/// How long a device that COULD build a TLS session waits before restarting
+/// over a server it cannot reach.
+///
+/// One hour, against two measurements. Card policy lives in RAM, so an
+/// unreachable restart costs the household every card until the server answers
+/// again - and on 2026-11-07 the wall units were running 25 to 47 hours between
+/// boots, so that content was not about to be lost to anything else. Seven of
+/// the twelve displays reported SOFTWARE_RESET+UNREACHABLE as their last
+/// restart reason on that same reading, which is this watchdog turning a
+/// drawing display into "Nothing to show yet" for the length of an outage it
+/// could not shorten.
+///
+/// An hour rather than forever because a wedged client with room to spare has
+/// no other recovery, and five minutes of silence is not evidence of one. It is
+/// long enough that a deploy, a Kestrel restart, a router reboot and most
+/// unplanned outages end underneath it, and short enough that a device nothing
+/// else can fix is back inside the window where a policy or firmware change
+/// reaches it.
+///
+/// This does not apply to the provably-cannot-reconnect path, which is a fact
+/// about this device's own heap and still acts on the first failure.
+constexpr uint32_t kMaxMsUnreachableWithHealthyHeap = 60UL * 60UL * 1000UL;
+
+/// When the current run of failed check-ins began, or 0 while check-ins are
+/// succeeding. Cleared by the first success, like gConsecutiveCheckInFailures,
+/// so a second outage times from its own start.
+///
+/// Wall clock rather than the failure count, because the count climbs at
+/// whatever cadence the server last asked for and the outage lasts however long
+/// it lasts. A device told to check in every ten seconds would otherwise reach
+/// any threshold in a fraction of the time.
+uint32_t gUnreachableSinceMs = 0;
+
+/// Whether the hold-off line below has been written for this episode. Its own
+/// flag rather than gHoldOffLogged, which belongs to the backoff hold-off: that
+/// one is reached later in the same episode, after this deadline passes and the
+/// restart is taken, and sharing one flag would silence whichever spoke second.
+bool gUnreachableHoldOffLogged = false;
+
 /// When the WiFi hold-off line below was last written, so it is said once when
 /// an episode starts and then once a minute while it lasts.
 ///
@@ -1575,7 +1628,36 @@ void checkUnreachableWatchdog() {
   const bool provablyCannotReconnect =
       !Http::canOpenNewSession() && gConsecutiveCheckInFailures > 0;
 
-  if (!provablyCannotReconnect && gConsecutiveCheckInFailures < kMaxConsecutiveCheckInFailures) {
+  // The judgement itself lives in App/UnreachableHoldOff.h, where a host test
+  // walks it. Everything around it stays here: the window above, the WiFi
+  // branch and the backoff floor below, the logging, and the restart.
+  const uint32_t unreachableForMs =
+      gUnreachableSinceMs == 0 ? 0 : (millis() - gUnreachableSinceMs);
+
+  if (UnreachableHoldOff::decide(provablyCannotReconnect, gConsecutiveCheckInFailures,
+                                 kMaxConsecutiveCheckInFailures, unreachableForMs,
+                                 kMaxMsUnreachableWithHealthyHeap) ==
+      UnreachableHoldOff::Decision::HoldOff) {
+    // Said once per episode. This function runs every loop iteration, and an
+    // unconditional line here is the flood that has been fixed three times -
+    // gHoldOffLogged, StackWatch::logHighWaterMark, and the WiFi hold-off.
+    //
+    // Its own flag rather than gHoldOffLogged: that one belongs to the backoff
+    // hold-off, which is reached later in the same episode once this deadline
+    // passes, so sharing would silence whichever spoke second.
+    if (gConsecutiveCheckInFailures >= kMaxConsecutiveCheckInFailures && !gUnreachableHoldOffLogged) {
+      gUnreachableHoldOffLogged = true;
+      Log::printf("[health] %lu check-in(s) have failed over %lu ms, but this device has %lu "
+                  "bytes contiguous and one TLS record buffer needs %lu - it could open a "
+                  "session, so the silence is the far end's and a restart cannot shorten it. "
+                  "Holding the cards and waiting until %lu ms. Silent from here until this "
+                  "clears.",
+                  static_cast<unsigned long>(gConsecutiveCheckInFailures),
+                  static_cast<unsigned long>(unreachableForMs),
+                  static_cast<unsigned long>(Http::largestContiguousBytes()),
+                  static_cast<unsigned long>(Http::kTlsRecordBufferBytes),
+                  static_cast<unsigned long>(kMaxMsUnreachableWithHealthyHeap));
+    }
     return;
   }
 
@@ -2091,6 +2173,12 @@ void performCheckIn() {
     // happens when this keeps happening, and why a restart is the only
     // recovery this firmware has for it.
     ++gConsecutiveCheckInFailures;
+    // Stamped on the first failure of a run only, so the hold-off below
+    // measures the episode rather than the moment this iteration happened to
+    // notice it.
+    if (gUnreachableSinceMs == 0) {
+      gUnreachableSinceMs = millis();
+    }
     // The counter keeps climbing past the limit on purpose - a maintenance
     // window, a short WiFi outage and the self-restart backoff all hold the
     // restart off while failures keep arriving, and the [health] lines report
@@ -2150,6 +2238,8 @@ void performCheckIn() {
     Log::printf("[checkin] recovered after %lu consecutive failure(s) - restart no longer needed",
                 static_cast<unsigned long>(gConsecutiveCheckInFailures));
     gConsecutiveCheckInFailures = 0;
+    gUnreachableSinceMs = 0;
+    gUnreachableHoldOffLogged = false;
     // So a later episode explains itself once rather than being held off in
     // silence - see gHoldOffLogged.
     gHoldOffLogged = false;

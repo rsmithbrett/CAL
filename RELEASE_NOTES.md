@@ -23,6 +23,34 @@ dated heading after.
 
 ## Unreleased
 
+### A display keeps its cards through a short outage - App
+
+When the server stops answering, a display used to restart itself after about
+five minutes. It does not any more, unless its own memory is the problem.
+
+That restart was never going to help. The server is the part that is down, and
+restarting a display cannot bring it back - but it does empty the screen,
+because the list of cards a display is showing lives only in memory. So a
+display full of content became "Nothing to show yet" for as long as the outage
+lasted, and the restart is what did it.
+
+Now it waits an hour before trying that. Anything shorter - a deploy, a service
+restart, a router reboot - and nobody sees anything at all: the cards keep
+turning over on whatever they last received, and the display picks up again on
+its next check-in.
+
+**Nothing to do.** A display that genuinely cannot build a secure connection
+still restarts on the first failure, exactly as before, because that is a fault
+a restart does fix.
+
+**What this does not change:** a restart from any other cause - power, a nudge
+at the wall, the memory watchdog - still clears the cards until the next
+check-in. Keeping them through a restart is separate work and is not in this
+build.
+
+Install over a cable at https://discoveraroundme.com/cal if you would rather
+not wait for the display to take it over the air.
+
 ---
 
 ## v2026.11.04.0002

@@ -64,12 +64,16 @@ ceiling - 20, 40, 80, 160, 240, 240... - stepped by the connection watchdog and
 the response-OOM watchdog, cleared only by a completed check-in. See the
 README's "The unreachable watchdog rebooted on the same cadence forever".
 
-**Automated coverage: none, and none is possible in this repository.** The
-schedule is a pure function of one `uint8_t` and `millis()`, which is testable
-in principle - but nothing in this tree can host a test, and extracting the
-function to something that could would mean building a host test target for a
-seven-line function. The judgement is that the log lines below are the cheaper
-proof.
+**Automated coverage: none for the schedule itself.** It is a pure function of one
+`uint8_t` and `millis()`, and the judgement when this was written was that the log
+lines below are the cheaper proof.
+
+*The reason given then - "nothing in this tree can host a test" - stopped being
+true before 2026-11-07.* There are 25 files under `tests/`, six stub directories
+and a `ci/test-*.sh` for each, and section 1f below extracted a watchdog decision
+into a header precisely so a host test could walk it. The schedule could have the
+same treatment. It has not been given it, and that is now a choice rather than an
+impossibility.
 
 ### 1a. The ladder actually doubles
 
@@ -211,6 +215,55 @@ the few instructions between them costs one shorter floor. Not tested, not worth
 testing, recorded so nobody reports it as a defect.
 
 ---
+
+## 1f. The hold-off before an unreachable restart, added 2026-11-07
+
+`App/UnreachableHoldOff.h`, called from `checkUnreachableWatchdog()`. Five failed
+check-ins no longer restart a device that could still open a TLS session; it
+holds its cards for an hour first. The provably-cannot-reconnect path is
+unchanged and still acts on the first failure. See the README's "A restart
+cannot reach a server that is down".
+
+**Automated coverage: `ci/test-unreachable-holdoff.sh`, 9 cases, both sides of
+both thresholds.** The decision was lifted into a `constexpr` function over five
+figures for exactly this reason - the cases that matter are a clock and a counter
+crossing their limits, and on a device each one costs an hour and a server you
+can take down. The function is asserted twice per case, as a `static_assert` over
+the constexpr walk and again at runtime, so a widened predicate stops the compile
+on any toolchain and also prints a `Failed:` line under the runner.
+
+The test was written before the rule existed and failed on three cases:
+`healthyHeap(5, 0)`, `healthyHeap(5, deadline - 1)` and
+`healthyHeap(500, deadline - 1)` all returned `Restart`. The five cases that must
+not change - the two proof cases, the proof-without-a-failure case and the two
+under-threshold cases - passed throughout, which is what says the extraction did
+not quietly alter the behaviour it was meant to preserve.
+
+**What the host test cannot reach**, and what a bench run is still for:
+
+1. That `App.ino` consults the header at all rather than keeping its own copy of
+   the judgement.
+2. That `gUnreachableSinceMs` is stamped on the first failure of a run and
+   cleared by the first success. A clock that never starts makes
+   `unreachableForMs` zero forever and holds off permanently; one that never
+   clears makes the second episode inherit the first one's age and restart
+   immediately.
+3. That the hold-off line is written **once per episode**. It has its own flag,
+   `gUnreachableHoldOffLogged`, rather than sharing `gHoldOffLogged` with the
+   backoff hold-off, because the backoff one is reached later in the same episode
+   and a shared flag silences whichever speaks second.
+
+**Bench form (~70 minutes).** Provision a device, let it check in, then stop the
+Host process without touching WiFi. Expect `[checkin] failure N of 5`, then the
+hold-off line naming the bytes contiguous, the record-buffer requirement and the
+hour - **once**, not once per loop iteration. No restart for an hour. Bring the
+server back inside the hour and the device must recover on its next check-in with
+its cards never having gone. Leave it down past the hour and the restart line
+follows, at which point the backoff schedule in 1a takes over unchanged.
+
+**Short form.** Temporarily set `kMaxMsUnreachableWithHealthyHeap` to 120,000 in
+a scratch build that is never registered in the firmware catalog, and read the
+same sequence in two minutes.
 
 ## 2. The mbedTLS figure is 16,717 contiguous, twice - not "~32KB" (`3cfbb08`)
 

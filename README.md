@@ -5911,7 +5911,10 @@ a power cycle.
 Across an evening of this on two devices, a restart recovered it every single time
 and nothing else ever did. So `checkUnreachableWatchdog()` in `App.ino` now does
 deliberately what a person was otherwise doing by hand: **five consecutive failed
-check-ins with WiFi associated, and the App restarts itself.** Five is about five
+check-ins with WiFi associated, and the App restarts itself.** *Narrowed
+2026-11-07: five failures alone no longer restart a device that could still open a
+TLS session - it holds its cards for an hour first. See "A restart cannot reach a
+server that is down" below. The provably-cannot-reconnect path is unchanged.* Five is about five
 minutes at the default 60-second cadence - long enough to sit under any ordinary
 blip, short enough that a stuck device is back inside the window where a policy or
 firmware change can reach it.
@@ -6335,6 +6338,76 @@ mid-window comes back with the watchdog armed and its cards honest, and is simpl
 told about the window again on its next successful check-in. **Unverified on
 hardware**, like every other card change in this build - checked by a clean
 compile and by reading.
+
+## A restart cannot reach a server that is down, added 2026-11-07
+
+The backoff above made an unreachable device reboot less often. It did not ask
+whether that device should be rebooting at all, and for the case it is most
+often in, the answer is no.
+
+**What was measured.** On 2026-11-07, seven of the twelve displays reported
+`SOFTWARE_RESET+UNREACHABLE` as their last restart reason. Over fourteen days of
+`device_telemetry_history` the wall units ran 25 to 47 hours between boots -
+Whitey three boots in 53.5 hours, Test2 four in 54.8. So the restarts those
+displays took were not ordinary churn they would have had anyway. They were this
+watchdog, firing because the server was unreachable, on devices that would
+otherwise have sat on their content for two days.
+
+**Why that empties a display.** Card policy lives in RAM and nowhere else. A
+restart drops it, `CardManager::draw()` takes its guard clause, and the panel
+reads "Nothing to show yet - waiting for the first update from the server" until
+the server comes back. The restart cannot bring it back any sooner, because the
+far end is what is down. So the whole transaction is a display full of content
+traded for a blank one, for nothing.
+
+### What changed
+
+The watchdog had two triggers and they are now treated differently.
+
+**The proof is unchanged.** `!Http::canOpenNewSession()` means the largest
+contiguous internal block is below one mbedTLS record buffer, so
+`mbedtls_ssl_setup()` cannot succeed. That is a fact about this device, proven
+locally, and a restart clears it. It still acts on the first failure, and it
+still ignores every clock. Devices 12 and 17 are what it exists for.
+
+**The count now waits.** Ample contiguous heap and the requests failing anyway
+is the ambiguous case the count was kept for - a server restart, a router blip,
+DNS - and until now it restarted after five failures like anything else. It now
+holds the cards for an hour first, and takes the restart only if the silence
+outlasts that.
+
+An hour against two readings: an outage shorter than it costs nothing at all,
+which covers a deploy, a Kestrel restart, a router reboot and most unplanned
+outages; and it is short enough that a device nothing else can fix is back inside
+the window where a policy or firmware change reaches it. The restart stays
+available rather than being removed, because a wedged client with room to spare
+has no other recovery and an hour of silence is no longer obviously the far end's
+fault. What changed is which way the doubt falls.
+
+The deadline is wall clock, not a count, and the two are not interchangeable:
+the count climbs at whatever cadence the server last asked for, so a device told
+to check in every ten seconds would cross any threshold in a fraction of the time
+an outage lasts. `gUnreachableSinceMs` is stamped on the first failure of a run
+and cleared by the first success, like the counter beside it.
+
+### Where the decision lives
+
+`App/UnreachableHoldOff.h`, as a `constexpr` function over five figures, so
+`ci/test-unreachable-holdoff.sh` can walk both sides of both thresholds on a host
+in milliseconds. Reproducing the same cases on a device means an hour each and a
+server you can take down. Everything around the decision stayed in `App.ino` -
+the maintenance window, the WiFi branch, the backoff floor, the logging and the
+restart itself.
+
+### What this does not fix
+
+**A restart from any other cause still empties the display.** Power, a heap
+watchdog, a therapeutic reboot, somebody at the wall - all of them drop the card
+policy, because it is RAM only. This change stops the watchdog manufacturing
+restarts during an outage; it does not make a restart survivable. Persisting the
+card policy is what does that, and it is not built.
+
+---
 
 ## The unreachable watchdog rebooted on the same cadence forever
 

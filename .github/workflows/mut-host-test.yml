@@ -55,6 +55,9 @@ jobs:
       - name: Check the asset counters' call sites
         if: ${{ hashFiles('ci/check-asset-counters.sh') != '' }}
         run: bash ci/check-asset-counters.sh
+      - name: Test the unreachable watchdog's hold-off on host
+        if: ${{ hashFiles('ci/test-unreachable-holdoff.sh') != '' }}
+        run: bash ci/test-unreachable-holdoff.sh
       - name: Test the WiFi setup confirmation on host
         if: ${{ hashFiles('ci/test-wifi-setup-button.sh') != '' }}
         run: bash ci/test-wifi-setup-button.sh

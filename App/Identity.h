@@ -268,7 +268,8 @@ void setLastUtcOffsetMinutes(int minutes);
 /// so narrating the WiFi/time ladder turns an invisible recovery into a
 /// visible fault, repeatedly. That is right for the first few and wrong
 /// forever: a device restarting every 13-27 minutes (measured across the
-/// fleet on 2026-09-11, one unit 24 times in five hours) would then never
+/// fleet on 2026-09-11, one unit 24 times in five hours; the fleet ran 25 to
+/// 47 hours between boots when re-measured on 2026-11-07) would then never
 /// tell anybody anything, and the household's only evidence would be a
 /// picture that blinks. This counter is what puts a floor under that - see
 /// kMaxSilentSelfRestarts in App.ino for the budget and what happens when it
