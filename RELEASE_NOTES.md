@@ -23,6 +23,22 @@ dated heading after.
 
 ## Unreleased
 
+### A display that cannot find WiFi now shows a button - App
+
+When a display cannot get onto your WiFi, the screen used to tell you to hold a
+button on the back for three seconds. That still works. The trouble is that the
+screen could not show you where the button was, and on some displays there may
+not be one fitted at all - which left the instruction pointing at nothing.
+
+The screen now draws a button you can tap. Tapping it asks whether you meant it
+before anything happens, and if nobody answers, it does nothing: a display
+trying to join WiFi is usually sitting on a wall with nobody in front of it, and
+saying yes by accident would put it back into setup mode with an open network
+anybody nearby could see.
+
+**Nothing to do**, and nothing else changes. The hold still works if you prefer
+it.
+
 ### A display keeps its cards through a short outage - App
 
 When the server stops answering, a display used to restart itself after about
@@ -50,6 +66,13 @@ build.
 
 Install over a cable at https://discoveraroundme.com/cal if you would rather
 not wait for the display to take it over the air.
+
+### Also in this release
+
+Three changes nobody will see on a display: the release notes for
+`v2026.11.04.0002` were corrected for readers whose display is several builds
+behind, a design document was written for the button above, and a build check
+that could hang for ever now stops itself after two minutes.
 
 ---
 
