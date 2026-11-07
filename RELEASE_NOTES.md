@@ -23,6 +23,10 @@ dated heading after.
 
 ## Unreleased
 
+---
+
+## v2026.11.07.0001
+
 ### A display that cannot find WiFi now shows a button - App
 
 When a display cannot get onto your WiFi, the screen used to tell you to hold a
