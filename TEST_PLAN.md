@@ -339,6 +339,101 @@ between the Writer and the Reader. A `policy stored` line on every check-in mean
 the hash comparison is not working and the part is being worn at roughly 8,800
 writes a year.
 
+## 1h. A failed photograph query no longer blanks the card, added 2026-11-07
+
+`App/PersonalPhotosPresence.h`, called from `parsePersonalPhotos()` in
+`App/CheckIn.cpp`. An absent `personalPhotoAssetIds` key now leaves the held
+photographs where they are; an explicitly empty array still clears them. The two
+were one instruction and both cleared, so one failed database query on an
+otherwise healthy check-in took a family's pictures off the glass. The server
+repo's `OUTAGE_CONTENT_LOSS_REVIEW.md` section 4 is the review that found it, and
+the sports branch a few hundred lines further down `CheckIn.cpp` is the rule this
+now matches.
+
+**What the server means by absence.**
+`CheckInGatewayService.ResolvePersonalPhotosAsync` returns null in three cases and
+none of them is a household choosing nothing: the photograph source is not wired
+into the deployment, the device's resolved card policy does not name the card, or
+the two database round trips threw and were caught so the rest of the check-in
+would survive. `PersonalPhotoAssetIds` carries
+`JsonIgnoreCondition.WhenWritingNull`, so null is no key at all. An empty list
+keeps its key and is the household's own answer.
+
+**The old-server case cannot happen.** Collapsing the two was defended as
+protecting a device from a server too old to send the field. The field shipped
+server-side on 2026-10-29 in commit `9d87979c`; the first App release that
+registers this card is `v2026.10.30.0001` on `c0c5835`, the day after; and there
+is one server. Reaching the old case needs production rolled back behind
+2026-10-29 with devices left on 2026-10-30 firmware or later. The
+backward-compatibility mandate runs the other way - old firmware against a newer
+server - and that direction is untouched, because firmware that never heard of
+the field still ignores it.
+
+**Automated coverage: `ci/test-personal-photos-absence.sh`, 7 cases.** The
+decision was lifted into a `constexpr` function over two values for the reason 1f
+gives: the case that matters is a server whose photograph query threw, and
+reproducing that on a device means taking a database down for one check-in and
+then watching a card that is meant not to change. Each case is asserted twice, as
+a `static_assert` over the constexpr walk and again at runtime, so a rule that
+collapses the two answers again stops the compile on any toolchain and also
+prints a `Failed:` line under the runner.
+
+The test was written before the header's rule existed. Against a placeholder
+holding today's behaviour it failed on three `static_assert`s - `absent(0)`,
+`absent(1)` and `absent(10)` all answered `ClearHeldSet` - and a copy with the
+static assertions stripped printed `Failed: no key, nothing parsed - expected
+LeaveHeldSetAlone, got ClearHeldSet` and exited 1. The four array cases passed
+throughout, which is what says the extraction did not alter the behaviour it was
+meant to preserve.
+
+Two mutations were then run against the finished header to prove the assertions
+bite in both directions. Making the absent branch unreachable stopped the compile
+on the same three `static_assert`s. Making an empty array answer
+`LeaveHeldSetAlone` stopped it on the two that hold the other half - the
+household's own answer, and the array that yielded no usable id. The header was
+restored and compared byte for byte after each.
+
+**What the host test cannot reach**, and what a bench run is still for. No host
+test in this repository compiles `App/CheckIn.cpp` or includes ArduinoJson, so
+nothing automated reads the parse itself:
+
+1. That `parsePersonalPhotos()` consults the header rather than keeping its own
+   copy of the judgement.
+2. That `is<JsonArrayConst>()` is what the member's shape is read with, so a null
+   and a missing key both answer false and a `[]` answers true.
+3. That an array whose every entry is null or empty reaches `ClearHeldSet` rather
+   than `LeaveHeldSetAlone`. The decision is asserted on a count of zero; what is
+   not asserted is that the parser still reports `memberIsArray` true for it.
+4. That a device holding photographs through an absent key still draws them,
+   which needs the SD cache and a rotation.
+
+**Bench form (~10 minutes).** Provision a device whose policy names
+`personalphotos` and let a household set carrying two or more pictures arrive.
+Expect `[checkin] personalPhotoAssetIds carries N photograph(s)` and the pictures
+in the rotation. Then make the server's photograph query fail for one check-in,
+so the field goes absent. Expect
+`[checkin] no personalPhotoAssetIds key - keeping the N photograph(s) already on
+the card rather than clearing them` on the debug stream, no
+`dropped N cached photograph(s)` line, and the pictures still cycling. Then untick
+every picture on the household's page so the server sends `[]`. Expect
+`[checkin] personalPhotoAssetIds is empty - the household has chosen nothing, so
+the N photograph(s) held come off the card`, the `dropped` line naming the ids,
+and the card out of the rotation. The check-in after that one must print neither
+line, because nothing is held any more.
+
+**Both lines are gated on something being held.** Most of the fleet has no
+photographs card and the server sends the key only to a display whose policy names
+one, so an unconditional line would put "no personalPhotoAssetIds key" on nearly
+every device's stream on the check-in cadence and bury the one reading worth
+having. A hold over nothing changes nothing.
+
+**What to watch for going wrong.** A `keeping the N photograph(s)` line arriving
+on the check-in cadence means the server has stopped sending the key for a
+household that has pictures, which is a server-side failure this change keeps off
+the glass and puts on the stream - the line is now the only place it shows. A
+display reassigned to a different household keeps the previous set until the first
+check-in that answers, which is one check-in rather than the none it used to be.
+
 ## 2. The mbedTLS figure is 16,717 contiguous, twice - not "~32KB" (`3cfbb08`)
 
 A documentation correction with no runtime component, which makes it the one

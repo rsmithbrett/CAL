@@ -98,6 +98,8 @@ jobs:
         run: bash ci/test-wifi-setup-button.sh
       - name: Test the personal photographs content key on host
         run: bash ci/test-personal-photos-key.sh
+      - name: Test what a check-in's personalPhotoAssetIds means on host
+        run: bash ci/test-personal-photos-absence.sh
       - name: Test the announcement and home value content keys on host
         run: bash ci/test-announcement-and-home-value-keys.sh
       - name: Test a card cannot register without naming a key policy

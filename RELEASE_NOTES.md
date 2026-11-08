@@ -46,6 +46,21 @@ itself is what survives.
 **Nothing to do.** The first restart after installing this is the last one that
 empties the screen.
 
+### Your photographs stay up when the server has a bad moment - App
+
+A display asks the server for your pictures every few minutes. When that one
+question failed at the server end, the display read the empty answer as "this
+family has no photographs any more" and took them off the screen, then kept them
+off until the next time the question worked. Nothing was wrong with the pictures,
+and nothing on the screen said what had happened.
+
+The display now tells the difference between the server not answering and the
+server saying you've chosen nothing. A question that failed leaves your pictures
+where they are. Unticking every picture on your own page still clears them within
+a few minutes, as before, and so does deleting them.
+
+**Nothing to do.**
+
 ---
 
 ## v2026.11.07.0001

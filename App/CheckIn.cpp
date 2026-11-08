@@ -20,6 +20,10 @@
 #include "CardColumns.h"
 #include "CardManager.h"
 #include "PersonalPhotos.h"
+// For the one decision parsePersonalPhotos() makes about the member it read. The
+// header names only <stdint.h>, which is what lets a host test walk the rule
+// without compiling this file - see the remarks at the top of it.
+#include "PersonalPhotosPresence.h"
 #include "Config.h"
 #include "Http.h"
 #include "Identity.h"
@@ -274,19 +278,41 @@ void addClearedAnnouncements(JsonDocument& requestDoc) {
 
 /// Hands the household's chosen photographs to the card that draws them.
 ///
-/// An absent member and an empty array are the same instruction - draw none - and
-/// both reach PersonalPhotos::setFromCheckIn with a count of zero, which clears the
-/// card. That matters for the absent case: a server too old to send the field, or a
-/// deployment with no photo source wired, must leave a display showing nothing rather
-/// than whatever it drew last week.
+/// A MISSING `personalPhotoAssetIds` KEY CLEARS NOTHING, the same rule the sports
+/// branch below states and for the same reason. Absent means the server said
+/// nothing about photographs; an explicitly empty array means the household has
+/// chosen nothing, and only the second one takes pictures off the glass.
+/// PersonalPhotosPresence.h holds the rule and the host test walks it.
 ///
-/// Anything that is not an array is treated as absent, the same tolerance
+/// The two were one instruction until 2026-11-07, on the reasoning that a server
+/// too old to send the field must not leave last week's pictures up. No device can
+/// meet a server that old. The field shipped server-side on 2026-10-29 in commit
+/// 9d87979c; the first App release that registers this card is v2026.10.30.0001 on
+/// c0c5835, the day after; and there is one server. The collapsed case needs
+/// production rolled back behind 2026-10-29 with devices left on 2026-10-30
+/// firmware or later. The compatibility mandate runs the other way - old firmware
+/// against a newer server, additive optional fields - and that direction is
+/// untouched, because firmware that never heard of the field still ignores it.
+///
+/// Absence in practice is the server declining to answer: the photograph source is
+/// not wired into the deployment, the device's resolved card policy does not name
+/// the card, or the two database round trips threw and ResolvePersonalPhotosAsync
+/// caught them so the rest of the check-in would survive. The third is what
+/// blanked a family's card on one failed query.
+///
+/// Anything that is not an array is read as absent too, the same tolerance
 /// parseCardPolicy applies to a member it cannot read.
 void parsePersonalPhotos(JsonVariantConst source) {
   char ids[PersonalPhotos::kMaxPhotos][PersonalPhotos::kAssetIdLength + 1] = {};
   uint8_t count = 0;
 
-  if (source.is<JsonArrayConst>()) {
+  // Read before the decision rather than inside it, because an array whose every
+  // entry was skipped yields no usable id and still has to clear: it looks like
+  // absence from in here and it is not absence. The member's own shape is the
+  // only thing that separates them.
+  const bool memberIsArray = source.is<JsonArrayConst>();
+
+  if (memberIsArray) {
     for (JsonVariantConst entry : source.as<JsonArrayConst>()) {
       if (count >= PersonalPhotos::kMaxPhotos) {
         break;
@@ -301,6 +327,42 @@ void parsePersonalPhotos(JsonVariantConst source) {
       ids[count][PersonalPhotos::kAssetIdLength] = '\0';
       ++count;
     }
+  }
+
+  // GATED ON SOMETHING BEING HELD, because most of the fleet has no photographs
+  // card and the server sends the key only to a display whose policy names one.
+  // An unconditional line here would put "no personalPhotoAssetIds key" on the
+  // debug stream of nearly every device on the check-in cadence, and the one
+  // reading worth having - a display that is holding pictures through a server
+  // that stopped answering for them - would be buried in it. A hold over nothing
+  // changes nothing and has nothing to report.
+  //
+  // The empty case is gated the same way for the same reason, and setFromCheckIn
+  // short-circuits an unchanged set, so a household who have chosen nothing
+  // produce no line and no work.
+  const unsigned held = static_cast<unsigned>(PersonalPhotos::count());
+
+  switch (PersonalPhotosPresence::decide(memberIsArray, count)) {
+    case PersonalPhotosPresence::Decision::LeaveHeldSetAlone:
+      if (held > 0) {
+        Log::printf("[checkin] no personalPhotoAssetIds key - keeping the %u photograph(s) "
+                    "already on the card rather than clearing them",
+                    held);
+      }
+      return;
+
+    case PersonalPhotosPresence::Decision::ClearHeldSet:
+      if (held > 0) {
+        Log::printf("[checkin] personalPhotoAssetIds is empty - the household has chosen "
+                    "nothing, so the %u photograph(s) held come off the card",
+                    held);
+      }
+      break;
+
+    case PersonalPhotosPresence::Decision::ReplaceHeldSet:
+      Log::printf("[checkin] personalPhotoAssetIds carries %u photograph(s)",
+                  static_cast<unsigned>(count));
+      break;
   }
 
   PersonalPhotos::setFromCheckIn(ids, count);

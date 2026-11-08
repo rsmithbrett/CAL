@@ -67,6 +67,9 @@ jobs:
       - name: Test the personal photographs content key on host
         if: ${{ hashFiles('ci/test-personal-photos-key.sh') != '' }}
         run: bash ci/test-personal-photos-key.sh
+      - name: Test what a check-in's personalPhotoAssetIds means on host
+        if: ${{ hashFiles('ci/test-personal-photos-absence.sh') != '' }}
+        run: bash ci/test-personal-photos-absence.sh
       - name: Test the announcement and home value content keys on host
         if: ${{ hashFiles('ci/test-announcement-and-home-value-keys.sh') != '' }}
         run: bash ci/test-announcement-and-home-value-keys.sh
