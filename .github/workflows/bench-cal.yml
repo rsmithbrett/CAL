@@ -120,6 +120,9 @@ jobs:
       - name: Test the unreachable watchdog's hold-off on host
         if: ${{ hashFiles('ci/test-unreachable-holdoff.sh') != '' }}
         run: bash ci/test-unreachable-holdoff.sh
+      - name: Test the stored card policy on host
+        if: ${{ hashFiles('ci/test-card-policy-store.sh') != '' }}
+        run: bash ci/test-card-policy-store.sh
       - name: Test the WiFi setup confirmation on host
         if: ${{ hashFiles('ci/test-wifi-setup-button.sh') != '' }}
         run: bash ci/test-wifi-setup-button.sh

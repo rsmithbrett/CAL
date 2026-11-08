@@ -92,6 +92,8 @@ jobs:
         run: bash ci/check-asset-counters.sh
       - name: Test the unreachable watchdog's hold-off on host
         run: bash ci/test-unreachable-holdoff.sh
+      - name: Test the stored card policy on host
+        run: bash ci/test-card-policy-store.sh
       - name: Test the WiFi setup confirmation on host
         run: bash ci/test-wifi-setup-button.sh
       - name: Test the personal photographs content key on host

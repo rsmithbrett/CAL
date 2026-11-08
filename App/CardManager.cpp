@@ -12,7 +12,10 @@
 #include <soc/spi_pins.h>
 #endif
 
+#include <new>
+
 #include "Actions.h"
+#include "CardPolicyStore.h"
 #include "Config.h"
 #include "ConfigRequest.h"
 #include "Display.h"
@@ -295,6 +298,25 @@ Position gCurrent;
 /// reset afterward, since every following boot gets its own fresh instance
 /// of this same wait.
 bool gPolicyEverApplied = false;
+
+/// Whether the policy applied this boot came from a check-in response rather
+/// than from flash. Separate from gPolicyEverApplied, which is only asking
+/// whether poll() still has to hold the boot screen - a restored policy answers
+/// that one and this one differently.
+///
+/// **This is what stops a stored policy overriding a newer one.** Once it is
+/// true, CardPolicyStore::decideRestore() refuses to read flash at all. See
+/// that function's own remarks.
+bool gServerPolicyApplied = false;
+
+/// Set while applyPolicy() is running over a policy that came out of flash, so
+/// it neither records the policy as the server's nor writes back the bytes it
+/// just read.
+bool gApplyingStoredPolicy = false;
+
+/// Whether the stored policy has already been applied this boot. Once per boot:
+/// a second restore would re-apply a rotation that has since moved on.
+bool gStoredPolicyRestored = false;
 
 /// When begin() was called, so poll()'s own wait for a real policy has a
 /// bound - see kMaxWaitForPolicyMs below.
@@ -1483,6 +1505,9 @@ void applyPolicy(const Cards::Policy& policy) {
   // recognises - is still the real, resolved answer poll() is holding the
   // boot screen for. See gPolicyEverApplied's own remarks.
   gPolicyEverApplied = true;
+  if (!gApplyingStoredPolicy) {
+    gServerPolicyApplied = true;
+  }
 
   if (policy.defaultDwellSeconds > 0) {
     gDefaultDwellSeconds = static_cast<uint16_t>(policy.defaultDwellSeconds);
@@ -1680,6 +1705,24 @@ void applyPolicy(const Cards::Policy& policy) {
   }
   Identity::noteHasPictureCards(pictureCards > 0);
 
+  // AND THE POLICY ITSELF, for the next boot. Card policy lived in RAM and
+  // nowhere else, so any restart - power, the heap watchdog, a nudge at the wall
+  // - dropped it and the panel read "Nothing to show yet" until the server
+  // answered again. With these bytes in flash and the SD asset cache that
+  // already survives, a restarted display draws its rotation with no server at
+  // all. OUTAGE_CONTENT_LOSS_REVIEW.md section 1.
+  //
+  // Nothing is written when the policy matches what is already stored, which is
+  // the ordinary case - the server resends an unchanged policy at most hourly
+  // and that would otherwise be about 8,800 flash writes a year. See
+  // CardPolicyStore::decideStore().
+  //
+  // Skipped entirely when this policy came OUT of flash: there is nothing to
+  // learn from writing back the bytes just read.
+  if (!gApplyingStoredPolicy) {
+    CardPolicyStore::save(policy);
+  }
+
   resetHistory(gCurrent);
   if (gCurrent.card < 0 || !showable(static_cast<uint8_t>(gCurrent.card))) {
     // Whatever was showing is no longer in the rotation - move on rather than
@@ -1688,6 +1731,50 @@ void applyPolicy(const Cards::Policy& policy) {
   } else {
     drawCurrent();
   }
+}
+
+void restoreStoredPolicy() {
+  const CardPolicyStore::Restore decision = CardPolicyStore::decideRestore(
+      CardPolicyStore::storedBytes() > 0, gServerPolicyApplied, gStoredPolicyRestored);
+  switch (decision) {
+    case CardPolicyStore::Restore::NothingStored:
+      Log::line("[cards] no policy in flash - the rotation waits for the first check-in, the "
+                "way every boot used to");
+      return;
+    case CardPolicyStore::Restore::ServerAlreadyAnswered:
+      // The rule this whole path is built around. A stored policy is always the
+      // older of the two statements.
+      Log::line("[cards] a policy has already arrived from the server this boot, so the stored "
+                "one is not read");
+      return;
+    case CardPolicyStore::Restore::AlreadyRestored:
+      Log::line("[cards] the stored policy was already applied this boot");
+      return;
+    case CardPolicyStore::Restore::Use:
+      break;
+  }
+
+  // On the heap rather than the stack. Cards::Policy carries 35 PolicyEntry
+  // slots, each with five Strings, and StackWatch.h's own arithmetic over the
+  // check-in path quotes that struct at the better part of five kilobytes. It is
+  // taken and given back inside this function, so nothing is held past the
+  // restore.
+  Cards::Policy* const policy = new (std::nothrow) Cards::Policy();
+  if (policy == nullptr) {
+    Log::line("[cards] no room to read the stored policy - waiting for the server");
+    return;
+  }
+
+  if (CardPolicyStore::load(*policy)) {
+    gStoredPolicyRestored = true;
+    gApplyingStoredPolicy = true;
+    applyPolicy(*policy);
+    gApplyingStoredPolicy = false;
+    Log::printf("[cards] the stored policy is on screen - %u entries, drawn before any check-in",
+                static_cast<unsigned>(policy->entryCount));
+  }
+
+  delete policy;
 }
 
 void redraw() { drawCurrent(); }

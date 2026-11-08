@@ -23,6 +23,29 @@ dated heading after.
 
 ## Unreleased
 
+### A display that restarts keeps its cards - App
+
+A display used to lose its list of cards every time it restarted. The list lived
+only in memory, so a power cut, a plug knocked at the wall, or the display
+restarting itself left it showing "Nothing to show yet - waiting for the first
+update from the server" until the server answered again. On a wall unit that
+restarts every twenty minutes or so, a server outage emptied the screen within
+the hour and kept it empty.
+
+The list is now written to the display's own storage whenever it changes, so a
+restart picks it straight back up. A display comes back drawing its rotation
+before it has spoken to the server at all - and pictures, notices and QR codes
+come back with it, because those are part of the list and the pictures are
+already on the SD card.
+
+**What still goes.** Anything the display fetches fresh - the weather, the tides,
+aircraft overhead, your calendar, your photographs - is not kept, and those cards
+come back empty for a minute until the next check-in fills them in. The rotation
+itself is what survives.
+
+**Nothing to do.** The first restart after installing this is the last one that
+empties the screen.
+
 ---
 
 ## v2026.11.07.0001

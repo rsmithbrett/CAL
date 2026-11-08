@@ -265,6 +265,80 @@ follows, at which point the backoff schedule in 1a takes over unchanged.
 a scratch build that is never registered in the firmware catalog, and read the
 same sequence in two minutes.
 
+---
+
+## 1g. The card policy survives a restart, added 2026-11-07
+
+`App/CardPolicyStore.h` and `App/CardPolicyStore.cpp`, written from
+`CardManager::applyPolicy()` and read by `CardManager::restoreStoredPolicy()`,
+which `setup()` calls once after `CardManager::begin()`. Card policy lived in RAM
+and nowhere else, so any restart dropped it and the panel read "Nothing to show
+yet - waiting for the first update from the server" until the server answered
+again. 1f stood the unreachable watchdog down; this covers a restart from any
+other cause - power, the heap watchdog, a nudge at the wall. The server repo's
+`OUTAGE_CONTENT_LOSS_REVIEW.md` section 1 is the review that found it.
+
+**The policy, not the content.** Every fetching card's content is still RAM only
+and still lost on a restart. A graphic, an announcement and a QR card draw real
+content straight away, because theirs arrives on the policy entry and their
+pictures are in the SD cache. The rest come back with their own "nothing yet"
+states and fill in on the first check-in that works.
+
+**Automated coverage: `ci/test-card-policy-store.sh`, 23 cases.** The format and
+both decisions were put in a header naming nothing but `<stdint.h>` and
+`<stddef.h>` for the reason 1f gives: a codec round trip and two predicates are
+cheap to walk on a host and expensive to reproduce on a device, where each
+refusal means writing a deliberately corrupt NVS blob and rebooting. The two
+decision functions are asserted twice per case, as a `static_assert` over the
+constexpr walk and again at runtime.
+
+The test was written before the header existed and failed to compile on the
+missing include. Two mutations were then run against the finished header to prove
+the assertions bite: dropping the format-version check from `Reader::begin()`
+printed two `Failed:` lines, and dropping the `serverPolicyApplied` branch from
+`decideRestore()` stopped the compile on two `static_assert`s.
+
+**The sizing, asserted rather than estimated.** A full 35-card policy carrying no
+content strings is 1,566 bytes. The budget is 4,096 - one NVS sector, because NVS
+writes a replacement blob before erasing what it replaces and the `nvs` partition
+is five sectors that already hold the device secret and three remembered
+networks. The realistic worst case an operator can build (five 280-character
+announcements, five 100-character QR payloads, five 48-character asset ids, five
+locations) fits. Every content field filled on all 35 cards does not, and is
+refused rather than truncated.
+
+**What the host test cannot reach**, and what a bench run is still for:
+
+1. That the blob actually survives a power cut, which is the whole point. NVS is
+   not reachable from a host.
+2. That the write happens on a changed policy and not on an unchanged one. The
+   gate is a stored hash and the test walks the decision, but not
+   `Preferences::putBytes` being called once per edit rather than hourly.
+3. That `restoreStoredPolicy()` runs before the first check-in and that
+   `gServerPolicyApplied` is only set from the check-in path. A restore landing
+   after a server policy would put the older statement on screen.
+4. That an over-budget policy CLEARS the stored one. A kept blob would resurrect
+   the policy before this one on the next restart.
+5. That a device re-enrolled under a different secret does not draw the previous
+   household's rotation. The owner stamp is four bytes of the secret's hash, and
+   only a real re-enrollment exercises it.
+
+**Bench form (~15 minutes).** Provision a device and let it check in, so a policy
+arrives. Expect `[cardpol] policy stored - N entries in B bytes`. Pull the power
+and restore it with the Host process stopped. Expect
+`[cards] the stored policy is on screen - N entries, drawn before any check-in`
+on serial, and the rotation turning over on whatever the SD cache holds - **not**
+"Nothing to show yet". Start the Host again and the first check-in must log
+`[cardpol] this policy is already the stored one - no write` on the debug stream
+rather than storing it a second time. Then edit the policy in the admin UI and
+confirm exactly one `policy stored` line follows.
+
+**What to watch for going wrong.** A `[cardpol] ... discarded` line on every boot
+means the blob is being written and refused, which is a format disagreement
+between the Writer and the Reader. A `policy stored` line on every check-in means
+the hash comparison is not working and the part is being worn at roughly 8,800
+writes a year.
+
 ## 2. The mbedTLS figure is 16,717 contiguous, twice - not "~32KB" (`3cfbb08`)
 
 A documentation correction with no runtime component, which makes it the one
