@@ -1,4 +1,4 @@
-| binary | `origin/main`, run 41322668927 | this branch, runs 41322667127, 41325454056 and 41328848039 | delta |# CAL / App test plan
+# CAL / App test plan
 
 This file is the firmware half of the project's testing rule. The rule is that a
 change is validated by an automated test wherever one is possible, and that
@@ -7096,14 +7096,14 @@ what writing the decision down the second time found.
   `tides` ought to resolve something is a question for the owner and the two
   design documents; what the gate does is stop the answer changing on one side
   only.
-- **`TEST_PLAN.md`'s first line is corrupt and was left alone.** A benchmark
-  table row is glued onto the `# CAL / App test plan` heading with no newline
-  between them, committed that way as of `2d859b7`, so the document has no H1. It
-  belongs to whichever lane added those run ids.
+- **`TEST_PLAN.md`'s first line was corrupt and this pass left it alone.** A
+  benchmark table row was glued onto the `# CAL / App test plan` heading with no
+  newline between them, committed that way as of `2d859b7`, so the document had
+  no H1. Fixed since, together with the heading level of section 35.
 - **Nothing was pushed.** No device was flashed or commanded, and no server was
   started or stopped.
 
-# 35. A drawn button on every WiFi attempt, and the confirmation in front of it
+## 35. A drawn button on every WiFi attempt, and the confirmation in front of it
 
 The reported case: a household whose display cannot reach WiFi is told to hold a
 button for three seconds. The gesture works. What it cannot do is tell somebody
