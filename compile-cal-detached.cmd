@@ -1,7 +1,13 @@
 @echo off
-del /q C:\Users\Administrator\Documents\CAL\cal-compile.log 2>nul
-del /q C:\Users\Administrator\Documents\CAL\cal-done.flag 2>nul
-cd /d C:\Users\Administrator\Documents\CAL
-C:\Tools\arduino-cli\arduino-cli.exe compile --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs --libraries C:\Users\Administrator\Documents\CAL\libraries --export-binaries . > C:\Users\Administrator\Documents\CAL\cal-compile.log 2>&1
-echo EXIT=%ERRORLEVEL% >> C:\Users\Administrator\Documents\CAL\cal-compile.log
-echo FINISHED > C:\Users\Administrator\Documents\CAL\cal-done.flag
+REM The repository root is the directory holding this script, so a clone
+REM anywhere builds without editing a path. %~dp0 ends in a backslash, which
+REM the joins below would double.
+setlocal
+set "ROOT=%~dp0"
+if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
+del /q "%ROOT%\cal-compile.log" 2>nul
+del /q "%ROOT%\cal-done.flag" 2>nul
+cd /d "%ROOT%"
+C:\Tools\arduino-cli\arduino-cli.exe compile --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs --libraries "%ROOT%\libraries" --export-binaries . > "%ROOT%\cal-compile.log" 2>&1
+echo EXIT=%ERRORLEVEL% >> "%ROOT%\cal-compile.log"
+echo FINISHED > "%ROOT%\cal-done.flag"

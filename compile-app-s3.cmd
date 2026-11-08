@@ -45,13 +45,17 @@ REM Output goes to the build directory arduino-cli names after the FQBN, so the
 REM two boards do not clobber each other and .gitignore already covers both.
 
 setlocal
-set ROOT=C:\Users\Administrator\Documents\CAL
+REM The repository root is the directory holding this script, so a clone
+REM anywhere builds without editing a path. %~dp0 ends in a backslash, which
+REM the joins below would double.
+set "ROOT=%~dp0"
+if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 REM The same path with forward slashes, for arguments handed to bash: dirname
 REM and the rest of the check script read a backslash as text, not a separator.
-set ROOTFS=C:/Users/Administrator/Documents/CAL
+set "ROOTFS=%ROOT:\=/%"
 set GITBASH=C:\Program Files\Git\bin\bash.exe
 set S3BUILD=App/build/esp32.esp32.esp32s3
-cd /d %ROOT%
+cd /d "%ROOT%"
 
 echo ==^> Checking the working tree's App partition table is the committed one
 git diff --quiet -- App/partitions.csv
@@ -82,7 +86,7 @@ copy /y "%ROOT%\App\partitions.csv" "%ROOT%\App\partitions.csv.4mb-backup" >nul
 copy /y "%ROOT%\App\partitions-panellan-8mb.csv" "%ROOT%\App\partitions.csv" >nul
 
 echo ==^> Compiling
-cd /d %ROOT%\App
+cd /d "%ROOT%\App"
 C:\Tools\arduino-cli\arduino-cli.exe compile ^
   --fqbn esp32:esp32:esp32s3:PSRAM=enabled,CDCOnBoot=cdc,PartitionScheme=custom ^
   --build-property build.flash_size=8MB ^
@@ -90,7 +94,7 @@ C:\Tools\arduino-cli\arduino-cli.exe compile ^
   --export-binaries . > "%ROOT%\app-s3-compile.log" 2>&1
 set BUILD_RC=%ERRORLEVEL%
 echo EXIT=%BUILD_RC% >> "%ROOT%\app-s3-compile.log"
-cd /d %ROOT%
+cd /d "%ROOT%"
 
 echo ==^> Restoring the 4MB table
 copy /y "%ROOT%\App\partitions.csv.4mb-backup" "%ROOT%\App\partitions.csv" >nul
