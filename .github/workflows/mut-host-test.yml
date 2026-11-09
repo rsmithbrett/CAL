@@ -73,6 +73,9 @@ jobs:
       - name: Test the announcement and home value content keys on host
         if: ${{ hashFiles('ci/test-announcement-and-home-value-keys.sh') != '' }}
         run: bash ci/test-announcement-and-home-value-keys.sh
+      - name: Test the sports card registrations and hook switches on host
+        if: ${{ hashFiles('ci/test-sports-card-registration.sh') != '' }}
+        run: bash ci/test-sports-card-registration.sh
       - name: Test a card cannot register without naming a key policy
         if: ${{ hashFiles('ci/test-key-policy.sh') != '' }}
         run: bash ci/test-key-policy.sh

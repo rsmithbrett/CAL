@@ -7200,3 +7200,183 @@ directory.
   binaries.
 - **A panel whose touch controller has failed** reaches none of this, which is
   why the BOOT hold stays.
+
+## 36. The sports registrations, under a host test (2026-11-08)
+
+Registering `sportsscores2` changed three things inside `App/Sports.cpp`, and a
+mutation sweep found every one of them invisible to all 24 runners in `ci/`: the
+second `strcmp` in `isBoard()`, the `registerOne(4, ...)` call, and the `case 3:`
+added to each of the three hook switches so their `default:` arm could hand out
+index 4. The `static_assert` on `kMaxCards` that commit also added is reached
+only by the arduino build, which CI runs after the gates, so a branch that broke
+one of the three went green through every one of them.
+
+`ci/test-sports-card-registration.sh` runs
+`tests/sports-card-registration-test.cpp` against `App/Sports.cpp` compiled as
+it ships, 21 cases.
+
+### 36a. Two dead functions, removed first
+
+`App/Sports.cpp` compiles against a host g++ as it ships except for two
+functions in its anonymous namespace that nothing calls, which `-Wall -Werror`
+rejects as `-Wunused-function`:
+
+- `count3()` at line 383. Index 3 is `sportslive`, which registers `countLive()`
+  instead, and `countLive()` reaches `itemCountFor(3)` directly. So the symmetric
+  `count0`..`count4` set had one member no registration ever wanted, and using it
+  would have been wrong: it answers the game count where the live card has to
+  answer zero unless something is playing.
+- `copyBounded()` at line 69. `copyInto()` twenty lines below does the same job
+  with the capacity argument meaning the buffer size rather than the buffer size
+  less one, and it is what the board draw calls. `App/CheckIn.cpp` has its own
+  `copyBounded()`, in its own translation unit, which is live and untouched.
+
+Both were **Verified dead** by a repository-wide grep before deletion: each name
+matched only its own definition. The two are gone and a comment where `count3`
+sat names what index 3 registers instead.
+
+### 36b. Nine definitions, and what needs none
+
+`tests/sports-card-stubs/Arduino.h` is the seventh stub directory under
+`tests/`. `Sports.h`, `Cards.h`, `CardColumns.h`, `Display.h` and `Log.h` are the
+shipped declarations, and the test defines the nine functions `Sports.cpp` links
+against: `Cards::registerCard`, `Display::utcOffsetMinutes`,
+`Display::use12HourClock`, `Display::formatTimeOfDay`,
+`Display::describeAnswerAge`, `Display::showSportsCard`,
+`Display::showSportsBoard`, `Log::printf` and `Log::verbose`.
+
+`CardColumns::boardScoreIsDrawable()` needs no stub. It is `constexpr` in that
+header, which is the reason the score facts were put there.
+
+The `Cards::registerCard` stub keeps every descriptor and applies
+`keyPolicyHolds()`, the same predicate production applies, so a registration
+stating a policy its descriptor does not satisfy stops this test rather than a
+device. Keeping the descriptors is the only way in: `isBoard()`,
+`registerOne()`, `listingIdFor()`, `describeFor()` and `frameCountFor()` all sit
+in an anonymous namespace, and `CardManager` reaches them the same way this test
+does, through `CardSpec`'s hooks. The `showSportsCard` and `showSportsBoard`
+stubs record which card's teams and rows arrived, which is how the draw cases
+read an answer back.
+
+### 36c. The 21 cases
+
+Registration:
+
+- every id in the table registers, which is the case the second league shipped
+  failing
+- as many cards register as there are ids, so a `registerOne()` handed the wrong
+  index is caught as well as one deleted
+- every registration carries `itemCount`, `draw`, `listingId`, `describe` and
+  `frameCountFor`
+
+`isBoard()`, read through the item count:
+
+- both scoreboards report one item for a frame of games
+- the team cards report one item a game
+- the live card reports one item a game
+- the live card reports nothing with no game in progress
+- an empty scoreboard reports no items
+
+The three switches, each answering for its own index:
+
+- each card reports a key for its own game
+- no two cards report the same key
+- each card describes its own game
+- an item past a card reports nothing
+- an empty card reports no key
+- each card draws its own games, read off what reached the renderer
+- only the scoreboards reach the table renderer
+
+`frameCountFor()`:
+
+- a scoreboard reports a frame per game
+- a scoreboard frames no more than the games it stores, at four and at a
+  six-game payload
+- a single-game card reports one frame
+- an empty scoreboard reports no frames
+
+And two about the id a payload names:
+
+- a payload for an unregistered id changes nothing
+- clearing empties every card, walked over the id table rather than the first
+  card
+
+The five cards hold different teams and different numbers of games on purpose.
+`sportslive` holds three and `sportsscores2` holds two, which is what makes a
+`sportslive` hook folded onto index 4 report 2 where 1 is right. With equal
+counts that fold reads as correct.
+
+### 36d. Made to fail first
+
+Nine mutations over eleven runs, each gated on `cmp` at both ends and each with
+the removed text grepped for before the run. `App/Sports.cpp` was restored
+byte-identical after every one, and checked against a pristine copy to say so.
+
+| Mutation | What the test printed |
+|---|---|
+| `isBoard()` loses the `"sportsscores"` `strcmp` | `Assertion failed: itemCountOf(kBoardOne) == 1` |
+| `isBoard()` loses the `"sportsscores2"` `strcmp` | `Assertion failed: itemCountOf(kBoardTwo) == 1` |
+| `registerOne(4, ...)` deleted | `Assertion failed: findCard(kIds[i]) != nullptr` |
+| `registerOne()` given index 2 instead of 4 | `Assertion failed: findCard(kIds[i]) != nullptr` |
+| `listingIdFor()` loses its `case 3:` | `Assertion failed: keyOf(kLive, 0) == "Capitals@Penguins"` |
+| `describeFor()` loses its `case 3:` | `Assertion failed: describeOf(kLive, 0) == "Capitals 2 @ Penguins 1 (LIVE)"` |
+| `frameCountFor()` loses its `case 3:` | `Assertion failed: frameCountOf(kLive, 0) == 1` |
+| a scoreboard frames 1 instead of a frame per game | `Assertion failed: frameCountOf(kBoardOne, 0) == 3` |
+| the single-game arm frames the game count | `Assertion failed: frameCountOf(kTeamOne, 0) == 1` |
+
+Two of the nine were run twice, because the obvious way to write them stops the
+compile rather than reaching the test. Deleting `registerOne(4, ...)` outright
+leaves `count4` and `draw4` with no caller, and deleting
+`case 3: return listingId3;` outright leaves `listingId3` with no caller, so both
+fail on `-Wunused-function` before a binary exists. That is a real gate and it is
+worth recording which one caught what, so both were run again in a shape that
+compiles, with the wrappers kept referenced, and in that shape the test's own
+assertion is what bit. The `describeFor()` and `frameCountFor()` mutations were
+written in the compiling shape from the start, so what the two of them would do
+to a build was not measured.
+
+**The wrapper's PASS line was made to fail too.** With the `std::cout` line taken
+out of `main()`, the binary exits 0 having printed 21 case lines and no verdict,
+and the wrapper prints `ERROR: the sports registration test exited 0 without
+printing its PASS line.` and exits 1.
+
+### 36e. Where it runs, and the floors that moved
+
+A step in `build-and-release.yml` unguarded, and in `bench-cal.yml` and
+`mut-host-test.yml`'s `host-test` job behind `hashFiles`, beside
+`test-announcement-and-home-value-keys.sh` in all three.
+`ci/build-firmware.sh` runs only the `check-*.sh` text gates, so it gets nothing.
+
+`ci/check-host-test-portability.sh` counts what it read and holds two floors.
+Both moved: 23 files to **29** and 6 stub directories to **7**. 27 of those 29
+were already tracked on this branch, so the figure the floor was written against
+had drifted before this change added two.
+
+### 36f. What this does not cover
+
+- **The `static_assert` on `kMaxCards` is still reached only by a compiler**, and
+  only the arduino build compiles that file. What stands in for it is the id
+  table in the test, held to `Sports::kMaxCards` by a `static_assert` of its own:
+  raising the cap without extending that table stops this test compiling, and the
+  identity cases then require the new index to answer with its own games rather
+  than the default arm's. That is stronger than the assert in the one way that
+  matters and weaker in another, because it fires in a test rather than in every
+  build of the firmware.
+- **The `slot.count > kMaxGames` comparison in `frameCountCardAt()` is
+  unreached.** `setGames()` caps the stored count first and logs the drift, so
+  nothing can put more than four games in a slot. The six-game case pins the
+  cap's effect rather than that comparison, which stays defensive.
+- **Nothing here draws.** `Display::showSportsBoard()` and
+  `showSportsCard()` are stubs that record their arguments. Whether two leagues
+  next to each other in the rotation read right on a 320x240 panel is a
+  photograph, not a host test.
+- **`CardManager`'s side is untouched.** How many impressions a frame count turns
+  into, and whether the rotation gives a board one dwell, are that module's, and
+  it names a graphics library through `Display.h` so nothing under `tests/` can
+  link it. `ci/check-content-key-resolvers.sh` is what holds the fallback order
+  it applies.
+- **No device ran this.** `sportsscores2` is registered in firmware and the
+  server still says nothing draws it: `KnownCards.cs` carries
+  `FirmwareRegisters: false` and the household page's `ScoreboardSlots` lists only
+  `sportsscores`. Until those move, a configured second league needs a raw config
+  write through `/diag/sports`.

@@ -102,6 +102,8 @@ jobs:
         run: bash ci/test-personal-photos-absence.sh
       - name: Test the announcement and home value content keys on host
         run: bash ci/test-announcement-and-home-value-keys.sh
+      - name: Test the sports card registrations and hook switches on host
+        run: bash ci/test-sports-card-registration.sh
       - name: Test a card cannot register without naming a key policy
         run: bash ci/test-key-policy.sh
       - name: Check the content key reaches the wire

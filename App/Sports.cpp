@@ -63,15 +63,6 @@ int8_t indexOf(const char* cardId) {
   return -1;
 }
 
-/// Copy with a hard bound and a guaranteed terminator. strncpy does not
-/// terminate when the source fills the buffer, which is the classic way a team
-/// name runs into whatever sits after it in .bss.
-void copyBounded(char* destination, const char* source, size_t capacity) {
-  if (source == nullptr) { destination[0] = '\0'; return; }
-  strncpy(destination, source, capacity);
-  destination[capacity] = '\0';
-}
-
 /// What the card says when a game has not started. Deliberately a clock time
 /// and not a countdown: a countdown is wrong the moment the rotation moves on,
 /// and this card may sit unredrawn for minutes.
@@ -380,7 +371,10 @@ void draw4(uint16_t i) { drawCardAt(4, i); }
 uint16_t count0() { return itemCountFor(0); }
 uint16_t count1() { return itemCountFor(1); }
 uint16_t count2() { return itemCountFor(2); }
-uint16_t count3() { return itemCountFor(3); }
+
+// No count3. Index 3 is sportslive, which registers countLive() below instead:
+// it answers zero unless a game is in progress, so the card drops out of the
+// rotation rather than drawing that nothing is on.
 uint16_t count4() { return itemCountFor(4); }
 
 /// True while any game on this card is in progress. Used only by sportslive,
