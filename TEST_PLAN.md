@@ -5869,19 +5869,57 @@ would pass it.
 
 ### 26b. Known gaps, recorded rather than discovered later
 
-- **No workflow calls it.** The step is written out in the lane's report and
-  nothing in `.github/` runs it, so the gate holds nothing until that lands. It
-  belongs in `build-and-release.yml` ahead of the compile, and reads the same on
-  a pull-request lane, where it would fail before main moves rather than after.
 - **It reads headings, not prose.** An entry re-worded into a new heading and
   left under Unreleased publishes twice and passes this. A heading repeated on
   purpose across two releases fails it.
 - **`gh` hangs on this workstation**, so every run here fed the body in from a
-  file fetched with `curl`. The `gh release view` line in the usage comment has
+  file fetched with `curl`. The `gh release view` line the workflow step runs has
   not been run anywhere.
 - **Not run on the release runner.** The script is `awk`, `sed`, `grep` and
   `tr`; what CI's bash and coreutils make of it is unmeasured, the way
   GCC 13.3 against 16.2.0 is unmeasured for section 19a.
+- **It compares against the rolling `latest` body**, which is whatever the
+  previous push composed. A push that follows one with an empty Unreleased
+  section is compared against no headings and passes without looking at
+  anything, which the script says in its own output.
+
+### 26c. The workflow step (2026-11-08)
+
+`build-and-release.yml` runs it as "Check the shipped release notes were
+rolled", between the host-test block and `Install arduino-cli`, so a repeated
+entry costs seconds rather than a compile. The step has no
+`continue-on-error`; the only one in that job is the `latest` publish, which
+had it before this.
+
+```yaml
+- name: Check the shipped release notes were rolled
+  env:
+    GH_TOKEN: ${{ github.token }}
+  run: |
+    set -euo pipefail
+    gh release view --repo "${{ github.repository }}" --json body --jq .body \
+      > prev-release-body.md
+    wc -c < prev-release-body.md
+    PREV_BODY_FILE=prev-release-body.md bash ci/check-release-notes-rolled.sh
+```
+
+`gh release view` with no tag names the release marked latest, which is the
+rolling `latest` tag, published with `make_latest` on the previous push. This
+step runs before either publish step replaces it.
+
+Three readings on this workstation at commit `3661afd`, previous bodies fetched
+with `curl` from `api.github.com` because `gh` hangs here. `RELEASE_NOTES.md`
+was copied aside first, every mutation gated on `cmp` against that copy, and
+`cmp` run again after restoring.
+
+| Previous body | `RELEASE_NOTES.md` | Read |
+|---|---|---|
+| `v2026.11.07.0001`, 3 entry headings | as committed, 2 entries of its own | `PASS: release notes rolled, 3 shipped heading(s) checked against 2 entry heading(s) under Unreleased`, exit 0 |
+| `v2026.11.07.0001`, 3 entry headings | its `## v2026.11.07.0001` line deleted, so those 3 fall back under Unreleased | all three named, `ERROR: 3 entry/entries would publish a second time`, exit 1 |
+| the live `latest` body, 0 entry headings | as committed | `The previous release published no entries, so there is nothing to have left behind.`, exit 0 |
+
+The second row is the shape of the defect the script exists for. The third is
+what the next push will read, and it is the gap recorded in 26b.
 
 ## 27. Two host gates that read none of their binary's output (2026-11-03)
 
@@ -5959,11 +5997,11 @@ matching nothing rather than by checking something, were left alone:
   twelve. A seventh entry point lands in no list. The zero-caller arm below it is
   unreachable under `set -euo pipefail`, so an unwired entry point exits non-zero
   with no message rather than with its own.
-- **`ci/check-release-notes-rolled.sh`'s Unreleased anchor.** Line 52 extracts the
-  section with a pattern anchored `^## Unreleased$` and never tests the result for
-  emptiness. Reword that heading and the comparison matches nothing for every
-  heading, while the pass line still reports a count taken from the previous
-  release's body.
+- **`ci/check-release-notes-rolled.sh`'s Unreleased anchor.** Closed in `076734f`:
+  the script counts the lines reading exactly `## Unreleased` and exits 1 unless
+  there is one, ahead of the extraction, and its pass line now carries both the
+  shipped heading count and the Unreleased entry count. Recorded here because the
+  finding stood when this section was written.
 - **`ci/check-text-state.sh`'s scanned-unit count.** Both rules are absence checks
   and neither prints how many function units it read. The column-zero opener means
   a namespace wrap scans nothing. It does assert positively that

@@ -109,6 +109,24 @@ jobs:
       - name: Check every card owes the key policy its registration states
         run: bash ci/check-card-key-decisions.sh
 
+      # Ahead of the compile, because the body this job publishes is composed
+      # from the same `## Unreleased` section further down and an entry left
+      # there goes out under a second tag. The previous release's body is the
+      # record of what already published; `gh release view` with no tag names it
+      # because the rolling "latest" tag is published with make_latest, and this
+      # step runs before either publish step replaces it.
+      #
+      # No continue-on-error: a repeated entry stops the release.
+      - name: Check the shipped release notes were rolled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view --repo "${{ github.repository }}" --json body --jq .body \
+            > prev-release-body.md
+          wc -c < prev-release-body.md
+          PREV_BODY_FILE=prev-release-body.md bash ci/check-release-notes-rolled.sh
+
       - name: Install arduino-cli
         uses: arduino/setup-arduino-cli@v2
 
