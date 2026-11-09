@@ -118,6 +118,7 @@ personalphotos   Resolves       PersonalPhotos.cpp
 sportsteam       Resolves       Sports.cpp
 sportsteam2      Resolves       Sports.cpp
 sportsscores     Resolves       Sports.cpp
+sportsscores2    Resolves       Sports.cpp
 sportslive       Resolves       Sports.cpp
 graphic          PolicyContent  Graphic.cpp
 graphic2         PolicyContent  Graphic.cpp
@@ -628,8 +629,8 @@ trap 'rm -f "$GRADE_OUT"' EXIT
     floor("the files naming the registry", candidate_count, 18)
     floor("the modules registering a card", discModuleCount, 16)
     floor("the modules in the census", censusModuleCount, 16)
-    floor("the census rows", censusCount, 35)
-    floor("the card ids read out of App/", idTotal, 35)
+    floor("the census rows", censusCount, 36)
+    floor("the card ids read out of App/", idTotal, 36)
     floor("the Cards::registerCard() calls", regTotal, 17)
     floor("the policies stated at those calls", statedTotal, 17)
     floor("the KeyPolicy values in App/Cards.h", known_policies, 3)
