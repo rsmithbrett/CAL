@@ -2732,6 +2732,21 @@ spare slot, and that constant's own comment carries the arithmetic along with a
 note that `StackWatch.h`'s quoted `PolicyEntry` count is further out of date for
 it.
 
+**`Cards::kMaxCards` moved from 35 to 36**, on 2026-11-08, for `sportsscores2` - a
+second league's scoreboard, so a household can follow more than one. The registry
+was exactly full at 35 again, so again this was not optional.
+
+What is new in this entry is the price. The App's reported global variables went
+115,524 to 116,356 across two builds of the same sketch either side of that one
+registration, so a card costs about **830 bytes of static RAM** - roughly a third
+of it the registering module's own storage, the rest this array growing by one
+`CardSpec` with its `assetId`, `text`, `qrData` and `location` buffers. Every
+earlier entry above reasoned from struct arithmetic over the module alone, which
+for this card would have predicted about 280. Start from the measured figure, and
+measure it again rather than scaling this one. `App/Sports.h` carries what the
+cost is weighed against, including why a boot reading of the largest contiguous
+block is a ceiling and not a floor.
+
 ## SelfTest: a diagnostic firmware for screen and SD isolation
 
 `SelfTest/` is a third sketch, sibling to `App/`, built the night of

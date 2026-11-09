@@ -116,7 +116,7 @@ Entry plainEntry(const char* id, int32_t order) {
   return entry;
 }
 
-/// The 35 ids this firmware registers, which is kMaxPolicyCards' worth and the
+/// The 36 ids this firmware registers, which is kMaxPolicyCards' worth and the
 /// shape the sizing question in OUTAGE_CONTENT_LOSS_REVIEW.md asks about.
 const char* const kEveryCardId[] = {
     "aircraft",      "calendar",      "clockdate",     "issflyover",   "listings",
@@ -125,7 +125,8 @@ const char* const kEveryCardId[] = {
     "graphic5",      "announcement",  "announcement2", "announcement3", "announcement4",
     "announcement5", "qrtext",        "qrtext2",       "qrtext3",      "qrtext4",
     "qrtext5",       "forecast",      "forecast2",     "forecast3",    "forecast4",
-    "forecast5",     "sportsteam",    "sportsteam2",   "sportsscores", "sportslive",
+    "forecast5",     "sportsteam",    "sportsteam2",   "sportsscores", "sportsscores2",
+    "sportslive",
 };
 constexpr size_t kEveryCardCount = sizeof(kEveryCardId) / sizeof(kEveryCardId[0]);
 static_assert(kEveryCardCount == CardPolicyStore::kMaxEntries,
@@ -218,7 +219,7 @@ void roundTripsEmptyStrings() {
   check(out.location[0] == '\0', "location comes back empty");
 }
 
-/// THE SIZING ANSWER. A full 35-card policy carrying no content strings, which
+/// THE SIZING ANSWER. A full 36-card policy carrying no content strings, which
 /// is what the review asked for. The number is asserted rather than printed
 /// because it is what the 4,096-byte budget is justified against.
 void fullPolicyFitsTheBudget() {
@@ -228,10 +229,13 @@ void fullPolicyFitsTheBudget() {
     measure.add(plainEntry(kEveryCardId[i], static_cast<int32_t>(i)));
   }
   measure.finish();
-  check(measure.entries() == CardPolicyStore::kMaxEntries, "all 35 entries measured");
-  check(measure.needed() == 1566,
-        "a 35-card policy with no content strings is 1,566 bytes. If this number moved, the "
-        "format changed and kFormatVersion has to move with it.");
+  check(measure.entries() == CardPolicyStore::kMaxEntries, "all 36 entries measured");
+  check(measure.needed() == 1614,
+        "a 36-card policy with no content strings is 1,614 bytes. 1,566 for the 35 cards this "
+        "read before sportsscores2 was registered: the 48 bytes between them are one entry "
+        "carrying a thirteen-character id, and the field layout is untouched. A move this line "
+        "cannot account for card by card is the format changing, and kFormatVersion has to move "
+        "with that.");
 
   Writer writer(gBlob, sizeof(gBlob));
   writer.begin(12, 30);
@@ -242,8 +246,8 @@ void fullPolicyFitsTheBudget() {
   check(writer.needed() == measure.needed(), "the measuring pass agreed with the real one");
 
   Reader reader;
-  check(reader.begin(gBlob, writer.needed()), "the 35-card blob is accepted");
-  check(reader.entryCount() == CardPolicyStore::kMaxEntries, "35 entries declared");
+  check(reader.begin(gBlob, writer.needed()), "the 36-card blob is accepted");
+  check(reader.entryCount() == CardPolicyStore::kMaxEntries, "36 entries declared");
   size_t read = 0;
   Entry out;
   while (reader.next(out)) {
@@ -251,7 +255,7 @@ void fullPolicyFitsTheBudget() {
     check(out.order == static_cast<int32_t>(read), "each entry keeps its own order");
     ++read;
   }
-  check(read == kEveryCardCount, "all 35 read back");
+  check(read == kEveryCardCount, "all 36 read back");
   check(reader.complete(), "nothing left over");
 }
 
@@ -285,7 +289,7 @@ void realisticWorstCaseFitsTheBudget() {
   measure.finish();
   check(!measure.overflowed(),
         "five full announcements, five full QR payloads, five asset ids and five locations on "
-        "top of all 35 cards still fit the budget");
+        "top of all 36 cards still fit the budget");
   check(measure.needed() < CardPolicyStore::kMaxBlobBytes,
         "and with room left - this is the figure the 4,096 is chosen against");
 }
@@ -335,7 +339,7 @@ void overflowIsReported() {
   }
   check(!writer.finish(), "finish() refuses an overflowed blob");
   check(writer.overflowed(), "and says it overflowed");
-  check(writer.needed() == 1566, "while still reporting what it would have needed");
+  check(writer.needed() == 1614, "while still reporting what it would have needed");
 
   Reader reader;
   check(!reader.begin(small, sizeof(small)),

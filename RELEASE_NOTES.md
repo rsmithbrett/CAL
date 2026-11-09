@@ -61,6 +61,20 @@ a few minutes, as before, and so does deleting them.
 
 **Nothing to do.**
 
+### A second league's scoreboard - App
+
+A display could show one league's games and no more. Follow baseball and the NFL
+and only one of them reached the screen: the other league's games were sent, the
+display didn't recognize which card they belonged to, and it dropped them.
+
+It now draws two scoreboards. They sit next to each other in the rotation and
+read the way the first one always has - today's games, the scores, and where each
+game is up to.
+
+**Nothing to do on the display.** Picking a second league is a change on your own
+pages and it isn't there yet. This is the half that ships first, because a page
+offering a league no display can draw would be worse than not offering it at all.
+
 ---
 
 ## v2026.11.07.0001

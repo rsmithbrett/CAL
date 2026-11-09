@@ -1754,7 +1754,7 @@ void restoreStoredPolicy() {
       break;
   }
 
-  // On the heap rather than the stack. Cards::Policy carries 35 PolicyEntry
+  // On the heap rather than the stack. Cards::Policy carries 36 PolicyEntry
   // slots, each with five Strings, and StackWatch.h's own arithmetic over the
   // check-in path quotes that struct at the better part of five kilobytes. It is
   // taken and given back inside this function, so nothing is held past the

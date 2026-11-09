@@ -493,16 +493,39 @@ struct CardSpec {
 //
 // 35 as of 2026-10-30, when PersonalPhotos.cpp registered "personalphotos". The registry
 // was exactly full at 34 again, so this edit was not optional for the same reason the one
-// above was not. The count is now exactly the registrations: 10 single-instance modules,
+// above was not. The count was then exactly the registrations: 10 single-instance modules,
 // 20 across the four five-instance ones, four sports and this.
 //
 // kMaxPolicyCards follows this, and Cards::Policy is a member of CheckIn::Result, which is
-// a stack local on the check-in path - see StackWatch.h, whose own arithmetic quotes 28
-// PolicyEntry slots at roughly 146 bytes apiece and is now seven slots out of date. One
-// more slot is about 146 bytes against a 16384-byte loop stack that already carries a TLS
-// handshake and a 4KB JSON parse. Worth knowing before the next bump, which is why it is
-// written here rather than left to be rediscovered.
-static constexpr uint8_t kMaxCards = 35;
+// a stack local on the check-in path - see StackWatch.h, whose own arithmetic prices a
+// PolicyEntry slot at roughly 146 bytes and quotes this count, so that file moves when this
+// line does. It quoted 28 slots and 4KB until 2026-11-08, eight behind, which is the state
+// this paragraph used to record instead of fixing. One more slot is about 146 bytes against a
+// 16384-byte loop stack that already carries a TLS handshake and a 4KB JSON parse. Worth
+// knowing before the next bump, which is why it is written here rather than left to be
+// rediscovered.
+//
+// 36 as of 2026-11-08, when Sports.cpp registered "sportsscores2" - a second league's
+// scoreboard, which an account could not follow before because this firmware registered one
+// scoreboard id and the payload for any other landed nowhere. The registry was exactly full
+// at 35, so this edit was not optional: registerCard() would have answered false and the
+// only trace would have been one debug line, on a feature whose whole symptom is a card that
+// never appears. One CardSpec here and one PolicyEntry below, plus the ~146 bytes of check-in
+// stack the paragraph above prices, against the same contiguous-block budget.
+//
+// The accounting: 10 single-instance modules, 20 across the four five-instance ones, five
+// sports, and personalphotos.
+//
+// **The CardSpec here is the larger half of what a registration costs, and it was measured
+// this time.** The App's reported global variables went 115,524 -> 116,356 across two builds
+// of the same sketch either side of that one registration: 832 bytes, of which roughly 290 is
+// Sports.cpp's own CardSlot and the rest is this array growing by one descriptor. Anyone
+// pricing the next card should start from ~830 and not from the struct arithmetic over the
+// module's own file, which came out three times too low. Sports.h carries the heap figures
+// that cost is weighed against, including why a boot reading of the largest contiguous block
+// is a ceiling rather than a floor and why the remaining six sports ids are not being
+// registered on the strength of one.
+static constexpr uint8_t kMaxCards = 36;
 
 /// What a card's draws report as their content key, named at the registration.
 ///

@@ -10,10 +10,13 @@
 /// after a live device crashed with "Stack canary watchpoint triggered
 /// (loopTask)" - see getArduinoLoopTaskStackSize() in App.ino. Every judgement
 /// about stack safety in this codebase since has been made by adding up the
-/// sizes of local objects: CheckIn::Result is roughly 4KB, dominated by 28
-/// PolicyEntry slots and their six Strings apiece; Forecast::fetch() holds two
-/// JsonDocuments across a TLS handshake; and so on. That arithmetic is how the
-/// announcement array came to be moved off the stack into a file-static buffer.
+/// sizes of local objects: CheckIn::Result is roughly 5KB, dominated by the 36
+/// PolicyEntry slots Cards::kMaxPolicyCards carries and their five Strings
+/// apiece - it read 28 slots and 4KB here until the registry reached 36 on
+/// 2026-11-08, and that count moves with Cards.h on every card added;
+/// Forecast::fetch() holds two JsonDocuments across a TLS handshake; and so on.
+/// That arithmetic is how the announcement array came to be moved off the stack
+/// into a file-static buffer.
 ///
 /// Adding up object sizes is a guess. It cannot see compiler-inserted
 /// temporaries, spilled registers, inlining decisions, or how deep the call

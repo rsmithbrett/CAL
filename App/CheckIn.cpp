@@ -1165,7 +1165,7 @@ Result perform() {
   // CheckInResult, which is a deliberate break from how every field above is
   // handled and is worth the inconsistency: the games are the only
   // variable-length payload here, and carrying them on the result struct too
-  // would mean a second full copy of up to four cards x four games resident at
+  // would mean a second full copy of up to five cards x four games resident at
   // once. On the heap whose LARGEST CONTIGUOUS BLOCK decides whether TLS opens,
   // a duplicate that exists only to preserve a code shape is the wrong trade.
   //

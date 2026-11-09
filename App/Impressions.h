@@ -46,7 +46,9 @@ constexpr uint8_t kMaxContentKey = 64;
 /// ever gets, so this has room and a terminator.
 constexpr uint8_t kMaxInstanceId = 40;
 
-/// A policy entry's id. The longest this firmware registers is "sportsscores".
+/// A policy entry's id. The longest this firmware registers is
+/// "featuredlistings" at sixteen characters, ahead of "personalphotos" at
+/// fourteen and "sportsscores2" at thirteen.
 constexpr uint8_t kMaxEntryCardId = 32;
 
 /// ISO 8601 UTC, "2026-10-11T18:15:00Z", twenty characters.

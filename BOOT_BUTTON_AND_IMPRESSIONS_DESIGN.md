@@ -244,15 +244,23 @@ A readable address is worth more than collision-proofing a case no household has
 produced, and a digest is the fix if one ever does.
 
 **The live sports card reported no key until 2026-11-03.** `App/Sports.cpp`
-registers four cards. Three go through `registerOne()`, which assigns the
+registers five cards. Four go through `registerOne()`, which assigns the
 resolver, the describe hook and the frame count from the shared
-`listingIdFor()`, `describeFor()` and `frameCountFor()` switches; the fourth,
+`listingIdFor()`, `describeFor()` and `frameCountFor()` switches; the other one,
 `sportslive`, is built by hand so that it can carry its own item count and its
-notable dwell, and that descriptor assigned none of the three. So the two team
-cards and the scoreboard reported a key on every draw and the live card out of
-the same file reported nothing on 907 of them, with 161 period rows holding
-nothing, counted on 2026-11-03. It now assigns all three, and the `default` arms
-of those switches already answered for index 3.
+notable dwell, and that descriptor assigned none of the three. So the team cards
+and the scoreboard reported a key on every draw and the live card out of the same
+file reported nothing on 907 of them, with 161 period rows holding nothing,
+counted on 2026-11-03. It now assigns all three.
+
+The `default` arms of those switches used to answer for index 3, which is what
+made the hand-built descriptor look as though it had inherited them.
+`sportsscores2` took index 4 on 2026-11-08, so index 3 has a case of its own and
+index 4 is what the default arm hands out. `Sports.cpp` carries a `static_assert`
+on the registration count beside those switches, so a sixth id cannot fold onto
+the last arm and draw index 4's games under its own id, with every id, count and
+frame figure reading as correct. That is the shape the live card was in for 907
+draws.
 
 What makes the key mean something was on the glass is the card's own item count.
 `countLive()` returns zero unless `anyLive(3)` finds a game in progress, so the
@@ -311,7 +319,7 @@ cards owe a key is a judgement about what a card puts on the glass rather than a
 property of the code that puts it there.
 
 So the judgement is written down per card id, in
-`ci/check-card-key-decisions.sh`, as a census of all 35 ids this firmware
+`ci/check-card-key-decisions.sh`, as a census of all 36 ids this firmware
 registers against the policy each one owes. The table higher up is the
 reasoning. The census is the same decision in a form a runner can compare
 against `App/`, and it is keyed on the card rather than on the file, which is

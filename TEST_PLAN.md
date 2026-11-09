@@ -298,14 +298,22 @@ the assertions bite: dropping the format-version check from `Reader::begin()`
 printed two `Failed:` lines, and dropping the `serverPolicyApplied` branch from
 `decideRestore()` stopped the compile on two `static_assert`s.
 
-**The sizing, asserted rather than estimated.** A full 35-card policy carrying no
-content strings is 1,566 bytes. The budget is 4,096 - one NVS sector, because NVS
+**The sizing, asserted rather than estimated.** A full 36-card policy carrying no
+content strings is 1,614 bytes. The budget is 4,096 - one NVS sector, because NVS
 writes a replacement blob before erasing what it replaces and the `nvs` partition
 is five sectors that already hold the device secret and three remembered
 networks. The realistic worst case an operator can build (five 280-character
 announcements, five 100-character QR payloads, five 48-character asset ids, five
-locations) fits. Every content field filled on all 35 cards does not, and is
+locations) fits. Every content field filled on all 36 cards does not, and is
 refused rather than truncated.
+
+It read 1,566 over 35 cards until 2026-11-08, when `sportsscores2` was registered
+and `Cards::kMaxCards` went to 36. The 48 bytes between the two figures are one
+entry carrying a thirteen-character id; the field layout did not move, so
+`kFormatVersion` did not either. The assertion in
+`tests/card-policy-store-test.cpp` now names both numbers and the difference, so
+the next move has to be accounted for card by card before anybody calls it a
+format change.
 
 **What the host test cannot reach**, and what a bench run is still for:
 
@@ -4591,11 +4599,14 @@ that it had not checked whether anything ran the new gate, and nothing did.
   no schema moves, and it matches what the panel drew. **Verified.** It reaches
   the server's impression store, which is the one place this change is visible
   off the device.
-- **The log has a ceiling and this can reach it.** Four cards of four games with
-  both sides negative is 32 lines in one check-in; `Log`'s pending ring holds
+- **The log has a ceiling and this can reach it.** Five cards of four games with
+  both sides negative is 40 lines in one check-in; `Log`'s pending ring holds
   exactly 32 (`App/Log.cpp:181`), so that check-in's other buffered lines are
-  evicted. Needs a server sending negatives on all sixteen games. Serial still
-  carries everything. **Verified** from the two constants, not reproduced.
+  evicted and eight of these lines evict each other. Needs a server sending
+  negatives on all twenty games. It read four cards, 32 lines and sixteen games -
+  exactly at the ring - until `sportsscores2` was registered on 2026-11-08, so the
+  ring is now the smaller of the two. Serial still carries everything. **Verified**
+  from the two constants, not reproduced.
 - **The gate strips line comments but not block comments.** `//` is taken out
   before matching, because a fixed-string pin is otherwise satisfied by a
   commented-out copy of the statement it pins - which an adversarial review
@@ -5565,13 +5576,15 @@ change:
 
 ## 24. The key the live sports card reports, and three gates that passed what they exist to catch (2026-11-03)
 
-`App/Sports.cpp` registers four cards. Three go through `registerOne()`, which
-assigns `spec.listingId`, `spec.describe` and `spec.frameCountFor` from the
-`listingIdFor()`, `describeFor()` and `frameCountFor()` switches; the fourth,
-`sportslive`, is built by hand so it can carry its own item count and its notable
-dwell, and that descriptor assigned none of the three. So `sportsteam` and
-`sportsscores` reported a key on every draw and the live card out of the same
-file reported nothing, over 907 draws and 161 period rows counted on 2026-11-03.
+`App/Sports.cpp` registers five cards as of 2026-11-08, four of them through
+`registerOne()`, which assigns `spec.listingId`, `spec.describe` and
+`spec.frameCountFor` from the `listingIdFor()`, `describeFor()` and
+`frameCountFor()` switches; the other one, `sportslive`, is built by hand so it
+can carry its own item count and its notable dwell, and that descriptor assigned
+none of the three. It registered four when this section was written. So
+`sportsteam` and `sportsscores` reported a key on every draw and the live card out
+of the same file reported nothing, over 907 draws and 161 period rows counted on
+2026-11-03.
 
 The owner's call that day is that it owes one. `listingId3`, `describe3` and
 `frameCount3` already existed and were already the `default` arm of each switch,
@@ -6967,7 +6980,7 @@ card is exactly the shape `sportslive` was for 907 draws and 161 period rows.
 
 **`ci/check-card-key-decisions.sh`**, run after
 `ci/check-content-key-resolvers.sh` in `ci/build-firmware.sh` and in all three
-workflows. It carries a census of 35 rows - one per card id this firmware
+workflows. It carries a census of 36 rows - one per card id this firmware
 registers, naming the policy the card owes and the module that defines it - and
 compares that census against `App/` in both directions:
 
@@ -6983,7 +6996,7 @@ compares that census against `App/` in both directions:
 
 The last row is the limit stated out loud. The policy comparison is per module
 because `Announcement.cpp` registers five cards from one templated call site and
-`Sports.cpp` registers four from two, so there is no registration to pair each id
+`Sports.cpp` registers five from two, so there is no registration to pair each id
 with. All sixteen modules owe one policy today. A module owing two would let the
 set comparison pass on a swap, and the gate fails on the first such census module
 rather than grading it.
@@ -7021,13 +7034,20 @@ the harness printed them.
 | M4 | The census row for `sportslive` changed to `Keyless` on its own | yes, 26,472 bytes both ways | n/a | fails twice |
 | M5 | `kMaxCards` bumped to 36, census untouched | yes, 42,417 bytes both ways | all pass | fails |
 
+M5 was a mutation while `kMaxCards` was 35. It stopped being one on 2026-11-08,
+when `sportsscores2` took the registry to 36 for real and this gate caught the
+same shape unprompted: it named `sportsscores2` as defined and not censused, and
+reported 35 census rows against `kMaxCards` 36. Re-running M5 as a mutation today
+means bumping to 37.
+
 The four that existed are `ci/test-key-policy.sh`,
 `ci/check-content-key-resolvers.sh`, `ci/test-personal-photos-key.sh` and
 `ci/test-announcement-and-home-value-keys.sh`. M2 is the headline: a card that
 states `Keyless` and genuinely assigns no resolver passes every one of them,
 which is the whole reason this section exists.
 
-What M2 printed:
+What M2 printed, on the four sports ids registered at the time - `sportsscores2`
+joined them on 2026-11-08 and a re-run would name five:
 
 ```
 ERROR: App/Sports.cpp: states Keyless Resolves where the census owes Resolves for
@@ -7047,10 +7067,15 @@ patterns stopped matching passes by finding nothing and these counts are the
 only way to see that from outside:
 
 ```
-    97 source files under App/, 19 naming the registry, 16 registering a card
-    35 card ids censused against kMaxCards 35, 35 read out of App/
+    103 source files under App/, 19 naming the registry, 16 registering a card
+    36 card ids censused against kMaxCards 36, 36 read out of App/
     17 Cards::registerCard() calls, 17 policies stated, 3 in the enum
 ```
+
+Read off a run on 2026-11-08, except the censused figure: that run printed 35
+against `kMaxCards` 36 and failed, because `sportsscores2` had been registered and
+the census row had not been written yet. It reads 36 once that row lands. The
+source-file count was 97 when this section was written.
 
 Floors are those readings, except the files naming the registry, floored at 18
 against 19 read: `App/Cards.h` and `App/CardManager.cpp` are in that figure and

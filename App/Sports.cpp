@@ -13,15 +13,21 @@
 namespace Sports {
 namespace {
 
-/// The four ids this firmware registers, in rotation order. Indexed by the same
-/// number as gCards below - the two arrays are parallel and must stay so, which
-/// is why the ids live here once rather than being repeated at each
-/// registration.
+/// The five ids this firmware registers. Indexed by the same number as gCards
+/// below - the two arrays are parallel and must stay so, which is why the ids
+/// live here once rather than being repeated at each registration.
+///
+/// sportsscores2 is appended rather than slotted beside sportsscores on purpose:
+/// index 3 is sportslive, and anyLive(3), notableLive() and the live
+/// registration below all name that number. Renumbering to group the two
+/// scoreboards would have moved the live card's index under three call sites
+/// that read as correct either way.
 const char* const kCardIds[kMaxCards] = {
     "sportsteam",
     "sportsteam2",
     "sportsscores",
     "sportslive",
+    "sportsscores2",
 };
 
 /// One card's worth of games. Flat and preallocated: see Sports.h on why this
@@ -32,13 +38,13 @@ struct CardSlot {
 
   /// When the server last read the provider, or 0 for "the server did not flag
   /// this card as old", which is the ordinary state - see setGames() in
-  /// Sports.h. Four bytes per card instance, sixteen across the four: the
+  /// Sports.h. Four bytes per card instance, twenty across the five: the
   /// entire .bss cost of this feature on a board whose .bss budget is the
-  /// reason there are four instances here and not eleven.
+  /// reason there are five instances here and not eleven.
   time_t staleSinceUtc = 0;
 
   /// What this card follows, as the server sent it: API-Sports' sport slug and
-  /// the league's display name. 43 bytes a card, 172 across the four, on the
+  /// the league's display name. 43 bytes a card, 215 across the five, on the
   /// same .bss budget the comment above is counting against.
   char sport[kMaxSportLength + 1] = "";
   char competition[kMaxCompetitionLength + 1] = "";
@@ -46,7 +52,7 @@ struct CardSlot {
 
 CardSlot gCards[kMaxCards];
 
-/// Index of a registered card id, or -1. Linear over four entries, which is
+/// Index of a registered card id, or -1. Linear over five entries, which is
 /// cheaper than any map and far cheaper than the String comparisons a map would
 /// need on this platform.
 int8_t indexOf(const char* cardId) {
@@ -225,10 +231,17 @@ String staleAgeText(const CardSlot& slot) {
 }
 
 /// Whether this registration draws the whole league at once rather than one
-/// game per dwell. The scoreboard does; the team cards and the live card follow
+/// game per dwell. Both scoreboards do; the team cards and the live card follow
 /// one thing each and keep the single-game renderer.
+///
+/// Both ids are named rather than matched on a "sportsscores" prefix, so a later
+/// id that happens to start with those twelve characters does not inherit the
+/// table renderer by accident. This answer decides the renderer, the item count
+/// and the frame count, and a card that got it wrong would draw one game per
+/// dwell while reporting four impressions for the frame.
 bool isBoard(uint8_t index) {
-  return strcmp(kCardIds[index], "sportsscores") == 0;
+  return strcmp(kCardIds[index], "sportsscores") == 0 ||
+         strcmp(kCardIds[index], "sportsscores2") == 0;
 }
 
 uint16_t itemCountFor(uint8_t index) {
@@ -242,9 +255,9 @@ uint16_t itemCountFor(uint8_t index) {
   return gCards[index].count;
 }
 
-/// Draw one game of one card. Shared by all four registrations; the card
+/// Draw one game of one card. Shared by all five registrations; the card
 /// instance is bound by the wrapper functions below, because CardSpec's DrawFn
-/// is a plain function pointer with no user data and four tiny wrappers are
+/// is a plain function pointer with no user data and five tiny wrappers are
 /// cheaper than a std::function each.
 void drawCardAt(uint8_t index, uint16_t itemIndex) {
   const CardSlot& slot = gCards[index];
@@ -346,17 +359,29 @@ void drawCardAt(uint8_t index, uint16_t itemIndex) {
                           /*isLive=*/game.state == State::Live);
 }
 
-// Four wrappers, one per registration. CardSpec::DrawFn and ItemCountFn are
-// bare function pointers, so the instance has to be bound at compile time.
+// One wrapper per registration. CardSpec::DrawFn and ItemCountFn are bare
+// function pointers, so the instance has to be bound at compile time.
+//
+// The switches below hand index 4 out of their `default:` arm, which is only
+// right while there are exactly five registrations. A sixth would fold onto
+// index 4 and draw the wrong league's games under the new card's id, with every
+// id, count and frame figure looking correct. So the count is asserted here, and
+// a sixth id added to kCardIds stops the build on this line.
+static_assert(kMaxCards == 5,
+              "Each hook switch below ends in a default arm returning index 4's wrapper. Add a "
+              "case and a wrapper per new registration before raising kMaxCards.");
+
 void draw0(uint16_t i) { drawCardAt(0, i); }
 void draw1(uint16_t i) { drawCardAt(1, i); }
 void draw2(uint16_t i) { drawCardAt(2, i); }
 void draw3(uint16_t i) { drawCardAt(3, i); }
+void draw4(uint16_t i) { drawCardAt(4, i); }
 
 uint16_t count0() { return itemCountFor(0); }
 uint16_t count1() { return itemCountFor(1); }
 uint16_t count2() { return itemCountFor(2); }
 uint16_t count3() { return itemCountFor(3); }
+uint16_t count4() { return itemCountFor(4); }
 
 /// True while any game on this card is in progress. Used only by sportslive,
 /// which exists to be present exactly then.
@@ -442,24 +467,27 @@ String describeCardAt(uint8_t index, uint16_t itemIndex) {
   return text;
 }
 
-// Four wrappers each, for the same reason draw0..draw3 exist: CardSpec's hooks
-// are bare function pointers with no user data to bind the instance through.
+// One wrapper each, for the same reason draw0..draw4 exist: CardSpec's hooks are
+// bare function pointers with no user data to bind the instance through.
 String listingId0(uint16_t i) { return listingIdCardAt(0, i); }
 String listingId1(uint16_t i) { return listingIdCardAt(1, i); }
 String listingId2(uint16_t i) { return listingIdCardAt(2, i); }
 String listingId3(uint16_t i) { return listingIdCardAt(3, i); }
+String listingId4(uint16_t i) { return listingIdCardAt(4, i); }
 
 String describe0(uint16_t i) { return describeCardAt(0, i); }
 String describe1(uint16_t i) { return describeCardAt(1, i); }
 String describe2(uint16_t i) { return describeCardAt(2, i); }
 String describe3(uint16_t i) { return describeCardAt(3, i); }
+String describe4(uint16_t i) { return describeCardAt(4, i); }
 
 Cards::ListingIdFn listingIdFor(uint8_t index) {
   switch (index) {
     case 0: return listingId0;
     case 1: return listingId1;
     case 2: return listingId2;
-    default: return listingId3;
+    case 3: return listingId3;
+    default: return listingId4;
   }
 }
 
@@ -468,7 +496,8 @@ Cards::DescribeFn describeFor(uint8_t index) {
     case 0: return describe0;
     case 1: return describe1;
     case 2: return describe2;
-    default: return describe3;
+    case 3: return describe3;
+    default: return describe4;
   }
 }
 
@@ -491,13 +520,15 @@ uint8_t frameCount0(uint16_t i) { return frameCountCardAt(0, i); }
 uint8_t frameCount1(uint16_t i) { return frameCountCardAt(1, i); }
 uint8_t frameCount2(uint16_t i) { return frameCountCardAt(2, i); }
 uint8_t frameCount3(uint16_t i) { return frameCountCardAt(3, i); }
+uint8_t frameCount4(uint16_t i) { return frameCountCardAt(4, i); }
 
 Cards::FrameCountFn frameCountFor(uint8_t index) {
   switch (index) {
     case 0: return frameCount0;
     case 1: return frameCount1;
     case 2: return frameCount2;
-    default: return frameCount3;
+    case 3: return frameCount3;
+    default: return frameCount4;
   }
 }
 
@@ -529,6 +560,17 @@ bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw
   const bool b = registerOne(1, count1, draw1, 13, 10);
   const bool c = registerOne(2, count2, draw2, 14, 14);
 
+  // sportsscores2 follows the first scoreboard in the order and carries the same
+  // 14s dwell, because it has the same amount to read. A household following two
+  // leagues sees them next to each other.
+  //
+  // EVERY INDEX IN kCardIds NEEDS A REGISTRATION, and they are handed out from
+  // two sites in this one lambda. The static_assert above guards the hook
+  // switches; nothing guards this. A sixth id with its wrapper, its case and the
+  // assert raised to 6 but no registerOne(5, ...) here compiles, registers
+  // nothing for it, and looks exactly like a card the server never sent.
+  const bool e = registerOne(4, count4, draw4, 15, 14);
+
   // sportslive registers its own item count, which is zero unless something is
   // playing, and marks itself notable while it is. Early in the order: if a
   // followed team is on, that is what the rotation should lead with.
@@ -543,17 +585,17 @@ bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw
   live.notableDwellSeconds = 20;
 
   // The same three hooks registerOne() assigns, from the same switches: index 3
-  // is the default arm of each. countLive() returns zero unless a game is in
-  // progress, so a draw of this card is a draw of one fixture, and
-  // listingIdCardAt() answers nothing for an index past the stored games or for a
-  // game with neither side named.
+  // has a case of its own in each, and index 4 is now the default arm.
+  // countLive() returns zero unless a game is in progress, so a draw of this card
+  // is a draw of one fixture, and listingIdCardAt() answers nothing for an index
+  // past the stored games or for a game with neither side named.
   live.listingId = listingIdFor(3);
   live.describe = describeFor(3);
   live.frameCountFor = frameCountFor(3);
 
   const bool d = Cards::registerCard(live, Cards::KeyPolicy::Resolves);
 
-  return a && b && c && d;
+  return a && b && c && d && e;
 }();
 
 }  // namespace
