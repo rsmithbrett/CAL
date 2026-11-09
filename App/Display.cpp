@@ -1422,9 +1422,14 @@ TextResult layoutText(const String& text, const TextBox& box, uint32_t colour, c
 // ---- The fitting ladder ---------------------------------------------------
 //
 // The bold sans faces this binary carries, largest first, whose fontHeight()
-// values are 56, 42, 29 and 22. layoutLine() below steps down this list before
-// it reaches for an ellipsis, and a step is safe to take anywhere because a
-// tier is never taller than the face above it.
+// values are 47, 33, 23 and 18. Those are the figures layoutLine() below
+// compares, because it sizes its slot and each tier off lcd.fontHeight(). The
+// faces' own yAdvance values are 56, 42, 29 and 22, which is the step a card
+// reserves when it passes a lineHeight of its own.
+//
+// layoutLine() steps down this list before it reaches for an ellipsis, and a
+// step is safe to take anywhere because a tier is never taller than the face
+// above it on either measure.
 //
 // Nothing follows the 9pt face. Font0 is the 6x8 bitmap drawClock()'s remarks
 // record as unreadable at arm's length, and text that has reached 9pt and still
@@ -2719,7 +2724,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   int rowY = routeLines > 0 ? 82 + shift + routeLines * kRouteLineHeight : 100 + shift;
 
   // THE ROW PITCH CLOSES UP WHEN THE ROUTE TOOK TWO LINES, because at 30 it
-  // did not fit and never had. Arithmetic, both at 9pt whose fontHeight() is
+  // did not fit and never had. Arithmetic, both at 9pt whose yAdvance is
   // 22, against contentBottom()'s 220 with no button bound:
   //
   //   one route line   rowY 100 -> rows 100/130/160, freshness 194..216   fits
@@ -3313,7 +3318,8 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // worth having; they are not worth pushing a legal qualifier off the panel,
   // which is exactly what happened when a button appeared on this card.
   // 22 per line, not the 18 this reserved before, and the four pixels matter.
-  // FreeSansBold9pt7b's fontHeight() is 22, so layoutText() reports this
+  // FreeSansBold9pt7b's yAdvance is 22 and its fontHeight() is 18, and the box
+  // below carries 22, so layoutText() reports this
   // block's bottom at complianceY + 22 per line - which, reserved at 18, was
   // four pixels PAST contentBottom() on every single draw. It has always
   // looked fine on glass, because a 9pt line's actual ink is shorter than the
@@ -4633,8 +4639,8 @@ void showQrTextCard(const String& qrData, const String& caption) {
     // the stream. What changed is that an ordinary caption stops being cut.
     //
     // The 22px step below is unchanged and is now exactly FreeSansBold9pt7b's
-    // own fontHeight(), where at 12pt it was several pixels short of the
-    // font's advance and this card was carrying its own number to compensate.
+    // own yAdvance, where at 12pt it was several pixels short of that face's
+    // advance of 29 and this card was carrying its own number to compensate.
     // The layout is the same layout; it has simply stopped disagreeing with
     // the face drawn into it.
     lcd.setFont(FontId::Sans9);
@@ -4710,7 +4716,7 @@ void showListingsCard(const String& address, const String& propertyType, int pri
   // layout is computed from below.
   constexpr int kAddressLineHeight = 18;
   constexpr int kAddressLines = 2;
-  constexpr int kBodyLineHeight = 22;  // FreeSansBold9pt7b's own fontHeight()
+  constexpr int kBodyLineHeight = 22;  // FreeSansBold9pt7b's own yAdvance
   const int bodyWidth = kContentWidth();
   const bool tight = contentIsTight();
 
@@ -5602,7 +5608,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   // the 200px-deep card the budget cannot afford. The compressed column is a
   // 10px-radius icon at cy=123 and then ONE line at y=132 carrying the day
   // label and the temperature together, bottoming at 154 exactly - 132 plus
-  // the 22px fontHeight() reports at 9pt, with nothing to spare and nothing
+  // the 22px the 9pt face advances, with nothing to spare and nothing
   // wasted. The 40px the strip gets is spent on keeping all three facts (which
   // day, what it will do, how warm) rather than on keeping three rows.
   //
