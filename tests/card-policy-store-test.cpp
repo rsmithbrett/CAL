@@ -116,8 +116,10 @@ Entry plainEntry(const char* id, int32_t order) {
   return entry;
 }
 
-/// The 35 ids this firmware registers, which is kMaxPolicyCards' worth and the
-/// shape the sizing question in OUTAGE_CONTENT_LOSS_REVIEW.md asks about.
+/// The 42 ids this firmware registers, which is kMaxPolicyCards' worth and the
+/// shape the sizing question in OUTAGE_CONTENT_LOSS_REVIEW.md asks about. Seven
+/// sports ids were added on 2026-11-09 when Sports.cpp grew from four
+/// registrations to eleven.
 const char* const kEveryCardId[] = {
     "aircraft",      "calendar",      "clockdate",     "issflyover",   "listings",
     "moonphase",     "sunmoon",       "tides",         "homevalue",    "featuredlistings",
@@ -126,6 +128,8 @@ const char* const kEveryCardId[] = {
     "announcement5", "qrtext",        "qrtext2",       "qrtext3",      "qrtext4",
     "qrtext5",       "forecast",      "forecast2",     "forecast3",    "forecast4",
     "forecast5",     "sportsteam",    "sportsteam2",   "sportsscores", "sportslive",
+    "sportsteam3",   "sportsteam4",   "sportsteam5",   "sportsscores2", "sportsscores3",
+    "sportsscores4", "sportsscores5",
 };
 constexpr size_t kEveryCardCount = sizeof(kEveryCardId) / sizeof(kEveryCardId[0]);
 static_assert(kEveryCardCount == CardPolicyStore::kMaxEntries,
@@ -228,10 +232,11 @@ void fullPolicyFitsTheBudget() {
     measure.add(plainEntry(kEveryCardId[i], static_cast<int32_t>(i)));
   }
   measure.finish();
-  check(measure.entries() == CardPolicyStore::kMaxEntries, "all 35 entries measured");
-  check(measure.needed() == 1566,
-        "a 35-card policy with no content strings is 1,566 bytes. If this number moved, the "
-        "format changed and kFormatVersion has to move with it.");
+  check(measure.entries() == CardPolicyStore::kMaxEntries, "all 42 entries measured");
+  check(measure.needed() == 1896,
+        "a 42-card policy with no content strings is 1,896 bytes. If this number moved, the "
+        "format changed and kFormatVersion has to move with it. It was 1,566 at 35 entries, "
+        "before Sports.cpp registered its other seven sports ids on 2026-11-09.");
 
   Writer writer(gBlob, sizeof(gBlob));
   writer.begin(12, 30);
@@ -335,7 +340,7 @@ void overflowIsReported() {
   }
   check(!writer.finish(), "finish() refuses an overflowed blob");
   check(writer.overflowed(), "and says it overflowed");
-  check(writer.needed() == 1566, "while still reporting what it would have needed");
+  check(writer.needed() == 1896, "while still reporting what it would have needed");
 
   Reader reader;
   check(!reader.begin(small, sizeof(small)),

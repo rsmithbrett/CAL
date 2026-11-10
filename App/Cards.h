@@ -502,7 +502,21 @@ struct CardSpec {
 // more slot is about 146 bytes against a 16384-byte loop stack that already carries a TLS
 // handshake and a 4KB JSON parse. Worth knowing before the next bump, which is why it is
 // written here rather than left to be rediscovered.
-static constexpr uint8_t kMaxCards = 35;
+//
+// 42 as of 2026-11-09, when Sports.cpp went from four registrations to eleven. The registry
+// was exactly full at 35, so this bump was not optional: registerCard() would have answered
+// false for the eighth sports id onward and the only trace would have been a line in a debug
+// stream. The owner asked for all five team cards and all five scoreboards to be
+// configurable, and a card the editor offers but no device registers is the gap
+// SPORTS_CARDS_DESIGN.md section 6 names - "the sports card is done" and "a device shows
+// sports" being two different claims.
+//
+// Seven slots is about 1,022 bytes of PolicyEntry on the check-in stack by the arithmetic
+// above, against a worst-ever free 4,556 bytes measured on Workstation that same day. That
+// margin was read off the devices' own StackWatch lines before the bump, and has to be read
+// again on a device running this build before any release is published - see Sports.h for
+// both measurements and for why the stack is the tighter of the two budgets.
+static constexpr uint8_t kMaxCards = 42;
 
 /// What a card's draws report as their content key, named at the registration.
 ///

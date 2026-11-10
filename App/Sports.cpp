@@ -13,15 +13,28 @@
 namespace Sports {
 namespace {
 
-/// The four ids this firmware registers, in rotation order. Indexed by the same
-/// number as gCards below - the two arrays are parallel and must stay so, which
-/// is why the ids live here once rather than being repeated at each
-/// registration.
+/// The eleven ids this firmware registers. Indexed by the same number as gCards
+/// below - the two arrays are parallel and must stay so, which is why the ids
+/// live here once rather than being repeated at each registration.
+///
+/// THE FIRST FOUR KEEP THE INDICES THEY HAD. sportslive is registered by hand
+/// below and reads its hooks as index 3, and the rest of this file was written
+/// against 0-3, so the seven added on 2026-11-09 are appended rather than
+/// slotted in beside their own kind. Rotation position comes from
+/// CardSpec::order, not from the order of this array, so appending changes
+/// nothing a reader of a screen would see.
 const char* const kCardIds[kMaxCards] = {
     "sportsteam",
     "sportsteam2",
     "sportsscores",
     "sportslive",
+    "sportsteam3",
+    "sportsteam4",
+    "sportsteam5",
+    "sportsscores2",
+    "sportsscores3",
+    "sportsscores4",
+    "sportsscores5",
 };
 
 /// One card's worth of games. Flat and preallocated: see Sports.h on why this
@@ -55,15 +68,6 @@ int8_t indexOf(const char* cardId) {
     if (strcmp(kCardIds[i], cardId) == 0) { return static_cast<int8_t>(i); }
   }
   return -1;
-}
-
-/// Copy with a hard bound and a guaranteed terminator. strncpy does not
-/// terminate when the source fills the buffer, which is the classic way a team
-/// name runs into whatever sits after it in .bss.
-void copyBounded(char* destination, const char* source, size_t capacity) {
-  if (source == nullptr) { destination[0] = '\0'; return; }
-  strncpy(destination, source, capacity);
-  destination[capacity] = '\0';
 }
 
 /// What the card says when a game has not started. Deliberately a clock time
@@ -228,7 +232,11 @@ String staleAgeText(const CardSlot& slot) {
 /// game per dwell. The scoreboard does; the team cards and the live card follow
 /// one thing each and keep the single-game renderer.
 bool isBoard(uint8_t index) {
-  return strcmp(kCardIds[index], "sportsscores") == 0;
+  // PREFIX, NOT EQUALITY, since 2026-11-09. There are five scoreboards now and
+  // an exact match would have answered true for the first and false for the
+  // other four, which draws a whole league one game per dwell - the failure
+  // itemCountFor() below exists to avoid. No team id starts with this prefix.
+  return strncmp(kCardIds[index], "sportsscores", 12) == 0;
 }
 
 uint16_t itemCountFor(uint8_t index) {
@@ -346,17 +354,23 @@ void drawCardAt(uint8_t index, uint16_t itemIndex) {
                           /*isLive=*/game.state == State::Live);
 }
 
-// Four wrappers, one per registration. CardSpec::DrawFn and ItemCountFn are
-// bare function pointers, so the instance has to be bound at compile time.
-void draw0(uint16_t i) { drawCardAt(0, i); }
-void draw1(uint16_t i) { drawCardAt(1, i); }
-void draw2(uint16_t i) { drawCardAt(2, i); }
-void draw3(uint16_t i) { drawCardAt(3, i); }
-
-uint16_t count0() { return itemCountFor(0); }
-uint16_t count1() { return itemCountFor(1); }
-uint16_t count2() { return itemCountFor(2); }
-uint16_t count3() { return itemCountFor(3); }
+/// One instance's worth of hooks, bound at compile time.
+///
+/// CardSpec's hooks are bare function pointers with no user data to carry the
+/// instance through, so each registration needs its own distinct set of static
+/// functions. Eleven hand-written sets of five would be fifty-five lines that
+/// differ only in a digit; this is the same `template <int N> struct Instance`
+/// shape Announcement.cpp and Graphic.cpp already use for their five, for the
+/// same reason.
+///
+/// Compile-time only. Each member instantiates to a function the linker places
+/// in flash, exactly as the hand-written wrappers did, and the tables below are
+/// const pointer arrays. Nothing here costs .bss.
+template <uint8_t N>
+struct Hooks {
+  static void draw(uint16_t i) { drawCardAt(N, i); }
+  static uint16_t count() { return itemCountFor(N); }
+};
 
 /// True while any game on this card is in progress. Used only by sportslive,
 /// which exists to be present exactly then.
@@ -442,35 +456,48 @@ String describeCardAt(uint8_t index, uint16_t itemIndex) {
   return text;
 }
 
-// Four wrappers each, for the same reason draw0..draw3 exist: CardSpec's hooks
-// are bare function pointers with no user data to bind the instance through.
-String listingId0(uint16_t i) { return listingIdCardAt(0, i); }
-String listingId1(uint16_t i) { return listingIdCardAt(1, i); }
-String listingId2(uint16_t i) { return listingIdCardAt(2, i); }
-String listingId3(uint16_t i) { return listingIdCardAt(3, i); }
+// The other three hooks, on the same template, for the same reason.
+template <uint8_t N>
+struct TextHooks {
+  static String listingId(uint16_t i) { return listingIdCardAt(N, i); }
+  static String describe(uint16_t i) { return describeCardAt(N, i); }
+};
 
-String describe0(uint16_t i) { return describeCardAt(0, i); }
-String describe1(uint16_t i) { return describeCardAt(1, i); }
-String describe2(uint16_t i) { return describeCardAt(2, i); }
-String describe3(uint16_t i) { return describeCardAt(3, i); }
+/// The hook tables, one entry per registered id.
+///
+/// WRITTEN OUT RATHER THAN GENERATED. An index_sequence fold would be shorter
+/// and would also put the only list of instances somewhere a reader of
+/// kCardIds would not look. These eleven lines fail to compile if kMaxCards and
+/// kCardIds ever disagree with them, which is the check worth having.
+const Cards::DrawFn kDraw[kMaxCards] = {
+    Hooks<0>::draw, Hooks<1>::draw, Hooks<2>::draw,  Hooks<3>::draw,
+    Hooks<4>::draw, Hooks<5>::draw, Hooks<6>::draw,  Hooks<7>::draw,
+    Hooks<8>::draw, Hooks<9>::draw, Hooks<10>::draw,
+};
 
-Cards::ListingIdFn listingIdFor(uint8_t index) {
-  switch (index) {
-    case 0: return listingId0;
-    case 1: return listingId1;
-    case 2: return listingId2;
-    default: return listingId3;
-  }
-}
+const Cards::ItemCountFn kCount[kMaxCards] = {
+    Hooks<0>::count, Hooks<1>::count, Hooks<2>::count,  Hooks<3>::count,
+    Hooks<4>::count, Hooks<5>::count, Hooks<6>::count,  Hooks<7>::count,
+    Hooks<8>::count, Hooks<9>::count, Hooks<10>::count,
+};
 
-Cards::DescribeFn describeFor(uint8_t index) {
-  switch (index) {
-    case 0: return describe0;
-    case 1: return describe1;
-    case 2: return describe2;
-    default: return describe3;
-  }
-}
+const Cards::ListingIdFn kListingId[kMaxCards] = {
+    TextHooks<0>::listingId, TextHooks<1>::listingId, TextHooks<2>::listingId,
+    TextHooks<3>::listingId, TextHooks<4>::listingId, TextHooks<5>::listingId,
+    TextHooks<6>::listingId, TextHooks<7>::listingId, TextHooks<8>::listingId,
+    TextHooks<9>::listingId, TextHooks<10>::listingId,
+};
+
+const Cards::DescribeFn kDescribe[kMaxCards] = {
+    TextHooks<0>::describe, TextHooks<1>::describe, TextHooks<2>::describe,
+    TextHooks<3>::describe, TextHooks<4>::describe, TextHooks<5>::describe,
+    TextHooks<6>::describe, TextHooks<7>::describe, TextHooks<8>::describe,
+    TextHooks<9>::describe, TextHooks<10>::describe,
+};
+
+Cards::ListingIdFn listingIdFor(uint8_t index) { return kListingId[index]; }
+
+Cards::DescribeFn describeFor(uint8_t index) { return kDescribe[index]; }
 
 /// How many games this card has on the glass in one showing.
 ///
@@ -487,19 +514,24 @@ uint8_t frameCountCardAt(uint8_t index, uint16_t) {
   return slot.count > kMaxGames ? kMaxGames : slot.count;
 }
 
-uint8_t frameCount0(uint16_t i) { return frameCountCardAt(0, i); }
-uint8_t frameCount1(uint16_t i) { return frameCountCardAt(1, i); }
-uint8_t frameCount2(uint16_t i) { return frameCountCardAt(2, i); }
-uint8_t frameCount3(uint16_t i) { return frameCountCardAt(3, i); }
+/// Declared down here, not beside the other two hook templates, because a
+/// template is instantiated where it is used and frameCountCardAt() is defined
+/// below them. Putting this member on TextHooks made the table above
+/// instantiate it ahead of that definition, which a host compiler rejects
+/// outright rather than resolving later.
+template <uint8_t N>
+struct FrameHooks {
+  static uint8_t frameCount(uint16_t i) { return frameCountCardAt(N, i); }
+};
 
-Cards::FrameCountFn frameCountFor(uint8_t index) {
-  switch (index) {
-    case 0: return frameCount0;
-    case 1: return frameCount1;
-    case 2: return frameCount2;
-    default: return frameCount3;
-  }
-}
+const Cards::FrameCountFn kFrameCount[kMaxCards] = {
+    FrameHooks<0>::frameCount, FrameHooks<1>::frameCount, FrameHooks<2>::frameCount,
+    FrameHooks<3>::frameCount, FrameHooks<4>::frameCount, FrameHooks<5>::frameCount,
+    FrameHooks<6>::frameCount, FrameHooks<7>::frameCount, FrameHooks<8>::frameCount,
+    FrameHooks<9>::frameCount, FrameHooks<10>::frameCount,
+};
+
+Cards::FrameCountFn frameCountFor(uint8_t index) { return kFrameCount[index]; }
 
 bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw,
                  int16_t order, uint16_t dwellSeconds) {
@@ -525,9 +557,25 @@ bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw
   // and before the marketing cards, which is where somebody would expect
   // something they chose to follow. Dwell is 10s for a team and 14s for the
   // scoreboard, which has more to read.
-  const bool a = registerOne(0, count0, draw0, 12, 10);
-  const bool b = registerOne(1, count1, draw1, 13, 10);
-  const bool c = registerOne(2, count2, draw2, 14, 14);
+  // The orders the first three have always carried, unchanged: a device in the
+  // field keeps the rotation it has. The seven added on 2026-11-09 take the
+  // numbers after them, so a household that configures a third team sees it
+  // appear after the scoreboard rather than watching the cards it already had
+  // move.
+  const bool a = registerOne(0, kCount[0], kDraw[0], 12, 10);
+  const bool b = registerOne(1, kCount[1], kDraw[1], 13, 10);
+  const bool c = registerOne(2, kCount[2], kDraw[2], 14, 14);
+
+  // Teams 3-5 at 15-17, then scoreboards 2-5 at 18-21. Same dwells as their
+  // own kind above: 10s for one team, 14s for a board with more to read.
+  bool rest = true;
+  for (uint8_t index = 4; index < kMaxCards; ++index) {
+    const bool board = isBoard(index);
+    rest = registerOne(index, kCount[index], kDraw[index],
+                       static_cast<int16_t>(11 + index),
+                       board ? 14 : 10)
+           && rest;
+  }
 
   // sportslive registers its own item count, which is zero unless something is
   // playing, and marks itself notable while it is. Early in the order: if a
@@ -536,14 +584,14 @@ bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw
   live.id = kCardIds[3];
   live.kind = Cards::Kind::List;
   live.itemCount = countLive;
-  live.draw = draw3;
+  live.draw = kDraw[3];
   live.isNotable = notableLive;
   live.order = 2;
   live.dwellSeconds = 12;
   live.notableDwellSeconds = 20;
 
-  // The same three hooks registerOne() assigns, from the same switches: index 3
-  // is the default arm of each. countLive() returns zero unless a game is in
+  // The same three hooks registerOne() assigns, from the same tables: index 3
+  // is sportslive's own row. countLive() returns zero unless a game is in
   // progress, so a draw of this card is a draw of one fixture, and
   // listingIdCardAt() answers nothing for an index past the stored games or for a
   // game with neither side named.
@@ -553,7 +601,7 @@ bool registerOne(uint8_t index, Cards::ItemCountFn itemCount, Cards::DrawFn draw
 
   const bool d = Cards::registerCard(live, Cards::KeyPolicy::Resolves);
 
-  return a && b && c && d;
+  return a && b && c && d && rest;
 }();
 
 }  // namespace

@@ -14,26 +14,52 @@
 /// filtered, ordered and capped. The device draws what it is given and makes no
 /// selection of its own. See SPORTS_CARDS_DESIGN.md on the server side.
 ///
-/// **FOUR CARD INSTANCES, NOT ELEVEN.** The server's catalog advertises eleven
-/// sports ids (sportsteam1-5, sportsscores1-5, sportslive). This firmware
-/// registers four of them, and that is a deliberate decision rather than an
-/// unfinished one:
+/// **ELEVEN CARD INSTANCES, SINCE 2026-11-09.** The server's catalog advertises
+/// eleven sports ids (sportsteam1-5, sportsscores1-5, sportslive) and this
+/// firmware now registers all of them. Until that date it registered four, and
+/// the paragraphs below are kept because the budget they describe is the reason
+/// this was a decision rather than an oversight.
 ///
-///   sportsteam    one followed team
-///   sportsteam2   a second followed team
-///   sportsscores  one league's games today
-///   sportslive    appears only while a followed team is playing
+/// Every registration costs a CardSpec and a PolicyEntry slot. Two budgets pay
+/// for it and they are not the same budget:
 ///
-/// Every registration costs a CardSpec and a PolicyEntry slot, and raising
-/// Cards::kMaxCards to cover all eleven would add roughly 1.6 KB of .bss on a
-/// board whose largest contiguous 8-bit block has been measured near the
-/// 16,717-byte TLS floor. A device pushed under that floor cannot open a TLS
-/// session, so it cannot check in, so it cannot be told an update exists -
-/// which makes .bss spent on card slots nobody configured the most expensive
-/// kind of unused memory this codebase has. A policy naming one of the other
-/// seven is ignored with a log line, exactly as a policy naming "weather"
-/// already is, and instances 3-5 become a later registration if anybody asks
-/// for them.
+///   .bss      Seven more CardSlot here, and seven more CardSpec in Cards.h.
+///             The heap pool shrinks by that much. The figure that matters is
+///             the largest contiguous 8-bit block, because mbedTLS needs 16,717
+///             bytes of it or a TLS session cannot open at all - and a device
+///             that cannot open TLS cannot check in, so it cannot be told an
+///             update exists. That is what makes memory spent here the most
+///             expensive kind this codebase has.
+///
+///   stack     kMaxPolicyCards follows Cards::kMaxCards, and Cards::Policy is a
+///             member of CheckIn::Result, which is a stack local on the
+///             check-in path. Seven more PolicyEntry slots at roughly 146 bytes
+///             apiece is about a kilobyte off a 16,384-byte loop stack that
+///             already carries a TLS handshake and a 4KB JSON parse. This is
+///             the tighter of the two.
+///
+/// **WHAT WAS MEASURED, 2026-11-09.** From the devices' own log streams and from the
+/// build, rather than from arithmetic - StackWatch.h's whole point:
+///
+///   Workstation   loopTask worst-ever free 4,556 of 16,384; largest internal
+///                 8-bit block 29,684
+///   Test2         loopTask worst-ever free 4,728 of 16,384; largest internal
+///                 8-bit block 30,708
+///
+///   Build         globals 115,524 -> 121,396 bytes, so this change costs
+///                 **5,872 bytes** of .data+.bss. Flash went 1,591,787 ->
+///                 1,599,223.
+///
+/// THE 1.6 KB THIS COMMENT USED TO ESTIMATE WAS LOW BY 3.7x. The estimate counted a
+/// CardSpec and a PolicyEntry per registration and missed the seven CardSlot in
+/// Sports.cpp, each carrying four Games. Whoever weighs the next registration: measure the
+/// build, do not add up the structs.
+///
+/// 5,872 bytes off a largest block of 29,684 still clears the 16,717-byte TLS floor, but
+/// the margin is about 7 KB rather than the 13 KB the estimate implied. The stack side is
+/// tighter still: seven more PolicyEntry slots is roughly a kilobyte off a worst-ever free
+/// 4,556. So the owner's condition on this change is that the watermark is read again on a
+/// device running this build before any release is published.
 ///
 /// **FIXED BUFFERS, NOT String.** Every other card here uses Arduino String
 /// freely, and this one deliberately does not. Four cards x four games x two
@@ -84,9 +110,10 @@ static constexpr uint8_t kMaxCompetitionLength = 24;
 /// Games stored per card. Matches the server's own cap; see the class remarks.
 static constexpr uint8_t kMaxGames = 4;
 
-/// Card instances this firmware registers. Four, deliberately - see the class
-/// remarks for why not eleven.
-static constexpr uint8_t kMaxCards = 4;
+/// Card instances this firmware registers. All eleven the server catalog
+/// advertises, since 2026-11-09 - see the class remarks for what that cost and
+/// what was measured before it was spent.
+static constexpr uint8_t kMaxCards = 11;
 
 /// What a game is doing. Mirrors the server's four states, which are themselves
 /// a deliberate collapse of each provider's much longer vocabulary.

@@ -119,6 +119,13 @@ sportsteam       Resolves       Sports.cpp
 sportsteam2      Resolves       Sports.cpp
 sportsscores     Resolves       Sports.cpp
 sportslive       Resolves       Sports.cpp
+sportsteam3      Resolves       Sports.cpp
+sportsteam4      Resolves       Sports.cpp
+sportsteam5      Resolves       Sports.cpp
+sportsscores2    Resolves       Sports.cpp
+sportsscores3    Resolves       Sports.cpp
+sportsscores4    Resolves       Sports.cpp
+sportsscores5    Resolves       Sports.cpp
 graphic          PolicyContent  Graphic.cpp
 graphic2         PolicyContent  Graphic.cpp
 graphic3         PolicyContent  Graphic.cpp

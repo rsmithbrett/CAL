@@ -84,19 +84,25 @@ constexpr uint8_t kMagic1 = 'P';
 /// find that out.
 ///
 /// What it buys, asserted in tests/card-policy-store-test.cpp rather than
-/// estimated here: a full 35-card policy carrying no content strings is 1,566
-/// bytes, leaving 2,530 for content. The realistic worst case an operator can
+/// estimated here: a full 42-card policy carrying no content strings is 1,896
+/// bytes, leaving 2,200 for content. The realistic worst case an operator can
 /// build - five announcements at the full 280 characters, five QR payloads at
 /// 100, five asset ids at 48 and five locations - fits inside it. The
-/// theoretical worst case, every content field filled on all 35 cards, does not,
+/// theoretical worst case, every content field filled on all 42 cards, does not,
 /// and is refused rather than truncated.
+///
+/// THE MARGIN NARROWED ON 2026-11-09, when Sports.cpp went from four
+/// registrations to eleven: 1,566 bytes of frame became 1,896, so content lost
+/// 330 of its 2,530. kMaxBlobBytes cannot absorb that - it is one NVS sector and
+/// the derivation above is why - so the next registration to be added should
+/// re-read the measured figure rather than assume this still fits.
 constexpr uint16_t kMaxBlobBytes = 4096;
 
 /// One entry per registered card, which is what Cards::kMaxPolicyCards caps a
 /// policy at. Repeated rather than included because Cards.h names Arduino.
 /// CardPolicyStore.cpp static_asserts that the two agree, so a change to the
 /// registry is a compile error here rather than a policy quietly stored short.
-constexpr uint8_t kMaxEntries = 35;
+constexpr uint8_t kMaxEntries = 42;
 
 /// The string bounds, each matching the Cards.h constant of the same name. Same
 /// static_assert in CardPolicyStore.cpp for each.
