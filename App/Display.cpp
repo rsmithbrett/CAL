@@ -3138,7 +3138,7 @@ void showHomeValueCard(const String& address, const String& estimateText, const 
   // ALREADY ARRIVED AT, copied rather than reinvented.
   //
   // This was one 12pt line in a 300px box and BOTH live addresses overflowed
-  // it. Re-measured against the vendored glyph tables rather than taken on
+  // it. Re-measured against the LovyanGFX glyph tables (section 9b) rather than taken on
   // trust: "300 Eatons Landing Dr, Annapolis, MD 21401" is 518px and
   // "104 Virginia Ave, Edgewater, MD 21037" is 449px, against 300. So the row
   // that says WHICH HOUSE the valuation is of was ellipsizing on every draw -
@@ -3660,7 +3660,7 @@ BoardScores boardScoreState(const SportsBoardRow* rows, uint8_t count) {
 ///
 /// Drawn from drawLine() and drawFastHLine(), the same two primitives
 /// drawNavAffordances() draws the chevrons with, rather than set as a glyph.
-/// The widest brace either vendored face carries is 17px tall and the block
+/// The widest brace either LovyanGFX face carries is 17px tall and the block
 /// this has to span is 44, and scaling a glyph to reach would put a text scale
 /// on the panel that section 14's contract then has to put back.
 ///
@@ -4615,7 +4615,7 @@ void showQrTextCard(const String& qrData, const String& caption) {
     // 9pt, NOT 12pt, AND THE CARD'S OWN COMMENT IS THE ARGUMENT FOR IT.
     //
     // At 12pt this line was cutting captions nobody would call long. Measured
-    // against the vendored glyph tables: the seeded "Scan for our latest
+    // against the LovyanGFX glyph tables (section 9b): the seeded "Scan for our latest
     // listings" is 304px in a 300px box and rendered "Scan for our latest
     // listin...", "Book a tour of this property" is 320px, and "Scan me for
     // more information" is 346px. Twenty-six to twenty-eight ordinary
@@ -4685,7 +4685,7 @@ void showListingsCard(const String& address, const String& propertyType, int pri
   // THE ADDRESS, ON TWO LINES AT 9pt, AND WHY IT IS NOT A CHOICE.
   //
   // This was one 12pt line in a 300px box and it did not fit a single live
-  // listing. Measured against the vendored glyph tables over all 118 addresses
+  // listing. Measured against the LovyanGFX glyph tables (section 9b) over all 118 addresses
   // in the cache, the range is 345 to 644px; even the shortest of them is 27
   // characters against a box that holds about 22 at this font. So the row that
   // says WHICH HOUSE this is was ellipsizing on every draw on every device -
@@ -5285,10 +5285,10 @@ String shortDayLabel(uint8_t index, const String& name) {
 ///
 /// <para>describeFreshness() in Forecast.cpp writes "Updated just now",
 /// "Updated 1 min ago" and "Updated N min ago". The word and its space measure
-/// 73px at 9pt against the vendored glyph table, which is what the location
-/// row is short by when the two share it. Anything that does not start with
-/// the word comes back unchanged, so a future wording cannot be cut mid-
-/// sentence by this.</para>
+/// 73px at 9pt against the LovyanGFX glyph table (TEXT_LAYOUT_DESIGN.md 9b),
+/// which is what the location row is short by when the two share it. Anything
+/// that does not start with the word comes back unchanged, so a future wording
+/// cannot be cut mid-sentence by this.</para>
 String withoutUpdatedPrefix(const String& updatedAt) {
   static const char kPrefix[] = "Updated ";
   constexpr unsigned int kPrefixLength = sizeof(kPrefix) - 1;
@@ -5416,7 +5416,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   //
   // THE STAMP LOSES THE WORD "Updated" WHEN IT SHARES THE ROW, and that is
   // what makes the pair fit at all. describeFreshness() in Forecast.cpp writes
-  // "Updated 59 min ago", 171px at 9pt against the vendored glyph table. The
+  // "Updated 59 min ago", 171px at 9pt against the LovyanGFX glyph table (section 9b). The
   // widest town this fleet draws, "Fort Washington, MD", is 182. With the 8px
   // gap the pair wants 361 of a 300px row, and the row cannot be found another
   // 61 pixels anywhere on this card. "Updated " is 73 of the stamp's 171 and
@@ -5448,8 +5448,8 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
   //
   // Squeezed, that guard costs more than it protects. With the freshness stamp
   // now sharing this row, keeping the kDayNightWidth term as well left the
-  // location 67 to 86px of the 300px body - and measured against the vendored
-  // glyph table "Annapolis" alone is 87px and "Annapolis, MD" is 125px, so
+  // location 67 to 86px of the 300px body - and measured against the LovyanGFX
+  // glyph table (section 9b), "Annapolis" alone is 87px and "Annapolis, MD" is 125px, so
   // every real location on this fleet would have ellipsized, and it would have
   // ellipsized to protect two pixels of clearance from a row that is not
   // there.
@@ -5833,7 +5833,7 @@ void showForecastCard(const String& location, bool currentIsDaytime, int current
       // revision, because CARD_AUDIT_2026_09_27.md section 9.1 wrote this line
       // as `"Mo 72"` while shortDayLabel() returns three characters, and at
       // the old 60px pitch three would not fit - "Mon 72" measures 63px and
-      // "Now 72" 64px against the vendored glyph table, so every column of
+      // "Now 72" 64px against the LovyanGFX glyph table (section 9b), so every column of
       // every tight card would have ellipsized.
       //
       // Dropping column 0 fixed the width instead of the string, which is the

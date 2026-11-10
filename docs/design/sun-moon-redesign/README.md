@@ -71,7 +71,8 @@ to every disc draws both the same way round.
 
 **The disc goes over the name, and the four upcoming phases come off.** Both the
 disc-beside-the-name and the four-across row are landscape compositions, and
-neither survives a 240px panel. Measured against the vendored glyph table:
+neither survives a 240px panel. Measured against the LovyanGFX glyph table by
+TEXT_LAYOUT_DESIGN.md section 9b's method:
 
 | Line | Column it was given | What it needs | Before |
 |---|---|---|---|
@@ -100,7 +101,7 @@ Landscape keeps `MOON | TODAY` and shows no date.
 
 ## Every separator on these two cards is ASCII
 
-The vendored `FreeSansBold` tables carry 0x20 to 0x7E and nothing else, and
+The LovyanGFX `FreeSansBold` tables carry 0x20 to 0x7E and nothing else, and
 `LGFXBase::text_width()` substitutes a space for any code outside the face —
 **per byte**, so a UTF-8 character leaves as many blanks as it has bytes.
 

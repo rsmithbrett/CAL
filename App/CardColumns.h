@@ -97,7 +97,7 @@ constexpr int kBoardMinNameWidth = 24;
 ///
 /// 78px is the widest string formatTimeOfDay() can hand it: "%d:%02d %s" with a
 /// two-digit hour, and AM rather than PM, because A advances 13 and P advances
-/// 12. Measured off the vendored FreeSansBold9pt7b glyph table by the method in
+/// 12. Measured off the LovyanGFX FreeSansBold9pt7b glyph table by the method in
 /// TEXT_LAYOUT_DESIGN.md section 9b, not estimated.
 ///
 /// Written as the sum rather than as 80, so a column trimmed towards the
@@ -132,7 +132,7 @@ constexpr int kBoardStateWordWidth = 55;
 constexpr int kBoardPeriodTextWidth = 74;
 constexpr int kBoardWidestPeriodTextWidth = 94;
 
-/// What a score column has to hold, off the vendored glyph tables by the method
+/// What a score column has to hold, off the LovyanGFX glyph tables by the method
 /// TEXT_LAYOUT_DESIGN.md section 9b describes.
 ///
 /// kBoardWidestTwoDigitScoreWidth is the widest two digits of
@@ -177,7 +177,7 @@ constexpr int kBoardWidestFourDigitScoreWidth = 40;
 /// rather than a sentence, the way kBoardWidestFourDigitScoreWidth above is.
 ///
 /// `-` advances 8 in FreeSansBold12pt7b and 6 in FreeSansBold9pt7b, off the
-/// vendored glyph tables by the method in TEXT_LAYOUT_DESIGN.md section 9b. So
+/// LovyanGFX glyph tables by the method in TEXT_LAYOUT_DESIGN.md section 9b. So
 /// `-10` to `-99` run 34 to 36 at Sans12 and are 26 at Sans9, and 36 and 26 are
 /// the two widest.
 ///
@@ -408,10 +408,10 @@ constexpr BoardColumns boardColumnsForBoard(int screenW, BoardScores scores,
 /// spine stands 4px right of it, and each tip runs 3px right of the spine;
 /// Display.cpp's drawRowBrace() asserts those three add up to this. It is drawn
 /// from line segments rather than set as a glyph, because the widest brace
-/// either vendored face carries is 17px tall against a 44px block.
+/// either LovyanGFX face carries is 17px tall against a 44px block.
 ///
 /// kBoardStackedScoreWidth is two digits of FreeSansBold9pt7b, measured off the
-/// vendored glyph table by the method TEXT_LAYOUT_DESIGN.md section 9b
+/// LovyanGFX glyph table by the method TEXT_LAYOUT_DESIGN.md section 9b
 /// describes. kBoardScoreWidth's 28 is the same two digits at Sans12, which is
 /// the face a one-line row draws them in and a two-line row has no height for:
 /// two Sans12 slots are 58px against the 52px card the profile panel gives a

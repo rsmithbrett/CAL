@@ -63,6 +63,17 @@ if errorlevel 1 (
 del /q "%ROOT%\cal-s3-compile.log" 2>nul
 del /q "%ROOT%\cal-s3-done.flag" 2>nul
 
+REM LovyanGFX and ArduinoJson come from the sketchbook, not from this
+REM repository, so the versions are checked against the ones
+REM ci/build-firmware.sh installs before anything is compiled against them.
+REM Ahead of the table swap below, so a refusal cannot leave the 8MB table
+REM sitting in the working tree under the name partitions.csv.
+call "%~dp0check-library-pins.cmd" "%ROOT%\cal-s3-compile.log"
+if errorlevel 1 (
+  echo LIBRARY-PINS-FAILED > "%ROOT%\cal-s3-done.flag"
+  exit /b 1
+)
+
 echo ==^> Swapping in the 8MB table
 copy /y "%ROOT%\partitions.csv" "%ROOT%\partitions.csv.4mb-backup" >nul
 copy /y "%ROOT%\partitions-panellan-8mb.csv" "%ROOT%\partitions.csv" >nul

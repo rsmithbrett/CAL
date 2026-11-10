@@ -641,8 +641,8 @@ prove on its own.
 
 A second pass over the same routine, from `CARD_AUDIT_2026_09_27.md`. What is
 new here as a *method* is that the widths below are **measured, not
-estimated**: `LGFXBase::text_width()` was reimplemented against the vendored
-LovyanGFX glyph tables, and the reimplementation reproduces **all eleven**
+estimated**: `LGFXBase::text_width()` was reimplemented against the LovyanGFX
+glyph tables 9b names, and the reimplementation reproduces **all eleven**
 width figures previously recorded by hand in this repository's own source
 comments — `Updated just now` at 150px, `Updated 365 days ago` at 190,
 `99.9 mi away` at 109, `HALFTIME` at 124, `311 deg NW` at 140 and the rest —
@@ -765,9 +765,21 @@ watch.
 Section 9a left four strings measured and unfixed. This is those four, plus
 one redraw bug that came in from a photograph rather than from the audit.
 
+**Where the four tables are.** They come from LovyanGFX, pinned to 1.2.28 by
+`ci/build-firmware.sh` and held there locally by `check-library-pins.cmd`,
+which stops a compile when the installed version differs. The four headers are
+`src/lgfx/Fonts/GFXFF/FreeSansBold9pt7b.h` and its `12pt`, `18pt` and `24pt`
+siblings inside that library, which on this workstation installs to
+`Documents/Arduino/libraries/LovyanGFX`. Nothing is copied into this
+repository, where `libraries/` holds `DamBoards` and nothing else, so checking
+a figure means installing 1.2.28 and reading the header. Every "off the
+LovyanGFX glyph tables" in this document, in `App/CardColumns.h`,
+`App/Display.cpp` and `tests/card-columns-test.cpp` means those four headers at
+that version.
+
 **The measurements were redone, not inherited.** `LGFXBase::text_width()` was
 reimplemented a fourth time, independently of the three the audit used, by
-reading `LGFXBase.cpp:2184` and the vendored `FreeSansBold9pt7b.h` /
+reading `LGFXBase.cpp:2184` and the LovyanGFX `FreeSansBold9pt7b.h` /
 `FreeSansBold12pt7b.h` glyph tables directly. At `size_x == 1` every `>>16` in
 that routine is the identity, so the whole of it is: substitute `0x20` for any
 code outside the face, then per character `right = left + max(xAdvance, width
@@ -1252,7 +1264,7 @@ Squeezed, the rule stays at 112: the freshness line is up on the location row,
 
 ### 13d. The faces are ASCII and four strings were not
 
-`LGFXBase::text_width()` substitutes 0x20 for any code outside the vendored
+`LGFXBase::text_width()` substitutes 0x20 for any code outside the LovyanGFX
 tables, per byte, so a UTF-8 character draws as many blanks as it has bytes.
 `SUN · TODAY`, `MOON · TODAY` and the sports card's `Q3 · 7:42` each lost their
 U+00B7 to two spaces; the sun card's `↑ SUNRISE` and `↓ SUNSET` each lost three.
@@ -1478,7 +1490,7 @@ the audit that built section 9b's method. Section 15 was written against the
 comment's "about 72px" instead, three hundred lines below a measurement of the
 same string in the same face.
 
-Re-measured here off the vendored `FreeSansBold9pt7b` glyph table by 9b's
+Re-measured here off the LovyanGFX `FreeSansBold9pt7b` glyph table by 9b's
 method, to confirm 10d rather than to replace it: the widest string
 `formatTimeOfDay()` can produce is 78px, which is a two-digit hour with `AM`
 rather than `PM`, because `A` advances 13 and `P` advances 12. The method
@@ -1880,7 +1892,7 @@ measuring rather than relying on what the previous row left behind.
 
 #### What a row draws, before and after
 
-Measured off the vendored `FreeSansBold9pt7b` glyph table by 15a's method,
+Measured off the LovyanGFX `FreeSansBold9pt7b` glyph table by 15a's method,
 which reproduces all five of this document's 12pt figures and all eight of
 15g's 9pt ones to the pixel.
 
@@ -2391,7 +2403,7 @@ nobody asked for, so it isn't what this does. `kMaxRows` is still 4 and the
 board still shows four games.
 
 So in profile the score draws in `Sans9` with the name. Two digits measure 20px
-there against 26 at `Sans12`, measured off the vendored glyph table by 9b's
+there against 26 at `Sans12`, measured off the LovyanGFX glyph table by 9b's
 method, and `kBoardStackedScoreWidth` is that 20. Landscape keeps `Sans12`, and
 `kBoardScoreWidth` is not touched here.
 
@@ -2444,7 +2456,7 @@ status at all. `App/CardColumns.h` asserts both.
 
 #### What a profile row gets, at both widths
 
-Measured off the vendored `FreeSansBold9pt7b` table by 9b's method, which
+Measured off the LovyanGFX `FreeSansBold9pt7b` table by 9b's method, which
 reproduces all twenty figures this document and 15g, 15h and 15i already carry
 to the pixel: `FINAL` 55, `PPD` 37, `LIVE` 41, `P1` 22, `6TH INN` 74, `4TH QTR`
 79, `3RD QTR` 80, `HALFTIME` 94, `OVERTIME` 97, `12:00 AM` 78, `7:30 PM` 67,
@@ -2751,7 +2763,7 @@ this panel has, so the comparison the caller is making is already true.
 
 #### What is measured and what is assumed
 
-The widths are measured. Every figure in this section comes off the vendored
+The widths are measured. Every figure in this section comes off the LovyanGFX
 glyph tables by 9b's method, and that reimplementation reproduces all
 twenty-seven figures this repository already carries, `FINAL` 55, `HALFTIME` 94,
 `Hurricanes` 94, `Est. value` 112 and the rest, to the pixel, before it was
@@ -2794,7 +2806,7 @@ expected, so this is a card not drawing what the wire sends it.
 
 #### What three digits measure
 
-Off the vendored glyph tables by 9b's method, the reimplementation reproducing
+Off the LovyanGFX glyph tables by 9b's method, the reimplementation reproducing
 all twenty-seven of this repository's figures first:
 
 | digits | widest at `Sans12` | widest at `Sans9` |
@@ -3002,7 +3014,7 @@ a 105 pays, and every other score on it drops a face with it.
 
 #### What a minus sign measures
 
-Off the vendored glyph tables by 9b's method. The reimplementation reproduces
+Off the LovyanGFX glyph tables by 9b's method. The reimplementation reproduces
 all twenty-four figures this repository already carries by hand - `Est. value`
 112, `Sunrise` 89, `Sunset` 81, `$400K - $450K` 161, `$9999K - $99999K` 200,
 `FINAL` 55, `6TH INN` 74, `4TH QTR` 79, `HALFTIME` 94, `OVERTIME` 97,

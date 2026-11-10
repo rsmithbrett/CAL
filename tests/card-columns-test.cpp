@@ -160,7 +160,7 @@ int stackedSeparation(int screenW, BoardScores scores) {
   return boardStackedSeparationFor(screenW, scores, boardDefaultStatusWidth(scores));
 }
 
-/// A team name and what it measures in FreeSansBold9pt7b, off the vendored
+/// A team name and what it measures in FreeSansBold9pt7b, off the LovyanGFX
 /// glyph table by the method TEXT_LAYOUT_DESIGN.md section 9b describes. The
 /// same reimplementation reproduces all twenty figures this repository already
 /// carries - FINAL 55, HALFTIME 94, Hurricanes 94, Capitals 70 and the rest -
@@ -185,7 +185,7 @@ constexpr Name kNamesStillTooWide[] = {
 };
 
 /// A score and what it measures in the two faces a score is drawn in, off the
-/// vendored glyph tables by section 9b's method. The same reimplementation
+/// LovyanGFX glyph tables by section 9b's method. The same reimplementation
 /// reproduces every figure above and in the header.
 ///
 /// `1` advances 14 at Sans12 where every other digit advances 13, so the three
@@ -642,7 +642,7 @@ int main() {
     assert(metTheBoard == 1);
 
     // The photographed board, both panels. FINAL at 55, P1 at 22 twice and a
-    // 7:00 PM start time at 67, measured off the vendored FreeSansBold9pt7b
+    // 7:00 PM start time at 67, measured off the LovyanGFX FreeSansBold9pt7b
     // table by section 15a's method, which reproduces every 9pt figure in that
     // document to the pixel. One row has scores, so the board is not scoreless
     // and all four rows draw a score column.

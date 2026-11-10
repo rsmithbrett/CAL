@@ -3379,7 +3379,7 @@ is the check for those, and there has not been one.
 **What this does not prove.**
 
 - Nothing calls `LGFXBase::text_width()`. Every figure in 15h is read off the
-  vendored `FreeSansBold9pt7b` glyph table by a reimplementation of that
+  LovyanGFX `FreeSansBold9pt7b` glyph table by a reimplementation of that
   function at `size_x == 1`, which reproduces all five 12pt figures and all
   eight 9pt figures already written into TEXT_LAYOUT_DESIGN.md to the pixel.
   That makes it a sixth agreeing model and still a model. What runs on the
@@ -3824,7 +3824,7 @@ and does not scrub control characters, so the route is open and no telemetry
 says it has been used.
 
 **The measurements.** `LGFXBase::text_width()` was reimplemented a fifth time at
-`size_x == 1` by 9b's method, off the vendored `FreeSansBold9pt7b.h` and
+`size_x == 1` by 9b's method, off the LovyanGFX `FreeSansBold9pt7b.h` and
 `FreeSansBold12pt7b.h` glyph tables, and it reproduces all twenty-seven figures
 this repository already carries - `FINAL` 55, `PPD` 37, `6TH INN` 74, `4TH QTR`
 79, `3RD QTR` 80, `HALFTIME` 94, `OVERTIME` 97, `12:00 AM` 78, `7:30 PM` 67,
@@ -4047,7 +4047,7 @@ without a diagnostic. An `enum class` converts from nothing, so a forgotten or
 swapped argument stops the compile; the conversion of 19 signatures and every
 assertion is what that cost.
 
-**The measurements**, off the vendored glyph tables by 9b's method, the
+**The measurements**, off the LovyanGFX glyph tables by 9b's method, the
 reimplementation re-run and reproducing all twenty-seven of this repository's
 figures before anything new was read off it:
 

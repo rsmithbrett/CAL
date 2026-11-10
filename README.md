@@ -3081,6 +3081,16 @@ against:
 | QRCode (ricmoo) | 0.0.1 — **vendored**, see below |
 | ArduinoJson | 7.4.3 |
 
+**The local `compile-*.cmd` wrappers check those two libraries before they
+compile anything.** They install nothing: `check-library-pins.cmd` reads
+`LOVYANGFX_VERSION` and `ARDUINOJSON_VERSION` out of `ci/build-firmware.sh`,
+reads what the sketchbook has, and stops the build naming both when they differ,
+because the wrappers resolve those two from the sketchbook and the build output
+does not record which versions went in. It is what keeps a local binary
+comparable to a CI one. The four `FreeSansBold` glyph tables every width figure
+in `App/` was measured off are LovyanGFX's, at that pinned version;
+`TEXT_LAYOUT_DESIGN.md` section 9b has the path.
+
 The QR generator is **vendored into the sketch** as `CalQr.c` / `CalQr.h` rather
 than used as an installed library, and the rename is the point of the exercise.
 A plain `#include <qrcode.h>` resolves to the ESP32 core's own `esp_qrcode`

@@ -65,6 +65,17 @@ if errorlevel 1 (
 del /q "%ROOT%\app-s3-compile.log" 2>nul
 del /q "%ROOT%\app-s3-done.flag" 2>nul
 
+REM LovyanGFX and ArduinoJson come from the sketchbook, not from this
+REM repository, so the versions are checked against the ones
+REM ci/build-firmware.sh installs before anything is compiled against them.
+REM Ahead of the table swap below, so a refusal cannot leave the 8MB table
+REM sitting in the working tree under the name App\partitions.csv.
+call "%~dp0check-library-pins.cmd" "%ROOT%\app-s3-compile.log"
+if errorlevel 1 (
+  echo LIBRARY-PINS-FAILED > "%ROOT%\app-s3-done.flag"
+  exit /b 1
+)
+
 REM Copied from App's OWN partitions-panellan-8mb.csv, beside this sketch, rather
 REM than from the root copy. The two are byte-identical and the PAIR is what gets
 REM checked: the table check pairs by filename and diffs each pair present on both
