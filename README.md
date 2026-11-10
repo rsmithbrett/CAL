@@ -3450,7 +3450,7 @@ selectable in software - no software change can move the SD card onto a
 separate, uncontended bus; there is no second physical path to it on this
 board. Properly serializing access to that one shared bus (a lock held
 around every SD operation and every display draw, on both sides) would
-mean either patching the vendored LovyanGFX library to expose a hook
+mean either patching the installed LovyanGFX library to expose a hook
 around its own SPI transactions, or wrapping every call site project-wide
 with a shared mutex - real surgery, and not something to attempt correctly
 without a physical device in hand to verify against.
