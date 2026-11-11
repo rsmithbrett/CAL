@@ -1078,6 +1078,52 @@ above are unaffected by any of it: every one of these fields is optional and
 additive in both directions, which is the same backward-compatibility mandate
 they exist to serve.
 
+### The ids a build registers, written into the image
+
+`App/CardManifest.g.h` holds every card id this build registers, as one string
+literal between two markers:
+
+```
+DAMCARDIDS1:aircraft,announcement,…,sunmoon,tides:ENDCARDIDS
+```
+
+`ci/write-card-manifest.sh` generates it from the registrations, and
+`ci/build-firmware.sh` runs that script with `--check` before compiling, so a
+card added, retired or renamed without regenerating the header fails the build.
+`CardManager::begin()` logs the list in slot-sized pieces, which is also what
+keeps the literal out of the linker's reach: a string nothing reads can be
+dropped, and a manifest the linker removed reads on the far side exactly like a
+release published before manifests existed.
+
+**Why the far side needs it.** DiscoverAroundMe keeps a catalog of card types
+with a per-entry flag saying whether firmware registers that id, and the flag
+decides what its editors offer an operator. The flag's evidence used to be a
+list somebody read out of this repository and pasted into that tree, with the
+release it came from written beside it as a version string. A version string is
+not evidence. On 2026-11-09 seven sports ids were pasted in against a branch of
+this repo that no release carried, every test over there stayed green, and the
+server grew seven card targets nothing draws; an announcement aimed at one of
+them would have stored cleanly and appeared nowhere.
+
+What that server can actually read is the image it stores for each release. The
+ids are already in there as the literals the registrations pass, so it can
+confirm an id it already suspects by looking for one. What it cannot do is
+enumerate: an id nothing over there has ever heard of is invisible to a search
+for ids it knows. The manifest is the list itself, carried inside the artifact
+it describes, so there is no second file to publish, no release asset to go
+missing and no field for an operator to fill in. A device's App image and the
+ids it registers are the same bytes.
+
+The derivation is a text scan, because `App/CardManager.cpp` names a graphics
+library and does not compile on a host, so nothing in CI can walk the registry.
+It reads the three shapes a registration writes an id in - a module's `kCardId`
+constant, a literal straight onto the descriptor, and `Sports.cpp`'s `kCardIds`
+table - the same three `ci/check-card-key-decisions.sh` reads. A scan can read
+less than `App/` holds, so the count is compared with `Cards::kMaxCards`, which
+`App/Cards.h` keeps exactly equal to the number of registrations, and floors
+under the ids and the modules they came from fail a run that found fewer than
+the 35 and 16 read on 2026-11-10.
+
 ### Card buttons and the pending-action queue
 
 `App/Actions.h`/`.cpp` adds buttons a card can draw and a queue of presses

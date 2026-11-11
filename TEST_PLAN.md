@@ -7006,3 +7006,65 @@ directory.
   binaries.
 - **A panel whose touch controller has failed** reaches none of this, which is
   why the BOOT hold stays.
+
+## 35. The card ids a build registers, carried in the image (2026-11-10)
+
+`App/CardManifest.g.h` is generated from the registrations and shipped inside the
+App binary, so DiscoverAroundMe can read what a release registers instead of
+grading its card catalog against a list somebody pasted into its own tree. See
+the README's *The ids a build registers, written into the image* for why that
+list stopped being trustworthy.
+
+**Automated coverage: `ci/write-card-manifest.sh --check`**, run by
+`ci/build-firmware.sh` and as its own step in `build-and-release.yml`. It reads
+the ids out of `App/` and fails when the committed header is not what that
+reading produces.
+
+### 35a. The gate bites
+
+Both run on the workstation, 2026-11-10, and both were verified to fail before
+being verified to pass.
+
+| Mutation | Expected | Observed |
+| --- | --- | --- |
+| An id added to the committed header and nowhere else | fail, with the diff | failed, exit 1, diff printed |
+| `"sportslive"` renamed to `"sportslive2"` in `App/Sports.cpp` | fail, with the diff | failed, exit 1, diff printed |
+
+Restored and re-run clean afterwards: 35 ids, 16 modules, `kMaxCards` 35.
+
+### 35b. The count has a floor and an equality
+
+A text scan that stops matching writes a shorter manifest rather than failing, and
+a short manifest is one the far side grades a catalog against. Two things stop
+that passing quietly: the id count is compared with `Cards::kMaxCards`, which
+`App/Cards.h` keeps exactly equal to the number of registrations, and floors of
+35 ids and 16 modules are the 2026-11-10 reading.
+
+### 35c. The literal survives the link
+
+The reference that keeps it is `CardManager::begin()`'s log of the list in
+slot-sized pieces. Verified on the host toolchain (GCC 16.2, `-Os
+-ffunction-sections -fdata-sections -Wl,--gc-sections`): the marker survives as
+one contiguous run in the linked binary and the five logged pieces split only
+between ids. The same reading against an `xtensa` App image is 35d.
+
+### 35d. The manifest is in the App image
+
+Read the marker back out of the built binary:
+
+```
+grep -ao "DAMCARDIDS1:[a-z0-9,]*:ENDCARDIDS" App/build/esp32.esp32.esp32/App.ino.bin
+```
+
+That one run of bytes is what the server reads out of the row it stores for a
+release.
+
+## Not covered
+
+- **No release carries a manifest yet.** Until one is published and registered,
+  the server falls back to asking the stored image whether each id it knows is
+  present, which confirms the ids it already names and cannot enumerate one it
+  does not.
+- **The flash cost is unmeasured as a delta.** The manifest repeats roughly 400
+  bytes of ids already in `.rodata`; `ci/check-partition-fit.sh` is what would
+  report it mattering.

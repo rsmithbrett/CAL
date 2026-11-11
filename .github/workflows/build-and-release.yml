@@ -105,6 +105,13 @@ jobs:
       - name: Check every card owes the key policy its registration states
         run: bash ci/check-card-key-decisions.sh
 
+      # Up here with the other text gates rather than left to build-firmware.sh,
+      # which runs it too: this one costs a second, and the manifest it checks is
+      # what the server reads a release's card ids out of. A disagreement found
+      # after a twenty-minute compile is the same disagreement found before it.
+      - name: Check the card id manifest matches what App registers
+        run: bash ci/write-card-manifest.sh --check
+
       - name: Install arduino-cli
         uses: arduino/setup-arduino-cli@v2
 

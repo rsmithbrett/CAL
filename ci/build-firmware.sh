@@ -644,7 +644,18 @@ bash ci/check-content-key-resolvers.sh
 # BOOT_BUTTON_AND_IMPRESSIONS_DESIGN.md, "Which card owes which policy".
 bash ci/check-card-key-decisions.sh
 
-# The ninth, and the only one that reads tests/ rather than App/. The host tests
+# The ninth. App/CardManifest.g.h carries every card id this build registers as
+# one string literal, so the server can read that list out of the image it stores
+# for a release instead of out of a list somebody pasted into its own tree. The
+# header is generated from the registrations, and --check fails when the committed
+# one is not what a fresh reading of App/ produces - a manifest disagreeing with
+# the registrations is worse than no manifest, because the other side grades its
+# card catalog against it.
+# ci/write-card-manifest.sh's own remarks, and the README's "The ids a build
+# registers, written into the image".
+bash ci/write-card-manifest.sh --check
+
+# The tenth, and the only one that reads tests/ rather than App/. The host tests
 # build with whatever g++ the machine has, so a stub standing in for a POSIX
 # function with a Microsoft one compiles here and not on ubuntu-latest. This runs
 # where the difference is invisible, which is the machine that has the Microsoft

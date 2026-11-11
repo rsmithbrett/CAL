@@ -13,6 +13,7 @@
 #endif
 
 #include "Actions.h"
+#include "CardManifest.g.h"
 #include "Config.h"
 #include "ConfigRequest.h"
 #include "Display.h"
@@ -1378,6 +1379,41 @@ void pollTouch() {
   handleTap(tap);
 }
 
+namespace {
+
+// The ids this build registers, read out of the generated manifest and logged in
+// pieces the log's slots hold whole - a slot clips at 255 bytes and the manifest
+// runs past that.
+//
+// This is also what keeps the manifest in the image. A string literal nothing
+// reads can be dropped at link time, and a manifest the linker removed reads on
+// the server exactly like a release published before manifests existed: nothing
+// found, nothing said. So the reference is a line somebody can also use, rather
+// than a trick the next reader takes for dead code.
+//
+// The server reads the same string out of the image it stores for a release and
+// grades its own card catalog against it - see ci/write-card-manifest.sh.
+void logCardIdManifest() {
+  const char* at = Cards::kCardIdManifest;
+  while (*at != '\0') {
+    char piece[128];
+    size_t written = 0;
+    while (*at != '\0' && written + 1 < sizeof(piece)) {
+      // Break between ids once the piece is long enough, so no line splits an
+      // id across two.
+      if (written >= 80 && *at == ',') {
+        ++at;
+        break;
+      }
+      piece[written++] = *at++;
+    }
+    piece[written] = '\0';
+    Log::printf("[cards] registers %s", piece);
+  }
+}
+
+}  // namespace
+
 void begin() {
   Actions::begin();
   gBeginAtMs = millis();
@@ -1392,6 +1428,7 @@ void begin() {
   }
 
   Log::printf("[cards] %u card(s) registered", gCardCount);
+  logCardIdManifest();
   gCurrent = Position();
   gListCursor = Position();
   resetHistory(gCurrent);
