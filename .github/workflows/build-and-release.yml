@@ -94,6 +94,12 @@ jobs:
         run: bash ci/test-unreachable-holdoff.sh
       - name: Test the stored card policy on host
         run: bash ci/test-card-policy-store.sh
+      # The eleven sports ids and the hook switches that route a payload to the
+      # right card. The release that first carries them is the one that most
+      # needs this run: the test and its script landed with the registration and
+      # nothing invoked either, in this workflow or in bench-cal.
+      - name: Test the sports card registration on host
+        run: bash ci/test-sports-card-registration.sh
       - name: Test the WiFi setup confirmation on host
         run: bash ci/test-wifi-setup-button.sh
       - name: Test the personal photographs content key on host

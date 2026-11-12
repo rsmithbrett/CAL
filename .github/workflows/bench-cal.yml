@@ -123,6 +123,14 @@ jobs:
       - name: Test the stored card policy on host
         if: ${{ hashFiles('ci/test-card-policy-store.sh') != '' }}
         run: bash ci/test-card-policy-store.sh
+      # The eleven sports ids and the hook switches that route a payload to the
+      # right card. The test and its script landed with the registration itself
+      # and nothing invoked either, so 21 cases guarding the commit this branch
+      # exists for had never run anywhere. Found by reading the PASS lines off a
+      # green run rather than the badge.
+      - name: Test the sports card registration on host
+        if: ${{ hashFiles('ci/test-sports-card-registration.sh') != '' }}
+        run: bash ci/test-sports-card-registration.sh
       - name: Test the WiFi setup confirmation on host
         if: ${{ hashFiles('ci/test-wifi-setup-button.sh') != '' }}
         run: bash ci/test-wifi-setup-button.sh
