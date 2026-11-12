@@ -43,13 +43,17 @@ REM and fail there. The flag ADDS to the default search path, so LovyanGFX and
 REM ArduinoJson still resolve from the sketchbook as before.
 
 setlocal
-set ROOT=C:\Users\Administrator\Documents\CAL
+REM The repository root is the directory holding this script, so a clone
+REM anywhere builds without editing a path. %~dp0 ends in a backslash, which
+REM the joins below would double.
+set "ROOT=%~dp0"
+if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 REM The same path with forward slashes, for arguments handed to bash: dirname
 REM and the rest of the check script read a backslash as text, not a separator.
-set ROOTFS=C:/Users/Administrator/Documents/CAL
+set "ROOTFS=%ROOT:\=/%"
 set GITBASH=C:\Program Files\Git\bin\bash.exe
 set S3BUILD=build/esp32.esp32.esp32s3
-cd /d %ROOT%
+cd /d "%ROOT%"
 
 echo ==^> Checking the working tree's partition table is the committed one
 git diff --quiet -- partitions.csv

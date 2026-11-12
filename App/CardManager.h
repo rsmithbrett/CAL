@@ -105,6 +105,28 @@ void pollActionButton();
 /// server turns one off.
 void applyPolicy(const Cards::Policy& policy);
 
+/// Applies the policy left in flash by a previous boot, so the rotation draws
+/// before the first check-in rather than showing "Nothing to show yet" for as
+/// long as the server takes to answer.
+///
+/// Call once from setup(), after Identity::begin() and after begin() - applying
+/// a policy draws, and drawing wants Actions::begin() and the scheduler's own
+/// position, which are the first things begin() sets up. Doing nothing is the
+/// ordinary outcome on a first boot and on any device whose stored policy was
+/// refused; CardPolicyStore::decideRestore() has the four answers and the server
+/// repo's OUTAGE_CONTENT_LOSS_REVIEW.md section 1 has what this is for.
+///
+/// **A stored policy never replaces a newer one.** Once a check-in has carried a
+/// policy this reads nothing at all, and it applies at most one policy per boot,
+/// so the older statement has no window to land in behind the fresher one.
+///
+/// Only the policy survives a restart, not the cards' content. Every fetching
+/// card comes back with its own "nothing yet" state and fills in on the first
+/// check-in that works. A graphic, an announcement and a QR card draw real
+/// content straight away, because theirs arrives on the policy entry itself and
+/// their pictures are already in the SD cache.
+void restoreStoredPolicy();
+
 /// How many of the last-applied policy's entries named a card id this
 /// firmware actually registers - the same number applyPolicy() already logs
 /// as "[cards] policy applied (N of M entries known...)", kept here so

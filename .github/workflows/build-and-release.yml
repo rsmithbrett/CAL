@@ -92,10 +92,20 @@ jobs:
         run: bash ci/check-asset-counters.sh
       - name: Test the unreachable watchdog's hold-off on host
         run: bash ci/test-unreachable-holdoff.sh
+      - name: Test the stored card policy on host
+        run: bash ci/test-card-policy-store.sh
+      # The eleven sports ids and the hook switches that route a payload to the
+      # right card. The release that first carries them is the one that most
+      # needs this run: the test and its script landed with the registration and
+      # nothing invoked either, in this workflow or in bench-cal.
+      - name: Test the sports card registration on host
+        run: bash ci/test-sports-card-registration.sh
       - name: Test the WiFi setup confirmation on host
         run: bash ci/test-wifi-setup-button.sh
       - name: Test the personal photographs content key on host
         run: bash ci/test-personal-photos-key.sh
+      - name: Test what a check-in's personalPhotoAssetIds means on host
+        run: bash ci/test-personal-photos-absence.sh
       - name: Test the announcement and home value content keys on host
         run: bash ci/test-announcement-and-home-value-keys.sh
       - name: Test a card cannot register without naming a key policy
@@ -104,6 +114,24 @@ jobs:
         run: bash ci/check-content-key-resolvers.sh
       - name: Check every card owes the key policy its registration states
         run: bash ci/check-card-key-decisions.sh
+
+      # Ahead of the compile, because the body this job publishes is composed
+      # from the same `## Unreleased` section further down and an entry left
+      # there goes out under a second tag. The previous release's body is the
+      # record of what already published; `gh release view` with no tag names it
+      # because the rolling "latest" tag is published with make_latest, and this
+      # step runs before either publish step replaces it.
+      #
+      # No continue-on-error: a repeated entry stops the release.
+      - name: Check the shipped release notes were rolled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view --repo "${{ github.repository }}" --json body --jq .body \
+            > prev-release-body.md
+          wc -c < prev-release-body.md
+          PREV_BODY_FILE=prev-release-body.md bash ci/check-release-notes-rolled.sh
 
       - name: Install arduino-cli
         uses: arduino/setup-arduino-cli@v2

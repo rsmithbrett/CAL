@@ -665,7 +665,7 @@ void showBannerCard(const String& text);
 /// of this property" 320px. The same two are 226px and 237px at 9pt. It is not a
 /// guarantee: `CardSpec::text` holds up to 280 characters and a long caption still
 /// ellipsizes, and says so in the stream. Nothing else on the card moves - the 22px step
-/// this layout was already carrying is exactly FreeSansBold9pt7b's own fontHeight().
+/// this layout was already carrying is exactly FreeSansBold9pt7b's own yAdvance.
 void showQrTextCard(const String& qrData, const String& caption);
 
 /// The real-estate listings card: one nearest-market listing per screen, with

@@ -3301,6 +3301,19 @@ void setup() {
 
   CardManager::begin();
 
+  // Then the rotation this display was last given, out of flash, so a display
+  // that restarted during an outage draws its cards instead of "Nothing to show
+  // yet - waiting for the first update from the server". Does nothing on a first
+  // boot, and nothing once a check-in has carried a policy.
+  //
+  // AFTER begin() and not before it. This applies a policy, which draws, and
+  // drawing wants Actions::begin() and the scheduler's own position already set
+  // up - both of which are the first things begin() does. The cost of this order
+  // is begin()'s one opening fetch picking a card from the default-active set
+  // rather than from the restored policy; the policy then replaces what is on
+  // screen immediately. See CardManager::restoreStoredPolicy().
+  CardManager::restoreStoredPolicy();
+
   // LAST THING IN setup(), so a chirp means "this device has finished booting"
   // and nothing else. Earlier in the sequence it would sound while the boot can
   // still fail, which would make it a worse signal than silence.

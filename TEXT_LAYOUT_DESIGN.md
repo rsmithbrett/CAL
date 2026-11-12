@@ -675,7 +675,8 @@ check that fires on a card that is not broken is a check people scroll past:
 a stray `gContentBottom = 200` left at the end of `showSportsCard()`, and
 `CardManager`'s early return to `showNoContent()` leaking the previous card's
 budget. A third was subtler and is worth recording: the home value compliance
-line reserved **18px** for a 9pt line whose `fontHeight()` is **22**, so it
+line reserved **18px**, which is the face's `fontHeight()`, for a 9pt line
+whose `yAdvance` is **22**, so it
 had always reported a bottom four pixels past `contentBottom()`. It looked
 fine on glass because a 9pt line's ink is shorter than its advance. The
 reservation is now 22 — reserving what the font advances rather than what the
@@ -778,8 +779,9 @@ It reproduces **every** figure already written into this repository by hand -
 `Est. value` at 112px, `Sunrise` at 89, `Sunset` at 81, `$400K - $450K` at
 161, the whole all-ones range table from 167 to 223, `$9999K - $99999K` at
 200, and the widest live listings address at 523 - to the pixel, and it agrees
-with the audit's own numbers for all four strings below. `fontHeight()` comes
-out at 22 for 9pt and 29 for 12pt, which is what the cards already assume.
+with the audit's own numbers for all four strings below. `yAdvance` comes
+out at 22 for 9pt and 29 for 12pt, which is the step the cards reserve;
+`fontHeight()` is 18 and 23 for the same two faces.
 
 That is a fourth agreeing model of LovyanGFX. It is still a model.
 
@@ -901,8 +903,8 @@ At 12pt the 300px box held about twenty-seven ordinary characters. The seeded
 This card's own comment already says the caption is "supplementary, not the
 point" - the code is the point - so the font is the thing to spend. **Nothing
 else on the card moves**: the 22px step this layout was already carrying as a
-number of its own is exactly `FreeSansBold9pt7b`'s `fontHeight()`, where at
-12pt it was several pixels short of the font's advance. The layout has stopped
+number of its own is exactly `FreeSansBold9pt7b`'s `yAdvance`, where at
+12pt it was several pixels short of the font's advance of 29. The layout has stopped
 disagreeing with the face drawn into it.
 
 Not a guarantee, and deliberately not dressed as one: `CardSpec::text` holds
@@ -1018,9 +1020,19 @@ it can't.
 ### 10a. The ladder is the four faces already in the binary
 
 `FreeSansBold9pt7b`, `12pt`, `18pt` and `24pt`, whose `fontHeight()` values are
-22, 29, 42 and 56. A tier is never taller than the face above it, so a step down
+18, 23, 33 and 47 and whose `yAdvance` values are 22, 29, 42 and 56.
+`layoutLine()` sizes its slot and each tier off `fontHeight()`; a card reserving
+a line of its own reserves the advance. A tier is never taller than the face
+above it on either measure, so a step down
 can't reach anything below the line, which is what makes this step safe to
 apply everywhere without asking.
+
+`LGFXBase::fontHeight()` returns `_font_metrics.height`, which for an Adafruit
+GFX face is the glyph bounding height across the range -
+`lgfx_fonts.cpp`'s `GFXfont::getDefaultMetric()` sets it from the largest
+above-baseline and below-baseline glyph offsets, and keeps `y_advance` as the
+face's own `yAdvance` beside it. The two are never equal for these four faces,
+and `fontHeight()` is the smaller.
 
 Nothing follows the 9pt face. Section 9b already settled that question for
 `homevalue.compliance`: `Font0` is the 6x8 bitmap `drawClock()` records as
@@ -1316,8 +1328,9 @@ covered the same way by `drawOneButton()`.
 
 On the board the effect is geometric rather than cosmetic. `kSansTiers` is read
 by `FontId`, so `sansTierIndex()` cannot see a scale, and `layoutLine()`'s ladder
-runs on a `Sans9` face whose `fontHeight()` is 44 instead of 22, inside a 35px
-row. That is doubled glyphs in rows measured for single ones, which is a
+runs on a `Sans9` face whose `fontHeight()` is 36 instead of 18, inside a 35px
+row - `fontHeight()` multiplies by the text scale. That is doubled glyphs in
+rows measured for single ones, which is a
 scoreboard with its columns wrong.
 
 ### 14b. The contract
@@ -3009,7 +3022,7 @@ all twenty-four figures this repository already carries by hand - `Est. value`
 `2ND P...` 66, `2ND PERIOD` 112, the 78px widest start time, `6:00 PM` and
 `7:30 PM` at 67, `11` at 28 and `1` at 14 in `Sans12`, `100` at 40 and 30,
 `11` at 20 in `Sans9`, `1000` at 40, `1...` and `3...` at 22, `...` at 12 - to
-the pixel, and `fontHeight()` at 22 and 29.
+the pixel, and `yAdvance` at 22 and 29, with `fontHeight()` at 18 and 23.
 
 `-` advances 8 in `Sans12` and 6 in `Sans9`. So:
 

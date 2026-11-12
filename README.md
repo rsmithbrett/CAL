@@ -2627,6 +2627,28 @@ choice in full every time: a picture missing from a later response is one the
 family unticked or deleted, and keeping it would draw something they have
 already removed. An empty array is a real answer and clears the card.
 
+**A missing `personalPhotoAssetIds` key clears nothing**, which is the rule the
+sports branch in the same file has always stated and this one took until
+2026-11-07 to match. `App/PersonalPhotosPresence.h` holds the decision and
+`ci/test-personal-photos-absence.sh` walks it. The server's resolver catches
+whatever its two database round trips throw so that one failed query cannot cost
+a display its policy, its update offer and its maintenance window, and what it
+returns on that path is null - which is left out of the JSON altogether. So
+absence is the server declining to answer, and until this change the card read it
+as the household owning no pictures and cleared itself. An explicitly empty array
+is the household's own answer and still clears. The case the old reading was
+defended on, a server too old to send the field, cannot reach a device: the field
+shipped server-side on 2026-10-29 and the first App release registering this card
+is `v2026.10.30.0001`, the day after, against the one server there is. The
+compatibility mandate points the other way, at old firmware against a newer
+server, and firmware that never heard of the field still ignores it.
+
+What this costs is that a display reassigned to a different household keeps the
+previous set until the first check-in that answers. That was none before and is
+one now, and the server answers `[]` for a household with nothing chosen, so the
+window is a single check-in rather than the open one the aircraft card's
+keep-on-unreachable path has.
+
 **A `List`, not an interstitial.** Graphic is one picture, so it interleaves
 after every N other cards. This is a variable-length set cycled an item at a
 time, which is what `Kind::List` means, and it gives each photograph its own

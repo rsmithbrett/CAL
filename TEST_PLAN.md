@@ -1,4 +1,4 @@
-| binary | `origin/main`, run 41322668927 | this branch, runs 41322667127, 41325454056 and 41328848039 | delta |# CAL / App test plan
+# CAL / App test plan
 
 This file is the firmware half of the project's testing rule. The rule is that a
 change is validated by an automated test wherever one is possible, and that
@@ -264,6 +264,175 @@ follows, at which point the backoff schedule in 1a takes over unchanged.
 **Short form.** Temporarily set `kMaxMsUnreachableWithHealthyHeap` to 120,000 in
 a scratch build that is never registered in the firmware catalog, and read the
 same sequence in two minutes.
+
+---
+
+## 1g. The card policy survives a restart, added 2026-11-07
+
+`App/CardPolicyStore.h` and `App/CardPolicyStore.cpp`, written from
+`CardManager::applyPolicy()` and read by `CardManager::restoreStoredPolicy()`,
+which `setup()` calls once after `CardManager::begin()`. Card policy lived in RAM
+and nowhere else, so any restart dropped it and the panel read "Nothing to show
+yet - waiting for the first update from the server" until the server answered
+again. 1f stood the unreachable watchdog down; this covers a restart from any
+other cause - power, the heap watchdog, a nudge at the wall. The server repo's
+`OUTAGE_CONTENT_LOSS_REVIEW.md` section 1 is the review that found it.
+
+**The policy, not the content.** Every fetching card's content is still RAM only
+and still lost on a restart. A graphic, an announcement and a QR card draw real
+content straight away, because theirs arrives on the policy entry and their
+pictures are in the SD cache. The rest come back with their own "nothing yet"
+states and fill in on the first check-in that works.
+
+**Automated coverage: `ci/test-card-policy-store.sh`, 23 cases.** The format and
+both decisions were put in a header naming nothing but `<stdint.h>` and
+`<stddef.h>` for the reason 1f gives: a codec round trip and two predicates are
+cheap to walk on a host and expensive to reproduce on a device, where each
+refusal means writing a deliberately corrupt NVS blob and rebooting. The two
+decision functions are asserted twice per case, as a `static_assert` over the
+constexpr walk and again at runtime.
+
+The test was written before the header existed and failed to compile on the
+missing include. Two mutations were then run against the finished header to prove
+the assertions bite: dropping the format-version check from `Reader::begin()`
+printed two `Failed:` lines, and dropping the `serverPolicyApplied` branch from
+`decideRestore()` stopped the compile on two `static_assert`s.
+
+**The sizing, asserted rather than estimated.** A full 35-card policy carrying no
+content strings is 1,566 bytes. The budget is 4,096 - one NVS sector, because NVS
+writes a replacement blob before erasing what it replaces and the `nvs` partition
+is five sectors that already hold the device secret and three remembered
+networks. The realistic worst case an operator can build (five 280-character
+announcements, five 100-character QR payloads, five 48-character asset ids, five
+locations) fits. Every content field filled on all 35 cards does not, and is
+refused rather than truncated.
+
+**What the host test cannot reach**, and what a bench run is still for:
+
+1. That the blob actually survives a power cut, which is the whole point. NVS is
+   not reachable from a host.
+2. That the write happens on a changed policy and not on an unchanged one. The
+   gate is a stored hash and the test walks the decision, but not
+   `Preferences::putBytes` being called once per edit rather than hourly.
+3. That `restoreStoredPolicy()` runs before the first check-in and that
+   `gServerPolicyApplied` is only set from the check-in path. A restore landing
+   after a server policy would put the older statement on screen.
+4. That an over-budget policy CLEARS the stored one. A kept blob would resurrect
+   the policy before this one on the next restart.
+5. That a device re-enrolled under a different secret does not draw the previous
+   household's rotation. The owner stamp is four bytes of the secret's hash, and
+   only a real re-enrollment exercises it.
+
+**Bench form (~15 minutes).** Provision a device and let it check in, so a policy
+arrives. Expect `[cardpol] policy stored - N entries in B bytes`. Pull the power
+and restore it with the Host process stopped. Expect
+`[cards] the stored policy is on screen - N entries, drawn before any check-in`
+on serial, and the rotation turning over on whatever the SD cache holds - **not**
+"Nothing to show yet". Start the Host again and the first check-in must log
+`[cardpol] this policy is already the stored one - no write` on the debug stream
+rather than storing it a second time. Then edit the policy in the admin UI and
+confirm exactly one `policy stored` line follows.
+
+**What to watch for going wrong.** A `[cardpol] ... discarded` line on every boot
+means the blob is being written and refused, which is a format disagreement
+between the Writer and the Reader. A `policy stored` line on every check-in means
+the hash comparison is not working and the part is being worn at roughly 8,800
+writes a year.
+
+## 1h. A failed photograph query no longer blanks the card, added 2026-11-07
+
+`App/PersonalPhotosPresence.h`, called from `parsePersonalPhotos()` in
+`App/CheckIn.cpp`. An absent `personalPhotoAssetIds` key now leaves the held
+photographs where they are; an explicitly empty array still clears them. The two
+were one instruction and both cleared, so one failed database query on an
+otherwise healthy check-in took a family's pictures off the glass. The server
+repo's `OUTAGE_CONTENT_LOSS_REVIEW.md` section 4 is the review that found it, and
+the sports branch a few hundred lines further down `CheckIn.cpp` is the rule this
+now matches.
+
+**What the server means by absence.**
+`CheckInGatewayService.ResolvePersonalPhotosAsync` returns null in three cases and
+none of them is a household choosing nothing: the photograph source is not wired
+into the deployment, the device's resolved card policy does not name the card, or
+the two database round trips threw and were caught so the rest of the check-in
+would survive. `PersonalPhotoAssetIds` carries
+`JsonIgnoreCondition.WhenWritingNull`, so null is no key at all. An empty list
+keeps its key and is the household's own answer.
+
+**The old-server case cannot happen.** Collapsing the two was defended as
+protecting a device from a server too old to send the field. The field shipped
+server-side on 2026-10-29 in commit `9d87979c`; the first App release that
+registers this card is `v2026.10.30.0001` on `c0c5835`, the day after; and there
+is one server. Reaching the old case needs production rolled back behind
+2026-10-29 with devices left on 2026-10-30 firmware or later. The
+backward-compatibility mandate runs the other way - old firmware against a newer
+server - and that direction is untouched, because firmware that never heard of
+the field still ignores it.
+
+**Automated coverage: `ci/test-personal-photos-absence.sh`, 7 cases.** The
+decision was lifted into a `constexpr` function over two values for the reason 1f
+gives: the case that matters is a server whose photograph query threw, and
+reproducing that on a device means taking a database down for one check-in and
+then watching a card that is meant not to change. Each case is asserted twice, as
+a `static_assert` over the constexpr walk and again at runtime, so a rule that
+collapses the two answers again stops the compile on any toolchain and also
+prints a `Failed:` line under the runner.
+
+The test was written before the header's rule existed. Against a placeholder
+holding today's behaviour it failed on three `static_assert`s - `absent(0)`,
+`absent(1)` and `absent(10)` all answered `ClearHeldSet` - and a copy with the
+static assertions stripped printed `Failed: no key, nothing parsed - expected
+LeaveHeldSetAlone, got ClearHeldSet` and exited 1. The four array cases passed
+throughout, which is what says the extraction did not alter the behaviour it was
+meant to preserve.
+
+Two mutations were then run against the finished header to prove the assertions
+bite in both directions. Making the absent branch unreachable stopped the compile
+on the same three `static_assert`s. Making an empty array answer
+`LeaveHeldSetAlone` stopped it on the two that hold the other half - the
+household's own answer, and the array that yielded no usable id. The header was
+restored and compared byte for byte after each.
+
+**What the host test cannot reach**, and what a bench run is still for. No host
+test in this repository compiles `App/CheckIn.cpp` or includes ArduinoJson, so
+nothing automated reads the parse itself:
+
+1. That `parsePersonalPhotos()` consults the header rather than keeping its own
+   copy of the judgement.
+2. That `is<JsonArrayConst>()` is what the member's shape is read with, so a null
+   and a missing key both answer false and a `[]` answers true.
+3. That an array whose every entry is null or empty reaches `ClearHeldSet` rather
+   than `LeaveHeldSetAlone`. The decision is asserted on a count of zero; what is
+   not asserted is that the parser still reports `memberIsArray` true for it.
+4. That a device holding photographs through an absent key still draws them,
+   which needs the SD cache and a rotation.
+
+**Bench form (~10 minutes).** Provision a device whose policy names
+`personalphotos` and let a household set carrying two or more pictures arrive.
+Expect `[checkin] personalPhotoAssetIds carries N photograph(s)` and the pictures
+in the rotation. Then make the server's photograph query fail for one check-in,
+so the field goes absent. Expect
+`[checkin] no personalPhotoAssetIds key - keeping the N photograph(s) already on
+the card rather than clearing them` on the debug stream, no
+`dropped N cached photograph(s)` line, and the pictures still cycling. Then untick
+every picture on the household's page so the server sends `[]`. Expect
+`[checkin] personalPhotoAssetIds is empty - the household has chosen nothing, so
+the N photograph(s) held come off the card`, the `dropped` line naming the ids,
+and the card out of the rotation. The check-in after that one must print neither
+line, because nothing is held any more.
+
+**Both lines are gated on something being held.** Most of the fleet has no
+photographs card and the server sends the key only to a display whose policy names
+one, so an unconditional line would put "no personalPhotoAssetIds key" on nearly
+every device's stream on the check-in cadence and bury the one reading worth
+having. A hold over nothing changes nothing.
+
+**What to watch for going wrong.** A `keeping the N photograph(s)` line arriving
+on the check-in cadence means the server has stopped sending the key for a
+household that has pictures, which is a server-side failure this change keeps off
+the glass and puts on the stream - the line is now the only place it shows. A
+display reassigned to a different household keeps the previous set until the first
+check-in that answers, which is one check-in rather than the none it used to be.
 
 ## 2. The mbedTLS figure is 16,717 contiguous, twice - not "~32KB" (`3cfbb08`)
 
@@ -5700,19 +5869,57 @@ would pass it.
 
 ### 26b. Known gaps, recorded rather than discovered later
 
-- **No workflow calls it.** The step is written out in the lane's report and
-  nothing in `.github/` runs it, so the gate holds nothing until that lands. It
-  belongs in `build-and-release.yml` ahead of the compile, and reads the same on
-  a pull-request lane, where it would fail before main moves rather than after.
 - **It reads headings, not prose.** An entry re-worded into a new heading and
   left under Unreleased publishes twice and passes this. A heading repeated on
   purpose across two releases fails it.
 - **`gh` hangs on this workstation**, so every run here fed the body in from a
-  file fetched with `curl`. The `gh release view` line in the usage comment has
+  file fetched with `curl`. The `gh release view` line the workflow step runs has
   not been run anywhere.
 - **Not run on the release runner.** The script is `awk`, `sed`, `grep` and
   `tr`; what CI's bash and coreutils make of it is unmeasured, the way
   GCC 13.3 against 16.2.0 is unmeasured for section 19a.
+- **It compares against the rolling `latest` body**, which is whatever the
+  previous push composed. A push that follows one with an empty Unreleased
+  section is compared against no headings and passes without looking at
+  anything, which the script says in its own output.
+
+### 26c. The workflow step (2026-11-08)
+
+`build-and-release.yml` runs it as "Check the shipped release notes were
+rolled", between the host-test block and `Install arduino-cli`, so a repeated
+entry costs seconds rather than a compile. The step has no
+`continue-on-error`; the only one in that job is the `latest` publish, which
+had it before this.
+
+```yaml
+- name: Check the shipped release notes were rolled
+  env:
+    GH_TOKEN: ${{ github.token }}
+  run: |
+    set -euo pipefail
+    gh release view --repo "${{ github.repository }}" --json body --jq .body \
+      > prev-release-body.md
+    wc -c < prev-release-body.md
+    PREV_BODY_FILE=prev-release-body.md bash ci/check-release-notes-rolled.sh
+```
+
+`gh release view` with no tag names the release marked latest, which is the
+rolling `latest` tag, published with `make_latest` on the previous push. This
+step runs before either publish step replaces it.
+
+Three readings on this workstation at commit `3661afd`, previous bodies fetched
+with `curl` from `api.github.com` because `gh` hangs here. `RELEASE_NOTES.md`
+was copied aside first, every mutation gated on `cmp` against that copy, and
+`cmp` run again after restoring.
+
+| Previous body | `RELEASE_NOTES.md` | Read |
+|---|---|---|
+| `v2026.11.07.0001`, 3 entry headings | as committed, 2 entries of its own | `PASS: release notes rolled, 3 shipped heading(s) checked against 2 entry heading(s) under Unreleased`, exit 0 |
+| `v2026.11.07.0001`, 3 entry headings | its `## v2026.11.07.0001` line deleted, so those 3 fall back under Unreleased | all three named, `ERROR: 3 entry/entries would publish a second time`, exit 1 |
+| the live `latest` body, 0 entry headings | as committed | `The previous release published no entries, so there is nothing to have left behind.`, exit 0 |
+
+The second row is the shape of the defect the script exists for. The third is
+what the next push will read, and it is the gap recorded in 26b.
 
 ## 27. Two host gates that read none of their binary's output (2026-11-03)
 
@@ -5790,11 +5997,11 @@ matching nothing rather than by checking something, were left alone:
   twelve. A seventh entry point lands in no list. The zero-caller arm below it is
   unreachable under `set -euo pipefail`, so an unwired entry point exits non-zero
   with no message rather than with its own.
-- **`ci/check-release-notes-rolled.sh`'s Unreleased anchor.** Line 52 extracts the
-  section with a pattern anchored `^## Unreleased$` and never tests the result for
-  emptiness. Reword that heading and the comparison matches nothing for every
-  heading, while the pass line still reports a count taken from the previous
-  release's body.
+- **`ci/check-release-notes-rolled.sh`'s Unreleased anchor.** Closed in `076734f`:
+  the script counts the lines reading exactly `## Unreleased` and exits 1 unless
+  there is one, ahead of the extraction, and its pass line now carries both the
+  shipped heading count and the Unreleased entry count. Recorded here because the
+  finding stood when this section was written.
 - **`ci/check-text-state.sh`'s scanned-unit count.** Both rules are absence checks
   and neither prints how many function units it read. The column-zero opener means
   a namespace wrap scans nothing. It does assert positively that
@@ -6927,14 +7134,14 @@ what writing the decision down the second time found.
   `tides` ought to resolve something is a question for the owner and the two
   design documents; what the gate does is stop the answer changing on one side
   only.
-- **`TEST_PLAN.md`'s first line is corrupt and was left alone.** A benchmark
-  table row is glued onto the `# CAL / App test plan` heading with no newline
-  between them, committed that way as of `2d859b7`, so the document has no H1. It
-  belongs to whichever lane added those run ids.
+- **`TEST_PLAN.md`'s first line was corrupt and this pass left it alone.** A
+  benchmark table row was glued onto the `# CAL / App test plan` heading with no
+  newline between them, committed that way as of `2d859b7`, so the document had
+  no H1. Fixed since, together with the heading level of section 35.
 - **Nothing was pushed.** No device was flashed or commanded, and no server was
   started or stopped.
 
-# 35. A drawn button on every WiFi attempt, and the confirmation in front of it
+## 35. A drawn button on every WiFi attempt, and the confirmation in front of it
 
 The reported case: a household whose display cannot reach WiFi is told to hold a
 button for three seconds. The gesture works. What it cannot do is tell somebody
