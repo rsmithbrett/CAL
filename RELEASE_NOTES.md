@@ -23,6 +23,10 @@ dated heading after.
 
 ## Unreleased
 
+---
+
+## v2026.11.12.0001
+
 ### A display that restarts keeps its cards - App
 
 A display used to lose its list of cards every time it restarted. The list lived
