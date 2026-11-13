@@ -201,12 +201,12 @@ struct Instance {
   /// actually on the card, zero otherwise - and zero is a perfectly ordinary
   /// answer here.
   ///
-  /// This is the opposite call from the one weather and aircraft make, on
-  /// purpose. Their non-Ok states are messages worth a screen ("weather is
-  /// not showing yet"), so they report one item and draw the message. A
+  /// This is the opposite call from the one the forecast card makes, on
+  /// purpose. Its non-Ok states are messages worth a screen ("Forecast is
+  /// not showing yet"), so it reports one item and draws the message. A
   /// picture that is missing has no message in it, so this instance removes
   /// itself from the rotation and the scheduler's existing empty-card
-  /// skipping does the rest.
+  /// skipping does the rest. The aircraft card without a plane does the same.
   ///
   /// The comparison against wantedAssetId() is what makes a policy change
   /// take effect immediately: the moment the server names a different asset,

@@ -114,6 +114,10 @@ jobs:
         run: bash ci/check-content-key-resolvers.sh
       - name: Check every card owes the key policy its registration states
         run: bash ci/check-card-key-decisions.sh
+      # Aircraft.cpp and CardManager.cpp linked together against stubs: the
+      # card's item count and the scheduler passing over it, read off one binary.
+      - name: Test the aircraft card takes no turn without a plane on host
+        run: bash ci/test-aircraft-takes-no-turn.sh
 
       # Ahead of the compile, because the body this job publishes is composed
       # from the same `## Unreleased` section further down and an entry left

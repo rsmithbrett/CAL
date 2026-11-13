@@ -30,6 +30,10 @@
 /// below already treats empty as "fall back to the old behaviour".
 namespace Aircraft {
 
+/// What the last fetch found. Ok is the only value that carries a plane, and
+/// the only one that puts the card in the rotation: cardItemCount() reports
+/// zero for every other value, so none of them is drawn. cardStatus() names the
+/// value for the log stream.
 enum class Status {
   Ok,
   /// The fetch succeeded, the server's own refresh succeeded, and nothing is
@@ -51,8 +55,8 @@ enum class Status {
   /// No provider credential on file, so nothing was ever attempted - a
   /// first-class resting state, not a failure, and NOT an empty sky. Read from
   /// `status == "NotConfigured"`; this card has no `isConfigured` field of its
-  /// own the way the listings payload does. Drawn muted, alongside the two
-  /// refusals below rather than as an error - the panel, the network and our
+  /// own the way the listings payload does. It sits with the two refusals
+  /// below rather than with the errors - the panel, the network and our
   /// server are all fine, and what is missing is something only an
   /// administrator can restore.
   NotConfigured,
@@ -184,23 +188,18 @@ struct Result {
   /// moved with it, so the card took the long dwell far more often and the
   /// whole rotation lengthened, which nobody chose.
   double notableDistanceMiles = 0.0;
-  /// Set on every non-Ok status, including Empty - what to put on screen.
-  ///
-  /// Always the plain, honest text, even during a declared maintenance window -
-  /// the window is applied on the way to the screen by
-  /// Maintenance::failureText() at draw time, never baked in here. Identical
-  /// contract, for identical reasons, to Forecast::Result::message; see that
-  /// field's own remarks and Maintenance.h.
+  /// Set on every non-Ok status, including Empty - the plain sentence for what
+  /// the fetch found. No status but Ok is drawn, so this does not reach the
+  /// panel. cardStatus() puts it in the log stream for a network error.
   String message;
 
   /// Whether this failure is one the words "cannot reach the service" were being
   /// used for. True at exactly the three sites that set `message` to "Cannot
   /// reach the aircraft service." and nowhere else - notably NOT at the TLS-setup
   /// failure, which is a fault on this device's own side of the wire that a
-  /// planned server outage does not explain. Identical contract, for identical
-  /// reasons, to Forecast::Result::serviceUnreachable; see that field's own
-  /// remarks. Read only by Maintenance::failureText(); when no window is in force
-  /// it changes nothing at all.
+  /// planned server outage does not explain. Read by cardFetch(): a result with
+  /// this set does not replace a plane already held, so the card keeps its
+  /// turn in the rotation through a request that got no answer.
   bool serviceUnreachable = false;
 };
 

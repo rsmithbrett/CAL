@@ -51,9 +51,10 @@ using FetchFn = void (*)();
 
 /// How many items this card can draw *right now*. 0 means the card has
 /// nothing to show and the scheduler passes over it entirely rather than
-/// putting a blank screen in the rotation. A card holding an explanatory
-/// status ("no aircraft within 10 mi", "weather is not activated") is NOT
-/// empty - that message is content.
+/// putting a blank screen in the rotation. Whether a status with no data
+/// behind it counts as an item is each card's own answer. The forecast card
+/// reports one for "Forecast is not showing yet", because that message is
+/// content. The aircraft card reports zero unless it holds a plane.
 using ItemCountFn = uint16_t (*)();
 
 /// Draw item `itemIndex` from retained state. Must not fetch.

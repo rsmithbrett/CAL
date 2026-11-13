@@ -168,26 +168,25 @@
 //     panel's bitmap fonts are not trusted to carry anything outside ASCII.
 //
 // =============================================================================
-// THE EMPTY STATES, and why this card is silent where Aircraft and Listings
-// are not.
+// THE EMPTY STATES, and why this card takes no turn where Listings does.
 // =============================================================================
 //
 // Graphic.h states the principle: a card with nothing to show reports zero
 // items and stays out of the rotation entirely, because "there is nothing
 // informative to say about a picture that isn't there, and a card reading 'no
 // image configured' in a household's living room would be a worse outcome than
-// one that simply never appears". Aircraft and Listings take the opposite
-// route - their "nothing overhead within 10 mi" and "no homes for sale near
-// Charlotte, NC right now" screens are real content, as Cards.h's ItemCountFn
-// remarks allow.
+// one that simply never appears". Listings takes the opposite route - its "no
+// homes for sale near Charlotte, NC right now" screen is real content, as
+// Cards.h's ItemCountFn remarks allow. Aircraft takes this card's route and
+// reports zero items unless it holds a plane.
 //
-// **This card follows Graphic, not Aircraft. It draws only real events, and is
-// silent in every other state - including outright failures.** Three reasons,
-// in increasing order of how much they decided it:
+// **This card follows Graphic, not Listings. It draws only real events, and
+// takes no turn in every other state - including outright failures.** Three
+// reasons, in increasing order of how much they decided it:
 //
-//   1. There is no fact in the absence. Aircraft's empty state says something
-//      true about the world that changed since last time and will change
-//      again: nothing is within the radius right now. "No calendar connected"
+//   1. There is no fact in the absence. The listings card's empty state says
+//      something true about the world that changed since last time and will
+//      change again: nothing is for sale nearby. "No calendar connected"
 //      says nothing the household does not already know, cannot be acted on
 //      from the sofa, and for most devices in this fleet is a PERMANENT
 //      condition - the card would occupy a rotation slot with an unchanging

@@ -23,6 +23,28 @@ dated heading after.
 
 ## Unreleased
 
+### The aircraft card only appears when there is a plane - App
+
+The aircraft card used to take its turn on the screen whether or not anything
+was overhead. Under a clear sky it showed "Nothing overhead right now", and when
+the flight data could not be checked it showed a message saying so. For most of
+the day that was a turn spent telling you there was nothing to see.
+
+The card now appears only while the display has a plane to show. With no plane
+it is left out and the display goes straight to the next card. If a check finds
+the plane gone while its card is up, the next card comes up straight away
+rather than after the rest of the turn.
+
+**How quickly it reacts.** A display checks for aircraft every ten minutes, as
+it did before. A plane's card can stay in the rotation for up to ten minutes
+after the plane was found, and a new plane can take that long to appear.
+
+**If aircraft is the only card you've chosen,** the screen reads "Nothing to
+show yet" between planes, with "Waiting for the first update from the server."
+under it. The display is working and the card comes back with the next plane.
+
+**Nothing to do.**
+
 ---
 
 ## v2026.11.12.0001

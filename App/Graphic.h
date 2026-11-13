@@ -58,9 +58,9 @@
 /// instance independently.** With no `assetId` in an instance's policy entry
 /// - which is every instance on every device until somebody sets one - that
 /// instance reports zero items and the scheduler passes over it entirely.
-/// Same for an asset that will not fetch or will not decode. That is
-/// deliberately unlike weather and aircraft, whose "not activated" and
-/// "nothing overhead" messages are real content worth a screen: there is
+/// Same for an asset that will not fetch or will not decode, and the aircraft
+/// card does the same without a plane. That is deliberately unlike the
+/// forecast card, whose "not showing yet" message is real content: there is
 /// nothing informative to say about a picture that isn't there, and a card
 /// reading "no image configured" in a household's living room would be a
 /// worse outcome than one that simply never appears. A household that only

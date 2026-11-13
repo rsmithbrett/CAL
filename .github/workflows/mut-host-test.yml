@@ -82,6 +82,9 @@ jobs:
       - name: Check every card owes the key policy its registration states
         if: ${{ hashFiles('ci/check-card-key-decisions.sh') != '' }}
         run: bash ci/check-card-key-decisions.sh
+      - name: Test the aircraft card takes no turn without a plane on host
+        if: ${{ hashFiles('ci/test-aircraft-takes-no-turn.sh') != '' }}
+        run: bash ci/test-aircraft-takes-no-turn.sh
 
   full-gate:
     # The arduino-cli half of the release gate, for mutations that only a real

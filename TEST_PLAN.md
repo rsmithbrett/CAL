@@ -725,6 +725,17 @@ room. Drive these the way 3c drives the listings card - the server derives
 `status` from the provider record, so breaking the upstream feed is what
 produces each value.
 
+**From 2026-11-12 the card draws none of the status screens below.** It takes
+no turn in the rotation unless it holds a plane (section 36), so each value is
+read off the stream instead of the panel:
+
+```
+[aircraft] no plane held (<status text>) - the card takes no turn until a fetch returns one
+```
+
+Steps 1 to 3 still hold, read on the stream. Steps 4 and 5 checked a screen
+that is no longer drawn and are kept as the record of what was checked before.
+
 #### 1. The filter, first, because it is the whole read
 
 Before anything else, confirm the stream names a parsed value:
@@ -740,20 +751,23 @@ correct. This is the same trap as 3c step 1 and is the first thing to rule out.
 
 #### 2. Each value, and the branch it must produce
 
-| `status` | sightings | expected screen |
+| `status` | sightings | expected result |
 |---|---|---|
 | `Ok` | some | the normal card, unchanged |
-| `Ok` | none | "Nothing overhead right now" - the only state allowed to say so |
-| `Unavailable` | none | "Couldn't check overhead just now", then "The flight data service is not answering right now." - **no** claim about the sky |
+| `Ok` | none | no aircraft card in the rotation; stream `no plane held (ok, nothing within 10 mi)` - the only state allowed to say so |
+| `Unavailable` | none | no aircraft card in the rotation; stream `no plane held (upstream refresh failed (reason is on the server, not the device))` - **no** claim about the sky |
 | `Stale` | some | the normal card, sightings drawn, **no** warning; stream only |
-| `NotConfigured` | any | "Aircraft overhead is not showing yet", muted, array not consulted |
+| `NotConfigured` | any | no aircraft card in the rotation; stream `no plane held (resting: no aircraft provider on file)`, array not consulted |
 
-Confirm the `Unavailable` screen contains no number of miles and no word
-implying emptiness. The failure to look for is the card reverting to the
-`Empty` wording, which is the entire defect.
+Confirm the `Unavailable` stream line contains no number of miles and no word
+implying emptiness. The failure to look for is the line reverting to the
+`Empty` wording, `ok, nothing within 10 mi`, over a broken feed, which is the
+entire defect.
 
-Confirm the headline and the detail line do not repeat each other: the headline
-names the outcome, the detail names the cause.
+Until 2026-11-12 the three rows without a plane each drew a screen: "Nothing
+overhead right now", "Couldn't check overhead just now" and "Aircraft overhead
+is not showing yet". The check that a headline and its detail line did not
+repeat each other went with those screens.
 
 `Stale` must leave the sightings on screen. The stream says so and the panel
 does not:
@@ -764,10 +778,12 @@ does not:
 
 #### 3. A pre-strip server, where this card is deliberately NOT fixed
 
-Point the device at a server that sends no `status`. The card behaves exactly
-as it did before this change: an empty list draws "No aircraft within 10 mi
-right now" whatever the upstream feed did. **This is the expected result, not a
-regression** - `Aircraft.cpp` says why it declined the `lastRefreshError`
+Point the device at a server that sends no `status`. The card reads an empty
+list as a clear sky whatever the upstream feed did, exactly as it did before
+the field existed. Until 2026-11-12 that drew "No aircraft within 10 mi right
+now"; since then the card takes no turn and the stream reads
+`no plane held (ok, nothing within 10 mi)`. **This is the expected result, not
+a regression** - `Aircraft.cpp` says why it declined the `lastRefreshError`
 fallback that `Listings.cpp` keeps. The stream must say which case it is in:
 
 ```
@@ -780,6 +796,15 @@ unreachable.
 
 #### 4. Muted, not amber, and still not `serviceUnreachable`
 
+*Retired 2026-11-12. The card draws no muted or amber screen for any status, and
+`Aircraft.cpp` no longer calls `Maintenance::failureText()`, so a maintenance
+window has no aircraft wording to change. `RefreshFailed` is still not
+`serviceUnreachable`, and that now decides something a household can see: an
+answered fetch reporting a failed refresh drops a plane the card was holding,
+where a request that got no answer keeps it. Section 36's "an answered fetch
+with no plane" case holds that. The text below is the record of what was
+checked before.*
+
 `RefreshFailed` must read as a resting state - the same muted treatment
 `NotConfigured` and the two refusals get - not the amber "something is wrong
 with this device" styling. Nothing is wrong with the device.
@@ -791,6 +816,11 @@ downtime replaces one false claim with another. Same distinction as 3a step 6
 and 3c step 5, on a second card.
 
 #### 5. `NotConfigured` draws a literal, never the server's words
+
+*Retired 2026-11-12. Nothing is drawn for `NotConfigured`. The stream reads
+`no plane held (resting: no aircraft provider on file)`, a literal in
+`cardStatus()` that carries none of the server's words either. The text below
+is the record of what was checked before.*
 
 Photograph the `NotConfigured` screen and confirm it reads "Aircraft tracking is
 not set up for this home yet." and contains no vendor name, no URL, and no
@@ -7213,3 +7243,166 @@ directory.
   binaries.
 - **A panel whose touch controller has failed** reaches none of this, which is
   why the BOOT hold stays.
+
+## 36. The aircraft card takes no turn without a plane (2026-11-12)
+
+The owner's rule is that no display shows a card saying there is no aircraft:
+the card is skipped. Until this change the aircraft card reported one item once
+it had fetched anything, so a clear sky, a failed refresh and an account with
+no provider on file each took a turn in the rotation as a status screen.
+README.md, "The aircraft card takes no turn without a plane", is the design
+record. Section 3d's screens are retired by it, and 3d says so in place.
+
+### 36a. What is built
+
+`Aircraft::cardItemCount()` reports one item while the last fetch found a plane
+and zero for every other status, so `showable()` in `App/CardManager.cpp` passes
+over the card the way it passes over an empty calendar. `cardDraw()` draws
+nothing without a plane. `cardFetch()` writes one line to the stream each time
+a fetch ends with no plane held, and `cardStatus()` supplies the text in the
+brackets:
+
+```
+[aircraft] no plane held (ok, nothing within 10 mi) - the card takes no turn until a fetch returns one
+```
+
+The rule for a plane already held is the one the card had. A request that got
+no answer keeps the plane and the card's turn. Any answered fetch without a
+plane drops it.
+
+The scheduler changed in three places, and those apply to every card. A card
+that stops being showable while it is on screen is left at once, through
+`leaveCurrentCard()`, with this line on the stream:
+
+```
+[cards] 'aircraft' has nothing to show after its refresh - moving on
+```
+
+`computeNext()` carries on from an emptied list card's place in the order,
+where it used to start again from the first card. The branch of `fetchCard()`
+that runs with nothing on screen restarts the history, so a reverse tap cannot
+step back from a card to the placeholder.
+
+### 36b. Added
+
+`ci/test-aircraft-takes-no-turn.sh` compiles `App/Aircraft.cpp` and
+`App/CardManager.cpp` as they ship, with
+`tests/aircraft-takes-no-turn-test.cpp`, against the five headers in
+`tests/aircraft-stubs/`, under `-std=c++17 -Wall -Wextra -Werror`. It requires
+the binary's own line and does not read its exit status:
+
+```
+PASS: aircraft card takes no turn without a plane, 14 cases, 165 checks
+```
+
+The test sets the clock, the service's answers and the taps, and reads the list
+of screens `Display` was asked for, the showings `Impressions` was told about
+and the stream. Two cards with no fetch function sit either side of the
+aircraft card in the order, so "the rotation carried on" is something a case
+can read.
+
+| case | what it holds |
+|---|---|
+| before the first fetch | no items, and the status reads `never fetched` |
+| a first fetch that got no answer | no items, the no-plane line on the stream, and across 24 seconds no aircraft screen, no showing for the card and no placeholder |
+| a clear sky | the same across a minute while the two neighbours keep alternating; called directly, the card's draw function draws nothing and logs that it was asked |
+| a plane arrives | one item, the card up on its turn for its ordinary dwell, then the card after it |
+| a plane inside the notable distance | the notable dwell |
+| the plane leaves while its card is up | the card after it goes up at once as a showing the rotation opened, with a full dwell of its own; the scheduler's line is on the stream; four reverse taps never reach the emptied card |
+| a fetch that got no answer | a request that cannot begin, an HTTP 400 and a 403 whose body is not ours each keep the plane; a plane served behind a stale upstream is still a plane; the kept plane takes its turn |
+| an answered fetch with no plane | thirteen answers, seven checks each: a clear sky, an empty list behind a stale and behind an unavailable upstream, HTTP 429 and 503, no provider on file, a 404 for no position, a display not activated, a provider turned off, a refusal with an unknown reason, a 401, a body that is not JSON, and a secure client that was never set up. Each drops a held plane, names its reason in `cardStatus()` and draws nothing |
+| every card empty | the scheduler's placeholder is on screen; the card goes up the moment a fetch returns a plane; a reverse tap stays on it |
+| the only card in a policy | the card is the only thing drawn while it holds a plane; the placeholder goes up at once when the plane leaves; the card returns with the next plane |
+| taps after the card has emptied | three reverse and five forward taps draw neither the card nor the placeholder |
+| the plane leaves during a manual hold | the card that followed goes up at once as a showing the rotation opened, keeps its ordinary dwell, and nothing is marked as sought when the hold's own time passes |
+| an announcement when the plane leaves | the card that replaces the plane's carries the announcement it would have carried had the plane's dwell run out |
+| the whole run | `Display::showAircraftStatus()` was never called |
+
+`build-and-release.yml` runs the script unguarded. `bench-cal.yml` and
+`mut-host-test.yml` run it behind `hashFiles`, as they do the others, and
+`bench-cal.yml`'s path list gained the twelve `App/` headers the test compiles
+that it did not already name.
+
+### 36c. Made to fail first
+
+The first thirteen cases were written before either shipped file changed and
+run against the unmodified sources. The run ended:
+
+```
+Failed: the aircraft status screen was never drawn [the whole run]
+Failed: 79 check(s) over the aircraft card's place in the rotation
+ERROR: the aircraft rotation test did not print its PASS line.
+```
+
+With `App/Aircraft.cpp` changed and `App/CardManager.cpp` not, 11 checks
+failed, every one of them the scheduler's: the card after the plane's did not
+go up, the placeholder was drawn over a rotation that had content, and a
+reverse tap stepped back to the placeholder.
+
+The test as it stands was then run against copies of the two files taken out
+of the commit before this one with `git show`, in a scratch directory, with no
+tracked file written. 87 checks failed against both old files, and 17 with
+only `App/Aircraft.cpp` changed.
+
+### 36d. Written after the code
+
+The fourteenth case, "an announcement when the plane leaves", was written after
+`leaveCurrentCard()` existed. So were five checks in older cases: the two that
+the replacement is recorded as a showing the rotation opened, the one that
+nothing is marked as sought, and the two that call the card's draw function
+directly. The check count on the PASS line was added last.
+
+They were added because three mutations got through the thirteen cases with no
+failed check: the announcement cursor not stepped, the replacement not recorded
+as a showing, and the draw function putting the status screen back. Each now
+fails, as 36e lists. Eight of the ten added checks also fail against the
+unmodified sources, which is the 79 becoming 87. The other two are the
+announcement case's own setup.
+
+### 36e. Mutations
+
+Each was applied to a copy of the shipped file in a scratch directory, by a
+block applier that refuses text it does not find exactly once, and the copy was
+compared against the shipped file with `cmp` before the compile, so a mutation
+that did not apply cannot read as a passing test.
+
+| mutation | failed checks |
+|---|---|
+| the item count back to one once anything was fetched | 48 |
+| the no-plane line reworded and sent to the verbose stream | 15 |
+| the keep rule switched off | 5 |
+| `computeNext()` starting again from the first card after an emptied one | 4 |
+| the nothing-on-screen branch not restarting the history | 3 |
+| the manual hold not ended on leaving a card | 2 |
+| the emptied card's history entry kept | 1 |
+| the replacement not starting a dwell of its own | 2 |
+| the announcement cursor not stepped | 1 |
+| the replacement not recorded as a showing | 3 |
+| the call to `leaveCurrentCard()` removed | none - it does not compile, an unused function under `-Werror` |
+| the same call removed with the function's address taken, so it compiles | 14 |
+| the draw function putting the status screen back | 3 |
+
+### 36f. What this does not cover
+
+- **Neither board was compiled and no display has run this.** The two files
+  were compiled by a host g++ against stubs. `arduino-cli` was not run for the
+  fleet board or the Panellan, so the first real compile is CI's.
+- **CI has not run the test.** Every figure above is GCC 16.2.0 on the
+  workstation. The runner's own g++ has not compiled these files, and a
+  different version can raise a warning this one does not, which `-Werror`
+  turns into a failed step.
+- **Pixels.** `Display` is a list of the screens it was asked for. Nothing here
+  says what a panel looks like.
+- **Heap.** No allocation was added, by reading. Nothing was measured. The
+  logo's RAM buffer is not released when the plane is dropped, as before.
+- **TLS and the HTTP client** are scripted answers.
+- **The ArduinoJson filter.** The stub accepts a filter and applies none, so
+  3d step 1's trap, a field the filter drops, is not held here.
+- **How long a real fetch takes, and when.** A case forces a refresh. The
+  ten-minute interval in `App/Config.h` is not waited out, so a plane stays on
+  its card for up to ten minutes after the fetch that found it, as before.
+- **The placeholder's wording.** A display whose only card is the aircraft card
+  reads "Nothing to show yet" and "Waiting for the first update from the
+  server." between planes. That text is the scheduler's and was not changed.
+- **`Display::showAircraftStatus()`** is still in `App/Display.cpp` and has no
+  caller.

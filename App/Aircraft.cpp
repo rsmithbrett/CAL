@@ -12,7 +12,6 @@
 #include "Http.h"
 #include "Identity.h"
 #include "Log.h"
-#include "Maintenance.h"
 #include "ProviderStatus.h"
 
 namespace Aircraft {
@@ -281,13 +280,11 @@ Result fetchMine() {
     // explains; this is our server answering perfectly well about an upstream
     // feed it could not reach. None of the ProviderStatus values means our
     // server is unreachable - every one arrives on a well-formed 200 - so
-    // nothing read out of that field may ever raise it, and failureText() keeps
-    // passing this message through untouched.
+    // nothing read out of that field may ever raise it. cardFetch() therefore
+    // drops a plane it holds when this result arrives.
     if (refreshFailed) {
       result.status = Status::RefreshFailed;
-      // Names the cause, where the headline names the outcome, so the two
-      // lines carry different information. No claim about the sky, and no
-      // count implied.
+      // Names the cause. No claim about the sky, and no count implied.
       result.message = "The flight data service is not answering right now.";
       Log::printf("[aircraft] empty list AND a failed refresh -> RefreshFailed; Empty NOT taken - "
                   "nothing here licenses a claim about the sky. serviceUnreachable stays false: "
@@ -302,7 +299,7 @@ Result fetchMine() {
     // and until now the only one that logged nothing at all. It says so now,
     // and says what it relied on to be allowed to.
     Log::printf("[aircraft] empty list and a refresh not reported as failed -> Empty; "
-                "RefreshFailed NOT taken - drawn as a real statement about the sky within %.0f mi",
+                "RefreshFailed NOT taken - a real statement about the sky within %.0f mi",
                 result.radiusMiles);
     return result;
   }
@@ -551,12 +548,17 @@ void cardFetch() {
   // The staleness is visible rather than implied. The freshness line is the
   // card's own, it keeps counting while the fetch fails, and a reader who
   // wants to know whether this is current can read it.
+  //
+  // The same rule decides the card's place in the rotation. cardItemCount()
+  // reports an item only while gLast is Ok, so a plane kept here keeps the
+  // card's turn, and a result that replaces it with any other status takes the
+  // card out of the rotation until a fetch returns a plane.
   Result fresh = fetchMine();
   gEverFetched = true;
   if (fresh.status != Status::Ok && fresh.serviceUnreachable &&
       gLast.status == Status::Ok) {
     Log::printf("[aircraft] could not reach the service - keeping the last good "
-                "result on screen rather than drawing an error over it (%s)",
+                "result and the card's turn in the rotation (%s)",
                 describeFreshness(gLastOkMs).c_str());
     return;
   }
@@ -669,14 +671,21 @@ void cardFetch() {
         gLast.nearest.airlineName.length() > 0 ? gLast.nearest.airlineName.c_str() : "no airline match",
         gLast.nearest.altitudeFeet, gLast.nearest.speedKnots, gLast.nearest.headingDegrees,
         gLast.nearest.distanceMiles, routeSummary.c_str());
+  } else {
+    // Printed rather than verbose: the stream is the only place a deployed
+    // display says why its aircraft card is missing from the rotation, and
+    // cardStatus() names which of the statuses it is.
+    Log::printf("[aircraft] no plane held (%s) - the card takes no turn until a fetch "
+                "returns one",
+                cardStatus().c_str());
   }
 }
 
-/// Same reasoning as Weather's: one item once anything has been fetched.
-/// Empty ("nothing overhead right now") counts as an item rather than zero -
-/// it is a real, informative message this card has always shown, and the
-/// scheduler's empty-card skipping is for cards with nothing at all to say.
-uint16_t cardItemCount() { return gEverFetched ? 1 : 0; }
+/// One item while a plane is held and none at any other time: before the first
+/// fetch, over a clear sky, and for every refusal and failure. The scheduler
+/// passes over a card reporting zero, which is what keeps "nothing overhead"
+/// from taking a turn in the rotation. gLast is Ok only when it carries a plane.
+uint16_t cardItemCount() { return gLast.status == Status::Ok ? 1 : 0; }
 
 /// A plane nearly directly overhead earns the longer dwell.
 ///
@@ -810,35 +819,11 @@ void cardDraw(uint16_t) {
     return;
   }
 
-  // Empty (fetch worked, nothing in range right now) and the two resting
-  // states read as ordinary/muted; auth and network trouble read amber -
-  // same isProblem split Weather's card makes, just with a third muted case
-  // this card has and weather doesn't.
-  // RefreshFailed joins the muted set rather than the amber one. Amber says
-  // "something is wrong with this device" and nothing is: the panel, the
-  // network and our server are all fine - an upstream feed our server talks to
-  // is not. Same reasoning, and the same resting-vs-amber split, that the
-  // listings card applies to its own RefreshFailed; amber in a kitchen for a
-  // fault nobody in that kitchen can fix teaches its reader to ignore amber.
-  const bool isRestingState = gLast.status == Status::NotActivated ||
-                              gLast.status == Status::ProviderDisabled ||
-                              gLast.status == Status::NotConfigured ||
-                              gLast.status == Status::RefreshFailed ||
-                              gLast.status == Status::Empty;
-  // Empty and RefreshFailed get DIFFERENT headlines, which is the whole point:
-  // one states the sky is clear, the other declines to state anything about it.
-  const String headline = gLast.status == Status::Empty  ? "Nothing overhead right now"
-                          : gLast.status == Status::RefreshFailed
-                              ? "Couldn't check overhead just now"
-                          : isRestingState ? "Aircraft overhead is not showing yet"
-                                           : "Could not load aircraft data";
-  // Resolved on this draw rather than at fetch time - see Forecast.cpp's
-  // identical call site and Maintenance.h. The log line keeps the raw message on
-  // purpose; the debug stream wants the fault, not the reassurance.
-  const String detail = Maintenance::failureText(gLast.message, gLast.serviceUnreachable);
-  Log::verbose("[aircraft] drawing status screen: %s (%s)", headline.c_str(),
-              gLast.message.c_str());
-  Display::showAircraftStatus(headline, detail, /*isProblem=*/!isRestingState);
+  // No plane is held. cardItemCount() reports zero then and the scheduler does
+  // not draw a card reporting zero, so this is reached only by a caller that
+  // did not ask first. Nothing is drawn and the panel stays as it was.
+  Log::verbose("[aircraft] draw reached with no plane held (%s) - nothing drawn",
+               cardStatus().c_str());
 }
 
 /// Which aircraft was overhead when somebody pressed - see Cards::DescribeFn.

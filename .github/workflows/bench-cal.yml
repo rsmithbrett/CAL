@@ -43,6 +43,20 @@ on:
       - "App/Log.h"
       - "App/PersonalPhotos.h"
       - "App/ReportedCounter.h"
+      # The headers ci/test-aircraft-takes-no-turn.sh compiles with Aircraft.cpp
+      # and CardManager.cpp that no line above names.
+      - "App/Actions.h"
+      - "App/Aircraft.h"
+      - "App/CardManager.h"
+      - "App/CardPolicyStore.h"
+      - "App/Config.h"
+      - "App/HeapRatchet.h"
+      - "App/Http.h"
+      - "App/Impressions.h"
+      - "App/Maintenance.h"
+      - "App/Motion.h"
+      - "App/ProviderStatus.h"
+      - "App/Touch.h"
       # The App's own partition tables and the second board's. ci/build-firmware.sh
       # reads the table out of the build directory and compares the compiled size
       # against it, so a resized partition changes what that check allows. The
@@ -152,6 +166,9 @@ jobs:
       - name: Check every card owes the key policy its registration states
         if: ${{ hashFiles('ci/check-card-key-decisions.sh') != '' }}
         run: bash ci/check-card-key-decisions.sh
+      - name: Test the aircraft card takes no turn without a plane on host
+        if: ${{ hashFiles('ci/test-aircraft-takes-no-turn.sh') != '' }}
+        run: bash ci/test-aircraft-takes-no-turn.sh
 
       - name: Compile against production toolchain and check real partitions
         run: bash ci/build-firmware.sh

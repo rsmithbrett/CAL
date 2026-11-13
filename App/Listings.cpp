@@ -730,8 +730,8 @@ void cardFetch() {
 
 /// Real count while Ok (capped at kMaxListings by fetchMine() itself), one
 /// item for any other status - same "a message is content too" tolerance
-/// Weather's and Aircraft's own cardItemCount() already give their resting
-/// and error states.
+/// the forecast card's own item count gives its resting and error states.
+/// The aircraft card gives none: it reports zero without a plane.
 uint16_t cardItemCount() {
   if (!gEverFetched) {
     return 0;
@@ -775,7 +775,7 @@ void cardDraw(uint16_t itemIndex) {
 
   // Empty and NotConfigured are resting states - nothing wrong with the
   // device, just nothing to show or nothing set up yet - shown muted rather
-  // than amber, the same isProblem split Weather's and Aircraft's cards make.
+  // than amber, the same isProblem split the forecast card makes.
   //
   // RefreshFailed rests too, and that is a judgement rather than an oversight.
   // Amber says "something is wrong with this device", and nothing is: the panel

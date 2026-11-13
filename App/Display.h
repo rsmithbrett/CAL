@@ -311,10 +311,11 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
 /// not move either way - only the text does.
 void aircraftLogoZone(int16_t& x, int16_t& y, int16_t& w, int16_t& h);
 
-/// The aircraft card's non-Ok states, including "fetch succeeded, nothing is
-/// currently overhead" (not an error - see Aircraft::Status::Empty) - same
-/// white/bannered card family as showAircraftCard(), mirroring
-/// showWeatherStatus()'s split from the boot-ladder screens.
+/// A headline and a detail line under the aircraft banner, in the same
+/// white/bannered card family as showAircraftCard() and split from the
+/// boot-ladder screens the way showForecastStatus() is. No card calls it: the
+/// aircraft card takes no turn in the rotation without a plane, so none of its
+/// non-Ok states is drawn.
 void showAircraftStatus(const String& headline, const String& detail, bool isProblem);
 
 /// The sunrise/sunset card. Both time strings are already-formatted local

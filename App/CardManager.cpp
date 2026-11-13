@@ -394,10 +394,10 @@ uint8_t gRefreshScan = 0;
 
 /// True when this card is active and actually has something to draw right
 /// now. A card with zero items is passed over entirely rather than put on
-/// screen blank. Note that a card holding an explanatory status ("no aircraft
-/// within 10 mi", "weather is not activated") reports one item, not zero -
-/// that message is content, and only a card with genuinely nothing to say
-/// (typically one that has never fetched) is skipped.
+/// screen blank. What counts as zero is the card's own answer - see
+/// Cards::ItemCountFn. The forecast card holding an explanatory status
+/// ("Forecast is not showing yet") reports one item, because that message is
+/// content. The aircraft card reports zero unless it holds a plane.
 /// Whether `card`'s effectivity window (if any) includes right now - the
 /// firmware half of CardPolicyEntry.EffectiveFromUtc/EffectiveToUtc on the
 /// server. Both 0 (the ordinary case: no policy has ever set either field)
@@ -567,9 +567,16 @@ Position computeNext() {
       return gListCursor;
     }
   } else {
-    const int8_t first = firstShowable(Cards::Kind::List);
-    if (first >= 0) {
-      gListCursor = Position{first, 0};
+    // The list card the sequence last stood on has nothing to show now. While
+    // the policy still carries it, the sequence carries on from its place in
+    // the order, so a card that empties does not send the rotation back to the
+    // top. A card the policy dropped has no place to carry on from.
+    const bool keepsItsPlace = current >= 0 && gCards[current].active &&
+                               gCards[current].kind == Cards::Kind::List;
+    const int8_t next = keepsItsPlace ? nextShowable(Cards::Kind::List, current)
+                                      : firstShowable(Cards::Kind::List);
+    if (next >= 0) {
+      gListCursor = Position{next, 0};
       return gListCursor;
     }
   }
@@ -1123,6 +1130,44 @@ void handleTap(const Touch::Tap& tap) {
   }
 }
 
+/// Takes the card on screen out of the rotation's present and puts up what
+/// would have followed it. For a card whose own refresh left it with nothing
+/// to show while it was up.
+///
+/// The card's entry leaves the navigation history, so a reverse tap from the
+/// replacement lands on whatever was up before it. If a later entry is
+/// recorded - the household had stepped back onto this card - that entry goes
+/// up, as advance() would replay it. Otherwise the next card is computed.
+///
+/// The replacement starts its own dwell and is recorded as a rotation arrival.
+/// A manual hold belonged to the card that has gone and ends with it, so the
+/// replacement is not counted as a card somebody navigated to and stayed on.
+void leaveCurrentCard() {
+  // One card going up is one step through the announcement queue, as in
+  // advance().
+  Cards::advanceAnnouncementCursor();
+
+  if (gHistoryCount > 0) {
+    for (uint8_t i = gHistoryCursor; i + 1 < gHistoryCount; ++i) {
+      gHistory[i] = gHistory[i + 1];
+    }
+    gHistoryCount--;
+  }
+
+  if (gHistoryCursor < gHistoryCount) {
+    applyHistory();
+  } else {
+    const Position next = computeNext();
+    pushHistory(next);
+    applyHistory();
+  }
+
+  gLastSwitchMs = millis();
+  gManualHoldUntilMs = 0;
+  noteShowing(Impressions::Arrival::Rotation);
+  drawCurrent();
+}
+
 void fetchCard(uint8_t index) {
   Cards::CardSpec& card = gCards[index];
   if (card.fetch == nullptr) {
@@ -1164,11 +1209,23 @@ void fetchCard(uint8_t index) {
 
   if (gCurrent.card < 0) {
     // Nothing was on screen (boot, or everything empty until now) - put the
-    // first thing we have up immediately rather than waiting out a dwell.
-    show(computeNext());
+    // first thing we have up immediately rather than waiting out a dwell. The
+    // history restarts at that card, so a reverse tap from it stays on it
+    // and does not step back onto an entry recorded while nothing was showable.
+    const Position next = computeNext();
+    resetHistory(next);
+    show(next);
     return;
   }
   if (gCurrent.card == static_cast<int8_t>(index)) {
+    if (!showable(index)) {
+      // The refresh left the card on screen with nothing to show. Its dwell is
+      // not waited out over the no-content screen: what the rotation would
+      // have shown next goes up now.
+      Log::printf("[cards] '%s' has nothing to show after its refresh - moving on", card.id);
+      leaveCurrentCard();
+      return;
+    }
     // Fresh data for the card actually on screen: redraw it in place. Not an
     // advance - a refresh must never make the rotation skip a card.
     drawCurrent();

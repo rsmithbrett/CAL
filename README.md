@@ -746,6 +746,12 @@ screens and `drawNoAircraftScreen()`/`drawNoListingsScreen()`'s white,
 card-styled ones for content problems specifically. The boot-ladder screens
 themselves (Wi-Fi joining, time sync, update-in-progress) are unchanged.
 
+The aircraft card stopped drawing its status screen on 2026-11-12. It takes no
+turn in the rotation unless it holds a plane, so none of its non-Ok states
+reaches the panel; see "The aircraft card takes no turn without a plane" at the
+end of this document. The weather card has since been folded into Forecast,
+and the forecast card still draws a status screen of its own.
+
 **The two-way toggle these cards used to live on is gone.** An earlier
 version of this document called that out as "a known simplification":
 `App.ino` held an `enum class CardKind { Weather, Aircraft }` and flipped
@@ -1019,13 +1025,15 @@ is not yanked away a second later. CYD-Dickey hardcodes this as
 server can change it.
 
 **Empty cards are skipped, blank cards are not shown.** A card reporting zero
-items is passed over entirely. Note what does *not* count as empty: a card
-holding an explanatory status — "no aircraft within 10 mi right now",
-"weather is not showing yet" — reports one item, because that message is
-content and has always been shown. In practice the skip fires for a card that
-has not fetched yet, which is the ordinary state for the first second or two
-after boot. If nothing at all has anything, `Display::showNoContent()` says
-so rather than leaving the panel blank.
+items is passed over entirely. What counts as empty is each card's own answer.
+The forecast card holding an explanatory status ("Forecast is not showing yet")
+reports one item, because that message is content and has always been shown. The
+aircraft card reports one item only while it holds a plane, so "no aircraft
+within 10 mi right now" is never a turn in the rotation; see "The aircraft card
+takes no turn without a plane". The skip also fires for any card that has not
+fetched yet, which is the ordinary state for the first second or two after
+boot. If nothing at all has anything, `Display::showNoContent()` says so rather
+than leaving the panel blank.
 
 **The policy comes from the server, on the check-in that already exists.**
 `CheckInResponse.cardPolicy` carries `defaultDwellSeconds`,
@@ -1499,9 +1507,10 @@ pictures a household picks independently.
 every device until somebody sets one — that instance reports zero items and
 the scheduler's existing empty-card skipping passes over it entirely. Same for
 an asset that will not fetch and for one that will not decode. This is
-deliberately the opposite of what weather and aircraft do, whose "not
-activated" and "nothing overhead right now" states report one item because
-those messages are real content worth a screen. There is nothing informative
+deliberately the opposite of what the forecast card does, whose "not showing
+yet" state reports one item because that message is real content worth a
+screen. The aircraft card did the same for "nothing overhead right now" until
+2026-11-12 and now reports zero without a plane. There is nothing informative
 to say about a picture that isn't there, and a card reading "no image
 configured" in a household's living room is a worse outcome than a card that
 simply never appears. A household that wants only one picture configures only
@@ -6316,6 +6325,12 @@ draws nothing at all on failure (see Calendar.h's three reasons), so its copy of
 the message only ever reaches `cardStatus()` and the debug stream, where the
 precise fault is what an operator actually wants.
 
+`Aircraft.cpp` stopped calling `failureText()` on 2026-11-12, when its status
+screen stopped being drawn (see "The aircraft card takes no turn without a
+plane"). It still sets `serviceUnreachable` at the same three sites, and
+`cardFetch()` reads the flag to decide whether a plane it holds outlasts a
+fetch that got no answer.
+
 ### Expiry is enforced here, on this device's own clock, at draw time
 
 This is the part that decides whether the feature is worth having. A device told
@@ -6871,6 +6886,11 @@ will need the stream to name the parsed value the way the other two now do.
 ### Aircraft reads `status`, and does not get a fallback
 
 Same defect, same fix, one deliberate difference.
+
+From 2026-11-12 none of the screens named in this section is drawn. The
+statuses are derived exactly as described here and still reach `cardStatus()`
+and the stream, which is where the difference between a clear sky and a failed
+refresh is now read. See "The aircraft card takes no turn without a plane".
 
 The card now whitelists `status`, derives one `refreshFailed` boolean from it,
 and splits the empty path: `Aircraft::Status::Empty` keeps "No aircraft within N
@@ -7555,3 +7575,166 @@ read.
 Not verified on hardware. No Panellan has been booted, so the 500ms-per-CMD0
 figure is read off the core's own `sd_diskio.cpp` rather than measured, and the
 gate is proven only by both boards compiling.
+
+## The aircraft card takes no turn without a plane
+
+The owner's rule, 2026-11-12: "Ensure there's never a card saying no aircraft-
+the card should be skipped."
+
+Until this change the card reported one item from its first fetch onward, so
+every state it could be in got a full turn: "Nothing overhead right now" over a
+clear sky, "Couldn't check overhead just now" when the server's own refresh
+failed, and the resting and refused screens. On most displays, for most of the
+day, that was one slide in every lap of the rotation telling a household that
+nothing was happening.
+
+`Aircraft::cardItemCount()` now returns 1 only while the last result's status is
+`Status::Ok`, the one status that carries a plane, and 0 at every other time
+including before the first fetch. That is the whole of what keeps the card out
+of the rotation. The scheduler's `showable()` already requires `itemCount() > 0`,
+and `firstShowable()`, `nextShowable()`, `dueInterstitial()` and `computeNext()`
+already pass over a card that is not showable. Calendar, the picture cards and
+Home Value take the same route.
+
+`cardDraw()` draws the plane and nothing else. Reached without one it draws
+nothing and says so at verbose level. The scheduler does not call it then,
+because `drawCurrent()` checks `showable()` first.
+
+### Every status without a plane skips, not only the clear sky
+
+The narrower reading of the rule would skip `Empty`, `RefreshFailed` and
+`NotConfigured`, and leave the refused and failed states (`NotActivated`,
+`ProviderDisabled`, `NoPosition`, `AuthError`, `NetworkError`) on the panel.
+This change takes the wider one. Each of those screens is the aircraft card
+saying it has no aircraft to show with a different reason attached, and none of
+the reasons is something the person standing at the display can act on there.
+
+What that costs: a display that is not activated for aircraft, or whose device
+secret is rejected, no longer says so on the glass. The reason still reaches an
+operator on the stream, in the two lines described under "What an operator reads
+instead of the screen" below. If the refused states should come back to the
+panel, the change is the condition in `cardItemCount()` plus a draw path for
+them.
+
+### What the display does, case by case
+
+| Case | What happens |
+|---|---|
+| Before the first fetch returns | The card reports zero and the rotation runs on the other cards. |
+| The first fetch gets no answer, or is answered without a plane | The same. One log line names the status. |
+| A fetch returns a plane while another card is up | The card joins the rotation at its place in the order and is shown at its next turn, for its ordinary dwell. |
+| The plane is inside the notable distance | The longer notable dwell, as before. `cardIsNotable()` already answers false unless the status is `Ok`, so it needed no change. |
+| The plane leaves while its card is up | The card that would have been next goes up at once and gets its own full dwell. |
+| The plane leaves while another card is up | Nothing on screen changes. The card is passed over from then on, and `forgetHistoryFor()` has dropped its entries from the navigation history. |
+| A forward or reverse tap | Cannot land on the card without a plane. Forward goes through `computeNext()`, and reverse replays a history the card is no longer in. |
+| Every card reports zero | `Display::showNoContent()`, as before this change. The moment a fetch returns a plane, the card goes up without waiting out a dwell. |
+| Aircraft is the only card in the policy | The no-content screen without a plane, the plane's card the moment a fetch returns one, and the no-content screen again the moment it leaves. |
+| A fetch gets no answer while a plane is held | The plane stays, with its "Updated N min ago" line counting up. |
+| A fetch is answered without a plane | The plane is dropped at that fetch. |
+
+### A fetch that got no answer keeps the plane, and an answer without one drops it
+
+This is the rule `cardFetch()` already had, unchanged. It used to decide which
+screen the card drew and now decides whether the card is in the rotation.
+
+A fetch got no answer when the request could not begin, when the HTTP status was
+below 429 and not one of 200, 401, 403 or 404 (which takes in the negative codes
+`HTTPClient` returns for a connection that failed or timed out), or when a 403
+carried a body that does not parse. Those are the three places
+`serviceUnreachable` is set. With a plane held, the plane is kept and the card
+keeps its turn. There is no time limit on that: the plane stays until a fetch is
+answered, and the freshness line on the card is what tells a reader how old the
+sighting is. A limit measured against `gLastOkMs` would be a small change and is
+the owner's call, so none is added here.
+
+Every other outcome drops the plane at that fetch: a clear sky, a failed
+upstream refresh (HTTP 429 and above, or a 200 whose `status` is `Stale`,
+`Unavailable` or unrecognised over an empty array), no provider on file, no
+position for the display, a refusal, a rejected device secret, a 200 that cannot
+be read, and a TLS layer on this device that is not ready. A `Stale` status that
+still carries planes is `Ok` and shows them, as before.
+
+### When the plane leaves while its card is up
+
+The card's refresh runs inside `poll()`, so a plane can go while a household is
+looking at it. `fetchCard()` now checks whether the card on screen is still
+showable after its refresh. When it is not, it logs that and calls
+`leaveCurrentCard()`, which puts up what the rotation would have shown next and
+starts that card's dwell from zero.
+
+Before this change the same moment left the scheduler's "Nothing to show yet"
+screen up for the rest of the emptied card's dwell. Few cards reached that state
+often. The aircraft card will reach it many times a day.
+
+`leaveCurrentCard()` takes the emptied card's entry out of the navigation
+history, so a reverse tap from the replacement lands on the card that was up
+before the plane's. If the household had stepped back onto the plane's card, the
+entry that followed it in the history goes up; otherwise `computeNext()`
+decides. A manual hold on the emptied card ends with it. The replacement was put
+up by the rotation and not sought, so it is recorded as a rotation arrival and
+is not counted as a card somebody navigated to and stayed on.
+
+`computeNext()` now carries on from the emptied card's place in the order while
+the policy still carries that card. Before, a list card that stopped being
+showable sent the sequence back to the first list card, which would have
+replayed the cards ahead of the aircraft card every time a plane left.
+
+Both changes are in the scheduler. They apply to every card whose refresh
+empties it while it is on screen, not only to this one.
+
+### Nothing showable at all
+
+With every card at zero, or with aircraft the only card in the policy and no
+plane held, the panel shows `Display::showNoContent()`: "Nothing to show yet"
+over "Waiting for the first update from the server." That screen is the
+scheduler's and is unchanged. It is redrawn once per default dwell, and the
+first fetch to return something replaces it at once.
+
+`fetchCard()`'s branch for that moment now resets the navigation history to the
+card it puts up. Without that, a reverse tap from the first card to appear after
+an empty spell stepped back onto an entry recorded while nothing was showable,
+and drew the no-content screen again.
+
+On an aircraft-only display the second line of that screen is wrong for most of
+the day: the server has answered, and the answer was a clear sky. The wording
+belongs to `Display` and is shared by every card, so it is left for the owner to
+decide and is not changed here.
+
+### What an operator reads instead of the screen
+
+Every fetch that ends with no plane held logs one line:
+
+```
+[aircraft] no plane held (ok, nothing within 10 mi) - the card takes no turn until a fetch returns one
+```
+
+The text in brackets is `cardStatus()`, so a clear sky, a failed upstream
+refresh, a refusal and a network fault each read differently, the way they do in
+the `[providers]` line on each check-in. When a refresh empties the card that is
+on screen, the scheduler adds:
+
+```
+[cards] 'aircraft' has nothing to show after its refresh - moving on
+```
+
+Neither line comes from `cardItemCount()`, which the scheduler calls every time
+it looks for the next card.
+
+### What this leaves
+
+`Display::showAircraftStatus()` is still in `Display.cpp` and now has no caller.
+It is left in place so this change stays inside the card and the scheduler.
+
+An announcement banner is drawn in place of a card's own content when that card
+takes its turn. An announcement whose only banner-eligible card is `aircraft`
+(`allowBanner` in the policy) therefore waits for a plane.
+
+The RAM buffer that holds an airline logo on a display with no SD card is not
+released when the plane is dropped. It stays as it was until the next plane's
+fetch replaces or releases it, or a failed check-in releases it, as before.
+
+Host-tested only. `ci/test-aircraft-takes-no-turn.sh` runs the shipped
+`Aircraft.cpp` and `CardManager.cpp` together against a fake clock, a fake
+service and a recording display, and TEST_PLAN.md section 36 lists the cases and
+what they cannot show. Neither board's firmware was compiled for this change,
+and no display has run it.
