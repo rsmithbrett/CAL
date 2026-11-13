@@ -78,10 +78,10 @@ struct Instance {
   static void draw(uint16_t) {
     const char* const qrData = currentQrData();
     if (strlen(qrData) == 0) {
-      // Only reachable if the policy changed between the scheduler's itemCount() check
-      // and this call - see Announcement::Instance<N>::draw()'s identical remark on its
-      // own equivalent guard.
-      Display::showNoContent("No QR code to show", "This card has no QR data configured yet.");
+      // itemCount() answers zero for this, so the only way here is a caller that did
+      // not ask - see Announcement::Instance<N>::draw()'s identical remark. Nothing is
+      // drawn: there is no message worth a panel in "nobody has configured this yet".
+      Log::printf("[%s] draw reached with no QR data configured - nothing drawn", id());
       return;
     }
     Log::printf("[%s] drawing code for '%s'%s", id(), qrData,

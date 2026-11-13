@@ -166,6 +166,9 @@ jobs:
       - name: Check every card owes the key policy its registration states
         if: ${{ hashFiles('ci/check-card-key-decisions.sh') != '' }}
         run: bash ci/check-card-key-decisions.sh
+      - name: Check no content means no card rather than a screen saying so
+        if: ${{ hashFiles('ci/check-no-content-is-not-a-card.sh') != '' }}
+        run: bash ci/check-no-content-is-not-a-card.sh
       - name: Test the aircraft card takes no turn without a plane on host
         if: ${{ hashFiles('ci/test-aircraft-takes-no-turn.sh') != '' }}
         run: bash ci/test-aircraft-takes-no-turn.sh

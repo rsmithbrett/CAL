@@ -1722,8 +1722,8 @@ card, just without a same-repository `static_assert` to enforce the
 cross-repository half of it.
 
 **Interstitial, not list**, for the same reason the picture card is: one
-notice is not a feed. **Missing text is the ordinary state, and it is
-silent** — with no `text` in the policy, which is every device until an admin
+notice is not a feed. **Missing text is the ordinary state and draws
+nothing** — with no `text` in the policy, which is every device until an admin
 types one, the card reports zero items and is passed over entirely, the same
 "no image configured" tolerance the picture card already has for words
 instead of a picture.
@@ -2677,11 +2677,12 @@ twenty-second timeout, on the loop task, with the previous card still on screen.
 already on the card, so the ordinary pass is ten cheap checks and the fetches
 only happen on the first pass after a household changes their set. `draw()` then
 reads that array and calls `Assets::drawCached()`, which never fetches. An item
-whose decode fails clears its own flag and puts
-`Display::showNoContent("No picture to show", ...)` on the panel, since
-`drawImageFromSd()` has already cleared it, and that item stays out until the
-next fetch, so a picture this display cannot decode costs one dwell instead of
-blanking the card on every cycle.
+whose decode fails clears its own flag and draws nothing - `drawImageFromSd()`
+has already cleared the panel, so what takes that dwell is the themed
+background and the clock rather than a screen explaining the absence - and the
+item stays out of the set until the next fetch, so a picture this display cannot
+decode costs one dwell instead of blanking the card on every cycle. See "No
+picture means no card" at the end of this file.
 
 **A display with no SD card holds one photograph in heap and moves along.**
 When nothing in the set reached the card, `fetch()` falls back to
@@ -2690,9 +2691,10 @@ cards and the airline logo already use. One buffer, not ten: only one picture is
 on screen at a time, and ten at ten to twenty kilobytes apiece is several times
 what this device has spare. `fetch()` advances `gRamNext` on every pass, so a
 cardless display still cycles the whole set, just at the refresh cadence rather
-than the dwell one. In between, `draw()` asks `Assets::drawRam()` for the item
-the buffer holds and draws the no-content panel for any other, which is the
-ordinary state for a cardless display holding one of several.
+than the dwell one. The items it cannot draw are not in its item count at all:
+`itemCount()` counts the photographs on the card plus the one in heap, so such a
+display takes one turn with a photograph on it rather than one turn per item
+with a message on most of them.
 
 `PersonalPhotos::releaseRamBuffer()` hands that buffer back from the check-in
 failure path in `App.ino`, beside `Graphic::releaseRamBuffers()` and
@@ -7818,8 +7820,10 @@ answer instead, "Updated just now" and "Updated N min ago", which is what the
 card drew before.
 
 Both go through the same ladder, which climbs a unit rather than letting one
-run away: seconds under a minute, minutes under an hour, hours under two days,
-then days. A plane held through a long outage reads "Reported 7 hr ago", which
+run away: seconds under a minute, minutes under an hour, hours under a day,
+then days. Each unit hands over when the next reaches one, so "Reported 1 day
+ago" is a line a display actually draws. A plane held through a long outage
+reads "Reported 7 hr ago", which
 is the line carrying the weight the rule above puts on it. The no-position-age
 branch is rounded down to a whole minute first, so a display talking to a server
 that sends no age reads exactly what it always has.
@@ -7854,8 +7858,78 @@ The RAM buffer that holds an airline logo on a display with no SD card is not
 released when the plane is dropped. It stays as it was until the next plane's
 fetch replaces or releases it, or a failed check-in releases it, as before.
 
-Host-tested only. `ci/test-aircraft-takes-no-turn.sh` runs the shipped
-`Aircraft.cpp` and `CardManager.cpp` together against a fake clock, a fake
-service and a recording display, and TEST_PLAN.md section 36 lists the cases and
-what they cannot show. Neither board's firmware was compiled for this change,
-and no display has run it.
+Host-tested, and compiled for both boards. `ci/test-aircraft-takes-no-turn.sh`
+runs the shipped `Aircraft.cpp` and `CardManager.cpp` together against a fake
+clock, a fake service and a recording display, and TEST_PLAN.md section 37 lists
+the cases and what they cannot show. No display has run it: nothing here has
+been on glass.
+
+## No picture means no card, on the four cards that could say otherwise
+
+A display was photographed showing a blue panel reading "No picture to show /
+This photograph could not be loaded." The owner's rule from it: these can never
+be shown. No picture means no card.
+
+Four cards could put a message on the glass in place of content, and each of
+them now takes no turn instead. The pattern is the aircraft card's, above: the
+card's `itemCount()` answers zero and the scheduler passes it over, rather than
+the card explaining an absence to whoever is standing at the panel.
+
+**`CardManager`'s own two screens stay.** "Nothing to show yet" and "This build
+has no cards registered" are about the whole rotation having nothing rather than
+about one card, and a panel with nothing at all to draw has to say something.
+`Display::showNoContent()` stays with them.
+
+### Known before the turn, which is most of it
+
+Three of the five message sites were only ever reachable if the policy changed
+between the scheduler's `itemCount()` check and the `draw()` call that follows
+it - the announcement card with no text, the QR card with no data, and the
+picture card whose asset the policy just changed. Each card's `itemCount()`
+already answered zero for its own condition, so the scheduler already passed the
+card over and the guard in `draw()` was for a race that cannot happen: both run
+inside one `drawCurrent()` call with nothing between them. Those three now log
+and draw nothing.
+
+The fourth is the one the photograph came from, and it is the common case rather
+than a race. `PersonalPhotos::itemCount()` reported the whole set, and a display
+with no SD card can draw only the one photograph it holds in heap, so a set of
+three took three turns and two of them put that panel up. `itemCount()` now
+counts the photographs this display can actually draw - on the card, or the one
+in heap - and `draw()` and `cardListingId()` map the scheduler's index onto that
+set through `itemAt()`. A cardless display holding one of three takes one turn
+with a photograph on it instead of three turns, two of them explaining an
+absence.
+
+### Discovered while drawing, where it costs one dwell
+
+The fifth is a decode failure: a picture or a photograph whose bytes are on the
+device and will not decode. Nothing can see that coming - it is discovered
+inside the draw, and by then `Display::drawImageFromSd()` has already cleared
+the panel, which is its standing contract on every false return.
+
+So that draw has nothing to put on a cleared panel, and what the glass shows for
+the rest of that one dwell is the themed background with the corner clock on it.
+Not a message, and not the card before it. The failing asset is taken out of the
+set in the same breath - `gReady = false` for a picture card, `gOnCard[item] =
+false` or `releaseRam()` for a photograph - so the card or the item is out of
+the rotation from the next computed card onward, and comes back on its own when
+a fetch lands a copy that decodes.
+
+**What this deliberately does not do is leave the card early.** Making the panel
+give way the moment a draw finds nothing needs the scheduler to know that the
+draw drew nothing, and it cannot: `showable()` after the draw is the wrong
+question for a list card, because a photograph set with one bad item still
+reports items and still looks showable. Answering it properly means a new signal
+out of `Cards::DrawFn`, which every card would have to carry. The cost of not
+doing it is one dwell of background-and-clock per asset that will not decode,
+once, rather than every pass.
+
+### Where this can leave a display with nothing
+
+A display whose only configured card is one of these four, in the state where
+that card now reports zero, reaches `CardManager`'s "Nothing to show yet" where
+it used to read a per-card message. That is one display shape: photographs
+chosen with no SD card and nothing yet fetched into heap, or a single picture
+card whose asset will not decode. Every display carrying any other card with
+content is unaffected - the rotation simply has one fewer card in it.

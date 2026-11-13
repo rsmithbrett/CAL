@@ -63,6 +63,11 @@ std::vector<std::string> gLogLines;
 
 void clearLog() { gLogLines.clear(); }
 
+/// The id of the last photograph a draw actually put on the panel, or empty.
+/// What this card draws is a photograph or nothing, so "did a picture reach the
+/// glass" is a question every case about the drawable set has to be able to ask.
+std::string gLastDrawn;
+
 /// Lines holding every one of `fragments`.
 std::vector<std::string> loggedMatching(const std::vector<std::string>& fragments) {
   std::vector<std::string> found;
@@ -259,143 +264,119 @@ void aChangedSetReportsNothingUntilTheNextFetch() {
   std::cout << "  a set that changed reports nothing until the next fetch\n";
 }
 
-/// A photograph that failed to decode stops reporting its id.
+/// A photograph that failed to decode leaves the drawable set.
 ///
 /// Production drops the item until the next fetch, and the key follows that
-/// decision rather than holding its own copy of what is drawable.
-void aPhotographThatDidNotDecodeStopsReportingItsId() {
+/// decision rather than holding its own copy of what is drawable. The index
+/// space is the drawable photographs, so the set compacts and the dropped id is
+/// no longer reported by any index.
+void aPhotographThatDidNotDecodeLeavesTheSet() {
   gOnCard = {kFirst, kSecond};
   gRamFetchSucceeds = true;
   gDrawCachedSucceeds = true;
   resetTo({kFirst, kSecond});
   runFetch();
+  assert(registered().itemCount() == 2);
   assert(keyFor(0) == kFirst);
+  assert(keyFor(1) == kSecond);
 
   gDrawCachedSucceeds = false;
   assert(registered().draw != nullptr);
   registered().draw(0);
 
-  assert(keyFor(0).empty() &&
-         "an item dropped for a decode failure must not keep reporting its id");
-  assert(keyFor(1) == kSecond);
+  assert(registered().itemCount() == 1 &&
+         "an item dropped for a decode failure is no longer an item");
+  assert(keyFor(0) == kSecond &&
+         "the drawable set compacts onto the photographs that are left");
+  assert(keyFor(1).empty());
+  for (uint16_t item = 0; item < PersonalPhotos::kMaxPhotos; ++item) {
+    assert(keyFor(item) != std::string(kFirst) &&
+           "an item dropped for a decode failure must not keep reporting its id");
+  }
   gDrawCachedSucceeds = true;
-  std::cout << "  a photograph that did not decode stops reporting its id\n";
+  std::cout << "  a photograph that did not decode leaves the drawable set\n";
 }
 
-/// A draw that put no photograph up says so, and names which item held the glass
-/// instead.
+/// A cardless display counts the one photograph it holds, not the whole set.
 ///
-/// This is the half of the card that a reader cannot get at any other way. A
-/// cardless display holds one picture, the other items of the set draw
-/// "No picture to show", and the impression recorded against each of them carries
-/// the full dwell - so the count on the card reads higher than the pictures it
-/// put up and nothing on the stream distinguished the two. The draws that fail to
-/// decode already wrote a line; these did not.
-void aDrawWithNoPictureNamesWhatTookTheGlass() {
+/// This is the state the photograph that started this came from: three chosen,
+/// one in heap, and the other two taking a turn each with "No picture to show"
+/// on the panel. They are not items any more, so the card takes one turn and a
+/// photograph is on it.
+void aCardlessDisplayCountsOnlyTheOneItHolds() {
   gOnCard.clear();
   gRamFetchSucceeds = true;
   gDrawCachedSucceeds = true;
   resetTo({kFirst, kSecond, kThird});
   runFetch();
 
-  // Whichever item the heap buffer landed on is the one that drew. The resolver
-  // answers for exactly that item, which is what ties this case to the key.
-  int held = -1;
-  for (uint16_t item = 0; item < 3; ++item) {
-    if (!keyFor(item).empty()) {
-      held = static_cast<int>(item);
-    }
-  }
-  assert(held >= 0 && "a cardless display should hold one picture after a fetch");
+  assert(registered().itemCount() == 1 &&
+         "a display with no SD card can draw one of the set, so it counts one");
 
+  clearLog();
+  gLastDrawn.clear();
   assert(registered().draw != nullptr);
-  const char* const ids[3] = {kFirst, kSecond, kThird};
+  registered().draw(0);
 
-  for (uint16_t item = 0; item < 3; ++item) {
-    clearLog();
-    registered().draw(item);
+  assert(!gLastDrawn.empty() && "the one item it counts draws a photograph");
+  assert(gLastDrawn == keyFor(0) && "and it is the photograph the key names");
+  assert(loggedMatching({"personalphotos", "nothing drawn"}).empty() &&
+         "a turn that drew a photograph writes no nothing-drawn line");
 
-    const auto named = loggedMatching({"personalphotos", ids[item], "not drawn"});
-    if (static_cast<int>(item) == held) {
-      assert(named.empty() && "the photograph that drew must not report itself as not drawn");
-      continue;
-    }
-
-    assert(named.size() == 1 &&
-           "a draw that put no photograph up writes one line naming the photograph");
-    const std::string& line = named.front();
-    assert(line.find("item " + std::to_string(item + 1) + " of 3") != std::string::npos &&
-           "the line names which item of the set drew nothing");
-
-    // The held item by number, not the word "heap". Both branches of production's
-    // line carry "heap", so an assertion on that word alone passes whichever one
-    // ran and says nothing about which state the display was in.
-    assert(line.find("item " + std::to_string(held + 1) + " is the one held in heap") !=
-               std::string::npos &&
-           "the line names which item holds the heap buffer instead");
-    assert(line.find("nothing is held in heap") == std::string::npos &&
-           "a display holding a picture must not report that nothing is held");
-  }
-
-  std::cout << "  a draw with no photograph names the item and what holds the glass\n";
+  std::cout << "  a cardless display counts the one photograph it holds\n";
 }
 
-/// A cardless display holding nothing says so, rather than naming a held item.
+/// A cardless display whose fetch failed counts nothing, so it takes no turn.
 ///
-/// The other arm of the same line. A fetch that failed leaves the heap buffer
-/// empty, so every item of the set draws the no-content state and there is no
-/// held item to point at. Forcing production's branch either way satisfied an
-/// assertion on the word "heap", which both arms carry.
-void aDrawWithNothingHeldSaysNothingIsHeld() {
+/// Every item of the set used to draw the no-content state here. None of them
+/// is an item now, the card is passed over the way the aircraft card is passed
+/// over without a plane, and a draw forced anyway puts no picture up.
+void aFetchThatHeldNothingCountsZero() {
   gOnCard.clear();
   gRamFetchSucceeds = false;
   gDrawCachedSucceeds = true;
   resetTo({kFirst, kSecond});
   runFetch();
 
+  assert(registered().itemCount() == 0 &&
+         "nothing on the card and nothing in heap is nothing to draw");
   for (uint16_t item = 0; item < 2; ++item) {
     assert(keyFor(item).empty() && "a fetch that failed holds nothing to report");
   }
 
-  const char* const ids[2] = {kFirst, kSecond};
-  for (uint16_t item = 0; item < 2; ++item) {
-    clearLog();
-    registered().draw(item);
-
-    const auto named = loggedMatching({"personalphotos", ids[item], "not drawn"});
-    assert(named.size() == 1 &&
-           "a draw with nothing held writes one line naming the photograph");
-    const std::string& line = named.front();
-    assert(line.find("item " + std::to_string(item + 1) + " of 2") != std::string::npos &&
-           "the line names which item of the set drew nothing");
-    assert(line.find("nothing is held in heap") != std::string::npos &&
-           "the line says the heap buffer holds nothing");
-    assert(line.find("is the one held in heap") == std::string::npos &&
-           "a display holding nothing must not name a held item");
-  }
+  clearLog();
+  gLastDrawn.clear();
+  registered().draw(0);
+  assert(gLastDrawn.empty() && "asked to draw anyway, it puts no photograph up");
+  assert(loggedMatching({"personalphotos", "nothing drawn"}).size() == 1 &&
+         "and writes one line saying so instead of putting a screen up");
 
   gRamFetchSucceeds = true;
-  std::cout << "  a draw with nothing held says nothing is held, rather than naming an item\n";
+  std::cout << "  a fetch that held nothing counts zero and draws nothing\n";
 }
 
-/// An item past the end of the set says so too.
+/// An index no photograph answers draws nothing and names what it was asked.
 ///
 /// CardManager asks for items under itemCount(), so this is the path that means
-/// the two disagree. It drew the no-content state and wrote nothing.
-void anItemPastTheSetSaysItDrewNothing() {
+/// the two disagree. It draws no picture and writes the one line that says so.
+void anIndexNoPhotographAnswersDrawsNothing() {
   gOnCard = {kFirst};
   gRamFetchSucceeds = true;
+  gDrawCachedSucceeds = true;
   resetTo({kFirst});
   runFetch();
+  assert(registered().itemCount() == 1);
 
   clearLog();
+  gLastDrawn.clear();
   assert(registered().draw != nullptr);
   registered().draw(4);
 
-  const auto named = loggedMatching({"personalphotos", "item 5", "set holds 1"});
+  assert(gLastDrawn.empty() && "an index past the drawable set puts no photograph up");
+  const auto named = loggedMatching({"personalphotos", "item 5", "1 drawable", "nothing drawn"});
   assert(named.size() == 1 &&
-         "a draw past the end of the set writes one line naming the item and the set size");
-  std::cout << "  an item past the set reports the item and the set size\n";
+         "it writes one line naming the index asked for and how many are drawable");
+  std::cout << "  an index no photograph answers draws nothing\n";
 }
 
 }  // namespace
@@ -423,13 +404,19 @@ void releaseRamBuffer(RamAssetBuffer& buffer) {
 }
 
 bool drawCached(const String& id) {
-  (void)id;
-  return gDrawCachedSucceeds;
+  if (!gDrawCachedSucceeds) {
+    return false;
+  }
+  gLastDrawn = static_cast<const std::string&>(id);
+  return true;
 }
 
 bool drawRam(const String& id, const RamAssetBuffer& buffer) {
-  (void)id;
-  return buffer.data != nullptr;
+  if (buffer.data == nullptr) {
+    return false;
+  }
+  gLastDrawn = static_cast<const std::string&>(id);
+  return true;
 }
 
 void invalidate(const String& id) { (void)id; }
@@ -451,14 +438,10 @@ bool registerCard(const CardSpec& spec, KeyPolicy keyPolicy) {
 
 }  // namespace Cards
 
-namespace Display {
-
-void showNoContent(const String& headline, const String& detail) {
-  (void)headline;
-  (void)detail;
-}
-
-}  // namespace Display
+// No Display namespace. This card draws a photograph or nothing, so there is no
+// Display function left for it to call - and leaving showNoContent() unstubbed
+// means a draw path that reaches for a screen again fails to link here rather
+// than reaching a panel.
 
 namespace Log {
 
@@ -482,10 +465,10 @@ int main() {
   aFetchThatFailedReportsNothing();
   anItemPastTheSetReportsNothing();
   aChangedSetReportsNothingUntilTheNextFetch();
-  aPhotographThatDidNotDecodeStopsReportingItsId();
-  aDrawWithNoPictureNamesWhatTookTheGlass();
-  aDrawWithNothingHeldSaysNothingIsHeld();
-  anItemPastTheSetSaysItDrewNothing();
+  aPhotographThatDidNotDecodeLeavesTheSet();
+  aCardlessDisplayCountsOnlyTheOneItHolds();
+  aFetchThatHeldNothingCountsZero();
+  anIndexNoPhotographAnswersDrawsNothing();
 
   std::cout << "PASS: personal photos content key (10 cases)\n";
   return 0;

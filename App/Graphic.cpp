@@ -221,15 +221,6 @@ struct Instance {
     return gCachedId == wantedAssetId() ? 1 : 0;
   }
 
-  /// The one no-content screen this instance can put up. Reached only from
-  /// draw(), and only in the two cases itemCount() could not see coming - see
-  /// both call sites below. Routed through Display::showNoContent() rather
-  /// than showForecastStatus(): that one carries its own card's colour-banded
-  /// banner, and a graphic card has no banner of its own to wear.
-  static void drawNoContent(const String& detail) {
-    Display::showNoContent("No picture to show", detail);
-  }
-
   /// Pure redraw. Never fetches - Assets::drawCached() is the draw-path entry
   /// point precisely because Assets::drawFullScreen() would fetch on a miss,
   /// and a rewind that reaches for the network is exactly what Cards.h's
@@ -248,11 +239,13 @@ struct Instance {
   /// See the tight branch below for the argument and for what it costs.
   static void draw(uint16_t) {
     if (!gReady || gCachedId.length() == 0 || gCachedId != wantedAssetId()) {
-      // Only reachable if the policy changed between the scheduler's
-      // itemCount() check and this call. Falls through to the same
-      // no-content screen as a failed decode below rather than leaving the
-      // panel blank.
-      drawNoContent("This card has no image configured yet.");
+      // itemCount() answers zero for every one of these, so the scheduler has
+      // already passed this instance over and the only way here is a caller
+      // that did not ask: both run inside one drawCurrent() call, with no
+      // chance for the policy to change in between. Nothing is drawn, because a
+      // picture that is not there has no message in it - the same rule
+      // itemCount()'s own remarks set out above.
+      Log::printf("[%s] draw reached with no picture held - nothing drawn", id());
       return;
     }
 
@@ -365,9 +358,9 @@ struct Instance {
     // cycle, and it will reappear on its own once fetch() lands a working
     // copy.
     gReady = false;
-    Log::printf("[%s] asset '%s' would not decode - dropping this card for now", id(),
-                gCachedId.c_str());
-    drawNoContent("This card's image could not be displayed.");
+    Log::printf("[%s] asset '%s' would not decode - dropping this card for now, and nothing is "
+                "drawn over the cleared panel",
+                id(), gCachedId.c_str());
   }
 
   /// Gives this instance's RAM buffer back and forgets the picture it held.

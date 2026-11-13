@@ -650,7 +650,8 @@ String heldIdentifier() {
 
 /// Writes "<lead> 3 hr ago" for a figure in seconds, climbing a unit rather
 /// than letting one run away: seconds under a minute, minutes under an hour,
-/// hours under two days, then days.
+/// hours under a day, then days. Each unit hands over when the next one
+/// reaches one, so every rung including "1 day ago" is reachable.
 ///
 /// The ladder exists because a plane is held for as long as the card holds it.
 /// A display cut off from the server for seven hours draws what it has with
@@ -679,11 +680,16 @@ void describeElapsed(char* out, size_t size, const char* lead, unsigned long sec
     snprintf(out, size, "%s 1 hr ago", lead);
     return;
   }
-  if (hours < 48UL) {
+  if (hours < 24UL) {
     snprintf(out, size, "%s %lu hr ago", lead, hours);
     return;
   }
-  snprintf(out, size, "%s %lu days ago", lead, hours / 24UL);
+  const unsigned long days = hours / 24UL;
+  if (days == 1) {
+    snprintf(out, size, "%s 1 day ago", lead);
+    return;
+  }
+  snprintf(out, size, "%s %lu days ago", lead, days);
 }
 
 /// The last line on the card: how old the fact above it is.

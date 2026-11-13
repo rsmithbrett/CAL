@@ -1082,6 +1082,10 @@ void theLastLineStatesThePlanesAge() {
   refreshAircraft();
   check(lastAgeLine() == "Reported 2 days ago", "past two days the line reads in days");
 
+  serviceAnswers(200, onePlaneWith("DAL977", 5.0, 3600, /*positionAgeSeconds=*/90000));
+  refreshAircraft();
+  check(lastAgeLine() == "Reported 1 day ago", "and the first day reads in the singular");
+
   serviceAnswers(200, onePlaneWith("DAL976", 5.0, 3600, /*positionAgeSeconds=*/3540));
   refreshAircraft();
   check(lastAgeLine() == "Reported 59 min ago", "a minute under the hour still reads in minutes");

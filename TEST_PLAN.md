@@ -7292,7 +7292,7 @@ step back from a card to the placeholder.
 the binary's own line and does not read its exit status:
 
 ```
-PASS: aircraft card takes no turn without a plane, 27 cases, 229 checks
+PASS: aircraft card takes no turn without a plane, 27 cases, 230 checks
 ```
 
 The test sets the clock, the service's answers and the taps, and reads the list
@@ -7325,7 +7325,7 @@ can read.
 | a plane the server set no limit on | clears the floor, takes its turn, is still held five minutes later, and dates the answer on its last line |
 | an altitude nobody reported | a figure where the server reported one, `--` where it sent null |
 | the literal UNKNOWN where a callsign goes | the registration on the card, in the status line and in the press label |
-| the age on the card's last line | `Reported 45 sec ago` on a draw at the answer's own tick, grown by the time since the answer when the rotation comes back round, `Updated just now` for a plane carrying no age, and the ladder's rungs read off the server's own figure: 59 min, 1 hr, 2 hr, 2 days |
+| the age on the card's last line | `Reported 45 sec ago` on a draw at the answer's own tick, grown by the time since the answer when the rotation comes back round, `Updated just now` for a plane carrying no age, and the ladder's rungs read off the server's own figure: 59 min, 1 hr, 2 hr, 1 day, 2 days |
 | the server's own fetch schedule | taken off the answer, not asked again at 59 seconds and asked at 60, and a schedule of 5 raised to the 30-second floor |
 | an answer carrying no schedule | back on the fixed interval, and not asked again two minutes later |
 | the schedule through a service that stops answering | two unanswered fetches keep the schedule, a third gives it up, and an answer puts it back |
@@ -7536,7 +7536,7 @@ dark, and the only other thing the panel could show is the scheduler's
 placeholder, which says less than a dated sighting.
 
 `describeAge()` therefore has to stay readable at any figure. `describeElapsed()`
-climbs a unit as the figure grows - seconds, minutes, hours under two days, then
+climbs a unit as the figure grows - seconds, minutes, hours under a day, then
 days - so a long hold reads "Reported 7 hr ago" rather than "Reported 420 min
 ago". The no-position-age branch is rounded down to a whole minute first, so a
 display talking to a server that sends no age reads exactly what it did before.
@@ -7599,3 +7599,117 @@ hold past the `millis()` rollover at about 49.7 days is not tested and would rea
 wrong: the elapsed figure wraps, so the line would say the position is newer than
 it is. Nothing bounds how long a plane is held, so the oldest sighting a display
 can draw is bounded only by how long the server stays out of reach.
+
+## 38. No picture means no card, on the four cards that could say otherwise (2026-11-13)
+
+A display was photographed showing "No picture to show / This photograph could
+not be loaded." The owner's rule from it: these can never be shown, no picture
+means no card. Four cards could put a message on the glass in place of content
+and each now takes no turn instead. README.md's "No picture means no card"
+section is the design record. `CardManager`'s own two screens stay, because they
+are about the whole rotation having nothing rather than about one card.
+
+### 38a. What is built
+
+Five message sites, in two shapes.
+
+**Three were unreachable already.** `Announcement`'s card with no text,
+`QrText`'s card with no data and `Graphic`'s instance with no picture held each
+had an `itemCount()` that already answered zero for exactly the condition the
+`draw()` guard tested, and both run inside one `drawCurrent()` call with nothing
+in between, so the policy cannot change between them. Each now logs and draws
+nothing.
+
+**One was the common case rather than a race, and it is the one photographed.**
+`PersonalPhotos::itemCount()` reported the whole chosen set, and a display with
+no SD card can draw only the one photograph it holds in heap, so a set of three
+took three turns and two of them put that panel up. The index space is now the
+drawable photographs: `isDrawable()` is the test, `itemCount()` counts them,
+`itemAt()` maps the scheduler's index onto them, and `draw()` and
+`cardListingId()` both read it. A cardless display holding one of three takes one
+turn with a photograph on it.
+
+**One is discovered inside the draw and costs one dwell.** A picture or
+photograph whose bytes are on the device and will not decode. By the time the
+draw knows, `Display::drawImageFromSd()` has cleared the panel - its standing
+contract on every false return, which the code says in as many words - so that
+dwell shows the theme background and the corner clock. The failing asset leaves
+the set in the same breath (`gReady = false`, `gOnCard[item] = false`, or
+`releaseRam()`), so the card or item is out of the rotation from the next
+computed card and returns when a fetch lands a copy that decodes.
+
+Not built: leaving the card early when a draw finds nothing. `showable()` after
+the draw is the wrong question for a list card - a photograph set with one bad
+item still reports items - and answering it properly needs a new signal out of
+`Cards::DrawFn` that every card would carry.
+
+### 38b. Added
+
+`ci/check-no-content-is-not-a-card.sh`. A text gate, in the same spirit as
+`check-text-state.sh`: no mention of `showNoContent` in any of the four card
+files, and exactly two `Display::showNoContent(` calls left in
+`App/CardManager.cpp`. It holds both halves of the rule, including the three
+sites no host case can reach. Wired into `build-and-release.yml` unguarded and
+into `mut-host-test.yml` and `bench-cal.yml` behind `hashFiles`, as the others
+are.
+
+### 38c. Changed, and made to fail first
+
+`tests/personal-photos-key-test.cpp` encoded the old index semantics, so four of
+its ten cases were rewritten. The host script is
+`ci/test-personal-photos-key.sh` and its line is unchanged:
+
+```
+PASS: personal photos content key (10 cases)
+```
+
+- "a photograph that did not decode stops reporting its id" became "a photograph
+  that did not decode leaves the drawable set": the count drops to one, the set
+  compacts so index 0 answers the photograph that is left, and no index reports
+  the dropped id.
+- "a draw with no picture names what took the glass" became "a cardless display
+  counts the one photograph it holds": the count is one, that turn draws a
+  photograph, and no nothing-drawn line is written.
+- "a draw with nothing held says nothing is held" became "a fetch that held
+  nothing counts zero": the count is zero, and a draw forced anyway puts no
+  picture up and writes one line.
+- "an item past the set says it drew nothing" became "an index no photograph
+  answers draws nothing", on the new line's wording.
+
+The stubs gained `gLastDrawn`, so a case can ask whether a photograph reached
+the panel, and the file's `Display::showNoContent` stub is gone - a draw path
+that reaches for a screen again now fails to link rather than reaching a panel.
+
+Mutations, grep-gated on the exact text removed and `cmp`-checked before the
+compile, with the restored file touched:
+
+| mutation | what fired |
+|---|---|
+| every item counted as drawable | `Assertion failed: keyFor(item).empty() && "nothing is held before the first fetch"` |
+| a failed decode left in the set | `Assertion failed: registered().itemCount() == 1 && "an item dropped for a decode failure is no longer an item"` |
+| a card file calling `showNoContent` again | `ERROR: App/QrText.cpp calls Display::showNoContent() 1 time(s).` |
+| one of `CardManager`'s two screens removed | `ERROR: App/CardManager.cpp calls Display::showNoContent() 1 time(s), expected 2.` |
+
+One mutation was discarded rather than recorded: returning `gCount` from
+`itemCount()` leaves the loop's accumulator set and unused, which fails
+`-Werror=unused-but-set-variable` instead of a case. The equivalent through
+`isDrawable()` is the one in the table.
+
+### 38d. Where this can leave a display with nothing
+
+A display whose only configured card is one of these four, in the state where
+that card now reports zero, reaches `CardManager`'s "Nothing to show yet" where
+it used to read a per-card message. Two shapes reach it: photographs chosen with
+no SD card and nothing yet fetched into heap, and a single picture card whose
+asset will not decode. A display carrying any other card with content is
+unaffected and simply has one fewer card in its rotation.
+
+### 38e. What this does not cover
+
+- **No glass.** Nothing here has been photographed. What a dwell of theme
+  background and clock looks like after a failed decode is unmeasured.
+- **Three of the five sites have no host case at all**, only the text gate. They
+  are unreachable by construction, which is why.
+- **`Graphic`, `Announcement` and `QrText` have no host test.** The arduino
+  compile is the first and only thing that reads those three files here.
+- **CI has not run it.** Every figure is this workstation.

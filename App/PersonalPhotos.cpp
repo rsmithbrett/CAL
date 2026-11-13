@@ -195,98 +195,119 @@ void fetch() {
   }
 }
 
-uint16_t itemCount() { return gCount; }
+/// Whether item `index` has bytes this display can put on the glass: a copy on
+/// the SD card, or the one photograph a card-less display holds in heap.
+bool isDrawable(uint8_t index) { return gOnCard[index] || gRamItem == index; }
+
+/// How many photographs of the set this display can draw.
+///
+/// Not gCount. A display with no SD card can draw only the one photograph it
+/// holds in heap, and reporting the whole set there spent a turn per item and
+/// put a screen up on most of them saying the picture could not be loaded. The
+/// owner's rule is that no picture means no card, so an item this display
+/// cannot draw is not an item: it is not counted, the scheduler never asks for
+/// it, and a cardless display holding one of three takes one turn with a
+/// photograph on it.
+///
+/// A set where none of them is drawable reports zero and the card is passed
+/// over entirely, the same way the aircraft card is passed over without a plane.
+uint16_t itemCount() {
+  uint16_t drawable = 0;
+  for (uint8_t i = 0; i < gCount; ++i) {
+    if (isDrawable(i)) {
+      ++drawable;
+    }
+  }
+  return drawable;
+}
+
+/// Which photograph the scheduler's `itemIndex` names, or kNothingHeld.
+///
+/// The scheduler walks 0..itemCount()-1, and itemCount() counts only the
+/// drawable ones, so the index it hands back is a position in that set rather
+/// than in the whole set. Everything that takes an item index goes through
+/// here, so draw() and cardListingId() cannot disagree about which photograph
+/// a turn was.
+uint8_t itemAt(uint16_t itemIndex) {
+  uint16_t seen = 0;
+  for (uint8_t i = 0; i < gCount; ++i) {
+    if (!isDrawable(i)) {
+      continue;
+    }
+    if (seen == itemIndex) {
+      return i;
+    }
+    ++seen;
+  }
+  return kNothingHeld;
+}
 
 /// The asset id of the photograph this item puts on the glass, or an empty
-/// string when the item draws no picture.
+/// string when the index names none.
 ///
 /// This is the card's content key, and an impression reports it in its
 /// attributes. Nothing else can answer it: the ids arrive on the check-in
 /// response rather than the card policy, so the policy's `assetId` and `qrData`
 /// that CardManager::noteShowing falls back to are both empty for this card.
 ///
-/// Gated on the two conditions draw() below tests, so an id is reported for a
-/// draw that put a photograph up and withheld for one that drew the no-content
-/// state. A display with no SD card holds one picture in heap and the rest of the
-/// set draws nothing, so an ungated id would name a photograph that was not on
-/// screen. noteShowing() runs immediately before the draw at every call site,
-/// which is what makes this and draw() read the same state.
+/// Reads the same itemAt() draw() does, so an id is reported for exactly the
+/// photograph that went on the panel. noteShowing() runs immediately before the
+/// draw at every call site, which is what makes the two read the same state.
 ///
 /// PERSONAL_PHOTOS_DESIGN.md section 8.7 is the record.
 String cardListingId(uint16_t itemIndex) {
-  if (itemIndex >= gCount) {
-    return String();
-  }
-
-  const uint8_t item = static_cast<uint8_t>(itemIndex);
-  if (!gOnCard[item] && gRamItem != item) {
+  const uint8_t item = itemAt(itemIndex);
+  if (item == kNothingHeld) {
     return String();
   }
 
   return String(gIds[item]);
 }
 
-void drawNoContent() {
-  Display::showNoContent("No picture to show", "This photograph could not be loaded.");
-}
-
 /// A pure redraw. Never fetches: drawCached and drawRam are the draw-path
 /// entry points, where drawFullScreen would reach for the network on a miss.
+///
+/// Draws a photograph or nothing. There is no screen here that explains an
+/// absence: itemCount() counts only the photographs this display can draw, so
+/// the scheduler never asks for one it cannot, and the one case nothing can see
+/// coming - bytes on the device that will not decode - takes the item out of
+/// the set and leaves the panel as Display::drawImageFromSd() left it, which is
+/// cleared to the theme background. See itemCount() above and the "No picture
+/// means no card" section in README.md.
 void draw(uint16_t itemIndex) {
-  if (itemIndex >= gCount) {
-    Log::printf("[%s] item %u drew no picture - the set holds %u", kCardId,
-                static_cast<unsigned>(itemIndex + 1), static_cast<unsigned>(gCount));
-    drawNoContent();
+  const uint8_t item = itemAt(itemIndex);
+  if (item == kNothingHeld) {
+    // itemCount() reports only drawable photographs, so the scheduler cannot
+    // reach this. A caller that did not ask first can.
+    Log::printf("[%s] draw asked for item %u with %u drawable - nothing drawn", kCardId,
+                static_cast<unsigned>(itemIndex + 1), static_cast<unsigned>(itemCount()));
     return;
   }
 
-  const uint8_t item = static_cast<uint8_t>(itemIndex);
   const char* const id = gIds[item];
 
   if (gOnCard[item]) {
     if (!Assets::drawCached(String(id))) {
-      // The decode failed. drawImageFromSd has already cleared the panel, so
-      // something has to go on it, and this item is dropped until the next
-      // fetch so a picture this display cannot decode costs one dwell rather
-      // than blanking the card on every cycle.
+      // The decode failed and drawImageFromSd() has already cleared the panel,
+      // so this dwell shows the theme background and the corner clock. The item
+      // is dropped until the next fetch, so a photograph this display cannot
+      // decode costs one dwell rather than a screen on every cycle, and it
+      // comes back on its own once a fetch lands a copy that decodes.
       gOnCard[item] = false;
-      Log::printf("[%s] photograph '%s' did not decode", kCardId, id);
-      drawNoContent();
+      Log::printf("[%s] photograph '%s' did not decode - out of the set until the next fetch, "
+                  "and nothing is drawn over the cleared panel",
+                  kCardId, id);
     }
     return;
   }
 
-  if (gRamItem == item) {
-    if (!Assets::drawRam(String(id), gRamBuffer)) {
-      Log::printf("[%s] photograph '%s' did not decode from RAM", kCardId, id);
-      releaseRam();
-      drawNoContent();
-    }
-    return;
+  // The one in heap, which is what isDrawable() left for a cardless display.
+  if (!Assets::drawRam(String(id), gRamBuffer)) {
+    Log::printf("[%s] photograph '%s' did not decode from RAM - the buffer is released and "
+                "nothing is drawn over the cleared panel",
+                kCardId, id);
+    releaseRam();
   }
-
-  // Not on the card and not the one in heap. Ordinary on a cardless display
-  // holding one of several, and the next fetch moves the buffer along.
-  //
-  // Named the way the featured-listings portrait band names a picture it did not
-  // draw: which item, where the bytes would have had to come from, and what holds
-  // the space instead. A set of three on a cardless display reaches this twice a
-  // pass and records an impression carrying the full dwell for each of them, so
-  // this line is what tells those draws apart from the one that put a photograph
-  // up. One line per draw rather than one per pass, because the item is what
-  // differs between them.
-  if (gRamItem == kNothingHeld) {
-    Log::printf("[%s] photograph '%s' (item %u of %u) not drawn - it is not on the card and "
-                "nothing is held in heap, so the no-content state takes the dwell",
-                kCardId, id, static_cast<unsigned>(item + 1), static_cast<unsigned>(gCount));
-  } else {
-    Log::printf("[%s] photograph '%s' (item %u of %u) not drawn - it is not on the card and "
-                "item %u is the one held in heap, so the no-content state takes the dwell",
-                kCardId, id, static_cast<unsigned>(item + 1), static_cast<unsigned>(gCount),
-                static_cast<unsigned>(gRamItem + 1));
-  }
-
-  drawNoContent();
 }
 
 bool registerSelf() {

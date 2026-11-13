@@ -124,10 +124,13 @@ struct Instance {
   static void draw(uint16_t) {
     const char* const text = currentText();
     if (strlen(text) == 0) {
-      // Only reachable if the policy changed between the scheduler's
-      // itemCount() check and this call - see Graphic::Instance<N>::draw()'s
-      // identical remark on its own equivalent guard.
-      Display::showNoContent("No announcement to show", "This card has no text configured yet.");
+      // itemCount() answers zero for this, so the scheduler has already passed
+      // the card over and the only way here is a caller that did not ask - the
+      // policy cannot change in between, since both run inside one
+      // drawCurrent() call. Nothing is drawn: a card with no notice in it has
+      // no message worth a panel, which is the rule the whole rotation follows.
+      // See Graphic::Instance<N>::draw()'s identical remark.
+      Log::printf("[%s] draw reached with no text configured - nothing drawn", id());
       return;
     }
     // The words actually on screen - nothing else in the log names this

@@ -64,6 +64,34 @@ under it. The display is working and the card comes back with the next plane.
 
 **Nothing to do.**
 
+### A card with no picture is left out, not explained - App
+
+A display was showing a blue panel reading "No picture to show / This photograph
+could not be loaded." Four cards could put a message like that on the screen in
+place of their own content: your photographs, a picture card, an announcement
+card with nothing typed into it yet, and a QR card with nothing configured yet.
+
+None of them does now. A card with nothing to show is left out of the rotation
+and the display goes straight to the next one, the same way the aircraft card is
+left out when there's no plane.
+
+**Your photographs on a display with no memory card.** Such a display can hold
+one photograph at a time, so a set of three used to take three turns: one with a
+picture and two with that blue panel. It now takes one turn, with a picture on
+it, and works through the set as it refreshes.
+
+**A picture that won't load costs one turn, once.** If the file is on the
+display but can't be decoded, that turn shows the background and the clock
+rather than a message, and the picture is dropped until the display fetches it
+again. It comes back on its own if the next copy loads.
+
+**If a display has nothing at all to show**, it still says so: "Nothing to show
+yet". That screen is about the whole rotation being empty rather than about one
+card, and it stays. A display whose only card is one of the four above, with
+nothing in it, now reaches that screen instead of the card's own message.
+
+**Nothing to do.**
+
 ---
 
 ## v2026.11.12.0001

@@ -114,6 +114,8 @@ jobs:
         run: bash ci/check-content-key-resolvers.sh
       - name: Check every card owes the key policy its registration states
         run: bash ci/check-card-key-decisions.sh
+      - name: Check no content means no card rather than a screen saying so
+        run: bash ci/check-no-content-is-not-a-card.sh
       # Aircraft.cpp and CardManager.cpp linked together against stubs: the
       # card's item count and the scheduler passing over it, read off one binary.
       - name: Test the aircraft card takes no turn without a plane on host
