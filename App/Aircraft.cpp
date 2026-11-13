@@ -55,11 +55,10 @@ Result parseRefusal(const String& body) {
   return result;
 }
 
-// How many seconds this plane is still worth showing. The server counts its own
-// limit down against the age of the position and sends what is left; zero means
-// the plane has had its time. An answer that carries no such field, which is
-// every server older than the field, gives each plane kDefaultShowForSeconds
-// instead, and so does a negative figure.
+// How many seconds this plane was still worth showing when the server answered.
+// Read only here, to decide whether the plane is worth picking at all. An answer
+// that carries no such field, which is every server older than the field, gives
+// each plane kDefaultShowForSeconds instead, and so does a negative figure.
 uint16_t secondsToShow(JsonVariantConst plane) {
   const int seconds = plane["showForSeconds"] | -1;
   if (seconds < 0) {
@@ -381,14 +380,16 @@ Result fetchMine() {
   // ever reaches this device. This card features one plane at a time, and an
   // ordinary airliner is what it features every other minute of the day.
   //
-  // A plane with no time left on it is passed over, so a list whose nearest
-  // entry has had its time still draws the next one that has time left, and a
-  // military plane outranks the others only while it has time of its own.
+  // A candidate with less than kMinimumTimeLeft on it is passed over, so a list
+  // whose nearest entry is nearly out of time still draws the next one with
+  // real time on it, and a military plane outranks the others only while it
+  // clears the floor too. This is the only place time left is ever read: the
+  // plane this picks is then drawn until a newer answer replaces it.
   JsonVariantConst plane = aircraft[0];
   uint16_t showForSeconds = 0;
   for (JsonVariantConst candidate : aircraft) {
     const uint16_t seconds = secondsToShow(candidate);
-    if (seconds == 0) {
+    if (seconds < kMinimumTimeLeft) {
       continue;
     }
     if (showForSeconds == 0) {
@@ -402,15 +403,16 @@ Result fetchMine() {
     }
   }
 
-  // Every plane on the list has had its time. Nothing here says the sky is
+  // Not one plane on the list clears the floor. Nothing here says the sky is
   // empty and nothing failed: the card takes no turn until a fetch brings back
-  // a plane with time left on it.
+  // a plane with real time on it.
   if (showForSeconds == 0) {
     result.status = Status::Expired;
     result.message = "No aircraft reported recently enough to show.";
-    Log::printf("[aircraft] %u sighting(s) and none with time left -> Expired; the card takes no "
+    Log::printf("[aircraft] %u sighting(s) and none with %us left -> Expired; the card takes no "
                 "turn until a fetch returns one",
-                static_cast<unsigned>(aircraft.size()));
+                static_cast<unsigned>(aircraft.size()),
+                static_cast<unsigned>(kMinimumTimeLeft));
     return result;
   }
 
@@ -616,32 +618,23 @@ String describeFreshness(unsigned long fetchedAtMs) {
   return String("Updated ") + ageMinutes + " min ago";
 }
 
-/// Whether a plane is held and still has time left on it.
+/// Whether this card is holding a plane.
 ///
-/// Each plane arrives with the seconds the server has left on it, counted from
-/// the answer this card read it out of, and that count runs down here between
-/// fetches - including through fetches that got no answer, which keep the plane
-/// rather than replacing it. At zero the status becomes Expired and stays there
-/// until a fetch returns a plane, so the countdown is read once and cannot
-/// un-read itself as millis() rolls over.
+/// Ok is the only status that carries one, and only a fetch changes the status,
+/// so this is the whole test. A plane is not dropped for being old: it is drawn
+/// until an answer arrives carrying a different one, which is the rule
+/// cardFetch() applies - a request that got no answer keeps the plane, and any
+/// answered fetch replaces it.
+///
+/// showForSeconds is read once, in fetchMine(), to decide whether a plane is
+/// worth picking. Nothing reads it after that, and nothing here counts it down.
+/// What says how old the figures on the card are is the card's own last line -
+/// see describeAge().
 ///
 /// Everything that asks whether this card has anything to show goes through
 /// here: the item count the scheduler reads, the draw, the press label, the
 /// listing key and the status line.
-bool holdsPlane() {
-  if (gLast.status != Status::Ok) {
-    return false;
-  }
-  if ((millis() - gLastOkMs) / 1000UL <
-      static_cast<unsigned long>(gLast.nearest.showForSeconds)) {
-    return true;
-  }
-  gLast.status = Status::Expired;
-  Log::printf("[aircraft] the plane held has had its %u seconds - the card takes no turn until a "
-              "fetch returns one",
-              static_cast<unsigned>(gLast.nearest.showForSeconds));
-  return false;
-}
+bool holdsPlane() { return gLast.status == Status::Ok; }
 
 /// What the plane held is called in the log stream: the flight, the tail number
 /// where no flight id arrived, or neither.
@@ -655,40 +648,66 @@ String heldIdentifier() {
   return "an aircraft";
 }
 
+/// Writes "<lead> 3 hr ago" for a figure in seconds, climbing a unit rather
+/// than letting one run away: seconds under a minute, minutes under an hour,
+/// hours under two days, then days.
+///
+/// The ladder exists because a plane is held for as long as the card holds it.
+/// A display cut off from the server for seven hours draws what it has with
+/// "Reported 7 hr ago" under it; the same moment in minutes reads "Reported 420
+/// min ago", which is a figure nobody converts at a glance.
+void describeElapsed(char* out, size_t size, const char* lead, unsigned long seconds) {
+  if (seconds == 0) {
+    snprintf(out, size, "%s just now", lead);
+    return;
+  }
+  if (seconds < 60UL) {
+    snprintf(out, size, "%s %lu sec ago", lead, seconds);
+    return;
+  }
+  const unsigned long minutes = seconds / 60UL;
+  if (minutes == 1) {
+    snprintf(out, size, "%s 1 min ago", lead);
+    return;
+  }
+  if (minutes < 60UL) {
+    snprintf(out, size, "%s %lu min ago", lead, minutes);
+    return;
+  }
+  const unsigned long hours = minutes / 60UL;
+  if (hours == 1) {
+    snprintf(out, size, "%s 1 hr ago", lead);
+    return;
+  }
+  if (hours < 48UL) {
+    snprintf(out, size, "%s %lu hr ago", lead, hours);
+    return;
+  }
+  snprintf(out, size, "%s %lu days ago", lead, hours / 24UL);
+}
+
 /// The last line on the card: how old the fact above it is.
 ///
 /// With a positionAgeSeconds the line dates the position - what the server
 /// measured, plus the time since this device read the answer - because the
 /// altitude, speed, heading and distance above it all describe that position.
-/// Without one it dates the answer instead, counting from the last fetch that
-/// returned a plane, which is what this card has always drawn.
+/// It keeps counting for as long as the plane is held, which is the whole of
+/// how a reader tells a fresh sighting from one carried through an outage.
+///
+/// Without the field it dates the answer instead, counting from the last fetch
+/// that returned a plane, and is rounded down to a whole minute first so the
+/// line reads exactly as it always has against a server that sends no age.
 ///
 /// Writes into the caller's buffer rather than returning a String, because this
 /// runs on every draw.
 void describeAge(char* out, size_t size) {
   const unsigned long sinceFetch = (millis() - gLastOkMs) / 1000UL;
   if (gLast.nearest.positionAgeSeconds < 0) {
-    const unsigned long minutes = sinceFetch / 60UL;
-    if (minutes == 0) {
-      snprintf(out, size, "Updated just now");
-    } else if (minutes == 1) {
-      snprintf(out, size, "Updated 1 min ago");
-    } else {
-      snprintf(out, size, "Updated %lu min ago", minutes);
-    }
+    describeElapsed(out, size, "Updated", (sinceFetch / 60UL) * 60UL);
     return;
   }
-  const unsigned long seconds =
-      static_cast<unsigned long>(gLast.nearest.positionAgeSeconds) + sinceFetch;
-  if (seconds == 0) {
-    snprintf(out, size, "Reported just now");
-  } else if (seconds < 60UL) {
-    snprintf(out, size, "Reported %lu sec ago", seconds);
-  } else if (seconds < 120UL) {
-    snprintf(out, size, "Reported 1 min ago");
-  } else {
-    snprintf(out, size, "Reported %lu min ago", seconds / 60UL);
-  }
+  describeElapsed(out, size, "Reported",
+                  static_cast<unsigned long>(gLast.nearest.positionAgeSeconds) + sinceFetch);
 }
 
 /// Hands the server's schedule to the scheduler, which asks this card again
@@ -711,9 +730,6 @@ String cardStatus() {
   if (!gEverFetched) {
     return "never fetched";
   }
-  // Asked first, because asking is what runs the countdown down: a plane that
-  // has had its time reads as Expired on this line rather than at the next
-  // fetch.
   if (holdsPlane()) {
     return String("ok, showing ") + heldIdentifier() + " at " +
            String(gLast.nearest.distanceMiles, 1) + " mi";
@@ -724,10 +740,10 @@ String cardStatus() {
       break;
     case Status::Empty:
       return String("ok, nothing within ") + String(gLast.radiusMiles, 0) + " mi";
-    // The sky was reported and what came back was too old to show. An answer,
-    // like Empty, and not a claim that the sky is clear.
+    // The sky was reported and nothing on it had enough time left to be worth
+    // a turn. An answer, like Empty, and not a claim that the sky is clear.
     case Status::Expired:
-      return "ok, no plane with time left to show";
+      return "ok, no plane with enough time left to show";
     // Distinct from Empty on purpose, and this line is where an admin sees the
     // difference: "nothing within 10 mi" is an answer, "could not check" is the
     // absence of one. Carries no reason - that is an operator diagnostic and
@@ -765,11 +781,11 @@ void cardFetch() {
   // changes of state, and holding content over them would keep a card on screen
   // after an operator turned it off. Those replace the cache.
   //
-  // The plane kept this way keeps its own countdown. It was given its seconds
-  // by the answer it arrived on, gLastOkMs still marks that answer, and
-  // holdsPlane() measures against it - so a server that stops answering costs
-  // the card its turn as soon as the plane it is holding runs out, not when the
-  // next answer finally arrives.
+  // The plane kept this way is kept for as long as it takes. Nothing here
+  // measures its age against a limit, because the one thing that could say the
+  // plane is no longer worth showing is a newer answer, and there isn't one.
+  // What a reader gets instead is the card's last line, which keeps counting
+  // from the answer the plane arrived on - see describeAge().
   Result fresh = fetchMine();
   gEverFetched = true;
 
@@ -931,11 +947,11 @@ void cardFetch() {
   }
 }
 
-/// One item while a plane is held and has time left on it, and none at any
-/// other time: before the first fetch, over a clear sky, for every refusal and
-/// failure, and once the plane held has had its seconds. The scheduler passes
-/// over a card reporting zero, which is what keeps "nothing overhead" from
-/// taking a turn in the rotation.
+/// One item while a plane is held, and none at any other time: before the first
+/// fetch, over a clear sky, for every refusal and failure, and when the last
+/// answer carried no plane worth picking. The scheduler passes over a card
+/// reporting zero, which is what keeps "nothing overhead" from taking a turn in
+/// the rotation. The figure changes only on a fetch.
 uint16_t cardItemCount() { return holdsPlane() ? 1 : 0; }
 
 /// A plane nearly directly overhead earns the longer dwell.

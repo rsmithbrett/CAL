@@ -33,17 +33,23 @@ the day that was a turn spent telling you there was nothing to see.
 The card now appears only while the display has a plane to show. With no plane
 it's left out and the display goes straight to the next card.
 
-**A plane leaves the card when its position gets old.** Every plane arrives with
-how long it's worth showing, and the display counts that down itself. When the
-time is up the card drops out of the rotation, and if that happens while the
-card is on screen, the next card comes up right away rather than after the rest
-of the turn. It works the same way when the server can't be reached: the plane
-on screen still goes at its own time instead of sitting there until the next
-answer arrives.
+**A plane stays on the card until there's a newer one.** The display doesn't
+drop a plane for being old. It keeps showing the one it has until the next
+answer from the server carries something different, so a display that can't
+reach the server for an hour shows the last plane it saw rather than going
+blank.
 
 **The last line now says how old the plane's position is**, rather than how long
 ago the display asked. "Reported 45 sec ago" counts from the moment the aircraft
-reported where it was.
+reported where it was, and it keeps counting for as long as the plane's on the
+card, through "Reported 14 min ago" and "Reported 2 hr ago". That line is how
+you tell a plane overhead now from one the display is carrying through an
+outage.
+
+**A plane that's nearly out of time is skipped.** When the display picks which
+plane to show, it passes over anything with less than twenty seconds left and
+takes the next one with real time on it. If nothing on the list qualifies, the
+card is left out until the next check brings back a plane worth showing.
 
 **How quickly it reacts.** The display asks for aircraft on the schedule the
 server sets, which is about once a minute instead of once every ten. A new plane

@@ -54,9 +54,8 @@ using FetchFn = void (*)();
 /// putting a blank screen in the rotation. Whether a status with no data
 /// behind it counts as an item is each card's own answer. The forecast card
 /// reports one for "Forecast is not showing yet", because that message is
-/// content. The aircraft card reports zero unless it holds a plane that still
-/// has time left on it, which can stop being true between two calls with no
-/// fetch in between.
+/// content. The aircraft card reports zero unless it holds a plane, and a card
+/// that holds nothing says so only once its own fetch has run.
 using ItemCountFn = uint16_t (*)();
 
 /// Draw item `itemIndex` from retained state. Must not fetch.

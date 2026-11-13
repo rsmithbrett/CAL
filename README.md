@@ -7629,10 +7629,10 @@ them.
 | A forward or reverse tap | Cannot land on the card without a plane. Forward goes through `computeNext()`, and reverse replays a history the card is no longer in. |
 | Every card reports zero | `Display::showNoContent()`, as before this change. The moment a fetch returns a plane, the card goes up without waiting out a dwell. |
 | Aircraft is the only card in the policy | The no-content screen without a plane, the plane's card the moment a fetch returns one, and the no-content screen again the moment it leaves. |
-| A fetch gets no answer while a plane is held | The plane stays until its own `showForSeconds` runs out, with its last line counting up. |
+| A fetch gets no answer while a plane is held | The plane stays, with its last line counting up. Nothing on the device drops it for being old. |
 | A fetch is answered without a plane | The plane is dropped at that fetch. |
-| The plane held runs out of time | The card reports zero from that second, with no fetch involved. If it is on screen, the next card goes up within a second. |
-| Every plane in an answer has run out of time | `Status::Expired`. The card takes no turn and nothing claims the sky is clear. |
+| The plane held outlives its `showForSeconds` | Nothing happens. Time left is read once, when the plane is chosen, and never again. |
+| Every plane in an answer has less than `kMinimumTimeLeft` left | `Status::Expired`. The card takes no turn and nothing claims the sky is clear. |
 
 ### A fetch that got no answer keeps the plane, and an answer without one drops it
 
@@ -7722,44 +7722,63 @@ on screen, the scheduler adds:
 Neither line comes from `cardItemCount()`, which the scheduler calls every time
 it looks for the next card.
 
-### A plane has a time limit and the display counts it down
+### A plane is kept until a newer answer arrives
 
-Each sighting arrives with `showForSeconds`, which the server works out as its
-own limit less the age of the position. The firmware reads it into
-`Sighting::showForSeconds` and `holdsPlane()` measures it against `gLastOkMs`,
-the instant of the last fetch that returned a plane. Everything that asks
-whether this card has anything to show goes through that one function: the item
-count, the draw, the press label, the listing key and the status line.
+Each sighting carries `showForSeconds`, the seconds the server has left on it.
+This firmware reads it at one moment only: when it chooses which plane off an
+answer to keep. After that the plane is drawn for as long as the card holds it,
+however long that turns out to be.
 
-At zero the status moves from `Ok` to `Expired` and stays there until a fetch
-returns a plane. It is a latch rather than a test re-run on every call, so the
-`millis()` rollover at ~49 days cannot bring a dropped plane back.
+Nothing on the device drops a plane for being old. What replaces it is the next
+answer that carries a different one, and the rule for which answers get to
+replace it is the one `cardFetch()` already had: a request that got no answer
+keeps the plane, and any answered fetch replaces it, including one that carries
+no qualifying plane at all. So the card goes dark only when the server says it
+should, never because a timer on the device ran out.
 
-A plane kept through a fetch that got no answer keeps counting from the answer
-it arrived on, because that fetch leaves `gLastOkMs` alone. So a server that
-stops answering costs the card its turn when the plane it is holding runs out,
-not when the next answer finally arrives.
+The weight of saying how old the figures are sits on the card's last line, which
+states the age of the position and keeps counting up for as long as the plane is
+held. "Reported 14 min ago" is that line doing its job, not a fault in it.
 
-`fetchMine()` passes over a plane already at zero, so the plane kept off a list
-is the first one with time left on it, and a military sighting outranks the
-others only while it has time of its own. A list where every plane is at zero
-is `Expired`.
+**There is no outer limit, deliberately.** A display that cannot reach the
+server for an hour draws the plane it has with "Reported 1 hr ago" under it.
+Capping that would put the card back to going dark, which is the thing this
+rule exists to stop, and the only other thing the panel could show in its place
+is the scheduler's "Nothing to show yet", which says less than a dated sighting
+does. The one thing a long hold needs is wording that stays readable, so the
+line moves to hours and then to days rather than counting minutes forever - see
+"The last line is the plane's age" below.
 
-A plane that arrives with no `showForSeconds` at all, which is every server
-older than the field, gets `Aircraft::kDefaultShowForSeconds`, 120 seconds,
-counted from the arrival of the answer.
+What this costs: a display cut off from the server for a day shows yesterday's
+plane, dated. That is the trade, taken on purpose.
 
-### A card that empties while it is up is left within a second
+### A plane with less than twenty seconds left is passed over
 
-`CardManager::poll()` asks once a second whether the card on screen is still
-showable and leaves it when it is not, dropping that card's history entries
-first so a reverse tap cannot step back onto it. Before this, a card could only
-empty on its own fetch, which is what `fetchCard()` already handled.
+The floor is `Aircraft::kMinimumTimeLeft`, 20 seconds, and it is applied in
+`fetchMine()` when the plane is chosen. A candidate with less than that left is
+skipped and the next one with real time on it is taken; a military sighting
+outranks the rest only while it clears the floor too. When no plane on the
+answer clears it the result is `Status::Expired`, the card takes no turn, and
+nothing claims the sky is clear.
 
-This applies to every card, not only aircraft. The once-a-second gate is there
-because the check calls a card module's own `itemCount()`, and `poll()` runs on
-every loop iteration.
+**Why a floor rather than a minimum turn for every card.** The alternative was
+to let the card take a plane with three seconds left and then guarantee it a
+full dwell anyway, which spends a turn in the rotation on a position already
+past its usefulness and puts a rule about one card into the scheduler. The floor
+keeps the decision where the data is.
 
+**The floor and the rule above do not overlap, and which one wins is worth
+stating.** The floor is a test on candidates at the moment of choosing, and it
+is the only time left is ever tested. A plane the card already holds is never
+measured against it, or against anything else: once chosen it is drawn until a
+newer answer replaces it. So a plane chosen with 25 seconds left is still on
+screen four minutes later if nothing newer has arrived, and that is correct.
+
+**Twenty seconds is a lane decision, not a measured figure.** It is a little
+over twice the card's ordinary 8-second dwell, so a plane that clears it is
+worth at least one full turn. The server's own limits are server settings and
+can move without a firmware release; this floor cannot, which is the argument
+for keeping it small.
 ### The server sets the fetch schedule
 
 Every aircraft answer carries `nextFetchSeconds`. `Cards::CardSpec` gained
@@ -7797,6 +7816,13 @@ answered. `describeAge()` adds the seconds since that answer and the card reads
 "Reported 45 sec ago", "Reported 3 min ago". Without the field it dates the
 answer instead, "Updated just now" and "Updated N min ago", which is what the
 card drew before.
+
+Both go through the same ladder, which climbs a unit rather than letting one
+run away: seconds under a minute, minutes under an hour, hours under two days,
+then days. A plane held through a long outage reads "Reported 7 hr ago", which
+is the line carrying the weight the rule above puts on it. The no-position-age
+branch is rounded down to a whole minute first, so a display talking to a server
+that sends no age reads exactly what it always has.
 
 The line is built into a stack buffer on the draw, so `showAircraftCard()` takes
 it as a `const char*` rather than a `const String&` and the draw path allocates

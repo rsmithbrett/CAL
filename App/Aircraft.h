@@ -31,9 +31,9 @@ namespace Aircraft {
 
 /// What the last fetch found. Ok is the only value that carries a plane, and
 /// the only one that puts the card in the rotation: cardItemCount() reports
-/// zero for every other value, so none of them is drawn. A plane that runs out
-/// of its showForSeconds turns Ok into Expired without another fetch.
-/// cardStatus() names the value for the log stream.
+/// zero for every other value, so none of them is drawn. Only a fetch changes
+/// the value: nothing on this device turns Ok into anything else as time
+/// passes. cardStatus() names the value for the log stream.
 enum class Status {
   Ok,
   /// The fetch succeeded, the server's own refresh succeeded, and nothing is
@@ -52,10 +52,10 @@ enum class Status {
   /// empty housing market and so the false claim is far less likely to be
   /// questioned by whoever reads it.
   RefreshFailed,
-  /// No plane left with time to show. Either every plane the server sent had
-  /// used up its showForSeconds by the time the answer arrived, or the plane
-  /// the card held used up its own before the next fetch replaced it. Not an
-  /// error, and nothing here claims the sky is empty.
+  /// The answer carried planes and not one of them had kMinimumTimeLeft left
+  /// on it. Not an error, and nothing here claims the sky is empty - every one
+  /// of those aircraft is up there, and each is too far past its last reported
+  /// position to be worth a turn in the rotation.
   Expired,
   /// No provider credential on file, so nothing was ever attempted - a
   /// first-class resting state, not a failure, and NOT an empty sky. Read from
@@ -76,10 +76,25 @@ enum class Status {
   NetworkError,      // couldn't reach the service, or the response made no sense
 };
 
-/// How long a plane is shown when the server names no limit of its own. A
-/// server old enough to predate showForSeconds sends none, and every plane it
-/// sends gets this many seconds, counted from the arrival of the answer.
+/// What a plane is credited with when the server names no limit of its own. A
+/// server old enough to predate showForSeconds sends none, and this stands in
+/// so such a plane clears kMinimumTimeLeft and is picked like any other. It
+/// does not decide how long the plane stays on the card: nothing does.
 constexpr uint16_t kDefaultShowForSeconds = 120;
+
+/// How much time a plane must have left to be worth picking, in seconds.
+///
+/// Read once, in fetchMine(), against the candidates on a fresh answer. A plane
+/// under it is passed over and the next one with real time on it is taken; when
+/// none of them clears it the card takes no turn. A plane already held is never
+/// measured against this or anything else - see Status::Ok and the block at the
+/// bottom of Aircraft.cpp.
+///
+/// A little over twice the card's ordinary 8-second dwell, so a plane that
+/// clears it is worth at least one full turn. The server's own limits are
+/// server settings and move without a firmware release; this one cannot, which
+/// is the argument for keeping it small.
+constexpr uint16_t kMinimumTimeLeft = 20;
 
 /// One aircraft, trimmed to what Display::showAircraftCard() actually draws -
 /// mirrors AircraftSighting on the server (DiscoverAroundMe.Providers.Data).
@@ -94,10 +109,13 @@ struct Sighting {
   /// Whether the server reported an altitude at all. False when the field was
   /// null or absent, and the card draws "--" in place of a figure.
   bool altitudeReported = false;
-  /// How many more seconds this plane is worth showing, as the server counted
-  /// it: its own limit less the age of the position. Zero means the plane has
-  /// had its time and this card passes over it, so a plane the card holds
-  /// always arrived with more than zero. An answer carrying no such field
+  /// How many more seconds this plane was worth showing when the server
+  /// answered: its own limit less the age of the position.
+  ///
+  /// It decides one thing, once - whether fetchMine() picks this plane, which
+  /// needs kMinimumTimeLeft. It is not a countdown, and nothing reads it after
+  /// the plane is held: the card keeps drawing that plane until a newer answer
+  /// replaces it, however long that takes. An answer carrying no such field
   /// gives every plane kDefaultShowForSeconds instead.
   uint16_t showForSeconds = kDefaultShowForSeconds;
   double speedKnots = 0;
@@ -196,9 +214,10 @@ struct Result {
   /// The one plane this card holds - valid only when status == Ok. The server
   /// returns its list sorted by distance ascending
   /// (MyAircraftService.RefreshCoreAsync's OrderBy), and fetchMine() keeps the
-  /// first military plane with time left on it, or the first plane with time
-  /// left when none of them is military. The card shows one plane at a time,
-  /// the same way it shows one featured forecast period.
+  /// first military plane clearing kMinimumTimeLeft, or the first plane
+  /// clearing it when none of them is military. The card shows one plane at a
+  /// time, the same way it shows one featured forecast period, and shows this
+  /// one until a newer answer carries a different plane.
   Sighting nearest;
   /// The owner's configured tracking radius, echoed back by the server on
   /// every response. Kept because "how interesting is this sighting" only
@@ -227,7 +246,7 @@ struct Result {
   /// failure, which is a fault on this device's own side of the wire that a
   /// planned server outage does not explain. Read by cardFetch(): a result with
   /// this set does not replace a plane already held, so the card keeps its turn
-  /// in the rotation until that plane's own showForSeconds runs out.
+  /// in the rotation for as long as the service stays out of reach.
   bool serviceUnreachable = false;
 
   /// How soon the server wants to be asked again, from nextFetchSeconds on the

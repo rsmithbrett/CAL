@@ -392,18 +392,12 @@ uint8_t gButtonCount = 0;
 /// keeps coming due first cannot starve the others.
 uint8_t gRefreshScan = 0;
 
-/// millis() of the last time poll() asked whether the card on screen still has
-/// anything to show. The question is asked once a second rather than on every
-/// loop iteration, because it calls a card module's own itemCount().
-uint32_t gLastContentCheckMs = 0;
-
 /// True when this card is active and actually has something to draw right
 /// now. A card with zero items is passed over entirely rather than put on
 /// screen blank. What counts as zero is the card's own answer - see
 /// Cards::ItemCountFn. The forecast card holding an explanatory status
 /// ("Forecast is not showing yet") reports one item, because that message is
-/// content. The aircraft card reports zero unless it holds a plane that still
-/// has time left on it, which is why poll() asks this again while a card is up.
+/// content. The aircraft card reports zero unless it holds a plane.
 /// Whether `card`'s effectivity window (if any) includes right now - the
 /// firmware half of CardPolicyEntry.EffectiveFromUtc/EffectiveToUtc on the
 /// server. Both 0 (the ordinary case: no policy has ever set either field)
@@ -1518,26 +1512,6 @@ void poll() {
   // The physical button beside the touch panel, polled on the same iteration so
   // the two controls cannot disagree about which card is up.
   pollActionButton();
-
-  // A card can run out of content while it is up, with no fetch involved: the
-  // aircraft card drops the plane it holds when that plane's time is up, and
-  // the dwell would otherwise keep the screen on a card that has nothing. The
-  // card's own entries come out of the history first, so stepping back does not
-  // land on it either.
-  //
-  // Asked once a second rather than on every loop iteration, because it calls a
-  // card module's own itemCount(). Nothing is on screen when gCurrent.card is
-  // below zero, which is what the no-content screen already says.
-  const uint32_t contentNow = millis();
-  if (gCurrent.card >= 0 && (contentNow - gLastContentCheckMs) >= 1000UL) {
-    gLastContentCheckMs = contentNow;
-    if (!showable(static_cast<uint8_t>(gCurrent.card))) {
-      Log::printf("[cards] '%s' has nothing left to show - moving on", gCards[gCurrent.card].id);
-      forgetHistoryFor(gCurrent.card);
-      leaveCurrentCard();
-      return;
-    }
-  }
 
   // PRESENCE, FROM THE SENSOR THAT ALREADY DEBOUNCES IT. Motion holds Active
   // for activeTimeoutSeconds after the last confirmed event, so a person who

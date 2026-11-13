@@ -56,19 +56,21 @@
 //     carries the announcement it would have carried had the plane's dwell run
 //     out, so leaving a card is one step through the announcement queue.
 //   - Asked to draw with no plane, the card draws nothing and logs that.
-//   - A plane runs out of its showForSeconds and the card leaves the rotation
-//     with no fetch in between, whether the service is answering or not, and
-//     whether the card is on screen, under a manual hold or elsewhere.
-//   - A plane already at zero seconds is passed over when the answer is read,
-//     so the plane drawn is the first with time left and a military sighting
-//     outranks the rest only while it has time of its own. A list where every
-//     plane is at zero holds none of them.
-//   - A plane carrying no limit at all is held for 120 seconds from the fetch.
+//   - A plane outliving its showForSeconds keeps its turn. Nothing on the
+//     device drops a plane for being old, including through seventy fetches
+//     that got no answer; what drops it is an answered fetch carrying none.
+//   - A candidate with less than kMinimumTimeLeft is passed over when the
+//     answer is read, so the plane drawn is the first clearing the floor and a
+//     military sighting outranks the rest only while it clears the floor too.
+//     Twenty seconds qualifies and nineteen does not. A list where no plane
+//     clears it holds none of them.
+//   - A plane carrying no limit at all clears the floor and stays.
 //   - An altitude the server sent as null draws "--", and the literal
 //     "UNKNOWN" where a callsign goes draws the registration.
 //   - The card's last line states the age of the plane's position where the
 //     server sent one, grown by the time since the answer, and dates the
-//     answer where it did not.
+//     answer where it did not. It climbs a unit as the figure grows: seconds,
+//     minutes, hours, then days.
 //   - The card asks again on the schedule the server sets, with a floor under
 //     it, falls back to the fixed interval on an answer that carries none, and
 //     gives the schedule up after three fetches in a row that got no answer.
@@ -864,142 +866,103 @@ void anAnnouncementKeepsItsTurnWhenThePlaneLeaves() {
   settle();
 }
 
-void aPlaneRunsOutOfTimeAndTheCardTakesNoTurn() {
-  beginCase("a plane that runs out of time");
+void aPlaneWhoseTimeIsUpKeepsItsTurn() {
+  beginCase("a plane whose time is up");
 
   settle();
   serviceAnswers(200, onePlaneWith("UAL900", 5.0, /*showForSeconds=*/30,
                                    /*positionAgeSeconds=*/-1));
   refreshAircraft();
   check(planesHeld() == 1, "the card holds the plane the fetch returned");
+  check(passUntilArrives("aircraft card: UAL900", 60), "and it takes its turn");
 
-  pass(29);
-  check(planesHeld() == 1, "it still holds it a second before its time is up");
-
+  // Well past the thirty seconds the server had left on it, with no answer in
+  // between: nothing on the device drops a plane for being old.
   const size_t logMark = logLines().size();
-  const size_t mark = screens().size();
-  pass(1);
-  check(planesHeld() == 0, "the card reports no items once the plane's time is up");
-  check(aircraftStatus() == "ok, no plane with time left to show",
-        "its status says so with no fetch in between");
-  check(loggedSince(logMark, "[aircraft] the plane held has had its 30 seconds"),
-        "and the stream says how long the plane had");
+  pass(120);
+  check(planesHeld() == 1, "it is still held four times its own showForSeconds later");
+  check(aircraftStatus() == "ok, showing UAL900 at 5.0 mi",
+        "its status still names the plane rather than an expiry");
+  check(!loggedSince(logMark, "[aircraft] no plane held"),
+        "and nothing in the stream says the card gave up its turn");
 
-  pass(40);
-  check(!drewSince(mark, "aircraft"), "no aircraft screen is drawn after that");
-  check(!drewSince(mark, "no content"), "the placeholder is not drawn in the card's place");
+  const size_t mark = screens().size();
+  check(passUntilArrives("aircraft card: UAL900", 60), "the card keeps coming round");
+  check(drewSince(mark, "aircraft card: UAL900"), "drawing the same plane");
 }
 
-void aPlaneRunsOutWhileTheServiceIsDown() {
-  beginCase("a plane that runs out while the service is down");
+void aPlaneIsHeldThroughALongOutage() {
+  beginCase("a plane carried through a long outage");
 
   settle();
-  serviceAnswers(200, onePlaneWith("DAL910", 5.0, 40, -1));
+  serviceAnswers(200, onePlaneWith("DAL910", 5.0, 40, /*positionAgeSeconds=*/10));
   refreshAircraft();
+  const unsigned long answeredAtMs = gNowMs;
   check(planesHeld() == 1, "the card holds the plane");
 
   serviceIsUnreachable();
-  pass(20);
-  refreshAircraft();
-  check(planesHeld() == 1, "a fetch that got no answer keeps it");
-
-  pass(19);
-  check(planesHeld() == 1, "the count runs from the answer the plane arrived on");
-  pass(1);
-  check(planesHeld() == 0, "and the plane is dropped at its own time, not at the next answer");
-  check(aircraftStatus() == "ok, no plane with time left to show", "its status says so");
-
-  const size_t logMark = logLines().size();
-  refreshAircraft();
-  check(planesHeld() == 0, "a further unanswered fetch brings nothing back");
-  check(!loggedSince(logMark, "keeping"), "and keeps nothing");
-}
-
-void aPlaneRunningOutWhileItsCardIsUpMovesOn() {
-  beginCase("the plane's time runs out while its card is up");
-
-  settle();
-  serviceAnswers(200, onePlaneWith("SWA920", 5.0, 3600, -1));
-  refreshAircraft();
-  check(passUntilArrives("aircraft card: SWA920", 60), "the card goes up on its turn");
-
-  // A refresh while the card is up, carrying a plane with four seconds left on
-  // it: the time then runs out with no fetch anywhere near it.
-  serviceAnswers(200, onePlaneWith("SWA921", 5.0, 4, -1));
-  refreshAircraft();
-  check(onScreen() == "aircraft card: SWA921", "the refresh redraws the card in place");
-
-  const size_t mark = screens().size();
-  const size_t logMark = logLines().size();
-  pass(4);
-  check(onScreen() == "after", "the card after it goes up when the plane's time is up");
-  check(rotationLastOpened("after"),
-        "the card that replaced it is recorded as a showing the rotation opened");
-  check(loggedSince(logMark, "'aircraft' has nothing left to show - moving on"),
-        "the scheduler logs why it left the card");
-  check(!drewSince(mark, "no content"), "the placeholder is not drawn over the rotation");
-  check(secondsUntilScreenChanges(60) == kDwellSeconds,
-        "the card that replaced it gets a full dwell of its own");
-
-  for (int i = 0; i < 4; ++i) {
-    tap(Touch::Hit::Reverse);
-    check(neighbourIsOnScreen(), "a reverse tap lands on a neighbour, never on the emptied card");
+  for (int minute = 0; minute < 70; ++minute) {
+    pass(60);
+    refreshAircraft();
   }
-}
+  check(planesHeld() == 1, "seventy fetches that got no answer keep it");
 
-void aPlaneRunningOutDuringAManualHoldMovesOn() {
-  beginCase("the plane's time runs out during a manual hold");
+  check(passUntilArrives("aircraft card: DAL910", 60), "the card still takes its turn");
+  const unsigned long age = 10 + (gNowMs - answeredAtMs) / 1000UL;
+  check(age >= 3600UL && age < 7200UL, "between one and two hours of position age has built up");
+  check(lastAgeLine() == "Reported 1 hr ago",
+        "and the last line states it in hours rather than counting minutes");
+
+  // The answer that finally arrives is what replaces the plane, not a timer.
+  const size_t logMark = logLines().size();
+  serviceAnswers(200, kClearSky);
+  refreshAircraft();
+  check(planesHeld() == 0, "an answered fetch with no plane is what drops it");
+  check(loggedSince(logMark, "[aircraft] no plane held"), "and the stream says so then");
+}
+void theFirstPlaneClearingTheFloorIsDrawn() {
+  beginCase("a list whose nearest plane is nearly out of time");
 
   settle();
-  serviceAnswers(200, onePlaneWith("JBU930", 5.0, 3600, -1));
-  refreshAircraft();
-  check(passUntilArrives("aircraft card: JBU930", 60), "the card takes its turn");
-  check(passUntilArrives("after", 60), "and the rotation moves past it");
-
-  tap(Touch::Hit::Reverse);
-  check(onScreen() == "aircraft card: JBU930", "a reverse tap steps back to the plane");
-
-  serviceAnswers(200, onePlaneWith("JBU931", 5.0, 3, -1));
-  refreshAircraft();
-  check(onScreen() == "aircraft card: JBU931", "the refresh redraws it in place");
-
-  const int sought = gSought;
-  pass(3);
-  check(onScreen() == "after", "the card that followed it goes up when the plane's time is up");
-  check(rotationLastOpened("after"),
-        "the replacement is recorded as a showing the rotation opened, not one somebody sought");
-  pass(kManualHoldSeconds);
-  check(gSought == sought, "no card is marked as sought once the hold's own time has passed");
-}
-
-void theFirstPlaneWithTimeLeftIsDrawn() {
-  beginCase("a list whose nearest plane has had its time");
-
-  settle();
-  serviceAnswers(200, planes({{"NEAR000", 0, false}, {"NEXT100", 100, false}}));
+  serviceAnswers(200, planes({{"NEAR005", 5, false}, {"NEXT100", 100, false}}));
   refreshAircraft();
   check(planesHeld() == 1, "the card holds a plane");
   check(passUntilArrives("aircraft card: NEXT100", 60),
-        "the plane drawn is the first one with time left, not the nearest");
+        "the plane drawn is the first one clearing the floor, not the nearest");
 }
 
-void aMilitaryPlaneWithTimeLeftOutranksTheRest() {
+void theFloorsOwnBoundary() {
+  beginCase("the floor's own boundary");
+
+  settle();
+  serviceAnswers(200, planes({{"AT020", 20, false}, {"LATER300", 300, false}}));
+  refreshAircraft();
+  check(passUntilArrives("aircraft card: AT020", 60),
+        "a plane with exactly the floor's seconds left is taken");
+
+  serviceAnswers(200, planes({{"UNDER19", 19, false}, {"LATER301", 301, false}}));
+  refreshAircraft();
+  check(passUntilArrives("aircraft card: LATER301", 60),
+        "one second under the floor is passed over");
+}
+
+void aMilitaryPlaneClearingTheFloorOutranksTheRest() {
   beginCase("a military plane among the rest");
 
   settle();
   serviceAnswers(200, planes({{"CIV100", 100, false}, {"MIL200", 200, true}}));
   refreshAircraft();
   check(passUntilArrives("aircraft card: MIL200", 60),
-        "a military plane with time left takes the card over a nearer civil one");
+        "a military plane clearing the floor takes the card over a nearer civil one");
 
-  serviceAnswers(200, planes({{"CIV300", 300, false}, {"MIL000", 0, true}}));
+  serviceAnswers(200, planes({{"CIV300", 300, false}, {"MIL005", 5, true}}));
   refreshAircraft();
   check(passUntilArrives("aircraft card: CIV300", 60),
-        "a military plane that has had its time does not outrank one that has not");
+        "a military plane under the floor does not outrank one over it");
 }
 
-void everyPlaneOutOfTimeTakesTheCardOutOfTheRotation() {
-  beginCase("every plane out of time");
+void everyPlaneUnderTheFloorTakesTheCardOutOfTheRotation() {
+  beginCase("every plane under the floor");
 
   settle();
   serviceAnswers(200, onePlaneWith("UAL940", 5.0, 3600, -1));
@@ -1009,33 +972,34 @@ void everyPlaneOutOfTimeTakesTheCardOutOfTheRotation() {
   const size_t logMark = logLines().size();
   const size_t mark = screens().size();
   const size_t shown = impressions().size();
-  serviceAnswers(200, planes({{"OLD100", 0, false}, {"OLD200", 0, true}}));
+  serviceAnswers(200, planes({{"OLD001", 1, false}, {"OLD019", 19, true}}));
   refreshAircraft();
 
-  check(planesHeld() == 0, "a list where every plane has had its time holds none of them");
-  check(aircraftStatus() == "ok, no plane with time left to show",
+  check(planesHeld() == 0, "a list where no plane clears the floor holds none of them");
+  check(aircraftStatus() == "ok, no plane with enough time left to show",
         "its status says so rather than claiming the sky is clear");
-  check(loggedSince(logMark, "2 sighting(s) and none with time left"),
-        "and the stream says how many it passed over");
+  check(loggedSince(logMark, "2 sighting(s) and none with 20s left"),
+        "and the stream says how many it passed over and what the floor is");
 
   pass(30);
   check(!drewSince(mark, "aircraft"), "no aircraft screen is drawn");
   check(!showedSince(shown, "aircraft"), "no showing is opened for the card");
 }
 
-void aPlaneWithNoLimitGetsTwoMinutes() {
+void aPlaneWithNoLimitClearsTheFloorAndStays() {
   beginCase("a plane the server set no limit on");
 
   settle();
   serviceAnswers(200, onePlaneWith("AAL950", 5.0, /*showForSeconds=*/-1,
                                    /*positionAgeSeconds=*/-1));
   refreshAircraft();
-  check(planesHeld() == 1, "the card holds it");
+  check(planesHeld() == 1, "a plane with no limit of its own clears the floor and is held");
+  check(passUntilArrives("aircraft card: AAL950", 60), "and takes its turn");
 
-  pass(119);
-  check(planesHeld() == 1, "a plane with no limit of its own is still held at 119 seconds");
-  pass(1);
-  check(planesHeld() == 0, "and is dropped at 120");
+  pass(300);
+  check(planesHeld() == 1, "and is still held five minutes later");
+  check(lastAgeLine().rfind("Updated ", 0) == 0,
+        "its last line dates the answer, the way it always has against such a server");
 }
 
 void anAltitudeNobodyReportedDrawsADash() {
@@ -1103,6 +1067,24 @@ void theLastLineStatesThePlanesAge() {
   check(onScreen() == "aircraft card: DAL972", "the card redraws with a plane carrying no age");
   check(lastAgeLine() == "Updated just now",
         "with no age from the server the line dates the answer instead");
+
+  // The ladder's upper rungs, read straight off the server's own figure so the
+  // clock has nothing to do with them.
+  serviceAnswers(200, onePlaneWith("DAL973", 5.0, 3600, /*positionAgeSeconds=*/7200));
+  refreshAircraft();
+  check(lastAgeLine() == "Reported 2 hr ago", "two hours of age reads in hours, not in minutes");
+
+  serviceAnswers(200, onePlaneWith("DAL974", 5.0, 3600, /*positionAgeSeconds=*/3600));
+  refreshAircraft();
+  check(lastAgeLine() == "Reported 1 hr ago", "and one hour reads without a figure in front of it");
+
+  serviceAnswers(200, onePlaneWith("DAL975", 5.0, 3600, /*positionAgeSeconds=*/180000));
+  refreshAircraft();
+  check(lastAgeLine() == "Reported 2 days ago", "past two days the line reads in days");
+
+  serviceAnswers(200, onePlaneWith("DAL976", 5.0, 3600, /*positionAgeSeconds=*/3540));
+  refreshAircraft();
+  check(lastAgeLine() == "Reported 59 min ago", "a minute under the hour still reads in minutes");
 }
 
 void theServerSetsTheFetchCadence() {
@@ -1402,14 +1384,13 @@ int main() {
   tapsPassOverTheEmptiedCard();
   aPlaneLeavingDuringAManualHoldMovesOn();
   anAnnouncementKeepsItsTurnWhenThePlaneLeaves();
-  aPlaneRunsOutOfTimeAndTheCardTakesNoTurn();
-  aPlaneRunsOutWhileTheServiceIsDown();
-  aPlaneRunningOutWhileItsCardIsUpMovesOn();
-  aPlaneRunningOutDuringAManualHoldMovesOn();
-  theFirstPlaneWithTimeLeftIsDrawn();
-  aMilitaryPlaneWithTimeLeftOutranksTheRest();
-  everyPlaneOutOfTimeTakesTheCardOutOfTheRotation();
-  aPlaneWithNoLimitGetsTwoMinutes();
+  aPlaneWhoseTimeIsUpKeepsItsTurn();
+  aPlaneIsHeldThroughALongOutage();
+  theFirstPlaneClearingTheFloorIsDrawn();
+  theFloorsOwnBoundary();
+  aMilitaryPlaneClearingTheFloorOutranksTheRest();
+  everyPlaneUnderTheFloorTakesTheCardOutOfTheRotation();
+  aPlaneWithNoLimitClearsTheFloorAndStays();
   anAltitudeNobodyReportedDrawsADash();
   anUnknownCallsignFallsBackToTheRegistration();
   theLastLineStatesThePlanesAge();

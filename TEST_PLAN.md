@@ -7292,7 +7292,7 @@ step back from a card to the placeholder.
 the binary's own line and does not read its exit status:
 
 ```
-PASS: aircraft card takes no turn without a plane, 28 cases, 240 checks
+PASS: aircraft card takes no turn without a plane, 27 cases, 229 checks
 ```
 
 The test sets the clock, the service's answers and the taps, and reads the list
@@ -7316,17 +7316,16 @@ can read.
 | taps after the card has emptied | three reverse and five forward taps draw neither the card nor the placeholder |
 | the plane leaves during a manual hold | the card that followed goes up at once as a showing the rotation opened, keeps its ordinary dwell, and nothing is marked as sought when the hold's own time passes |
 | an announcement when the plane leaves | the card that replaces the plane's carries the announcement it would have carried had the plane's dwell run out |
-| a plane that runs out of time | held at 29 seconds of a 30-second limit and gone at 30, with no fetch in between; the status reads `ok, no plane with time left to show`, the stream says how long the plane had, and nothing is drawn for 40 seconds after |
-| a plane that runs out while the service is down | a fetch that got no answer keeps it, the count keeps running from the answer it arrived on, and the plane is dropped at its own time rather than at the next answer |
-| the plane's time runs out while its card is up | the card after it goes up as a showing the rotation opened, with the scheduler's line on the stream, a full dwell of its own, no placeholder, and four reverse taps that never reach the emptied card |
-| the plane's time runs out during a manual hold | the card that followed goes up as a rotation showing, and nothing is marked as sought when the hold's own time passes |
-| a list whose nearest plane has had its time | the first plane with time left is the one drawn |
-| a military plane among the rest | a military plane with time left takes the card over a nearer civil one, and one that has had its time does not |
-| every plane out of time | no items, `ok, no plane with time left to show`, the count of sightings passed over on the stream, and no screen or showing across 30 seconds |
-| a plane the server set no limit on | held at 119 seconds and dropped at 120 |
+| a plane whose time is up | still held, still drawn and still named by its status two minutes past a 30-second limit, with no fetch in between and nothing on the stream saying the card gave up its turn |
+| a plane carried through a long outage | seventy fetches that got no answer keep it, the card still takes its turn, the last line reads `Reported 1 hr ago`, and the answered fetch that follows is what drops it |
+| a list whose nearest plane is nearly out of time | the first plane clearing the floor is the one drawn |
+| the floor's own boundary | twenty seconds left is taken, nineteen is passed over |
+| a military plane among the rest | a military plane clearing the floor takes the card over a nearer civil one, and one under the floor does not |
+| every plane under the floor | no items, `ok, no plane with enough time left to show`, the count of sightings and the floor on the stream, and no screen or showing across 30 seconds |
+| a plane the server set no limit on | clears the floor, takes its turn, is still held five minutes later, and dates the answer on its last line |
 | an altitude nobody reported | a figure where the server reported one, `--` where it sent null |
 | the literal UNKNOWN where a callsign goes | the registration on the card, in the status line and in the press label |
-| the age on the card's last line | `Reported 45 sec ago` on a draw at the answer's own tick, grown by the time since the answer when the rotation comes back round, and `Updated just now` for a plane carrying no age |
+| the age on the card's last line | `Reported 45 sec ago` on a draw at the answer's own tick, grown by the time since the answer when the rotation comes back round, `Updated just now` for a plane carrying no age, and the ladder's rungs read off the server's own figure: 59 min, 1 hr, 2 hr, 2 days |
 | the server's own fetch schedule | taken off the answer, not asked again at 59 seconds and asked at 60, and a schedule of 5 raised to the 30-second floor |
 | an answer carrying no schedule | back on the fixed interval, and not asked again two minutes later |
 | the schedule through a service that stops answering | two unanswered fetches keep the schedule, a third gives it up, and an answer puts it back |
@@ -7445,7 +7444,9 @@ where every plane is at zero is `Status::Expired`, which draws nothing and does
 not claim the sky is clear. `holdsPlane()` runs the count down between fetches
 against `gLastOkMs`, so a plane kept through a fetch that got no answer is
 still dropped at its own time, and the status latches to `Expired` rather than
-being re-read each call.
+being re-read each call. **The countdown half of this was reversed in 37h**: the
+owner chose to keep drawing the plane instead, and the floor there replaced the
+test for zero.
 
 `positionAgeSeconds` is how old the position was when the server answered. The
 card's last line adds the time since the answer to it and reads "Reported 45
@@ -7469,7 +7470,8 @@ in `callsign` is read as empty, so the card falls back to the registration.
 `CardManager::poll()` asks once a second whether the card on screen still has
 something to show and leaves it when it does not, with its history entries
 dropped first. That applies to every card, not only this one; before this, a
-card could only empty on its own fetch.
+card could only empty on its own fetch. **Removed again in 37h**, once the
+countdown it existed for was removed.
 
 `Display::showAircraftStatus()` had no caller and is removed, with its
 declaration, its definition and the test's stub.
@@ -7517,3 +7519,83 @@ a draw that held a plane and carried a line dating it.
 older cases stay about the card's place in the rotation rather than about the
 countdown. Two checks in "a fetch that got no answer" follow the reworded
 keep-the-cache line.
+
+### 37h. A plane is kept until a newer answer, and a floor on what gets picked (2026-11-13)
+
+Two decisions by the owner, both reversing part of 37g, both in README.md before
+the code.
+
+**A plane is kept until a newer answer arrives.** `holdsPlane()` is now just
+`gLast.status == Status::Ok`. Nothing on the device drops a plane for being old:
+`showForSeconds` is read once, in `fetchMine()`, to decide whether a plane is
+worth picking, and never again. What replaces a held plane is the next answered
+fetch, under the rule `cardFetch()` already had - a request that got no answer
+keeps the plane, any answered fetch replaces it. There is no outer limit, which
+is a decision rather than an omission: capping it puts the card back to going
+dark, and the only other thing the panel could show is the scheduler's
+placeholder, which says less than a dated sighting.
+
+`describeAge()` therefore has to stay readable at any figure. `describeElapsed()`
+climbs a unit as the figure grows - seconds, minutes, hours under two days, then
+days - so a long hold reads "Reported 7 hr ago" rather than "Reported 420 min
+ago". The no-position-age branch is rounded down to a whole minute first, so a
+display talking to a server that sends no age reads exactly what it did before.
+
+**A plane with less than `Aircraft::kMinimumTimeLeft` is passed over.** Twenty
+seconds, applied to candidates in `fetchMine()`'s selection loop in place of the
+old test for zero. A military sighting outranks the rest only while it clears the
+floor too. When nothing on the answer clears it the result is `Status::Expired`,
+which the card already handled.
+
+The two rules do not overlap and the order is worth stating: the floor is the
+only place time left is ever read, and it is read about candidates, never about
+the plane already held. A plane picked with 25 seconds left is still on screen
+four minutes later if nothing newer has arrived.
+
+Twenty seconds is a lane decision. It is a little over twice the card's ordinary
+8-second dwell, so a plane that clears it is worth at least one full turn. The
+figure cannot move without a firmware release, which is the argument for keeping
+it small; the server's own limits are settings and can move freely.
+
+**Removed: the poll-time leave from 37g.** `CardManager::poll()` no longer asks
+once a second whether the card on screen still has something to show, and
+`gLastContentCheckMs` is gone. It was built for the countdown and the countdown
+is gone. The other two ways a card stops being showable are already handled:
+`fetchCard()` leaves a card that empties on its own fetch, and `applyPolicy()`
+moves off a card the server just switched off. Nothing else in `App/` makes a
+card unshowable mid-dwell - checked by reading every `itemCount()` in the tree,
+all of which answer from state only a fetch or a policy writes. Leaving it in
+would cost an `itemCount()` call per second on every display to catch a case
+nothing produces.
+
+**Made to fail first.** Neither decision changes a signature, so both new rules
+were mutated back out of the shipped files, grep-gated on the exact text removed
+and `cmp`-checked before the compile, with the restored file touched:
+
+| mutation | first failing line |
+|---|---|
+| the selection floor back to the old test for zero | `Failed: the plane drawn is the first one clearing the floor, not the nearest [a list whose nearest plane is nearly out of time]` |
+| `kMinimumTimeLeft` one second lower | `Failed: one second under the floor is passed over [the floor's own boundary]` |
+| the countdown put back into `holdsPlane()` | `Failed: it is still held four times its own showForSeconds later [a plane whose time is up]` |
+| the age ladder stopped at minutes | `Failed: and the last line states it in hours rather than counting minutes [a plane carried through a long outage]` |
+| the no-age branch not rounded to a whole minute | `Failed: with no age from the server the line dates the answer instead [the age on the card's last line]` |
+
+**Retired.** "the plane's time runs out while its card is up" and "the plane's
+time runs out during a manual hold". Both tested the poll-time leave through the
+countdown, and neither scenario exists now. The fetch-driven leave they shared a
+mechanism with is still covered by "the plane leaves while its card is up".
+
+**Renamed and rewritten.** "a plane that runs out of time" became "a plane whose
+time is up", "a plane that runs out while the service is down" became "a plane
+carried through a long outage", "a list whose nearest plane has had its time"
+became "a list whose nearest plane is nearly out of time", "every plane out of
+time" became "every plane under the floor", and "a plane the server set no limit
+on" no longer watches for a drop at 120 seconds. **Added:** "the floor's own
+boundary", and four rungs of the age ladder inside the existing age case.
+
+**What this does not cover, beyond 37f.** The ladder's day rung is exercised with
+a scripted `positionAgeSeconds`, not by a clock that actually ran that long. A
+hold past the `millis()` rollover at about 49.7 days is not tested and would read
+wrong: the elapsed figure wraps, so the line would say the position is newer than
+it is. Nothing bounds how long a plane is held, so the oldest sighting a display
+can draw is bounded only by how long the server stays out of reach.
