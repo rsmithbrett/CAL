@@ -26,7 +26,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # stands in for that: the three keys the countdown, the age line and the fetch
 # schedule are read from have to be in the filter.
 for KEY in nextFetchSeconds positionAgeSeconds showForSeconds; do
-  if ! grep -q "f\[\"$KEY\"\] = true;\|\[\"$KEY\"\] = true;" App/Aircraft.cpp; then
+  if ! grep -q "\[\"$KEY\"\] = true;" App/Aircraft.cpp; then
     echo "ERROR: fetchMine()'s filter in App/Aircraft.cpp does not whitelist $KEY." >&2
     echo "       An un-whitelisted key never reaches the parse, and the host test" >&2
     echo "       cannot see that because its JSON stub does not apply the filter." >&2
