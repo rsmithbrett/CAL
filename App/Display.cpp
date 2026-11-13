@@ -2554,7 +2554,7 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
                       double speedKnots, double headingDegrees, double distanceMiles,
                       const String& originCode, const String& destinationCode,
                       const String& originName, const String& destinationName,
-                      const String& updatedAt, const String& noRouteLine, bool hasLogo) {
+                      const char* updatedAt, const String& noRouteLine, bool hasLogo) {
   lcd.fillScreen(bg());
   drawCardBanner("OVERHEAD", kAircraftBanner, 130);
 
@@ -2749,8 +2749,18 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   char valueBuf[24];
 
   layoutLine("Altitude", kCardMargin, rowY, rowLabelWidth, muted(), "aircraft.altitude.label");
-  snprintf(valueBuf, sizeof(valueBuf), "%d ft", altitudeFeet);
-  layoutLine(valueBuf, rightX, rowY, rowValueWidth, ink(), "aircraft.altitude", Align::Right);
+
+  // A dash where nobody reported an altitude, for the reason the speed row
+  // below draws one: zero feet is sea level, which a plane on approach over
+  // water genuinely reports, so the caller sends kAltitudeNotReported instead
+  // of a figure and this row says so rather than inventing one.
+  if (altitudeFeet == kAltitudeNotReported) {
+    Log::line("[display] aircraft.altitude: not reported, drawing '--'");
+    layoutLine("--", rightX, rowY, rowValueWidth, ink(), "aircraft.altitude", Align::Right);
+  } else {
+    snprintf(valueBuf, sizeof(valueBuf), "%d ft", altitudeFeet);
+    layoutLine(valueBuf, rightX, rowY, rowValueWidth, ink(), "aircraft.altitude", Align::Right);
+  }
   rowY += kRowHeight;
 
   layoutLine("Speed", kCardMargin, rowY, rowLabelWidth, muted(), "aircraft.speed.label");
@@ -2784,35 +2794,11 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
   // line was set in Font0, the 6x8 bitmap face drawClock()'s own remarks
   // record as having failed on real hardware ("simply not there"). Same
   // fix, same face.
-  if (updatedAt.length() > 0) {
+  if (updatedAt != nullptr && updatedAt[0] != '\0') {
     lcd.setFont(FontId::Sans9);
     lcd.setTextSize(1);
     layoutLine(updatedAt, kCardMargin, rowY + 4, kContentWidth(), muted(),
                "aircraft.updated");
-  }
-
-  drawClock();
-  restoreDefaultTextState();
-}
-
-// The three status cards below (aircraft, listings, forecast) share one shape:
-// a headline in warn or muted, then an optional detail block stacked under
-// however many lines the headline actually took. The `bottom` layoutText()
-// returns is what does the stacking, so a two-line headline pushes the detail
-// down by exactly one line instead of by an assumed one.
-void showAircraftStatus(const String& headline, const String& detail, bool isProblem) {
-  lcd.fillScreen(bg());
-  drawCardBanner("OVERHEAD", kAircraftBanner, 130);
-
-  lcd.setFont(FontId::Sans9);
-  lcd.setTextSize(1);
-  const uint32_t headlineColour = isProblem ? kWarn : muted();
-  const TextBox headlineBox{kCardMargin, 40, kContentWidth(), 22, 3, Align::Left};
-  const TextResult drew = layoutText(headline, headlineBox, headlineColour, "aircraft.status");
-  if (detail.length() > 0) {
-    const TextBox detailBox{kCardMargin, static_cast<int16_t>(drew.bottom + 12),
-                            kContentWidth(), 18, 3, Align::Left};
-    layoutText(detail, detailBox, ink(), "aircraft.status.detail");
   }
 
   drawClock();
@@ -5208,6 +5194,11 @@ void showFeaturedListingCard(const String& title, const String& headline, const 
   restoreDefaultTextState();
 }
 
+// The two status cards (this one and showForecastStatus()) share one shape: a
+// headline in warn or muted, then an optional detail block stacked under
+// however many lines the headline actually took. The `bottom` layoutText()
+// returns is what does the stacking, so a two-line headline pushes the detail
+// down by exactly one line instead of by an assumed one.
 void showListingsStatus(const String& headline, const String& detail, bool isProblem) {
   lcd.fillScreen(bg());
   drawCardBanner("LISTINGS", kListingsBanner, 130);

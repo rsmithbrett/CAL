@@ -54,7 +54,9 @@ using FetchFn = void (*)();
 /// putting a blank screen in the rotation. Whether a status with no data
 /// behind it counts as an item is each card's own answer. The forecast card
 /// reports one for "Forecast is not showing yet", because that message is
-/// content. The aircraft card reports zero unless it holds a plane.
+/// content. The aircraft card reports zero unless it holds a plane that still
+/// has time left on it, which can stop being true between two calls with no
+/// fetch in between.
 using ItemCountFn = uint16_t (*)();
 
 /// Draw item `itemIndex` from retained state. Must not fetch.
@@ -81,9 +83,9 @@ using NotableFn = bool (*)(uint16_t itemIndex);
 ///   parked in one state for twenty minutes says nothing about it at all.
 ///
 ///   The fetching cards (Aircraft, Listings, Forecast) have no such statics
-///   and log at fetch time instead - which sounds better until you notice
-///   fetches are kContentRefreshIntervalMs apart, so "nothing for ten
-///   minutes" is the normal, healthy case there too.
+///   and log at fetch time instead - which sounds better until you notice how
+///   far apart the fetches are. A card on kContentRefreshIntervalMs says
+///   nothing for ten minutes at a time, and that is the normal, healthy case.
 ///
 /// Either way an admin who starts watching mid-flight sees cards cycling in
 /// rotation and has no way to tell a working fetch from a refused one without
@@ -387,6 +389,11 @@ struct CardSpec {
   /// registered card's counter ticks on every computed card; whichever
   /// interstitial exceeds its own interleaveEvery first is what shows.
   uint16_t cardsSince = 0;
+  /// How many seconds to wait between this card's fetches, when the card's own
+  /// source says. Zero leaves it on Config::kContentRefreshIntervalMs, which is
+  /// every card that has no opinion. A card writes this itself, from whatever
+  /// its server sent on the last answer - see Aircraft.cpp's applySchedule().
+  uint16_t refreshSeconds = 0;
   /// millis() of the last completed fetch. Drives the refresh timer only.
   uint32_t lastFetchMs = 0;
   bool everFetched = false;

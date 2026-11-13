@@ -56,17 +56,39 @@
 //     carries the announcement it would have carried had the plane's dwell run
 //     out, so leaving a card is one step through the announcement queue.
 //   - Asked to draw with no plane, the card draws nothing and logs that.
+//   - A plane runs out of its showForSeconds and the card leaves the rotation
+//     with no fetch in between, whether the service is answering or not, and
+//     whether the card is on screen, under a manual hold or elsewhere.
+//   - A plane already at zero seconds is passed over when the answer is read,
+//     so the plane drawn is the first with time left and a military sighting
+//     outranks the rest only while it has time of its own. A list where every
+//     plane is at zero holds none of them.
+//   - A plane carrying no limit at all is held for 120 seconds from the fetch.
+//   - An altitude the server sent as null draws "--", and the literal
+//     "UNKNOWN" where a callsign goes draws the registration.
+//   - The card's last line states the age of the plane's position where the
+//     server sent one, grown by the time since the answer, and dates the
+//     answer where it did not.
+//   - The card asks again on the schedule the server sets, with a floor under
+//     it, falls back to the fixed interval on an answer that carries none, and
+//     gives the schedule up after three fetches in a row that got no answer.
 //
 // What this cannot check: anything about pixels, since Display is a list of
 // names here; heap, since tests/aircraft-stubs/ArduinoJson.h allocates from the
 // host and applies no filter; TLS; either board's build, which only the arduino
 // compile reaches; and the time a real fetch takes, since one returns at once
 // here and the clock does not move during it.
+//
+// The filter is the one gap with a gate of its own. The JSON stub accepts
+// fetchMine()'s filter and applies none, so no case here can see a field the
+// filter drops; ci/test-aircraft-takes-no-turn.sh greps for the three keys this
+// file's cases depend on before it compiles anything.
 
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -135,6 +157,23 @@ std::vector<std::string>& logLines() {
   static std::vector<std::string> held;
   return held;
 }
+
+/// The altitude the aircraft card was drawn with, one entry per draw, oldest
+/// first. "--" for the figure Display reads as "nobody reported one".
+std::vector<std::string>& altitudes() {
+  static std::vector<std::string> held;
+  return held;
+}
+
+/// The card's last line, one entry per draw, oldest first.
+std::vector<std::string>& ageLines() {
+  static std::vector<std::string> held;
+  return held;
+}
+
+std::string lastAltitude() { return altitudes().empty() ? std::string() : altitudes().back(); }
+
+std::string lastAgeLine() { return ageLines().empty() ? std::string() : ageLines().back(); }
 
 /// The card id of every showing the scheduler opened, oldest first.
 std::vector<std::string>& impressions() {
@@ -253,15 +292,81 @@ const char* const kUnnamedRefusal = R"({"reason":"something_new","message":"Not 
 
 /// One aircraft `distanceMiles` away. The service says anything inside 2 miles
 /// is notable, so 5.0 is an ordinary sighting and 1.0 a notable one.
+///
+/// An hour of showForSeconds, so a case built on this one is about the card's
+/// place in the rotation and never about the countdown running out underneath
+/// it. The cases that are about the countdown use onePlaneWith() below.
 std::string onePlane(const char* callsign, double distanceMiles, const char* status = "Ok") {
   char body[512];
   snprintf(body, sizeof(body),
            R"({"radiusMiles":10,"notableDistanceMiles":2,"status":"%s","aircraft":[)"
            R"({"callsign":"%s","altitudeFeet":31000,"speedKnots":440,"headingDegrees":270,)"
            R"("distanceMiles":%.1f,"airlineCode":"UAL","airlineName":"United",)"
-           R"("originCode":"IAD","destinationCode":"DEN","registration":"N12345"}]})",
+           R"("originCode":"IAD","destinationCode":"DEN","registration":"N12345",)"
+           R"("showForSeconds":3600}]})",
            status, callsign, distanceMiles);
   return body;
+}
+
+/// One aircraft with the fields a newer server adds. A negative showForSeconds
+/// or positionAgeSeconds leaves that field off the wire altogether, which is
+/// what a server older than the field sends; `altitude` goes on as written, so
+/// "null" is the altitude nobody reported.
+std::string onePlaneWith(const char* callsign, double distanceMiles, int showForSeconds,
+                         int positionAgeSeconds, const char* altitude = "31000") {
+  std::string extra;
+  char field[64];
+  if (showForSeconds >= 0) {
+    snprintf(field, sizeof(field), R"(,"showForSeconds":%d)", showForSeconds);
+    extra += field;
+  }
+  if (positionAgeSeconds >= 0) {
+    snprintf(field, sizeof(field), R"(,"positionAgeSeconds":%d)", positionAgeSeconds);
+    extra += field;
+  }
+
+  char body[640];
+  snprintf(body, sizeof(body),
+           R"({"radiusMiles":10,"notableDistanceMiles":2,"status":"Ok","aircraft":[)"
+           R"({"callsign":"%s","altitudeFeet":%s,"speedKnots":440,"headingDegrees":270,)"
+           R"("distanceMiles":%.1f,"airlineCode":"UAL","airlineName":"United",)"
+           R"("originCode":"IAD","destinationCode":"DEN","registration":"N12345"%s}]})",
+           callsign, altitude, distanceMiles, extra.c_str());
+  return body;
+}
+
+/// One entry in a list of sightings, in the order the server sends them.
+struct Plane {
+  const char* callsign;
+  int showForSeconds;
+  bool isMilitary;
+};
+
+/// A list of sightings, all five miles out, each with its own time left.
+std::string planes(std::initializer_list<Plane> list) {
+  std::string body = R"({"radiusMiles":10,"notableDistanceMiles":2,"status":"Ok","aircraft":[)";
+  bool first = true;
+  for (const Plane& plane : list) {
+    char one[320];
+    snprintf(one, sizeof(one),
+             R"(%s{"callsign":"%s","altitudeFeet":31000,"speedKnots":440,)"
+             R"("headingDegrees":270,"distanceMiles":5.0,"showForSeconds":%d,)"
+             R"("isMilitary":%s,"registration":"N12345"})",
+             first ? "" : ",", plane.callsign, plane.showForSeconds,
+             plane.isMilitary ? "true" : "false");
+    body += one;
+    first = false;
+  }
+  body += "]}";
+  return body;
+}
+
+/// The same body with a fetch schedule on it, which is a top-level field beside
+/// the array rather than part of it.
+std::string withSchedule(std::string body, int nextFetchSeconds) {
+  char field[48];
+  snprintf(field, sizeof(field), R"("nextFetchSeconds":%d,)", nextFetchSeconds);
+  return body.insert(1, field);
 }
 
 // --- the neighbours ---------------------------------------------------------
@@ -523,13 +628,15 @@ void anUnansweredFetchKeepsThePlane() {
   size_t logMark = logLines().size();
   refreshAircraft();
   check(planesHeld() == 1, "a request that cannot begin keeps the plane");
-  check(loggedSince(logMark, "keeping the last good result"), "and logs that it kept it");
+  check(loggedSince(logMark, "could not reach the service - keeping"),
+        "and logs that it kept it");
 
   serviceAnswers(400, "");
   logMark = logLines().size();
   refreshAircraft();
   check(planesHeld() == 1, "an HTTP status that is no answer of ours keeps the plane");
-  check(loggedSince(logMark, "keeping the last good result"), "and logs that it kept it");
+  check(loggedSince(logMark, "could not reach the service - keeping"),
+        "and logs that it kept it");
 
   serviceAnswers(403, "<html>a proxy's page</html>");
   refreshAircraft();
@@ -757,10 +864,314 @@ void anAnnouncementKeepsItsTurnWhenThePlaneLeaves() {
   settle();
 }
 
-void noStatusScreenWasEverDrawn() {
+void aPlaneRunsOutOfTimeAndTheCardTakesNoTurn() {
+  beginCase("a plane that runs out of time");
+
+  settle();
+  serviceAnswers(200, onePlaneWith("UAL900", 5.0, /*showForSeconds=*/30,
+                                   /*positionAgeSeconds=*/-1));
+  refreshAircraft();
+  check(planesHeld() == 1, "the card holds the plane the fetch returned");
+
+  pass(29);
+  check(planesHeld() == 1, "it still holds it a second before its time is up");
+
+  const size_t logMark = logLines().size();
+  const size_t mark = screens().size();
+  pass(1);
+  check(planesHeld() == 0, "the card reports no items once the plane's time is up");
+  check(aircraftStatus() == "ok, no plane with time left to show",
+        "its status says so with no fetch in between");
+  check(loggedSince(logMark, "[aircraft] the plane held has had its 30 seconds"),
+        "and the stream says how long the plane had");
+
+  pass(40);
+  check(!drewSince(mark, "aircraft"), "no aircraft screen is drawn after that");
+  check(!drewSince(mark, "no content"), "the placeholder is not drawn in the card's place");
+}
+
+void aPlaneRunsOutWhileTheServiceIsDown() {
+  beginCase("a plane that runs out while the service is down");
+
+  settle();
+  serviceAnswers(200, onePlaneWith("DAL910", 5.0, 40, -1));
+  refreshAircraft();
+  check(planesHeld() == 1, "the card holds the plane");
+
+  serviceIsUnreachable();
+  pass(20);
+  refreshAircraft();
+  check(planesHeld() == 1, "a fetch that got no answer keeps it");
+
+  pass(19);
+  check(planesHeld() == 1, "the count runs from the answer the plane arrived on");
+  pass(1);
+  check(planesHeld() == 0, "and the plane is dropped at its own time, not at the next answer");
+  check(aircraftStatus() == "ok, no plane with time left to show", "its status says so");
+
+  const size_t logMark = logLines().size();
+  refreshAircraft();
+  check(planesHeld() == 0, "a further unanswered fetch brings nothing back");
+  check(!loggedSince(logMark, "keeping"), "and keeps nothing");
+}
+
+void aPlaneRunningOutWhileItsCardIsUpMovesOn() {
+  beginCase("the plane's time runs out while its card is up");
+
+  settle();
+  serviceAnswers(200, onePlaneWith("SWA920", 5.0, 3600, -1));
+  refreshAircraft();
+  check(passUntilArrives("aircraft card: SWA920", 60), "the card goes up on its turn");
+
+  // A refresh while the card is up, carrying a plane with four seconds left on
+  // it: the time then runs out with no fetch anywhere near it.
+  serviceAnswers(200, onePlaneWith("SWA921", 5.0, 4, -1));
+  refreshAircraft();
+  check(onScreen() == "aircraft card: SWA921", "the refresh redraws the card in place");
+
+  const size_t mark = screens().size();
+  const size_t logMark = logLines().size();
+  pass(4);
+  check(onScreen() == "after", "the card after it goes up when the plane's time is up");
+  check(rotationLastOpened("after"),
+        "the card that replaced it is recorded as a showing the rotation opened");
+  check(loggedSince(logMark, "'aircraft' has nothing left to show - moving on"),
+        "the scheduler logs why it left the card");
+  check(!drewSince(mark, "no content"), "the placeholder is not drawn over the rotation");
+  check(secondsUntilScreenChanges(60) == kDwellSeconds,
+        "the card that replaced it gets a full dwell of its own");
+
+  for (int i = 0; i < 4; ++i) {
+    tap(Touch::Hit::Reverse);
+    check(neighbourIsOnScreen(), "a reverse tap lands on a neighbour, never on the emptied card");
+  }
+}
+
+void aPlaneRunningOutDuringAManualHoldMovesOn() {
+  beginCase("the plane's time runs out during a manual hold");
+
+  settle();
+  serviceAnswers(200, onePlaneWith("JBU930", 5.0, 3600, -1));
+  refreshAircraft();
+  check(passUntilArrives("aircraft card: JBU930", 60), "the card takes its turn");
+  check(passUntilArrives("after", 60), "and the rotation moves past it");
+
+  tap(Touch::Hit::Reverse);
+  check(onScreen() == "aircraft card: JBU930", "a reverse tap steps back to the plane");
+
+  serviceAnswers(200, onePlaneWith("JBU931", 5.0, 3, -1));
+  refreshAircraft();
+  check(onScreen() == "aircraft card: JBU931", "the refresh redraws it in place");
+
+  const int sought = gSought;
+  pass(3);
+  check(onScreen() == "after", "the card that followed it goes up when the plane's time is up");
+  check(rotationLastOpened("after"),
+        "the replacement is recorded as a showing the rotation opened, not one somebody sought");
+  pass(kManualHoldSeconds);
+  check(gSought == sought, "no card is marked as sought once the hold's own time has passed");
+}
+
+void theFirstPlaneWithTimeLeftIsDrawn() {
+  beginCase("a list whose nearest plane has had its time");
+
+  settle();
+  serviceAnswers(200, planes({{"NEAR000", 0, false}, {"NEXT100", 100, false}}));
+  refreshAircraft();
+  check(planesHeld() == 1, "the card holds a plane");
+  check(passUntilArrives("aircraft card: NEXT100", 60),
+        "the plane drawn is the first one with time left, not the nearest");
+}
+
+void aMilitaryPlaneWithTimeLeftOutranksTheRest() {
+  beginCase("a military plane among the rest");
+
+  settle();
+  serviceAnswers(200, planes({{"CIV100", 100, false}, {"MIL200", 200, true}}));
+  refreshAircraft();
+  check(passUntilArrives("aircraft card: MIL200", 60),
+        "a military plane with time left takes the card over a nearer civil one");
+
+  serviceAnswers(200, planes({{"CIV300", 300, false}, {"MIL000", 0, true}}));
+  refreshAircraft();
+  check(passUntilArrives("aircraft card: CIV300", 60),
+        "a military plane that has had its time does not outrank one that has not");
+}
+
+void everyPlaneOutOfTimeTakesTheCardOutOfTheRotation() {
+  beginCase("every plane out of time");
+
+  settle();
+  serviceAnswers(200, onePlaneWith("UAL940", 5.0, 3600, -1));
+  refreshAircraft();
+  check(planesHeld() == 1, "a plane is held to begin with");
+
+  const size_t logMark = logLines().size();
+  const size_t mark = screens().size();
+  const size_t shown = impressions().size();
+  serviceAnswers(200, planes({{"OLD100", 0, false}, {"OLD200", 0, true}}));
+  refreshAircraft();
+
+  check(planesHeld() == 0, "a list where every plane has had its time holds none of them");
+  check(aircraftStatus() == "ok, no plane with time left to show",
+        "its status says so rather than claiming the sky is clear");
+  check(loggedSince(logMark, "2 sighting(s) and none with time left"),
+        "and the stream says how many it passed over");
+
+  pass(30);
+  check(!drewSince(mark, "aircraft"), "no aircraft screen is drawn");
+  check(!showedSince(shown, "aircraft"), "no showing is opened for the card");
+}
+
+void aPlaneWithNoLimitGetsTwoMinutes() {
+  beginCase("a plane the server set no limit on");
+
+  settle();
+  serviceAnswers(200, onePlaneWith("AAL950", 5.0, /*showForSeconds=*/-1,
+                                   /*positionAgeSeconds=*/-1));
+  refreshAircraft();
+  check(planesHeld() == 1, "the card holds it");
+
+  pass(119);
+  check(planesHeld() == 1, "a plane with no limit of its own is still held at 119 seconds");
+  pass(1);
+  check(planesHeld() == 0, "and is dropped at 120");
+}
+
+void anAltitudeNobodyReportedDrawsADash() {
+  beginCase("an altitude nobody reported");
+
+  settle();
+  serviceAnswers(200, onePlaneWith("UAL960", 5.0, 3600, -1, "31000"));
+  refreshAircraft();
+  check(passUntilArrives("aircraft card: UAL960", 60), "the card goes up");
+  check(lastAltitude() == "31000", "a reported altitude is drawn as a figure");
+
+  serviceAnswers(200, onePlaneWith("UAL961", 5.0, 3600, -1, "null"));
+  refreshAircraft();
+  check(onScreen() == "aircraft card: UAL961", "the card redraws with the next plane");
+  check(lastAltitude() == "--", "an altitude the server sent as null draws a dash");
+}
+
+void anUnknownCallsignFallsBackToTheRegistration() {
+  beginCase("the literal UNKNOWN where a callsign goes");
+
+  settle();
+  serviceAnswers(200, onePlaneWith("UNKNOWN", 5.0, 3600, -1));
+  refreshAircraft();
+  check(passUntilArrives("aircraft card: N12345", 60),
+        "the card draws the registration rather than the word UNKNOWN");
+  check(aircraftStatus() == "ok, showing N12345 at 5.0 mi",
+        "and the status line names it the same way");
+  check(aircraft().describe(0) == "N12345 - IAD to DEN - 5.0 mi away",
+        "and the press label names it rather than nothing at all");
+}
+
+void theLastLineStatesThePlanesAge() {
+  beginCase("the age on the card's last line");
+
+  settle();
+  serviceAnswers(200, onePlaneWith("DAL970", 5.0, 3600, /*positionAgeSeconds=*/45));
+  refreshAircraft();
+  check(passUntilArrives("aircraft card: DAL970", 60), "the card goes up");
+
+  // Fetched and drawn on the same tick, so the line is the age the server
+  // measured and nothing else.
+  serviceAnswers(200, onePlaneWith("DAL971", 5.0, 3600, 45));
+  refreshAircraft();
+  const unsigned long answeredAtMs = gNowMs;
+  check(onScreen() == "aircraft card: DAL971", "the refresh redraws it in place");
+  check(lastAgeLine() == "Reported 45 sec ago",
+        "the line states the age of the position the server measured");
+
+  check(passUntilArrives("before", 60), "the rotation moves on");
+  check(passUntilArrives("aircraft card: DAL971", 60), "and comes back round to the card");
+  const unsigned long age = 45 + (gNowMs - answeredAtMs) / 1000UL;
+  check(age > 45, "time passed while the rotation went round");
+  std::string wanted;
+  if (age < 60) {
+    wanted = "Reported " + std::to_string(age) + " sec ago";
+  } else if (age < 120) {
+    wanted = "Reported 1 min ago";
+  } else {
+    wanted = "Reported " + std::to_string(age / 60) + " min ago";
+  }
+  check(lastAgeLine() == wanted, "and the figure has grown by the time since the answer");
+
+  serviceAnswers(200, onePlaneWith("DAL972", 5.0, 3600, /*positionAgeSeconds=*/-1));
+  refreshAircraft();
+  check(onScreen() == "aircraft card: DAL972", "the card redraws with a plane carrying no age");
+  check(lastAgeLine() == "Updated just now",
+        "with no age from the server the line dates the answer instead");
+}
+
+void theServerSetsTheFetchCadence() {
+  beginCase("the server's own fetch schedule");
+
+  settle();
+  serviceAnswers(200, withSchedule(onePlaneWith("UAL980", 5.0, 3600, -1), 60));
+  refreshAircraft();
+  check(aircraft().refreshSeconds == 60, "the card takes the schedule off the answer");
+
+  const uint32_t fetchedAtMs = aircraft().lastFetchMs;
+  pass(59);
+  check(aircraft().lastFetchMs == fetchedAtMs, "the card is not asked again before the schedule");
+  pass(1);
+  check(aircraft().lastFetchMs != fetchedAtMs,
+        "and is asked again as soon as the schedule is up, not ten minutes later");
+
+  serviceAnswers(200, withSchedule(onePlaneWith("UAL981", 5.0, 3600, -1), 5));
+  refreshAircraft();
+  check(aircraft().refreshSeconds == 30, "a schedule under the floor is raised to the floor");
+}
+
+void noScheduleKeepsTheFixedInterval() {
+  beginCase("an answer carrying no schedule");
+
+  settle();
+  serviceAnswers(200, withSchedule(onePlaneWith("UAL985", 5.0, 3600, -1), 60));
+  refreshAircraft();
+  check(aircraft().refreshSeconds == 60, "the card is on the server's schedule to begin with");
+
+  serviceAnswers(200, onePlaneWith("UAL986", 5.0, 3600, -1));
+  refreshAircraft();
+  check(aircraft().refreshSeconds == 0,
+        "an answer with no schedule on it puts the card back on the fixed interval");
+
+  const uint32_t fetchedAtMs = aircraft().lastFetchMs;
+  pass(120);
+  check(aircraft().lastFetchMs == fetchedAtMs, "and it is not asked again two minutes later");
+}
+
+void anUnansweredFetchGivesUpTheScheduleAfterTwoTries() {
+  beginCase("the schedule through a service that stops answering");
+
+  settle();
+  serviceAnswers(200, withSchedule(onePlaneWith("UAL990", 5.0, 3600, -1), 60));
+  refreshAircraft();
+  check(aircraft().refreshSeconds == 60, "the card is on the server's schedule");
+
+  serviceIsUnreachable();
+  refreshAircraft();
+  check(aircraft().refreshSeconds == 60, "one fetch that got no answer keeps it");
+  refreshAircraft();
+  check(aircraft().refreshSeconds == 60, "so does a second");
+  refreshAircraft();
+  check(aircraft().refreshSeconds == 0, "a third puts the card back on the fixed interval");
+
+  serviceAnswers(200, withSchedule(onePlaneWith("UAL991", 5.0, 3600, -1), 60));
+  refreshAircraft();
+  check(aircraft().refreshSeconds == 60, "an answer puts it back on the server's schedule");
+}
+
+void nothingWasEverDrawnWithoutAPlane() {
   beginCase("the whole run");
 
-  check(!drewSince(0, "aircraft status"), "the aircraft status screen was never drawn");
+  check(drawsSince(0, "aircraft card: ") > 0, "the card was drawn during the run");
+  check(drawsSince(0, "aircraft card: ") == altitudes().size(),
+        "every aircraft screen in the whole run came from a draw that held a plane");
+  check(drawsSince(0, "aircraft card: ") == ageLines().size(),
+        "and every one of them carried a line dating what it showed");
 }
 
 }  // namespace
@@ -842,10 +1253,13 @@ bool drawRamInRect(const String&, const RamAssetBuffer&, int32_t, int32_t, int32
 
 namespace Display {
 
-void showAircraftCard(const String& callsign, const String&, int, double, double, double,
-                      const String&, const String&, const String&, const String&, const String&,
-                      const String&, bool) {
+void showAircraftCard(const String& callsign, const String&, int altitudeFeet, double, double,
+                      double, const String&, const String&, const String&, const String&,
+                      const char* updatedAt, const String&, bool) {
   screens().push_back(std::string("aircraft card: ") + callsign.c_str());
+  altitudes().push_back(altitudeFeet == kAltitudeNotReported ? std::string("--")
+                                                             : std::to_string(altitudeFeet));
+  ageLines().push_back(updatedAt == nullptr ? std::string() : std::string(updatedAt));
 }
 
 void aircraftLogoZone(int16_t& x, int16_t& y, int16_t& w, int16_t& h) {
@@ -853,12 +1267,6 @@ void aircraftLogoZone(int16_t& x, int16_t& y, int16_t& w, int16_t& h) {
   y = 0;
   w = 0;
   h = 0;
-}
-
-/// Kept so a build of Aircraft.cpp that still draws a status screen links, and
-/// the case that looks for one can say so.
-void showAircraftStatus(const String& headline, const String&, bool) {
-  screens().push_back(std::string("aircraft status: ") + headline.c_str());
 }
 
 void showNoContent(const String& headline, const String&) {
@@ -994,7 +1402,21 @@ int main() {
   tapsPassOverTheEmptiedCard();
   aPlaneLeavingDuringAManualHoldMovesOn();
   anAnnouncementKeepsItsTurnWhenThePlaneLeaves();
-  noStatusScreenWasEverDrawn();
+  aPlaneRunsOutOfTimeAndTheCardTakesNoTurn();
+  aPlaneRunsOutWhileTheServiceIsDown();
+  aPlaneRunningOutWhileItsCardIsUpMovesOn();
+  aPlaneRunningOutDuringAManualHoldMovesOn();
+  theFirstPlaneWithTimeLeftIsDrawn();
+  aMilitaryPlaneWithTimeLeftOutranksTheRest();
+  everyPlaneOutOfTimeTakesTheCardOutOfTheRotation();
+  aPlaneWithNoLimitGetsTwoMinutes();
+  anAltitudeNobodyReportedDrawsADash();
+  anUnknownCallsignFallsBackToTheRegistration();
+  theLastLineStatesThePlanesAge();
+  theServerSetsTheFetchCadence();
+  noScheduleKeepsTheFixedInterval();
+  anUnansweredFetchGivesUpTheScheduleAfterTwoTries();
+  nothingWasEverDrawnWithoutAPlane();
 
   if (gFailures != 0) {
     std::printf("Failed: %d check(s) over the aircraft card's place in the rotation\n", gFailures);

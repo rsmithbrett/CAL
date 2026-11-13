@@ -114,7 +114,7 @@ this firmware does not control:
 |---|---|---|
 | `showSportsCard` score | `homeScore` / `awayScore` | Provider text, right aligned against the margin, nothing stops it colliding with the name column |
 | `showSportsCard` status | `status` | The provider's own progress wording, drawn raw at `kCardMargin, 172` |
-| `showAircraftCard` | `distanceBuf`, `updatedAt` | `updatedAt` is server formatted |
+| `showAircraftCard` | `distanceBuf`, `updatedAt` | `updatedAt` is built by `Aircraft.cpp`'s `describeAge()` into a 32-byte stack buffer, from figures the server sends; nothing measures it against the band |
 | `showListingsCard` | `updatedAt`, `distanceBuf` | same |
 | `showCalendarCard` | `"N of M"` built with `String` concatenation | allocates on the draw path |
 | `showForecastCard` | `shortDayLabel(...)`, `tempBuffer` | column bounded, never measured against the column |

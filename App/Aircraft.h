@@ -7,9 +7,8 @@
 /// why cards get sibling files rather than growing into one another. Like
 /// Weather, the .cpp registers its own card descriptor with the scheduler
 /// (see Cards.h) rather than being named anywhere above it. It registers as
-/// a *list* card - see the block at the bottom of Aircraft.cpp for why that
-/// is the honest description even while the server hands over only the
-/// nearest sighting.
+/// a list card holding at most one plane: one item while a plane is held, none
+/// otherwise. See the block at the bottom of Aircraft.cpp.
 ///
 /// CYD-Dickey's Aircraft.cpp/Aircraft.h talk to api.adsb.lol directly from
 /// the device and additionally resolve, per callsign, an airline name/logo
@@ -32,8 +31,9 @@ namespace Aircraft {
 
 /// What the last fetch found. Ok is the only value that carries a plane, and
 /// the only one that puts the card in the rotation: cardItemCount() reports
-/// zero for every other value, so none of them is drawn. cardStatus() names the
-/// value for the log stream.
+/// zero for every other value, so none of them is drawn. A plane that runs out
+/// of its showForSeconds turns Ok into Expired without another fetch.
+/// cardStatus() names the value for the log stream.
 enum class Status {
   Ok,
   /// The fetch succeeded, the server's own refresh succeeded, and nothing is
@@ -52,6 +52,11 @@ enum class Status {
   /// empty housing market and so the false claim is far less likely to be
   /// questioned by whoever reads it.
   RefreshFailed,
+  /// No plane left with time to show. Either every plane the server sent had
+  /// used up its showForSeconds by the time the answer arrived, or the plane
+  /// the card held used up its own before the next fetch replaced it. Not an
+  /// error, and nothing here claims the sky is empty.
+  Expired,
   /// No provider credential on file, so nothing was ever attempted - a
   /// first-class resting state, not a failure, and NOT an empty sky. Read from
   /// `status == "NotConfigured"`; this card has no `isConfigured` field of its
@@ -71,11 +76,30 @@ enum class Status {
   NetworkError,      // couldn't reach the service, or the response made no sense
 };
 
+/// How long a plane is shown when the server names no limit of its own. A
+/// server old enough to predate showForSeconds sends none, and every plane it
+/// sends gets this many seconds, counted from the arrival of the answer.
+constexpr uint16_t kDefaultShowForSeconds = 120;
+
 /// One aircraft, trimmed to what Display::showAircraftCard() actually draws -
 /// mirrors AircraftSighting on the server (DiscoverAroundMe.Providers.Data).
 struct Sighting {
+  /// The flight's callsign. Empty when the provider reported none, and also
+  /// when the server sends the literal "UNKNOWN", which older servers use for
+  /// the same thing - fetchMine() reads both as empty and the card falls back
+  /// to the registration or the airline name for its headline.
   String callsign;
+  /// Feet above sea level, meaningful only while altitudeReported is true.
   int altitudeFeet = 0;
+  /// Whether the server reported an altitude at all. False when the field was
+  /// null or absent, and the card draws "--" in place of a figure.
+  bool altitudeReported = false;
+  /// How many more seconds this plane is worth showing, as the server counted
+  /// it: its own limit less the age of the position. Zero means the plane has
+  /// had its time and this card passes over it, so a plane the card holds
+  /// always arrived with more than zero. An answer carrying no such field
+  /// gives every plane kDefaultShowForSeconds instead.
+  uint16_t showForSeconds = kDefaultShowForSeconds;
   double speedKnots = 0;
   double headingDegrees = 0;
   double distanceMiles = 0;
@@ -160,17 +184,21 @@ struct Sighting {
   /// The tail number ("166562"), where the provider has one. Military sightings only - a
   /// civil aircraft is named by its airline, which this card already draws.
   String registration;
+
+  /// Seconds from the plane's last reported position to the moment the server
+  /// answered. -1 when the server sent none, and the last line on the card
+  /// then states the age of the answer rather than the age of the position.
+  int32_t positionAgeSeconds = -1;
 };
 
 struct Result {
   Status status = Status::NetworkError;
-  /// The nearest aircraft in range - valid only when status == Ok. The
-  /// server already returns its Aircraft list sorted by distance ascending
-  /// (MyAircraftService.RefreshCoreAsync's OrderBy), so this is simply
-  /// element 0; CAL shows one featured aircraft per card the same way it
-  /// shows one featured forecast period, rather than cycling through the
-  /// full list CYD-Dickey's touch-driven card carousel does (this board has
-  /// no touch input wired up at all - see App.ino).
+  /// The one plane this card holds - valid only when status == Ok. The server
+  /// returns its list sorted by distance ascending
+  /// (MyAircraftService.RefreshCoreAsync's OrderBy), and fetchMine() keeps the
+  /// first military plane with time left on it, or the first plane with time
+  /// left when none of them is military. The card shows one plane at a time,
+  /// the same way it shows one featured forecast period.
   Sighting nearest;
   /// The owner's configured tracking radius, echoed back by the server on
   /// every response. Kept because "how interesting is this sighting" only
@@ -198,9 +226,15 @@ struct Result {
   /// reach the aircraft service." and nowhere else - notably NOT at the TLS-setup
   /// failure, which is a fault on this device's own side of the wire that a
   /// planned server outage does not explain. Read by cardFetch(): a result with
-  /// this set does not replace a plane already held, so the card keeps its
-  /// turn in the rotation through a request that got no answer.
+  /// this set does not replace a plane already held, so the card keeps its turn
+  /// in the rotation until that plane's own showForSeconds runs out.
   bool serviceUnreachable = false;
+
+  /// How soon the server wants to be asked again, from nextFetchSeconds on the
+  /// answer. Zero when this result carries no schedule: the answer had no such
+  /// field, or there was no answer to read one from. cardFetch() hands it to
+  /// the scheduler, which falls back to its fixed interval on zero.
+  uint16_t nextFetchSeconds = 0;
 };
 
 /// GETs /api/myaircraft/mine with the device's own secret and no id anywhere

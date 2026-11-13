@@ -203,6 +203,11 @@ void showStatus(const String& headline, const String& detail = "");
 /// A failure the household can act on.
 void showFailure(const String& headline, const String& whatToDo);
 
+/// What showAircraftCard() reads as "nobody reported an altitude", in place of
+/// a figure in feet. A hundred thousand feet below sea level, which no aircraft
+/// reports and no arithmetic here produces.
+constexpr int kAltitudeNotReported = -100000;
+
 /// The aircraft-overhead card. Originally modeled on CYD-Dickey's
 /// drawFeaturedAircraft() minus the parts that assumed data the server didn't
 /// provide; the server now does (airline name, logo, route - see Aircraft.h's
@@ -223,10 +228,10 @@ void showFailure(const String& headline, const String& whatToDo);
 /// Empty destination (name and code both) with a non-empty origin draws a
 /// one-sided "from X" line (a filed departure with no filed arrival, or a
 /// route lookup partial); everything empty draws no route line at all rather
-/// than an empty one - the honest rendering of "no route data", same
-/// reasoning as the card drawing nothing when there is no picture configured
-/// (see Graphic.h). Unlike the code-only line this replaces, a full name on
-/// either or both sides can run past one line at this card's width - see the
+/// than an empty one, the same way the graphic card draws nothing when there is
+/// no picture configured (see Graphic.h). Unlike the code-only line this
+/// replaces, a full name on either or both sides can run past one line at this
+/// card's width - see the
 /// README on why that wrap grows the route line down into the stat rows'
 /// starting position instead of truncating or shrinking the font, and why a
 /// pure-code route (the common case today, and the only case a 6-month-old
@@ -249,11 +254,20 @@ void showFailure(const String& headline, const String& whatToDo);
 /// below and Aircraft.cpp's cardDraw()) - the same module boundary Graphic.cpp
 /// already keeps: whoever owns the asset id draws the picture, Display.cpp
 /// only ever decides where things go.
+///
+/// altitudeFeet carries kAltitudeNotReported where nobody reported one, and the
+/// altitude row then reads "--" the way the speed row already does. Zero feet
+/// cannot stand in for it: that is sea level, and a plane on approach over
+/// water reports it.
+///
+/// updatedAt is the last line - how old the figures above it are. A pointer
+/// rather than a String because this is the draw path and the caller builds it
+/// into a stack buffer; nullptr and an empty string both draw no line.
 void showAircraftCard(const String& callsign, const String& airlineName, int altitudeFeet,
                       double speedKnots, double headingDegrees, double distanceMiles,
                       const String& originCode, const String& destinationCode,
                       const String& originName, const String& destinationName,
-                      const String& updatedAt,
+                      const char* updatedAt,
 
                       /// A line drawn where a filed route would go, for a sighting that
                       /// has none. The military card puts the service here once the
@@ -310,13 +324,6 @@ void showAircraftCard(const String& callsign, const String& airlineName, int alt
 /// beside the text is the height there is underneath it. The zone itself does
 /// not move either way - only the text does.
 void aircraftLogoZone(int16_t& x, int16_t& y, int16_t& w, int16_t& h);
-
-/// A headline and a detail line under the aircraft banner, in the same
-/// white/bannered card family as showAircraftCard() and split from the
-/// boot-ladder screens the way showForecastStatus() is. No card calls it: the
-/// aircraft card takes no turn in the rotation without a plane, so none of its
-/// non-Ok states is drawn.
-void showAircraftStatus(const String& headline, const String& detail, bool isProblem);
 
 /// The sunrise/sunset card. Both time strings are already-formatted local
 /// wall-clock ("06:32") - this draws, it does not compute, so the
@@ -698,7 +705,8 @@ void showListingsCard(const String& address, const String& propertyType, int pri
 /// refresh did not (Listings::Status::RefreshFailed - empty because the
 /// question failed rather than because the market is, and drawn as such), and
 /// genuine auth/network trouble. Same white/bannered card family as every
-/// other content card, mirroring showAircraftStatus()'s muted-vs-amber split.
+/// other content card, with the same muted-vs-amber split showForecastStatus()
+/// uses.
 ///
 /// `detail` is always one of Listings.cpp's own literals. The server's
 /// lastRefreshError text never reaches this function, and no longer reaches

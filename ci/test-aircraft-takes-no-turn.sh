@@ -18,6 +18,22 @@
 # board's build, and how long a real fetch takes.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+# The stub accepts fetchMine()'s filter and does not apply it, so every field in
+# a test body reaches the document whether or not the filter names it. A key
+# missing from the real filter is dropped during deserialization and the parse
+# takes its fallback forever, which no case here can see. These greps are what
+# stands in for that: the three keys the countdown, the age line and the fetch
+# schedule are read from have to be in the filter.
+for KEY in nextFetchSeconds positionAgeSeconds showForSeconds; do
+  if ! grep -q "f\[\"$KEY\"\] = true;\|\[\"$KEY\"\] = true;" App/Aircraft.cpp; then
+    echo "ERROR: fetchMine()'s filter in App/Aircraft.cpp does not whitelist $KEY." >&2
+    echo "       An un-whitelisted key never reaches the parse, and the host test" >&2
+    echo "       cannot see that because its JSON stub does not apply the filter." >&2
+    exit 1
+  fi
+done
+
 TEST_BUILD_DIR=$(mktemp -d)
 trap 'rm -rf "$TEST_BUILD_DIR"' EXIT
 "${CXX:-g++}" -std=c++17 -Wall -Wextra -Werror \

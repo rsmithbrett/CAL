@@ -19,6 +19,15 @@ namespace {
 
 constexpr const char* kPath = "/api/myaircraft/mine";
 
+// The shortest schedule this card will take from the server. A figure below it
+// is raised to it, so a misconfigured server cannot turn this card into a
+// request loop: each fetch holds the one shared connection and can sit on a
+// failing request for Config::kHttpTimeoutMs.
+constexpr uint16_t kMinNextFetchSeconds = 30;
+
+// The largest figure either of the two second counts can hold.
+constexpr long kMaxSeconds = 65535;
+
 // Identical shape and reasoning to Weather.cpp's parseRefusal - the same
 // ContentProviderGate produces this 403 body for every device-facing content
 // route, aircraft included (see ContentProviderGate.cs).
@@ -44,6 +53,48 @@ Result parseRefusal(const String& body) {
   }
   Log::printf("[aircraft] refused (%s): %s", reason, result.message.c_str());
   return result;
+}
+
+// How many seconds this plane is still worth showing. The server counts its own
+// limit down against the age of the position and sends what is left; zero means
+// the plane has had its time. An answer that carries no such field, which is
+// every server older than the field, gives each plane kDefaultShowForSeconds
+// instead, and so does a negative figure.
+uint16_t secondsToShow(JsonVariantConst plane) {
+  const int seconds = plane["showForSeconds"] | -1;
+  if (seconds < 0) {
+    return kDefaultShowForSeconds;
+  }
+  if (static_cast<long>(seconds) > kMaxSeconds) {
+    return static_cast<uint16_t>(kMaxSeconds);
+  }
+  return static_cast<uint16_t>(seconds);
+}
+
+// How soon the server wants to be asked again, clamped to what the scheduler
+// can act on. Zero is what an answer without the field reads as, and it leaves
+// the card on the scheduler's fixed interval.
+uint16_t scheduleFrom(int seconds) {
+  if (seconds <= 0) {
+    return 0;
+  }
+  if (seconds < kMinNextFetchSeconds) {
+    return kMinNextFetchSeconds;
+  }
+  if (static_cast<long>(seconds) > kMaxSeconds) {
+    return static_cast<uint16_t>(kMaxSeconds);
+  }
+  return static_cast<uint16_t>(seconds);
+}
+
+// The altitude as the log stream states it: a figure in feet, or that nobody
+// reported one.
+void describeAltitude(const Sighting& sighting, char* out, size_t size) {
+  if (!sighting.altitudeReported) {
+    snprintf(out, size, "not reported");
+    return;
+  }
+  snprintf(out, size, "%dft", sighting.altitudeFeet);
 }
 
 }  // namespace
@@ -143,22 +194,20 @@ Result fetchMine() {
   // Function-local static, so it is constructed on first use rather than
   // during static init where the heap is in no state to be relied on.
   //
-  // THE FILTER IS NOT A DOCUMENTATION DETAIL, IT IS THE READ ITSELF. An
-  // un-whitelisted key is dropped during deserialization and never reaches
-  // `doc` at all, so `doc["status"]` on a filter without a `status` entry is
-  // indistinguishable from a server that never sent one - a silent, permanent
-  // fallback to "the refresh was fine" no matter what the server does. That is
-  // not hypothetical: it is why `lastRefreshError` was invisible to this card
-  // for its whole life, and why Listings.cpp calls the filter the load-bearing
-  // half of the same change. Adding a field to this card means adding it here
+  // The filter is the read itself, not a note about it. A key missing from it
+  // is dropped during deserialization and never reaches `doc`, so the parse
+  // below cannot tell that key apart from one the server never sent and takes
+  // its fallback every time. Adding a field to this card means adding it here
   // in the same edit.
   static const JsonDocument filter = [] {
     JsonDocument f;
     f["radiusMiles"] = true;
     f["notableDistanceMiles"] = true;
-    // A top-level sibling of the array, not part of it, so it gets its own
-    // entry. See the empty-list branch below for what it decides.
+    // Top-level siblings of the array, not part of it, so each gets its own
+    // entry. See the empty-list branch below for what `status` decides, and
+    // cardFetch() for what the card does with the schedule.
     f["status"] = true;
+    f["nextFetchSeconds"] = true;
     f["aircraft"][0]["callsign"] = true;
     f["aircraft"][0]["altitudeFeet"] = true;
     f["aircraft"][0]["speedKnots"] = true;
@@ -178,6 +227,11 @@ Result fetchMine() {
     f["aircraft"][0]["militaryBranch"] = true;
     f["aircraft"][0]["aircraftType"] = true;
     f["aircraft"][0]["registration"] = true;
+    // How old the position is and how much of this plane's time is left. The
+    // card counts the second one down itself between fetches and states the
+    // first one on the glass.
+    f["aircraft"][0]["positionAgeSeconds"] = true;
+    f["aircraft"][0]["showForSeconds"] = true;
     return f;
   }();
 
@@ -196,6 +250,12 @@ Result fetchMine() {
   // Zero when the server does not send it, which cardIsNotable() reads as
   // "fall back to the old fifth-of-the-radius rule".
   result.notableDistanceMiles = doc["notableDistanceMiles"] | 0.0;
+
+  // Read here rather than on the Ok path, so every answer the server gives -
+  // an empty sky, a resting provider, a failed upstream refresh - carries the
+  // schedule it wants to be asked on. Zero on an answer without the field, and
+  // the card then stays on the scheduler's fixed interval.
+  result.nextFetchSeconds = scheduleFrom(doc["nextFetchSeconds"] | 0);
 
   // THE SIGNAL, AND THE ONE FIELD THIS CARD READS TO GET IT. `ProviderStatus`
   // on the server - a closed vocabulary derived on the record, meant to be read
@@ -315,75 +375,113 @@ Result fetchMine() {
                 static_cast<unsigned>(aircraft.size()));
   }
 
-  // ELEMENT 0 IS THE NEAREST, AND A MILITARY SIGHTING OUTRANKS IT.
+  // The list arrives in distance order, and a military sighting outranks the
+  // rest: the server keeps a place for the nearest military aircraft even when
+  // the eight-aircraft cap would have dropped it, which is the whole reason one
+  // ever reaches this device. This card features one plane at a time, and an
+  // ordinary airliner is what it features every other minute of the day.
   //
-  // The server sends the list in distance order and keeps a place for the nearest
-  // military aircraft even when the eight-aircraft cap would have dropped it, which is
-  // the whole reason one ever reaches this device. Drawing element 0 regardless would
-  // spend that place on a sighting nothing ever shows: this card features exactly one
-  // aircraft, and an ordinary airliner is what it features every other minute of the day.
-  //
-  // Still the NEAREST military one - the list is ordered, and this takes the first match.
-  // Falls back to element 0 when there is none, which is every ordinary response.
-  JsonVariantConst nearest = aircraft[0];
+  // A plane with no time left on it is passed over, so a list whose nearest
+  // entry has had its time still draws the next one that has time left, and a
+  // military plane outranks the others only while it has time of its own.
+  JsonVariantConst plane = aircraft[0];
+  uint16_t showForSeconds = 0;
   for (JsonVariantConst candidate : aircraft) {
+    const uint16_t seconds = secondsToShow(candidate);
+    if (seconds == 0) {
+      continue;
+    }
+    if (showForSeconds == 0) {
+      plane = candidate;
+      showForSeconds = seconds;
+    }
     if (candidate["isMilitary"].as<bool>()) {
-      nearest = candidate;
+      plane = candidate;
+      showForSeconds = seconds;
       break;
     }
   }
 
-  result.status = Status::Ok;
-  // "UNKNOWN" IS NOT A CALLSIGN AND READS EXACTLY LIKE ONE. A military
-  // aircraft flying without a flight id has none, and the word sat where
-  // SCWTP33 sits on the card beside it - photographed 2026-10-08. Empty
-  // instead, so the card falls back to the registration it already has, or
-  // draws nothing, the way it does for every other missing string.
-  result.nearest.callsign = String((const char*)(nearest["callsign"] | ""));
-  result.nearest.altitudeFeet = nearest["altitudeFeet"] | 0;
+  // Every plane on the list has had its time. Nothing here says the sky is
+  // empty and nothing failed: the card takes no turn until a fetch brings back
+  // a plane with time left on it.
+  if (showForSeconds == 0) {
+    result.status = Status::Expired;
+    result.message = "No aircraft reported recently enough to show.";
+    Log::printf("[aircraft] %u sighting(s) and none with time left -> Expired; the card takes no "
+                "turn until a fetch returns one",
+                static_cast<unsigned>(aircraft.size()));
+    return result;
+  }
 
-  // NaN RATHER THAN ZERO, AND THE SERVER HAS BEEN SENDING NULL FOR A
-  // FORTNIGHT WAITING FOR IT. IAdsbClient made both of these nullable
-  // precisely so "not reported" stops reading as a reading: zero knots is a
-  // parked aeroplane and zero degrees is due north. Coalescing here threw
-  // that away on arrival, and the card drew a P-8 at 6,975 feet doing 0 kts
-  // heading N.
-  //
-  // NaN because it is the one double that fails every comparison, so
+  result.status = Status::Ok;
+  result.nearest.showForSeconds = showForSeconds;
+
+  // "UNKNOWN" is what the server sends where a military aircraft flies without
+  // a flight id, and it reads exactly like a callsign where SCWTP33 sits on the
+  // card. Empty instead, so the card falls back to the registration it already
+  // has, or draws nothing, the way it does for every other missing string.
+  const char* callsignText = plane["callsign"] | "";
+  if (strcmp(callsignText, "UNKNOWN") == 0) {
+    callsignText = "";
+  }
+  result.nearest.callsign = String(callsignText);
+
+  // Null or absent means nobody reported an altitude. Zero feet is sea level,
+  // so the flag carries the difference and the card draws "--" without it.
+  result.nearest.altitudeReported = plane["altitudeFeet"].is<double>();
+  result.nearest.altitudeFeet = result.nearest.altitudeReported ? (plane["altitudeFeet"] | 0) : 0;
+
+  // How old the position was when the server answered. -1 for an answer that
+  // carries no such field, and the last line on the card then dates the answer
+  // rather than the position.
+  const int positionAge = plane["positionAgeSeconds"] | -1;
+  result.nearest.positionAgeSeconds = positionAge < 0 ? -1 : positionAge;
+
+  // NaN rather than zero, because zero knots is a parked aeroplane and zero
+  // degrees is due north. The server writes null for a figure nobody reported,
+  // and NaN is the one double that fails every comparison, so
   // compassDirection()'s own [0,360) guard already refuses it and draws the
   // dash it was written to draw. Only speed needed a check of its own.
   result.nearest.speedKnots =
-      nearest["speedKnots"].is<double>() ? nearest["speedKnots"].as<double>() : NAN;
+      plane["speedKnots"].is<double>() ? plane["speedKnots"].as<double>() : NAN;
   result.nearest.headingDegrees =
-      nearest["headingDegrees"].is<double>() ? nearest["headingDegrees"].as<double>() : NAN;
-  result.nearest.distanceMiles = nearest["distanceMiles"] | 0.0;
+      plane["headingDegrees"].is<double>() ? plane["headingDegrees"].as<double>() : NAN;
+  result.nearest.distanceMiles = plane["distanceMiles"] | 0.0;
   // `| ""` reads a JSON null exactly the same as a field an older server
   // never sends at all - both mean "nothing here" to this client, and the
   // contract deliberately writes null rather than omitting the key, so both
   // shapes have to land on the same empty String regardless.
-  result.nearest.airlineCode = String((const char*)(nearest["airlineCode"] | ""));
-  result.nearest.airlineName = String((const char*)(nearest["airlineName"] | ""));
-  result.nearest.airlineLogoAssetId = String((const char*)(nearest["airlineLogoAssetId"] | ""));
-  result.nearest.originCode = String((const char*)(nearest["originCode"] | ""));
-  result.nearest.originName = String((const char*)(nearest["originName"] | ""));
-  result.nearest.destinationCode = String((const char*)(nearest["destinationCode"] | ""));
-  result.nearest.destinationName = String((const char*)(nearest["destinationName"] | ""));
+  result.nearest.airlineCode = String((const char*)(plane["airlineCode"] | ""));
+  result.nearest.airlineName = String((const char*)(plane["airlineName"] | ""));
+  result.nearest.airlineLogoAssetId = String((const char*)(plane["airlineLogoAssetId"] | ""));
+  result.nearest.originCode = String((const char*)(plane["originCode"] | ""));
+  result.nearest.originName = String((const char*)(plane["originName"] | ""));
+  result.nearest.destinationCode = String((const char*)(plane["destinationCode"] | ""));
+  result.nearest.destinationName = String((const char*)(plane["destinationName"] | ""));
   // Absent on every civil aircraft and on every server old enough to predate the fields,
   // which land on the same empty String for the reason above. The flag reads false in
   // both cases, which is what "not a military sighting" means to this card.
-  result.nearest.isMilitary = nearest["isMilitary"].as<bool>();
-  result.nearest.militaryBranch = String((const char*)(nearest["militaryBranch"] | ""));
-  result.nearest.aircraftType = String((const char*)(nearest["aircraftType"] | ""));
-  result.nearest.registration = String((const char*)(nearest["registration"] | ""));
+  result.nearest.isMilitary = plane["isMilitary"].as<bool>();
+  result.nearest.militaryBranch = String((const char*)(plane["militaryBranch"] | ""));
+  result.nearest.aircraftType = String((const char*)(plane["aircraftType"] | ""));
+  result.nearest.registration = String((const char*)(plane["registration"] | ""));
 
   // A lightly-summarized response rather than the raw body - same filtering
   // reasoning as Forecast::fetch()'s own verbose line: this endpoint's
   // JsonDocument filter above already exists to keep only the fields this
   // card draws in memory, and buffering the raw body just to log it would
   // undo that.
-  Log::verbose("[aircraft] response radiusMiles=%.0f callsign=%s alt=%dft dist=%.1fmi",
-              result.radiusMiles, result.nearest.callsign.c_str(), result.nearest.altitudeFeet,
-              result.nearest.distanceMiles);
+  char altitudeText[16];
+  describeAltitude(result.nearest, altitudeText, sizeof(altitudeText));
+  Log::verbose("[aircraft] response radiusMiles=%.0f callsign=%s alt=%s dist=%.1fmi showFor=%us "
+               "positionAge=%lds nextFetch=%us",
+               result.radiusMiles,
+               result.nearest.callsign.length() > 0 ? result.nearest.callsign.c_str() : "(none)",
+               altitudeText, result.nearest.distanceMiles,
+               static_cast<unsigned>(result.nearest.showForSeconds),
+               static_cast<long>(result.nearest.positionAgeSeconds),
+               static_cast<unsigned>(result.nextFetchSeconds));
 
   return result;
 }
@@ -392,14 +490,11 @@ Result fetchMine() {
 // The card descriptor. See the equivalent block at the bottom of Weather.cpp
 // for why registration happens here rather than in App.ino.
 //
-// Registered as a *list* card even though the server currently gives us
-// exactly one sighting - the nearest. That is the honest description of the
-// card's shape: MyAircraftService returns a distance-sorted list and this
-// module takes element 0 only because nothing had a use for the rest. A
-// later server change that hands over the whole list needs cardItemCount()
-// and cardDraw() to start reading an index, and nothing in the scheduler to
-// change at all. Registering it as an interstitial today would have to be
-// undone then.
+// Registered as a list card that holds one plane at a time. MyAircraftService
+// returns a distance-sorted list and fetchMine() keeps one entry off it, so
+// cardItemCount() reports one while a plane is held and zero otherwise. A
+// later change that keeps more than one needs cardItemCount() and cardDraw()
+// to start reading an index, and nothing in the scheduler to change at all.
 // ---------------------------------------------------------------------------
 namespace {
 
@@ -463,12 +558,48 @@ bool gLogoRamUndrawable = false;
 constexpr uint8_t kMaxLogoRamDrawFailures = 2;
 uint8_t gLogoRamDrawFailures = 0;
 
+/// Which logo a network fetch to RAM was last attempted for, as a hash, and
+/// when - so one id costs at most one attempt per Config::kContentRefreshIntervalMs
+/// however that attempt went.
+///
+/// A display with no SD card has nowhere to keep a logo, so the fetch path asks
+/// the network for it on every refresh. That was one request per ten minutes
+/// until this card started taking the server's own schedule, which is a minute
+/// on today's server, and a few thousand bytes allocated and freed ten times as
+/// often is exactly the churn that carves a heap into unusable holes. A
+/// different airline overhead hashes differently and is fetched at once, which
+/// is the case that matters.
+///
+/// A hash rather than the id, so this costs eight bytes rather than a String
+/// whose buffer moves.
+uint32_t gLogoRamAttemptHash = 0;
+unsigned long gLogoRamAttemptMs = 0;
+
+/// FNV-1a over an asset id. Collisions cost one skipped logo fetch for up to a
+/// refresh interval, which is why a hash is enough here.
+uint32_t hashOf(const String& text) {
+  uint32_t hash = 2166136261UL;
+  for (size_t i = 0; i < text.length(); ++i) {
+    hash ^= static_cast<uint8_t>(text[i]);
+    hash *= 16777619UL;
+  }
+  return hash;
+}
+
 /// millis() when gLast last became an Ok result - same field, same reasoning,
 /// same fix as Weather.cpp's gLastOkMs: "Updated just now" was previously
 /// hardcoded on every draw, including a redraw of a sighting fetched minutes
 /// earlier and reverse navigation into card history, where it was false by
 /// construction.
 unsigned long gLastOkMs = 0;
+
+/// How many fetches in a row got no answer, and how many of those keep the
+/// server's own schedule before the card falls back to the scheduler's fixed
+/// interval. A server that has stopped answering should not be asked every
+/// minute for the rest of the uptime: each attempt holds the one shared
+/// connection and can sit on a dead socket for Config::kHttpTimeoutMs.
+constexpr uint8_t kUnansweredBeforeSlowdown = 2;
+uint8_t gUnansweredInARow = 0;
 
 /// Unsigned subtraction, correct across the millis() rollover at ~49 days -
 /// identical to Weather.cpp's describeFreshness(), duplicated rather than
@@ -485,6 +616,93 @@ String describeFreshness(unsigned long fetchedAtMs) {
   return String("Updated ") + ageMinutes + " min ago";
 }
 
+/// Whether a plane is held and still has time left on it.
+///
+/// Each plane arrives with the seconds the server has left on it, counted from
+/// the answer this card read it out of, and that count runs down here between
+/// fetches - including through fetches that got no answer, which keep the plane
+/// rather than replacing it. At zero the status becomes Expired and stays there
+/// until a fetch returns a plane, so the countdown is read once and cannot
+/// un-read itself as millis() rolls over.
+///
+/// Everything that asks whether this card has anything to show goes through
+/// here: the item count the scheduler reads, the draw, the press label, the
+/// listing key and the status line.
+bool holdsPlane() {
+  if (gLast.status != Status::Ok) {
+    return false;
+  }
+  if ((millis() - gLastOkMs) / 1000UL <
+      static_cast<unsigned long>(gLast.nearest.showForSeconds)) {
+    return true;
+  }
+  gLast.status = Status::Expired;
+  Log::printf("[aircraft] the plane held has had its %u seconds - the card takes no turn until a "
+              "fetch returns one",
+              static_cast<unsigned>(gLast.nearest.showForSeconds));
+  return false;
+}
+
+/// What the plane held is called in the log stream: the flight, the tail number
+/// where no flight id arrived, or neither.
+String heldIdentifier() {
+  if (gLast.nearest.callsign.length() > 0) {
+    return gLast.nearest.callsign;
+  }
+  if (gLast.nearest.registration.length() > 0) {
+    return gLast.nearest.registration;
+  }
+  return "an aircraft";
+}
+
+/// The last line on the card: how old the fact above it is.
+///
+/// With a positionAgeSeconds the line dates the position - what the server
+/// measured, plus the time since this device read the answer - because the
+/// altitude, speed, heading and distance above it all describe that position.
+/// Without one it dates the answer instead, counting from the last fetch that
+/// returned a plane, which is what this card has always drawn.
+///
+/// Writes into the caller's buffer rather than returning a String, because this
+/// runs on every draw.
+void describeAge(char* out, size_t size) {
+  const unsigned long sinceFetch = (millis() - gLastOkMs) / 1000UL;
+  if (gLast.nearest.positionAgeSeconds < 0) {
+    const unsigned long minutes = sinceFetch / 60UL;
+    if (minutes == 0) {
+      snprintf(out, size, "Updated just now");
+    } else if (minutes == 1) {
+      snprintf(out, size, "Updated 1 min ago");
+    } else {
+      snprintf(out, size, "Updated %lu min ago", minutes);
+    }
+    return;
+  }
+  const unsigned long seconds =
+      static_cast<unsigned long>(gLast.nearest.positionAgeSeconds) + sinceFetch;
+  if (seconds == 0) {
+    snprintf(out, size, "Reported just now");
+  } else if (seconds < 60UL) {
+    snprintf(out, size, "Reported %lu sec ago", seconds);
+  } else if (seconds < 120UL) {
+    snprintf(out, size, "Reported 1 min ago");
+  } else {
+    snprintf(out, size, "Reported %lu min ago", seconds / 60UL);
+  }
+}
+
+/// Hands the server's schedule to the scheduler, which asks this card again
+/// that many seconds after the fetch that carried it. Zero leaves the card on
+/// the scheduler's fixed interval, which is what every answer without the field
+/// reads as.
+void applySchedule(uint16_t seconds) {
+  const int8_t index = Cards::indexOf("aircraft");
+  if (index < 0) {
+    return;
+  }
+  Cards::at(static_cast<uint8_t>(index)).refreshSeconds = seconds;
+}
+
 /// This card's current fetch state, re-asserted to the debug stream once per
 /// check-in - see Cards.h's StatusFn for why change-only logging was not
 /// enough. Names the refusal reason rather than just "not ok": "which of the
@@ -493,12 +711,23 @@ String cardStatus() {
   if (!gEverFetched) {
     return "never fetched";
   }
+  // Asked first, because asking is what runs the countdown down: a plane that
+  // has had its time reads as Expired on this line rather than at the next
+  // fetch.
+  if (holdsPlane()) {
+    return String("ok, showing ") + heldIdentifier() + " at " +
+           String(gLast.nearest.distanceMiles, 1) + " mi";
+  }
   switch (gLast.status) {
     case Status::Ok:
-      return String("ok, nearest ") + gLast.nearest.callsign + " at " +
-             String(gLast.nearest.distanceMiles, 1) + " mi";
+      // holdsPlane() answered no, so this is no longer the status.
+      break;
     case Status::Empty:
       return String("ok, nothing within ") + String(gLast.radiusMiles, 0) + " mi";
+    // The sky was reported and what came back was too old to show. An answer,
+    // like Empty, and not a claim that the sky is clear.
+    case Status::Expired:
+      return "ok, no plane with time left to show";
     // Distinct from Empty on purpose, and this line is where an admin sees the
     // difference: "nothing within 10 mi" is an answer, "could not check" is the
     // absence of one. Carries no reason - that is an operator diagnostic and
@@ -523,52 +752,53 @@ String cardStatus() {
 }
 
 void cardFetch() {
-  // A FETCH THAT COULD NOT REACH THE SERVICE DOES NOT ERASE WHAT IS ON THE
-  // GLASS. This assigned the fetch straight over gLast, so one failed request
-  // replaced a good forecast with "Cannot reach the forecast service." and the
-  // card drew that until the next success - on a display in a lobby, in front
-  // of whoever was standing at it. The owner's words on seeing three of them:
-  // this should never happen, it should use cache if the server isn't
-  // reachable.
+  // A fetch that could not reach the service does not erase what is on the
+  // glass. gLast holds the last result and gLastOkMs the instant it was last
+  // Ok, and the card's own last line has been dating that answer all along, so
+  // keeping it is a matter of not throwing it away.
   //
-  // The cache was already here. gLast holds the last result and gLastOkMs the
-  // instant it was last Ok, and describeFreshness() has been rendering
-  // "Updated 41 min ago" onto the card all along. The only thing missing was
-  // not throwing it away.
+  // Only for serviceUnreachable, and that distinction is the whole safety of
+  // it. The flag means the request never got an answer - no TLS session, no
+  // route, a timeout - so the last answer is still the best account of the
+  // world available. Every other failure is the server answering: a refusal, a
+  // disabled provider, a device not activated, an empty sky. Those are real
+  // changes of state, and holding content over them would keep a card on screen
+  // after an operator turned it off. Those replace the cache.
   //
-  // ONLY FOR serviceUnreachable, and the distinction is the whole safety of
-  // this. That flag means the request never got an answer - no TLS session, no
-  // route, a timeout - so the last answer is still the best available account
-  // of the world and showing it is honest. Every other failure is the server
-  // answering: a refusal, a disabled provider, a device not activated, an
-  // empty result. Those are real changes of state, and holding stale content
-  // over them would keep a card on screen after an operator turned it off.
-  // Those still replace the cache, exactly as before.
-  //
-  // The staleness is visible rather than implied. The freshness line is the
-  // card's own, it keeps counting while the fetch fails, and a reader who
-  // wants to know whether this is current can read it.
-  //
-  // The same rule decides the card's place in the rotation. cardItemCount()
-  // reports an item only while gLast is Ok, so a plane kept here keeps the
-  // card's turn, and a result that replaces it with any other status takes the
-  // card out of the rotation until a fetch returns a plane.
+  // The plane kept this way keeps its own countdown. It was given its seconds
+  // by the answer it arrived on, gLastOkMs still marks that answer, and
+  // holdsPlane() measures against it - so a server that stops answering costs
+  // the card its turn as soon as the plane it is holding runs out, not when the
+  // next answer finally arrives.
   Result fresh = fetchMine();
   gEverFetched = true;
-  if (fresh.status != Status::Ok && fresh.serviceUnreachable &&
-      gLast.status == Status::Ok) {
-    Log::printf("[aircraft] could not reach the service - keeping the last good "
-                "result and the card's turn in the rotation (%s)",
-                describeFreshness(gLastOkMs).c_str());
+
+  // What the server wants to be asked on, handed to the scheduler whether or
+  // not this answer carried a plane. An unanswered request keeps the schedule
+  // for a couple of tries and then gives it up, so a server that has gone away
+  // is asked on the fixed interval rather than every minute.
+  if (fresh.serviceUnreachable) {
+    if (gUnansweredInARow < kUnansweredBeforeSlowdown) {
+      ++gUnansweredInARow;
+    } else {
+      applySchedule(0);
+    }
+  } else {
+    gUnansweredInARow = 0;
+    applySchedule(fresh.nextFetchSeconds);
+  }
+
+  if (fresh.status != Status::Ok && fresh.serviceUnreachable && holdsPlane()) {
+    Log::printf("[aircraft] could not reach the service - keeping %s and the card's turn in the "
+                "rotation (%s)",
+                heldIdentifier().c_str(), describeFreshness(gLastOkMs).c_str());
     return;
   }
 
-  // MOVED, not copied. This used to be gLast = fetch(), assigning straight
-  // from the returned temporary, which the compiler moves. Binding to a local
-  // first - which the keep-the-cache check above needs - turns that into a deep
-  // copy of every String in the result, and a const local makes the move
-  // impossible. On a display whose whole failure mode is contiguous heap, that is
-  // allocation churn introduced by a fix for a different problem.
+  // Moved, not copied. The keep-the-cache check above needs a named local, and
+  // assigning one without the move deep-copies every String in the result. On a
+  // display whose failure mode is contiguous heap, that is allocation churn for
+  // nothing.
   gLast = std::move(fresh);
   if (gLast.status == Status::Ok) {
     gLastOkMs = millis();
@@ -604,48 +834,64 @@ void cardFetch() {
         // reached the server on - the same fallback Graphic.cpp's cards have
         // had since fetchToRam() arrived, which the logo was never wired to.
         //
-        // Re-fetched every cycle rather than kept once it is in hand, which is
-        // what Graphic.cpp's fetch() does with its own pictures and for the
-        // same reason: a RAM buffer is the one cache nothing can invalidate.
+        // Re-fetched rather than kept once it is in hand, which is what
+        // Graphic.cpp's fetch() does with its own pictures and for the same
+        // reason: a RAM buffer is the one cache nothing can invalidate.
         // ensureCached() answers "already here" on the file existing, so a
         // device with a card cannot notice the server re-encoding an asset
-        // either - but that device at least has a cached file for Assets.cpp
-        // to drop. Holding these bytes for the uptime would make a card-less
-        // device the only one a re-encode could never reach short of a
-        // restart. A logo is a few thousand bytes against a picture card's ten
-        // to twenty on the same ten-minute schedule.
-        Log::printf("[aircraft] no SD cache for logo '%s' - fetching it straight to RAM",
-                    logoId.c_str());
-        const size_t heldBefore = gLogoRam.size;
-        if (Assets::fetchToRam(logoId, gLogoRam)) {
-          // A different id, or the same id with a different number of bytes,
-          // means these are not the bytes that failed to draw last time. Size
-          // is a weak test for "different" and it is the only one available
-          // here; the alternative is writing off a re-encoded logo until the
-          // device restarts.
-          //
-          // Bounded by kMaxLogoRamDrawFailures, because the test above is
-          // keyed to the buffer and the buffer is emptied by things that are
-          // not an answer to "will these bytes draw" - see that constant.
-          if ((gLogoRamId != logoId || gLogoRam.size != heldBefore) &&
-              gLogoRamDrawFailures < kMaxLogoRamDrawFailures) {
-            gLogoRamUndrawable = false;
-          }
-          gLogoRamId = logoId;
-          Log::printf("[aircraft] logo for '%s' is showing straight from RAM (%u bytes) - "
-                      "no SD card available",
-                      gLast.nearest.airlineCode.c_str(), static_cast<unsigned>(gLogoRam.size));
+        // either - but that device at least has a cached file for Assets.cpp to
+        // drop. Holding these bytes for the uptime would make a card-less
+        // device the only one a re-encode could never reach short of a restart.
+        //
+        // Once per refresh interval per id, not once per fetch, now that this
+        // card can be asked as often as the server says - see
+        // gLogoRamAttemptMs. A logo is a few thousand bytes against a picture
+        // card's ten to twenty, and the picture cards are still on the
+        // ten-minute interval.
+        const uint32_t logoHash = hashOf(logoId);
+        const bool askedRecently =
+            gLogoRamAttemptMs != 0 && gLogoRamAttemptHash == logoHash &&
+            (millis() - gLogoRamAttemptMs) < Config::kContentRefreshIntervalMs;
+        if (askedRecently) {
+          Log::verbose("[aircraft] logo '%s' was asked for over the network within the refresh "
+                       "interval - not asking again this fetch",
+                       logoId.c_str());
         } else {
-          // fetchToRam() can leave a partial write behind, so what the buffer
-          // holds is no longer any id's bytes - see Assets.h on why the caller
-          // has to forget that itself.
-          gLogoRamId = "";
-          if (gLogoRamDrawFailures < kMaxLogoRamDrawFailures) {
-            gLogoRamUndrawable = false;
-          }
-          Log::printf("[aircraft] logo '%s' could not be fetched to RAM either - no logo this "
-                      "cycle",
+          gLogoRamAttemptHash = logoHash;
+          gLogoRamAttemptMs = millis();
+          Log::printf("[aircraft] no SD cache for logo '%s' - fetching it straight to RAM",
                       logoId.c_str());
+          const size_t heldBefore = gLogoRam.size;
+          if (Assets::fetchToRam(logoId, gLogoRam)) {
+            // A different id, or the same id with a different number of bytes,
+            // means these are not the bytes that failed to draw last time. Size
+            // is a weak test for "different" and it is the only one available
+            // here; the alternative is writing off a re-encoded logo until the
+            // device restarts.
+            //
+            // Bounded by kMaxLogoRamDrawFailures, because the test above is
+            // keyed to the buffer and the buffer is emptied by things that are
+            // not an answer to "will these bytes draw" - see that constant.
+            if ((gLogoRamId != logoId || gLogoRam.size != heldBefore) &&
+                gLogoRamDrawFailures < kMaxLogoRamDrawFailures) {
+              gLogoRamUndrawable = false;
+            }
+            gLogoRamId = logoId;
+            Log::printf("[aircraft] logo for '%s' is showing straight from RAM (%u bytes) - "
+                        "no SD card available",
+                        gLast.nearest.airlineCode.c_str(), static_cast<unsigned>(gLogoRam.size));
+          } else {
+            // fetchToRam() can leave a partial write behind, so what the buffer
+            // holds is no longer any id's bytes - see Assets.h on why the caller
+            // has to forget that itself.
+            gLogoRamId = "";
+            if (gLogoRamDrawFailures < kMaxLogoRamDrawFailures) {
+              gLogoRamUndrawable = false;
+            }
+            Log::printf("[aircraft] logo '%s' could not be fetched to RAM either - no logo this "
+                        "cycle",
+                        logoId.c_str());
+          }
         }
       }
     }
@@ -665,12 +911,16 @@ void cardFetch() {
       routeSummary = destinationSummary.length() > 0 ? (originSummary + "->" + destinationSummary)
                                                        : ("from " + originSummary + " only");
     }
+    char altitudeText[16];
+    describeAltitude(gLast.nearest, altitudeText, sizeof(altitudeText));
     Log::printf(
-        "[aircraft] card updated: %s (%s) alt=%dft speed=%.0fkts heading=%.0f dist=%.1fmi route=%s",
-        gLast.nearest.callsign.c_str(),
+        "[aircraft] card updated: %s (%s) alt=%s speed=%.0fkts heading=%.0f dist=%.1fmi route=%s "
+        "showing for %us",
+        heldIdentifier().c_str(),
         gLast.nearest.airlineName.length() > 0 ? gLast.nearest.airlineName.c_str() : "no airline match",
-        gLast.nearest.altitudeFeet, gLast.nearest.speedKnots, gLast.nearest.headingDegrees,
-        gLast.nearest.distanceMiles, routeSummary.c_str());
+        altitudeText, gLast.nearest.speedKnots, gLast.nearest.headingDegrees,
+        gLast.nearest.distanceMiles, routeSummary.c_str(),
+        static_cast<unsigned>(gLast.nearest.showForSeconds));
   } else {
     // Printed rather than verbose: the stream is the only place a deployed
     // display says why its aircraft card is missing from the rotation, and
@@ -681,11 +931,12 @@ void cardFetch() {
   }
 }
 
-/// One item while a plane is held and none at any other time: before the first
-/// fetch, over a clear sky, and for every refusal and failure. The scheduler
-/// passes over a card reporting zero, which is what keeps "nothing overhead"
-/// from taking a turn in the rotation. gLast is Ok only when it carries a plane.
-uint16_t cardItemCount() { return gLast.status == Status::Ok ? 1 : 0; }
+/// One item while a plane is held and has time left on it, and none at any
+/// other time: before the first fetch, over a clear sky, for every refusal and
+/// failure, and once the plane held has had its seconds. The scheduler passes
+/// over a card reporting zero, which is what keeps "nothing overhead" from
+/// taking a turn in the rotation.
+uint16_t cardItemCount() { return holdsPlane() ? 1 : 0; }
 
 /// A plane nearly directly overhead earns the longer dwell.
 ///
@@ -701,7 +952,7 @@ uint16_t cardItemCount() { return gLast.status == Status::Ok ? 1 : 0; }
 /// send the field behaves exactly as it did. The 1-mile floor stays on both
 /// paths: a very small value must not make every sighting notable.
 bool cardIsNotable(uint16_t) {
-  if (gLast.status != Status::Ok) {
+  if (!holdsPlane()) {
     return false;
   }
   const double notable = gLast.notableDistanceMiles > 0
@@ -711,14 +962,16 @@ bool cardIsNotable(uint16_t) {
 }
 
 void cardDraw(uint16_t) {
-  if (gLast.status == Status::Ok) {
+  if (holdsPlane()) {
     // What is actually on screen this draw, not just what the last fetch
     // found - the two can diverge across a rewind, where this runs again
     // with no fresh fetch behind it. cardFetch()'s own printf() summary
     // above only fires on a successful fetch, not on every draw.
+    char altitudeText[16];
+    describeAltitude(gLast.nearest, altitudeText, sizeof(altitudeText));
     Log::verbose(
-        "[aircraft] drawing: %s alt=%dft speed=%.0fkts heading=%.0f dist=%.1fmi logo=%s",
-        gLast.nearest.callsign.c_str(), gLast.nearest.altitudeFeet, gLast.nearest.speedKnots,
+        "[aircraft] drawing: %s alt=%s speed=%.0fkts heading=%.0f dist=%.1fmi logo=%s",
+        heldIdentifier().c_str(), altitudeText, gLast.nearest.speedKnots,
         gLast.nearest.headingDegrees, gLast.nearest.distanceMiles,
         gLast.nearest.airlineLogoAssetId.length() > 0 ? gLast.nearest.airlineLogoAssetId.c_str()
                                                         : "(none)");
@@ -772,12 +1025,19 @@ void cardDraw(uint16_t) {
         (Assets::isCached(gLast.nearest.airlineLogoAssetId) ||
          (gLogoRamId == gLast.nearest.airlineLogoAssetId && !gLogoRamUndrawable));
 
+    // The last line, built into a stack buffer because this is the draw path.
+    char ageLine[32];
+    describeAge(ageLine, sizeof(ageLine));
+
     Display::showAircraftCard(identifier, operatorName,
-                              gLast.nearest.altitudeFeet, gLast.nearest.speedKnots,
+                              gLast.nearest.altitudeReported
+                                  ? gLast.nearest.altitudeFeet
+                                  : Display::kAltitudeNotReported,
+                              gLast.nearest.speedKnots,
                               gLast.nearest.headingDegrees, gLast.nearest.distanceMiles,
                               gLast.nearest.originCode, gLast.nearest.destinationCode,
                               gLast.nearest.originName, gLast.nearest.destinationName,
-                              describeFreshness(gLastOkMs), noRouteLine, hasLogo);
+                              ageLine, noRouteLine, hasLogo);
 
     // Drawn after showAircraftCard(), not by it - same module boundary
     // Graphic.cpp already keeps with Display.cpp: whoever holds the asset id
@@ -828,7 +1088,8 @@ void cardDraw(uint16_t) {
 
 /// Which aircraft was overhead when somebody pressed - see Cards::DescribeFn.
 ///
-/// Callsign, route and distance. The callsign identifies the flight to anyone
+/// The flight or the tail number, the route and the distance. The callsign
+/// identifies the flight to anyone
 /// who looks it up afterwards; the route is what makes it mean something to a
 /// reader who will not. Distance is included here, unlike on the listings card,
 /// because for an aircraft it is the point of the press - "there was a plane two
@@ -851,7 +1112,7 @@ void cardDraw(uint16_t) {
 /// reasoning as the listings card's MLS fallback: a less stable identifier
 /// still names the thing, and no key at all names nothing.
 String cardListingId(uint16_t) {
-  if (gLast.status != Status::Ok) {
+  if (!holdsPlane()) {
     return String();
   }
 
@@ -863,7 +1124,17 @@ String cardListingId(uint16_t) {
 }
 
 String cardDescribe(uint16_t) {
-  if (gLast.status != Status::Ok || gLast.nearest.callsign.length() == 0) {
+  if (!holdsPlane()) {
+    return String();
+  }
+
+  // The flight where one was filed, the tail number where none was - the same
+  // fallback the card's own headline takes, so a military aircraft flying
+  // without a flight id still names something here. Nothing at all when neither
+  // arrived.
+  String summary = gLast.nearest.callsign.length() > 0 ? gLast.nearest.callsign
+                                                       : gLast.nearest.registration;
+  if (summary.length() == 0) {
     return String();
   }
 
@@ -873,7 +1144,6 @@ String cardDescribe(uint16_t) {
                                  ? gLast.nearest.destinationName
                                  : gLast.nearest.destinationCode;
 
-  String summary = gLast.nearest.callsign;
   if (origin.length() > 0 || destination.length() > 0) {
     summary += " - " + (origin.length() > 0 ? origin : String("?")) + " to " +
                (destination.length() > 0 ? destination : String("?"));

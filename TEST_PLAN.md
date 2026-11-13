@@ -726,7 +726,7 @@ room. Drive these the way 3c drives the listings card - the server derives
 produces each value.
 
 **From 2026-11-12 the card draws none of the status screens below.** It takes
-no turn in the rotation unless it holds a plane (section 36), so each value is
+no turn in the rotation unless it holds a plane (section 37), so each value is
 read off the stream instead of the panel:
 
 ```
@@ -801,7 +801,7 @@ unreachable.
 window has no aircraft wording to change. `RefreshFailed` is still not
 `serviceUnreachable`, and that now decides something a household can see: an
 answered fetch reporting a failed refresh drops a plane the card was holding,
-where a request that got no answer keeps it. Section 36's "an answered fetch
+where a request that got no answer keeps it. Section 37's "an answered fetch
 with no plane" case holds that. The text below is the record of what was
 checked before.*
 
@@ -7244,7 +7244,7 @@ directory.
 - **A panel whose touch controller has failed** reaches none of this, which is
   why the BOOT hold stays.
 
-## 36. The aircraft card takes no turn without a plane (2026-11-12)
+## 37. The aircraft card takes no turn without a plane (2026-11-12, extended 2026-11-13)
 
 The owner's rule is that no display shows a card saying there is no aircraft:
 the card is skipped. Until this change the aircraft card reported one item once
@@ -7253,7 +7253,7 @@ no provider on file each took a turn in the rotation as a status screen.
 README.md, "The aircraft card takes no turn without a plane", is the design
 record. Section 3d's screens are retired by it, and 3d says so in place.
 
-### 36a. What is built
+### 37a. What is built
 
 `Aircraft::cardItemCount()` reports one item while the last fetch found a plane
 and zero for every other status, so `showable()` in `App/CardManager.cpp` passes
@@ -7283,7 +7283,7 @@ where it used to start again from the first card. The branch of `fetchCard()`
 that runs with nothing on screen restarts the history, so a reverse tap cannot
 step back from a card to the placeholder.
 
-### 36b. Added
+### 37b. Added
 
 `ci/test-aircraft-takes-no-turn.sh` compiles `App/Aircraft.cpp` and
 `App/CardManager.cpp` as they ship, with
@@ -7292,7 +7292,7 @@ step back from a card to the placeholder.
 the binary's own line and does not read its exit status:
 
 ```
-PASS: aircraft card takes no turn without a plane, 14 cases, 165 checks
+PASS: aircraft card takes no turn without a plane, 28 cases, 240 checks
 ```
 
 The test sets the clock, the service's answers and the taps, and reads the list
@@ -7316,14 +7316,28 @@ can read.
 | taps after the card has emptied | three reverse and five forward taps draw neither the card nor the placeholder |
 | the plane leaves during a manual hold | the card that followed goes up at once as a showing the rotation opened, keeps its ordinary dwell, and nothing is marked as sought when the hold's own time passes |
 | an announcement when the plane leaves | the card that replaces the plane's carries the announcement it would have carried had the plane's dwell run out |
-| the whole run | `Display::showAircraftStatus()` was never called |
+| a plane that runs out of time | held at 29 seconds of a 30-second limit and gone at 30, with no fetch in between; the status reads `ok, no plane with time left to show`, the stream says how long the plane had, and nothing is drawn for 40 seconds after |
+| a plane that runs out while the service is down | a fetch that got no answer keeps it, the count keeps running from the answer it arrived on, and the plane is dropped at its own time rather than at the next answer |
+| the plane's time runs out while its card is up | the card after it goes up as a showing the rotation opened, with the scheduler's line on the stream, a full dwell of its own, no placeholder, and four reverse taps that never reach the emptied card |
+| the plane's time runs out during a manual hold | the card that followed goes up as a rotation showing, and nothing is marked as sought when the hold's own time passes |
+| a list whose nearest plane has had its time | the first plane with time left is the one drawn |
+| a military plane among the rest | a military plane with time left takes the card over a nearer civil one, and one that has had its time does not |
+| every plane out of time | no items, `ok, no plane with time left to show`, the count of sightings passed over on the stream, and no screen or showing across 30 seconds |
+| a plane the server set no limit on | held at 119 seconds and dropped at 120 |
+| an altitude nobody reported | a figure where the server reported one, `--` where it sent null |
+| the literal UNKNOWN where a callsign goes | the registration on the card, in the status line and in the press label |
+| the age on the card's last line | `Reported 45 sec ago` on a draw at the answer's own tick, grown by the time since the answer when the rotation comes back round, and `Updated just now` for a plane carrying no age |
+| the server's own fetch schedule | taken off the answer, not asked again at 59 seconds and asked at 60, and a schedule of 5 raised to the 30-second floor |
+| an answer carrying no schedule | back on the fixed interval, and not asked again two minutes later |
+| the schedule through a service that stops answering | two unanswered fetches keep the schedule, a third gives it up, and an answer puts it back |
+| the whole run | every aircraft screen drawn came from a draw that held a plane, and every one carried a line dating what it showed |
 
 `build-and-release.yml` runs the script unguarded. `bench-cal.yml` and
 `mut-host-test.yml` run it behind `hashFiles`, as they do the others, and
 `bench-cal.yml`'s path list gained the twelve `App/` headers the test compiles
 that it did not already name.
 
-### 36c. Made to fail first
+### 37c. Made to fail first
 
 The first thirteen cases were written before either shipped file changed and
 run against the unmodified sources. The run ended:
@@ -7344,7 +7358,7 @@ of the commit before this one with `git show`, in a scratch directory, with no
 tracked file written. 87 checks failed against both old files, and 17 with
 only `App/Aircraft.cpp` changed.
 
-### 36d. Written after the code
+### 37d. Written after the code
 
 The fourteenth case, "an announcement when the plane leaves", was written after
 `leaveCurrentCard()` existed. So were five checks in older cases: the two that
@@ -7355,11 +7369,11 @@ directly. The check count on the PASS line was added last.
 They were added because three mutations got through the thirteen cases with no
 failed check: the announcement cursor not stepped, the replacement not recorded
 as a showing, and the draw function putting the status screen back. Each now
-fails, as 36e lists. Eight of the ten added checks also fail against the
+fails, as 37e lists. Eight of the ten added checks also fail against the
 unmodified sources, which is the 79 becoming 87. The other two are the
 announcement case's own setup.
 
-### 36e. Mutations
+### 37e. Mutations
 
 Each was applied to a copy of the shipped file in a scratch directory, by a
 block applier that refuses text it does not find exactly once, and the copy was
@@ -7382,7 +7396,7 @@ that did not apply cannot read as a passing test.
 | the same call removed with the function's address taken, so it compiles | 14 |
 | the draw function putting the status screen back | 3 |
 
-### 36f. What this does not cover
+### 37f. What this does not cover
 
 - **Neither board was compiled and no display has run this.** The two files
   were compiled by a host g++ against stubs. `arduino-cli` was not run for the
@@ -7397,12 +7411,109 @@ that did not apply cannot read as a passing test.
   logo's RAM buffer is not released when the plane is dropped, as before.
 - **TLS and the HTTP client** are scripted answers.
 - **The ArduinoJson filter.** The stub accepts a filter and applies none, so
-  3d step 1's trap, a field the filter drops, is not held here.
-- **How long a real fetch takes, and when.** A case forces a refresh. The
-  ten-minute interval in `App/Config.h` is not waited out, so a plane stays on
-  its card for up to ten minutes after the fetch that found it, as before.
+  3d step 1's trap, a field the filter drops, is not held here. The three keys
+  this change reads are held by a grep in `ci/test-aircraft-takes-no-turn.sh`
+  instead, which fails the script before it compiles anything. The other
+  nineteen keys in the filter have no such gate.
+- **How long a real fetch takes.** Every answer in these cases is scripted and
+  returns at once. A fetch against a server that has stopped answering can hold
+  the loop for `Config::kHttpTimeoutMs`, which nothing here measures.
 - **The placeholder's wording.** A display whose only card is the aircraft card
   reads "Nothing to show yet" and "Waiting for the first update from the
   server." between planes. That text is the scheduler's and was not changed.
-- **`Display::showAircraftStatus()`** is still in `App/Display.cpp` and has no
-  caller.
+- **`Display::showAircraftStatus()`** is gone from `App/Display.cpp` and
+  `App/Display.h`, along with the test's stub for it. The case that watched for
+  it is retired: nothing can call a function the header no longer declares.
+- **The last line stands still during a dwell.** It is built on the draw, and a
+  card on screen is not redrawn every second, so a plane sitting through a
+  20-second notable dwell keeps the figure it went up with.
+- **A list is still reduced to one plane.** When the plane held runs out
+  between fetches the card takes no turn until the next fetch, even if another
+  plane in that same answer had time left on it.
+
+### 37g. The countdown, the schedule and the age line (2026-11-13)
+
+Three wire fields the server now sends on every aircraft answer, and what this
+firmware does with each. All three are optional: against a server that sends
+none of them the card skips every screen with no plane, gives each plane 120
+seconds counted from the answer's arrival, and keeps its fixed fetch interval.
+
+`showForSeconds` is the seconds the server has left on that plane. `fetchMine()`
+passes over a plane at zero, so the plane drawn is the first with time left and
+a military plane outranks the rest only while it has time of its own. A list
+where every plane is at zero is `Status::Expired`, which draws nothing and does
+not claim the sky is clear. `holdsPlane()` runs the count down between fetches
+against `gLastOkMs`, so a plane kept through a fetch that got no answer is
+still dropped at its own time, and the status latches to `Expired` rather than
+being re-read each call.
+
+`positionAgeSeconds` is how old the position was when the server answered. The
+card's last line adds the time since the answer to it and reads "Reported 45
+sec ago"; without the field it dates the answer, "Updated just now", which is
+what the card drew before. The line is built into a stack buffer and
+`Display::showAircraftCard()` now takes it as a `const char*`, so the draw path
+builds no String for it.
+
+`nextFetchSeconds` is how soon the server wants to be asked again.
+`Cards::CardSpec` gained `refreshSeconds`, which `refreshOneDueCard()` uses in
+place of `Config::kContentRefreshIntervalMs` when it is not zero. The aircraft
+card writes it after every fetch: zero for an answer without the field, the
+figure raised to a 30-second floor otherwise, and zero again after three
+fetches in a row that got no answer.
+
+`altitudeFeet` can be null, which the card now draws as "--" rather than as
+"0 ft". `Sighting::altitudeReported` carries the difference and
+`Display::kAltitudeNotReported` is what the draw reads. The literal "UNKNOWN"
+in `callsign` is read as empty, so the card falls back to the registration.
+
+`CardManager::poll()` asks once a second whether the card on screen still has
+something to show and leaves it when it does not, with its history entries
+dropped first. That applies to every card, not only this one; before this, a
+card could only empty on its own fetch.
+
+`Display::showAircraftStatus()` had no caller and is removed, with its
+declaration, its definition and the test's stub.
+
+The airline logo's network fetch is held to one attempt per id per
+`Config::kContentRefreshIntervalMs`, because the schedule above would otherwise
+multiply it by ten on a display with no SD card. No case covers it: the test's
+Assets stubs answer no to everything, so the fetch path is never reached here.
+
+**Made to fail first.** The test cases and the shipped code were written
+together - the signature and struct changes stop the new cases compiling
+against the old code - so each key change was then mutated out of the shipped
+file, with a grep for the exact text removed as the gate and `cmp` against the
+backup before the compile. The restored file was touched. Each mutation's first
+failing line:
+
+| mutation | first failing line |
+|---|---|
+| the countdown in `holdsPlane()` always true | `Failed: the card reports no items once the plane's time is up [a plane that runs out of time]` |
+| `showForSeconds` read from a key the server never sends | `Failed: the card reports no items once the plane's time is up [a plane that runs out of time]` |
+| the zero-seconds plane not passed over in the selection | `Failed: a military plane that has had its time does not outrank one that has not [a military plane among the rest]` |
+| `kDefaultShowForSeconds` 120 raised to 65535 | `Failed: and is dropped at 120 [a plane the server set no limit on]` |
+| the "UNKNOWN" callsign kept | `Failed: the card draws the registration rather than the word UNKNOWN [the literal UNKNOWN where a callsign goes]` |
+| `altitudeReported` always true | `Failed: an altitude the server sent as null draws a dash [an altitude nobody reported]` |
+| `positionAgeSeconds` ignored on the last line | `Failed: the line states the age of the position the server measured [the age on the card's last line]` |
+| `refreshOneDueCard()` ignoring `refreshSeconds` | `Failed: and is asked again as soon as the schedule is up, not ten minutes later [the server's own fetch schedule]` |
+| the 30-second floor under the schedule removed | `Failed: a schedule under the floor is raised to the floor [the server's own fetch schedule]` |
+| the budget before giving the schedule up removed | `Failed: one fetch that got no answer keeps it [the schedule through a service that stops answering]` |
+| the poll-time leave never firing | `Failed: the card after it goes up when the plane's time is up [the plane's time runs out while its card is up]` |
+| `showForSeconds` dropped from the JSON filter | `ERROR: fetchMine()'s filter in App/Aircraft.cpp does not whitelist showForSeconds.` |
+
+Two mutations were discarded rather than recorded. Reading the wire field into
+a discarded local fails `-Werror=unused-parameter` instead of a check, which is
+the same shape 37e already records for `leaveCurrentCard()`. Turning the
+poll-time guard into `gCurrent.card < 0` segfaults, because the body then
+indexes `gCards` with a negative subscript; that is the mutation being wrong,
+not the code.
+
+**Retired.** "the whole run" no longer watches for
+`Display::showAircraftStatus()`, which cannot be called now that nothing
+declares it. It checks instead that every aircraft screen in the run came from
+a draw that held a plane and carried a line dating it.
+
+**Changed.** `onePlane()` now sends `"showForSeconds":3600`, so the fourteen
+older cases stay about the card's place in the rotation rather than about the
+countdown. Two checks in "a fetch that got no answer" follow the reworded
+keep-the-cache line.

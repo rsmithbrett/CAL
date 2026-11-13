@@ -23,7 +23,7 @@ dated heading after.
 
 ## Unreleased
 
-### The aircraft card only appears when there is a plane - App
+### The aircraft card appears only when there's a plane, and the plane is current - App
 
 The aircraft card used to take its turn on the screen whether or not anything
 was overhead. Under a clear sky it showed "Nothing overhead right now", and when
@@ -31,13 +31,26 @@ the flight data could not be checked it showed a message saying so. For most of
 the day that was a turn spent telling you there was nothing to see.
 
 The card now appears only while the display has a plane to show. With no plane
-it is left out and the display goes straight to the next card. If a check finds
-the plane gone while its card is up, the next card comes up straight away
-rather than after the rest of the turn.
+it's left out and the display goes straight to the next card.
 
-**How quickly it reacts.** A display checks for aircraft every ten minutes, as
-it did before. A plane's card can stay in the rotation for up to ten minutes
-after the plane was found, and a new plane can take that long to appear.
+**A plane leaves the card when its position gets old.** Every plane arrives with
+how long it's worth showing, and the display counts that down itself. When the
+time is up the card drops out of the rotation, and if that happens while the
+card is on screen, the next card comes up right away rather than after the rest
+of the turn. It works the same way when the server can't be reached: the plane
+on screen still goes at its own time instead of sitting there until the next
+answer arrives.
+
+**The last line now says how old the plane's position is**, rather than how long
+ago the display asked. "Reported 45 sec ago" counts from the moment the aircraft
+reported where it was.
+
+**How quickly it reacts.** The display asks for aircraft on the schedule the
+server sets, which is about once a minute instead of once every ten. A new plane
+shows up within that. A display talking to an older server keeps the ten-minute
+schedule it had.
+
+**Altitude reads "--" where nobody reported one**, in place of "0 ft".
 
 **If aircraft is the only card you've chosen,** the screen reads "Nothing to
 show yet" between planes, with "Waiting for the first update from the server."

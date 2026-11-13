@@ -738,7 +738,7 @@ only as long as someone keeps it agreeing.
 
 Both cards also gained a "content status" treatment for their non-Ok states
 (not yet activated, disabled for this owner, nothing currently in range, auth
-or network trouble) — `Display::showWeatherStatus`/`showAircraftStatus` keep
+or network trouble) — `Display::showWeatherStatus` keeps
 these in the same white/bannered card family rather than routing them through
 the black boot-ladder `showStatus()`/`showFailure()` screens, matching
 CYD-Dickey's own split between `drawStatusMessage()`'s black Wi-Fi/menu
@@ -1315,7 +1315,7 @@ Figures are the bottom of the lowest content drawn, the same thing
 | `showNoContent` | ~192 at full headline and detail line counts | ~38px |
 | `showClockDate` | ~185 (date block from y=145, up to two 20px lines) | ~31px |
 | `showSunMoonCard`, `showIssFlyoverCard`, `showIssNextPassCard` | ~180 when the optional detail line is present (y=140, up to two 20px lines) | ~26px |
-| `showAircraftStatus`, `showListingsStatus`, `showForecastStatus` | ~172 at three headline lines plus three detail lines | ~18px |
+| `showListingsStatus`, `showForecastStatus` | ~172 at three headline lines plus three detail lines | ~18px |
 | `showQrTextCard` | ~164 with a caption, ~156 without | 2–10px |
 | `showAnnouncementCard`, `showCalendarCard` | 150 at the 5×24px tier, 156 at the 7×18px fallback tier | 0–2px |
 
@@ -7629,8 +7629,10 @@ them.
 | A forward or reverse tap | Cannot land on the card without a plane. Forward goes through `computeNext()`, and reverse replays a history the card is no longer in. |
 | Every card reports zero | `Display::showNoContent()`, as before this change. The moment a fetch returns a plane, the card goes up without waiting out a dwell. |
 | Aircraft is the only card in the policy | The no-content screen without a plane, the plane's card the moment a fetch returns one, and the no-content screen again the moment it leaves. |
-| A fetch gets no answer while a plane is held | The plane stays, with its "Updated N min ago" line counting up. |
+| A fetch gets no answer while a plane is held | The plane stays until its own `showForSeconds` runs out, with its last line counting up. |
 | A fetch is answered without a plane | The plane is dropped at that fetch. |
+| The plane held runs out of time | The card reports zero from that second, with no fetch involved. If it is on screen, the next card goes up within a second. |
+| Every plane in an answer has run out of time | `Status::Expired`. The card takes no turn and nothing claims the sky is clear. |
 
 ### A fetch that got no answer keeps the plane, and an answer without one drops it
 
@@ -7720,10 +7722,103 @@ on screen, the scheduler adds:
 Neither line comes from `cardItemCount()`, which the scheduler calls every time
 it looks for the next card.
 
+### A plane has a time limit and the display counts it down
+
+Each sighting arrives with `showForSeconds`, which the server works out as its
+own limit less the age of the position. The firmware reads it into
+`Sighting::showForSeconds` and `holdsPlane()` measures it against `gLastOkMs`,
+the instant of the last fetch that returned a plane. Everything that asks
+whether this card has anything to show goes through that one function: the item
+count, the draw, the press label, the listing key and the status line.
+
+At zero the status moves from `Ok` to `Expired` and stays there until a fetch
+returns a plane. It is a latch rather than a test re-run on every call, so the
+`millis()` rollover at ~49 days cannot bring a dropped plane back.
+
+A plane kept through a fetch that got no answer keeps counting from the answer
+it arrived on, because that fetch leaves `gLastOkMs` alone. So a server that
+stops answering costs the card its turn when the plane it is holding runs out,
+not when the next answer finally arrives.
+
+`fetchMine()` passes over a plane already at zero, so the plane kept off a list
+is the first one with time left on it, and a military sighting outranks the
+others only while it has time of its own. A list where every plane is at zero
+is `Expired`.
+
+A plane that arrives with no `showForSeconds` at all, which is every server
+older than the field, gets `Aircraft::kDefaultShowForSeconds`, 120 seconds,
+counted from the arrival of the answer.
+
+### A card that empties while it is up is left within a second
+
+`CardManager::poll()` asks once a second whether the card on screen is still
+showable and leaves it when it is not, dropping that card's history entries
+first so a reverse tap cannot step back onto it. Before this, a card could only
+empty on its own fetch, which is what `fetchCard()` already handled.
+
+This applies to every card, not only aircraft. The once-a-second gate is there
+because the check calls a card module's own `itemCount()`, and `poll()` runs on
+every loop iteration.
+
+### The server sets the fetch schedule
+
+Every aircraft answer carries `nextFetchSeconds`. `Cards::CardSpec` gained
+`refreshSeconds`, which `refreshOneDueCard()` uses in place of
+`Config::kContentRefreshIntervalMs` when it is not zero, and the aircraft card
+writes it after every fetch through `Cards::at(Cards::indexOf("aircraft"))`.
+
+Zero means "no schedule on this answer" and leaves the card on the ten-minute
+interval, which is what a server older than the field produces. A figure below
+`kMinNextFetchSeconds`, 30, is raised to it: each fetch holds the one shared
+HTTPS connection and can sit on a dead socket for `Config::kHttpTimeoutMs`, so a
+misconfigured server must not be able to turn this card into a request loop.
+
+Three fetches in a row that get no answer give the schedule up and put the card
+back on the fixed interval. The first two keep it, so a server that blinks is
+not punished for a minute's outage.
+
+What this costs: against a server asking for 60 seconds the card makes ten times
+the requests it used to, and `gLast`'s Strings are replaced on each one.
+
+The airline logo does not follow it. A display with no SD card has nowhere to
+keep a logo, so the fetch path asks the network for it on every refresh, and ten
+times the fetches would be ten times a few thousand bytes allocated and freed on
+the device whose failure mode is contiguous heap. `gLogoRamAttemptMs` holds that
+to one network attempt per id per `Config::kContentRefreshIntervalMs`, however
+the attempt went. A different airline overhead hashes differently and is fetched
+at once, which is the case that matters; the same airline twice in a minute is
+served from the buffer that already holds it. A display with an SD card never
+reaches this path.
+
+### The last line is the plane's age
+
+`positionAgeSeconds` is how old the plane's position was when the server
+answered. `describeAge()` adds the seconds since that answer and the card reads
+"Reported 45 sec ago", "Reported 3 min ago". Without the field it dates the
+answer instead, "Updated just now" and "Updated N min ago", which is what the
+card drew before.
+
+The line is built into a stack buffer on the draw, so `showAircraftCard()` takes
+it as a `const char*` rather than a `const String&` and the draw path allocates
+nothing for it. It is built on the draw and a card on screen is not redrawn
+every second, so the figure stands still through a dwell.
+
+### An altitude nobody reported
+
+`altitudeFeet` can be null on the wire. Zero feet is sea level and a plane on
+approach over water reports it, so the figure cannot carry "not reported" on its
+own: `Sighting::altitudeReported` does, and `cardDraw()` passes
+`Display::kAltitudeNotReported` in its place. The row then reads "--", the way
+the speed row already does for a speed nobody reported.
+
+The literal "UNKNOWN" in `callsign`, which older servers send for a military
+aircraft flying without a flight id, is read as empty, so the card falls back to
+the registration.
+
 ### What this leaves
 
-`Display::showAircraftStatus()` is still in `Display.cpp` and now has no caller.
-It is left in place so this change stays inside the card and the scheduler.
+`Display::showAircraftStatus()` is gone from `Display.cpp` and `Display.h`. It
+had no caller once the card stopped drawing its non-Ok states.
 
 An announcement banner is drawn in place of a card's own content when that card
 takes its turn. An announcement whose only banner-eligible card is `aircraft`
