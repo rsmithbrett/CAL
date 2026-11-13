@@ -2677,13 +2677,13 @@ twenty-second timeout, on the loop task, with the previous card still on screen.
 already on the card, so the ordinary pass is ten cheap checks and the fetches
 only happen on the first pass after a household changes their set. `draw()` then
 reads that array and calls `Assets::drawCached()`, which never fetches. An item
-whose decode fails clears its own flag and draws nothing - `drawImageFromSd()`
-has already cleared the panel, so what takes that dwell is the themed
-background and the clock rather than a screen explaining the absence - and the
-item stays out of the set until the next fetch, so a picture this display cannot
-decode costs one dwell instead of blanking the card on every cycle. See "No
-picture means no card" at the end of this file.
-
+that will not draw - the decode failed, or the SD card stopped answering since
+the fetch - clears its own flag and draws nothing. `drawCached()` has cleared
+the panel on both, so what takes that dwell is the themed background and the
+clock rather than a screen explaining the absence, and the item stays out of the
+set until the next fetch, so a picture this display cannot draw costs one dwell
+instead of blanking the card on every cycle. See "No picture means no card" at
+the end of this file.
 **A display with no SD card holds one photograph in heap and moves along.**
 When nothing in the set reached the card, `fetch()` falls back to
 `Assets::fetchToRam()` for a single item, the same RAM fallback the graphic
@@ -5267,12 +5267,12 @@ keeping the cheap half of the signature and discarding the diagnostic half
 would be giving up the only part that says something we could not already
 guess. JPEG is matched on `FF D8 FF`.
 
-**An unrecognised header draws nothing and counts a failure.** It does not
+**An unrecognized header draws nothing and counts a failure.** It does not
 guess. Guessing cannot succeed - neither decoder will find a header it
 understands - and it costs the one useful thing in the log, because the failure
 would then be reported against a decoder rather than against the file. Instead
 the header bytes themselves go into the log, all eight of them, because they
-name the cause where "unrecognised" would not: a cached HTML error page starts
+name the cause where "unrecognized" would not: a cached HTML error page starts
 `3C 21`, a truncated write shows a short read, and a PNG mangled in transport
 shows the first four bytes right and the tail wrong. Three different bugs in
 three different subsystems, told apart by one line.
@@ -5281,7 +5281,7 @@ A file in that state is not a life sentence, and un-sticking it needed no new
 machinery: `Assets.cpp`'s existing retry-then-`giveUpOnDecodeFailure()` path
 already treats "would not decode" as grounds to delete the cache entry and
 re-fetch it on the next pass (see "A decode failure now retries and
-self-heals, instead of being a life sentence" above), and an unrecognised
+self-heals, instead of being a life sentence" above), and an unrecognized
 signature is simply another way of not decoding.
 
 Counting it as a draw failure is deliberate and consistent with "What the
@@ -7653,7 +7653,7 @@ the owner's call, so none is added here.
 
 Every other outcome drops the plane at that fetch: a clear sky, a failed
 upstream refresh (HTTP 429 and above, or a 200 whose `status` is `Stale`,
-`Unavailable` or unrecognised over an empty array), no provider on file, no
+`Unavailable` or unrecognized over an empty array), no provider on file, no
 position for the display, a refusal, a rejected device secret, a 200 that cannot
 be read, and a TLS layer on this device that is not ready. A `Stale` status that
 still carries planes is `Ok` and shows them, as before.
@@ -7825,8 +7825,10 @@ then days. Each unit hands over when the next reaches one, so "Reported 1 day
 ago" is a line a display actually draws. A plane held through a long outage
 reads "Reported 7 hr ago", which
 is the line carrying the weight the rule above puts on it. The no-position-age
-branch is rounded down to a whole minute first, so a display talking to a server
-that sends no age reads exactly what it always has.
+branch is rounded down to a whole minute first, so it never reads in seconds,
+and then climbs the same rungs: where it used to read "Updated 60 min ago" it
+now reads "Updated 1 hr ago". The rounding is what is preserved, not the whole
+line.
 
 The line is built into a stack buffer on the draw, so `showAircraftCard()` takes
 it as a `const char*` rather than a `const String&` and the draw path allocates
@@ -7903,10 +7905,16 @@ absence.
 
 ### Discovered while drawing, where it costs one dwell
 
-The fifth is a decode failure: a picture or a photograph whose bytes are on the
-device and will not decode. Nothing can see that coming - it is discovered
-inside the draw, and by then `Display::drawImageFromSd()` has already cleared
-the panel, which is its standing contract on every false return.
+The fifth is an asset the card cannot put on the glass at draw time: bytes on
+the device that will not decode, or a file that is no longer there because the
+SD card stopped answering between the fetch that recorded it and this draw.
+Nothing can see either coming - both are discovered inside the draw.
+
+`Assets::drawCached()` and `Assets::drawRam()` clear the panel to the theme
+background on every false return, which is their contract and is what makes the
+paragraph below true. `Display::drawImageFromSd()` holds it for the decode
+paths; each wrapper's own early return never reaches that call and clears for
+itself. See "What the cleared-panel contract is for" below.
 
 So that draw has nothing to put on a cleared panel, and what the glass shows for
 the rest of that one dwell is the themed background with the corner clock on it.
@@ -7922,8 +7930,38 @@ draw drew nothing, and it cannot: `showable()` after the draw is the wrong
 question for a list card, because a photograph set with one bad item still
 reports items and still looks showable. Answering it properly means a new signal
 out of `Cards::DrawFn`, which every card would have to carry. The cost of not
-doing it is one dwell of background-and-clock per asset that will not decode,
+doing it is one dwell of background-and-clock per asset the card cannot draw,
 once, rather than every pass.
+
+### What the cleared-panel contract is for
+
+`CardManager::drawCurrent()` does not clear the panel before calling a card's
+`draw()`. Every card that draws content clears for itself on the way in, which
+is cheaper than clearing twice, and it is why a card that draws *nothing* needs
+the function it asked for the bytes to have cleared instead.
+
+Neither `Assets::drawCached()` nor `Assets::drawRam()` did, on one return each.
+`drawCached()` answers false at once when `isCached()` says the asset is not on
+the card, and `drawRam()` when the buffer is empty; both return before the
+Display call that clears. `isCached()` tests `Sd::isReady()`, the id, and
+`SD.exists()`, so an SD card that stops answering between a fetch and a draw
+takes that return with the card's own `gOnCard[]` or `gReady` still true from the
+last fetch.
+
+What that looked like: the card before this one stayed on the glass for the whole
+of this card's dwell, with this card's clock and buttons painted over it. A
+running clock on somebody else's content, then the rotation moving on and doing
+it again next pass. That reads as a display that has hung, which is worse than
+the message this change set out to remove - and it was this change that exposed
+it, because the message was what used to paint over those pixels.
+
+Both early returns now clear, and both declarations in `Assets.h` say so as a
+contract rather than as an observation about what the Display layer happens to
+do. The fix is there rather than in the two cards because that is where the
+promise is made and where every caller inherits it: four call sites today, all
+full-panel draws, and the next one gets it for free. The two in-rect variants
+are separate functions and deliberately do not clear - a logo layered onto a
+composed card must not wipe it.
 
 ### Where this can leave a display with nothing
 

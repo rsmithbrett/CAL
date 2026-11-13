@@ -169,6 +169,9 @@ jobs:
       - name: Check no content means no card rather than a screen saying so
         if: ${{ hashFiles('ci/check-no-content-is-not-a-card.sh') != '' }}
         run: bash ci/check-no-content-is-not-a-card.sh
+      - name: Check a draw that fails leaves a cleared panel, not the card before it
+        if: ${{ hashFiles('ci/check-cleared-panel-contract.sh') != '' }}
+        run: bash ci/check-cleared-panel-contract.sh
       - name: Test the aircraft card takes no turn without a plane on host
         if: ${{ hashFiles('ci/test-aircraft-takes-no-turn.sh') != '' }}
         run: bash ci/test-aircraft-takes-no-turn.sh

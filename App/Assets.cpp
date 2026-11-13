@@ -1346,6 +1346,11 @@ void releaseRamBuffer(RamAssetBuffer& buffer) {
 
 bool drawRam(const String& id, const RamAssetBuffer& buffer) {
   if (buffer.data == nullptr || buffer.size == 0) {
+    // Cleared for the same reason drawCached()'s own early return is: a false
+    // return out of here leaves the caller drawing nothing, and the panel must
+    // not still be holding the card before it. drawImageFromBuffer() below
+    // clears first and this return never reaches it.
+    Display::clearPanel();
     return false;
   }
 
@@ -1448,6 +1453,18 @@ bool drawCachedInRect(const String& id, int32_t x, int32_t y, int32_t w, int32_t
 
 bool drawCached(const String& id) {
   if (!isCached(id)) {
+    // Cleared before returning, because every false return out of this
+    // function has to leave the panel in the same state. Display's own
+    // drawImageFromSd() clears first and keeps that promise on each of its
+    // failure paths, so the retry loop below cannot return false over a panel
+    // the caller still owns - but this early return never reaches it, and the
+    // callers are full-panel draws that put nothing up when this says no. The
+    // card before them stayed on the glass for a whole dwell with the new
+    // card's clock and buttons drawn over it, which reads as a frozen display.
+    //
+    // Reached when the SD card stops answering, or the file goes, between the
+    // fetch that recorded the asset as cached and this draw.
+    Display::clearPanel();
     return false;
   }
   for (uint8_t attempt = 0; attempt < kMaxDrawAttempts; ++attempt) {

@@ -116,6 +116,8 @@ jobs:
         run: bash ci/check-card-key-decisions.sh
       - name: Check no content means no card rather than a screen saying so
         run: bash ci/check-no-content-is-not-a-card.sh
+      - name: Check a draw that fails leaves a cleared panel, not the card before it
+        run: bash ci/check-cleared-panel-contract.sh
       # Aircraft.cpp and CardManager.cpp linked together against stubs: the
       # card's item count and the scheduler passing over it, read off one binary.
       - name: Test the aircraft card takes no turn without a plane on host

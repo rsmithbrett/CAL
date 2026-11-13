@@ -80,10 +80,11 @@ one photograph at a time, so a set of three used to take three turns: one with a
 picture and two with that blue panel. It now takes one turn, with a picture on
 it, and works through the set as it refreshes.
 
-**A picture that won't load costs one turn, once.** If the file is on the
-display but can't be decoded, that turn shows the background and the clock
-rather than a message, and the picture is dropped until the display fetches it
-again. It comes back on its own if the next copy loads.
+**A picture that won't load costs one turn, once.** If the display has the file
+but can't draw it - it won't decode, or the memory card stopped answering - that
+turn shows the background and the clock rather than a message, and the picture is
+dropped until the display fetches it again. It comes back on its own if the next
+copy loads.
 
 **If a display has nothing at all to show**, it still says so: "Nothing to show
 yet". That screen is about the whole rotation being empty rather than about one

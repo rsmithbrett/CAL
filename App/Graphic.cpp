@@ -346,6 +346,11 @@ struct Instance {
       return;
     }
 
+    // Whichever of the three draws above ran has left the panel cleared to the
+    // theme background - drawCached() and drawRam() both hold that on every
+    // false return, and the tight branch clears before its in-rect draw - so
+    // nothing below is drawn over the card that was on screen before this one.
+    //
     // Assets::drawCached()/drawRam() already retried this same asset a few
     // times and logged the failure (see Assets.cpp's own
     // giveUpOnDecodeFailure()) - drawCached() additionally invalidated the

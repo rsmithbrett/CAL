@@ -392,12 +392,6 @@ uint8_t gButtonCount = 0;
 /// keeps coming due first cannot starve the others.
 uint8_t gRefreshScan = 0;
 
-/// True when this card is active and actually has something to draw right
-/// now. A card with zero items is passed over entirely rather than put on
-/// screen blank. What counts as zero is the card's own answer - see
-/// Cards::ItemCountFn. The forecast card holding an explanatory status
-/// ("Forecast is not showing yet") reports one item, because that message is
-/// content. The aircraft card reports zero unless it holds a plane.
 /// Whether `card`'s effectivity window (if any) includes right now - the
 /// firmware half of CardPolicyEntry.EffectiveFromUtc/EffectiveToUtc on the
 /// server. Both 0 (the ordinary case: no policy has ever set either field)
@@ -449,6 +443,12 @@ uint16_t effectiveItemCount(const Cards::CardSpec& card) {
   return reported < cap ? reported : cap;
 }
 
+/// True when this card is active and actually has something to draw right
+/// now. A card with zero items is passed over entirely rather than put on
+/// screen blank. What counts as zero is the card's own answer - see
+/// Cards::ItemCountFn. The forecast card holding an explanatory status
+/// ("Forecast is not showing yet") reports one item, because that message is
+/// content. The aircraft card reports zero unless it holds a plane.
 bool showable(uint8_t index) {
   const Cards::CardSpec& card = gCards[index];
   // itemCount() raw, not effectiveItemCount(), and deliberately: this asks

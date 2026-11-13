@@ -288,11 +288,13 @@ void draw(uint16_t itemIndex) {
 
   if (gOnCard[item]) {
     if (!Assets::drawCached(String(id))) {
-      // The decode failed and drawImageFromSd() has already cleared the panel,
-      // so this dwell shows the theme background and the corner clock. The item
-      // is dropped until the next fetch, so a photograph this display cannot
-      // decode costs one dwell rather than a screen on every cycle, and it
-      // comes back on its own once a fetch lands a copy that decodes.
+      // Either the decode failed or the file is no longer there - an SD card
+      // that stopped answering between the fetch that recorded it and this
+      // draw. Assets::drawCached() clears the panel on both, so this dwell
+      // shows the theme background and the corner clock. The item is dropped
+      // until the next fetch, so a photograph this display cannot draw costs
+      // one dwell rather than a screen on every cycle, and it comes back on
+      // its own once a fetch lands a copy that decodes.
       gOnCard[item] = false;
       Log::printf("[%s] photograph '%s' did not decode - out of the set until the next fetch, "
                   "and nothing is drawn over the cleared panel",
@@ -302,8 +304,10 @@ void draw(uint16_t itemIndex) {
   }
 
   // The one in heap, which is what isDrawable() left for a cardless display.
+  // drawRam() clears the panel on every false return, the empty-buffer one
+  // included, so nothing here can leave the card before this one on the glass.
   if (!Assets::drawRam(String(id), gRamBuffer)) {
-    Log::printf("[%s] photograph '%s' did not decode from RAM - the buffer is released and "
+    Log::printf("[%s] photograph '%s' did not draw from RAM - the buffer is released and "
                 "nothing is drawn over the cleared panel",
                 kCardId, id);
     releaseRam();

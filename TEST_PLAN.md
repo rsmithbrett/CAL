@@ -7538,8 +7538,11 @@ placeholder, which says less than a dated sighting.
 `describeAge()` therefore has to stay readable at any figure. `describeElapsed()`
 climbs a unit as the figure grows - seconds, minutes, hours under a day, then
 days - so a long hold reads "Reported 7 hr ago" rather than "Reported 420 min
-ago". The no-position-age branch is rounded down to a whole minute first, so a
-display talking to a server that sends no age reads exactly what it did before.
+ago". The no-position-age branch is rounded down to a whole minute first, so it
+never reads in seconds, and then climbs the same rungs - where it used to read
+"Updated 60 min ago" it now reads "Updated 1 hr ago". The rounding is what is
+preserved, not the whole line. **Corrected 2026-11-13**: this said such a
+display read exactly what it did before, which is wrong above an hour.
 
 **A plane with less than `Aircraft::kMinimumTimeLeft` is passed over.** Twenty
 seconds, applied to candidates in `fetchMine()`'s selection loop in place of the
@@ -7563,10 +7566,15 @@ once a second whether the card on screen still has something to show, and
 is gone. The other two ways a card stops being showable are already handled:
 `fetchCard()` leaves a card that empties on its own fetch, and `applyPolicy()`
 moves off a card the server just switched off. Nothing else in `App/` makes a
-card unshowable mid-dwell - checked by reading every `itemCount()` in the tree,
-all of which answer from state only a fetch or a policy writes. Leaving it in
-would cost an `itemCount()` call per second on every display to catch a case
-nothing produces.
+card unshowable mid-dwell except through its own `draw()`, which is where
+`PersonalPhotos`'s `gOnCard[]` and `Graphic`'s `gReady` are written and which
+their own item counts then read - and a card that empties inside its draw cannot
+be rescued by a check that runs after the draw anyway. That is the one-dwell
+case section 38 documents. Leaving the per-second check in would cost an
+`itemCount()` call per second on every display to catch nothing it could act on.
+
+**Corrected 2026-11-13.** This paragraph first said every `itemCount()` answers
+from state only a fetch or a policy writes. Two of them do not.
 
 **Made to fail first.** Neither decision changes a signature, so both new rules
 were mutated back out of the shipped files, grep-gated on the exact text removed
@@ -7595,10 +7603,12 @@ boundary", and four rungs of the age ladder inside the existing age case.
 
 **What this does not cover, beyond 37f.** The ladder's day rung is exercised with
 a scripted `positionAgeSeconds`, not by a clock that actually ran that long. A
-hold past the `millis()` rollover at about 49.7 days is not tested and would read
-wrong: the elapsed figure wraps, so the line would say the position is newer than
-it is. Nothing bounds how long a plane is held, so the oldest sighting a display
-can draw is bounded only by how long the server stays out of reach.
+single hold longer than the `millis()` rollover at about 49.7 days would read
+wrong, and is not tested: the subtraction is unsigned, so it is correct across
+the rollover itself, and only an interval longer than the whole 49.7-day period
+wraps. That needs a plane held, unreplaced, for seven weeks. Nothing bounds how
+long a plane is held, so the oldest sighting a display can draw is bounded only
+by how long the server stays out of reach.
 
 ## 38. No picture means no card, on the four cards that could say otherwise (2026-11-13)
 
@@ -7713,3 +7723,110 @@ unaffected and simply has one fewer card in its rotation.
 - **`Graphic`, `Announcement` and `QrText` have no host test.** The arduino
   compile is the first and only thing that reads those three files here.
 - **CI has not run it.** Every figure is this workstation.
+
+## 39. A draw that fails leaves a cleared panel, not the card before it (2026-11-13)
+
+Found by the correctness review on section 38 and verified in the code before
+anything was changed. Section 38 removed the screens that used to paint over the
+previous card on a failed draw, and rested on a contract that does not hold on
+the path the two picture cards actually take.
+
+### 39a. What was wrong
+
+`CardManager::drawCurrent()` does not clear the panel before calling a card's
+`draw()`. Each card that draws content clears for itself on the way in, so a
+card that draws *nothing* depends on whatever it asked for the bytes to have
+cleared instead.
+
+`Assets::drawCached()` answers false at `App/Assets.cpp` the moment `isCached()`
+says the asset is not on the card, and `Assets::drawRam()` the moment the buffer
+is empty. Both return before the Display call that clears.
+`Display::drawImageFromSd()` does hold "cleared on every false return" - it is
+written there in as many words - but neither wrapper's early return reaches it.
+`isCached()` tests `Sd::isReady()`, the id and `SD.exists()`, so an SD card that
+stops answering between a fetch and a draw takes that return with the card's own
+`gOnCard[]` or `gReady` still true from the last fetch.
+
+**What a person saw.** The card before this one stayed on the glass for the whole
+of this card's dwell, with this card's clock and its buttons painted over it by
+`drawChrome()`. A running clock on somebody else's content, the rotation moving
+on, and the same thing again on the next pass for as long as the SD card stayed
+down. That reads as a display that has hung, which is worse than the message
+section 38 set out to remove - and section 38 is what exposed it, because the
+message was the thing that used to paint over those pixels. The decode path that
+section reasoned about was fine; the file-is-not-there path was not.
+
+Nobody has seen it on glass. It is read off the code.
+
+### 39b. What is built
+
+Both early returns call `Display::clearPanel()` before returning false, and both
+declarations in `Assets.h` now carry it as a contract rather than as an
+observation about what the Display layer happens to do.
+
+**Why there and not in the two cards.** That is where the promise is made and
+where every caller inherits it. There are four call sites today - two in
+`PersonalPhotos::draw()`, two in `Graphic::Instance<N>::draw()` - and all four
+are full-panel draws that put nothing up on a false return, so clearing is
+right for every one of them and for the next caller that does not think to ask.
+Fixing it in the two cards would leave the same trap behind the same function.
+The two in-rect variants are separate functions and deliberately do not clear: a
+logo layered onto a card another call composed must not wipe it.
+
+Also corrected: the comment at `PersonalPhotos::draw()` and the block comment in
+`Graphic::Instance<N>::draw()` that each promised the old contract, and the
+README sentences that did.
+
+### 39c. Added, and made to fail first
+
+`ci/check-cleared-panel-contract.sh`, a text gate in the same spirit as
+`check-ram-budget-call.sh` beside it, which holds the same file's calls into
+`RamPictureBudget.h`. It reads the opening lines of each of the two full-panel
+draws and requires `Display::clearPanel();` there, and reads the two in-rect
+draws and requires that it is absent.
+
+**No host test compiles `App/Assets.cpp`**, and nothing stubs it in a way that
+could see this: the photographs host test replaces `Assets` wholesale, so the
+card-level cases cannot reach the function that was wrong. A text gate is what
+this file already gets for its other invariants, and standing up a host harness
+for `Assets.cpp` - SD, Display, HeapTrace, the RAM budget and the HTTP layer -
+is a bigger change than the fix. That is the gap, stated rather than papered
+over.
+
+| mutation | what fired |
+|---|---|
+| both clears removed | `ERROR: drawCached()'s not-on-the-card return returns false without clearing the panel.` and the same for `drawRam()` |
+| a clear added to `drawCachedInRect()` | `ERROR: bool drawCachedInRect( clears the whole panel.` |
+
+Wired into `build-and-release.yml` unguarded and into `mut-host-test.yml` and
+`bench-cal.yml` behind `hashFiles`, as the others are.
+
+### 39d. Three corrections to sections 37 and 38
+
+Each was a sentence, not code.
+
+- 37g and 37h said a display talking to a server that sends no position age
+  reads exactly what it did before. It does not: that branch is rounded to a
+  whole minute and then climbs the same ladder, so what read "Updated 60 min
+  ago" reads "Updated 1 hr ago". The rounding is what is preserved. The same
+  claim was in `describeAge()`'s own comment, in README.md, and in `b666682`'s
+  commit message, which cannot be corrected in place.
+- 37h justified removing the per-second check by saying every `itemCount()` in
+  the tree answers from state only a fetch or a policy writes. Two do not:
+  `PersonalPhotos`'s `gOnCard[]` and `Graphic`'s `gReady` are written by their
+  own `draw()`. The deletion is still right - a card that empties inside its own
+  draw cannot be rescued by a check that runs after the draw - and the
+  consequence is the one-dwell case section 38 documents.
+- 37h's rollover sentence overstated. The subtraction is unsigned, so it is
+  correct across the `millis()` rollover itself; only a single hold longer than
+  the whole 49.7-day period wraps, which needs a plane held unreplaced for seven
+  weeks.
+
+### 39e. What this does not cover
+
+- **No glass.** Neither the state being fixed nor the fixed one has been seen.
+- **No behavioral host case**, for the reason in 39c. The gate reads the shape
+  of two returns and cannot see whether `clearPanel()` clears.
+- **The SD-stopped-answering state is not reproduced anywhere.** It is reasoned
+  from `isCached()`'s three conditions and the fetch that set `gOnCard[]`.
+- **CI has not run it.**

@@ -106,11 +106,18 @@ bool isCached(const String& id);
 /// card's draw(); drawCached() below is the draw-path version.
 bool drawFullScreen(const String& id);
 
-/// Draws an asset that is already cached, and never fetches. False means
-/// either "not on the card" (nothing was drawn) or "the decode failed", in
-/// which case Display::drawImageFromSd() has already cleared the panel to the
-/// theme background and the caller is expected to put its own no-content
-/// state there. This is what a card's draw() calls.
+/// Draws an asset that is already cached, and never fetches. This is what a
+/// card's draw() calls.
+///
+/// False means either "not on the card" or "the decode failed", and **the
+/// panel is cleared to the theme background on both**, so a caller that draws
+/// nothing on a false return leaves a clean panel rather than the card before
+/// it. Display::drawImageFromSd() holds that for the decode paths; the
+/// not-on-the-card return never reaches it and clears for itself.
+///
+/// This is a contract, not an observation. A false return over an untouched
+/// panel left the previous card on the glass for the whole of the next card's
+/// dwell, with that card's clock and buttons drawn over it.
 bool drawCached(const String& id);
 
 /// Same as drawCached(), bounded to a rectangle rather than the whole panel -
@@ -250,6 +257,11 @@ void releaseRamBuffer(RamAssetBuffer& buffer);
 /// exactly the condition this path exists for) - reused as-is rather than
 /// forked, so a RAM-fetched picture's decode failures show up in the same
 /// decodeFailureIds()/decodeFailureCount() report CheckIn.cpp already sends.
+///
+/// Clears the panel on every false return, for the reason drawCached() above
+/// sets out: an empty buffer returns before drawImageFromBuffer() can clear it,
+/// and a caller that then draws nothing must not be left showing the card
+/// before it.
 bool drawRam(const String& id, const RamAssetBuffer& buffer);
 
 /// Same as drawRam(), bounded to a rectangle rather than the whole panel -

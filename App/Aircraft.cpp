@@ -701,8 +701,10 @@ void describeElapsed(char* out, size_t size, const char* lead, unsigned long sec
 /// how a reader tells a fresh sighting from one carried through an outage.
 ///
 /// Without the field it dates the answer instead, counting from the last fetch
-/// that returned a plane, and is rounded down to a whole minute first so the
-/// line reads exactly as it always has against a server that sends no age.
+/// that returned a plane. Rounded down to a whole minute first, so this branch
+/// never reads in seconds, and then through the same ladder: a figure that used
+/// to read "Updated 60 min ago" reads "Updated 1 hr ago", which is the ladder
+/// doing its job rather than this branch being left alone.
 ///
 /// Writes into the caller's buffer rather than returning a String, because this
 /// runs on every draw.
