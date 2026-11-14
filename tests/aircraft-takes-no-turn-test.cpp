@@ -160,6 +160,15 @@ std::vector<std::string>& logLines() {
   return held;
 }
 
+/// How many items the aircraft card reported at the moment each draw ran, one
+/// entry per draw. The whole-run case reads it: a draw that put a card on the
+/// glass while the card held nothing is the defect this file is about, and the
+/// item count is the only thing that answers that question from outside.
+std::vector<uint16_t>& heldAtDraw() {
+  static std::vector<uint16_t> held;
+  return held;
+}
+
 /// The altitude the aircraft card was drawn with, one entry per draw, oldest
 /// first. "--" for the figure Display reads as "nobody reported one".
 std::vector<std::string>& altitudes() {
@@ -993,13 +1002,21 @@ void aPlaneWithNoLimitClearsTheFloorAndStays() {
   serviceAnswers(200, onePlaneWith("AAL950", 5.0, /*showForSeconds=*/-1,
                                    /*positionAgeSeconds=*/-1));
   refreshAircraft();
+  const unsigned long answeredAtMs = gNowMs;
   check(planesHeld() == 1, "a plane with no limit of its own clears the floor and is held");
   check(passUntilArrives("aircraft card: AAL950", 60), "and takes its turn");
 
   pass(300);
   check(planesHeld() == 1, "and is still held five minutes later");
-  check(lastAgeLine().rfind("Updated ", 0) == 0,
-        "its last line dates the answer, the way it always has against such a server");
+
+  // The figure, not just the lead word. A plane carrying no positionAgeSeconds
+  // dates the answer, and the answer is as old as the clock says. Read on the
+  // tick the card is drawn, off gNowMs rather than off the line being checked.
+  check(passUntilArrives("aircraft card: AAL950", 60), "the card comes round again");
+  const unsigned long minutes = (gNowMs - answeredAtMs) / 60000UL;
+  check(minutes >= 5, "at least five minutes have passed since the answer");
+  check(lastAgeLine() == "Updated " + std::to_string(minutes) + " min ago",
+        "its last line dates the answer, in whole minutes");
 }
 
 void anAltitudeNobodyReportedDrawsADash() {
@@ -1091,6 +1108,89 @@ void theLastLineStatesThePlanesAge() {
   check(lastAgeLine() == "Reported 59 min ago", "a minute under the hour still reads in minutes");
 }
 
+/// Every rung of the age ladder, and the figure either side of each handover.
+///
+/// Read straight off the server's own positionAgeSeconds and drawn on the tick
+/// the answer arrived, so the clock adds nothing and each row is exactly what
+/// describeElapsed() makes of one figure. The handovers are what a ladder gets
+/// wrong: 59 against 60 seconds, 59 against 60 minutes, 23 against 24 hours,
+/// and the singular at one day. The last row is the longest line this card can
+/// draw, which is what measures the buffer describeAge() writes into.
+void theLaddersHandoverPoints() {
+  beginCase("the age ladder's handover points");
+
+  struct Rung {
+    int positionAgeSeconds;
+    const char* line;
+  };
+  const Rung kRungs[] = {
+      {0, "Reported just now"},
+      {1, "Reported 1 sec ago"},
+      {59, "Reported 59 sec ago"},
+      {60, "Reported 1 min ago"},
+      {119, "Reported 1 min ago"},
+      {120, "Reported 2 min ago"},
+      {3599, "Reported 59 min ago"},
+      {3600, "Reported 1 hr ago"},
+      {7199, "Reported 1 hr ago"},
+      {7200, "Reported 2 hr ago"},
+      {82800, "Reported 23 hr ago"},
+      {86399, "Reported 23 hr ago"},
+      {86400, "Reported 1 day ago"},
+      {172799, "Reported 1 day ago"},
+      {172800, "Reported 2 days ago"},
+      {864000, "Reported 10 days ago"},
+  };
+
+  settle();
+  serviceAnswers(200, onePlaneWith("AGEBASE", 5.0, 3600, 45));
+  refreshAircraft();
+  check(passUntilArrives("aircraft card: AGEBASE", 60), "the card goes up");
+
+  int index = 0;
+  for (const Rung& rung : kRungs) {
+    char callsign[16];
+    snprintf(callsign, sizeof(callsign), "AGE%03d", index++);
+    serviceAnswers(200, onePlaneWith(callsign, 5.0, 3600, rung.positionAgeSeconds));
+    refreshAircraft();
+    const std::string row = std::to_string(rung.positionAgeSeconds) + "s";
+    checkFor(row.c_str(), lastAgeLine() == rung.line,
+             "the last line reads at the rung that figure falls on");
+  }
+}
+
+/// The line dating the answer is rounded down to a whole minute before it is
+/// worded, so a figure in seconds is not something it ever states.
+///
+/// A plane carrying no positionAgeSeconds, held while the rotation goes round:
+/// the card is drawn seconds after the answer rather than on the tick it
+/// arrived, which is where the rounding shows.
+void theAnswersAgeIsRoundedToAWholeMinute() {
+  beginCase("the age of an answer, to a whole minute");
+
+  settle();
+  serviceAnswers(200, onePlaneWith("UAL995", 5.0, 3600, /*positionAgeSeconds=*/-1));
+  refreshAircraft();
+  check(lastAgeLine() == "Updated just now", "the tick the answer arrived on reads just now");
+
+  const size_t mark = ageLines().size();
+  pass(50);
+
+  size_t datingTheAnswer = 0;
+  size_t statingSeconds = 0;
+  for (size_t i = mark; i < ageLines().size(); ++i) {
+    if (ageLines()[i].rfind("Updated ", 0) != 0) {
+      continue;
+    }
+    ++datingTheAnswer;
+    if (ageLines()[i].find(" sec ago") != std::string::npos) {
+      ++statingSeconds;
+    }
+  }
+  check(datingTheAnswer > 0, "the card was drawn again within the minute after the answer");
+  check(statingSeconds == 0, "and no line dating that answer states a figure in seconds");
+}
+
 void theServerSetsTheFetchCadence() {
   beginCase("the server's own fetch schedule");
 
@@ -1153,11 +1253,20 @@ void anUnansweredFetchGivesUpTheScheduleAfterTwoTries() {
 void nothingWasEverDrawnWithoutAPlane() {
   beginCase("the whole run");
 
-  check(drawsSince(0, "aircraft card: ") > 0, "the card was drawn during the run");
-  check(drawsSince(0, "aircraft card: ") == altitudes().size(),
-        "every aircraft screen in the whole run came from a draw that held a plane");
-  check(drawsSince(0, "aircraft card: ") == ageLines().size(),
-        "and every one of them carried a line dating what it showed");
+  const size_t drawn = drawsSince(0, "aircraft card: ");
+  check(drawn > 0, "the card was drawn during the run");
+
+  size_t withoutAPlane = 0;
+  for (const uint16_t held : heldAtDraw()) {
+    if (held == 0) {
+      ++withoutAPlane;
+    }
+  }
+  check(heldAtDraw().size() == drawn, "every aircraft screen was asked what the card held");
+  check(withoutAPlane == 0,
+        "and the card reported a plane at every draw that put one on the glass");
+  check(drawn == altitudes().size() && drawn == ageLines().size(),
+        "each of them carried an altitude and a line dating what it showed");
 }
 
 }  // namespace
@@ -1243,6 +1352,9 @@ void showAircraftCard(const String& callsign, const String&, int altitudeFeet, d
                       double, const String&, const String&, const String&, const String&,
                       const char* updatedAt, const String&, bool) {
   screens().push_back(std::string("aircraft card: ") + callsign.c_str());
+  // Asked of the card itself, while its draw is on the stack.
+  heldAtDraw().push_back(gAircraft >= 0 ? Cards::at(static_cast<uint8_t>(gAircraft)).itemCount()
+                                        : 0);
   altitudes().push_back(altitudeFeet == kAltitudeNotReported ? std::string("--")
                                                              : std::to_string(altitudeFeet));
   ageLines().push_back(updatedAt == nullptr ? std::string() : std::string(updatedAt));
@@ -1398,6 +1510,8 @@ int main() {
   anAltitudeNobodyReportedDrawsADash();
   anUnknownCallsignFallsBackToTheRegistration();
   theLastLineStatesThePlanesAge();
+  theLaddersHandoverPoints();
+  theAnswersAgeIsRoundedToAWholeMinute();
   theServerSetsTheFetchCadence();
   noScheduleKeepsTheFixedInterval();
   anUnansweredFetchGivesUpTheScheduleAfterTwoTries();

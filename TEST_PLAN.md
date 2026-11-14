@@ -7830,3 +7830,151 @@ Each was a sentence, not code.
 - **The SD-stopped-answering state is not reproduced anywhere.** It is reasoned
   from `isCached()`'s three conditions and the fetch that set `gOnCard[]`.
 - **CI has not run it.**
+
+## 40. What the adversarial read found, and the two screens after it (2026-11-13)
+
+27 mutations in a worktree of its own, one at a time, each proved applied. Three
+baselines confirmed. Four turned nothing red, and one of those undid the owner's
+rule outright.
+
+### 40a. The gate pinned a name, not the rule
+
+`ci/check-no-content-is-not-a-card.sh` grepped the four card files for
+`Display::showNoContent`. `Display` has four other screens that put a headline
+and a detail exactly where a card's content goes: `showStatus()`,
+`showFailure()`, `showForecastStatus()`, `showListingsStatus()`. The reviewer put
+the owner's photographed screen back into `Graphic.cpp`'s decode-failure path
+through `Display::showStatus` and all 25 scripts stayed green. That path is
+reachable in production, and no host test compiles `Graphic.cpp` or
+`QrText.cpp` at all, so for those two the gate was the whole of the coverage.
+
+The gate now reads all five names in each of the four files. Verified red under
+the reviewer's own mutation:
+
+```
+ERROR: App/Graphic.cpp calls Display::showStatus() 1 time(s).
+```
+
+### 40b. The filter grep read the key, not its nesting
+
+`ci/test-aircraft-takes-no-turn.sh` grepped `["$KEY"] = true;`, which matches at
+any depth. Moving `positionAgeSeconds` to a top-level sibling of the array drops
+it from every element during deserialization: every plane reads -1 and the card
+dates the answer rather than the position, forever. The grep passed, and so did
+everything else, because the host stub ignores filters.
+
+It now checks each key at the nesting it arrives at, by the whole line. Verified
+red under that mutation:
+
+```
+ERROR: fetchMine()'s filter in App/Aircraft.cpp does not carry 'f["aircraft"][0]["positionAgeSeconds"] = true;'.
+```
+
+### 40c. The age ladder's handovers, and the buffer
+
+Covered figures were 45, 3540, 3600, 7200, 90000 and 180000. Sixty seconds,
+twenty-four hours and any line over nineteen characters were unmeasured, so
+`hours < 24UL` could read `< 25UL`, `seconds < 60UL` could read `< 61UL`, and
+`ageLine[32]` could be `[20]`, with nothing red. On a device those are "Reported
+60 sec ago", "Reported 24 hr ago" and "Reported 10 days ag".
+
+`theLaddersHandoverPoints()` reads sixteen figures off the server's own
+`positionAgeSeconds`, drawn on the tick the answer arrived so the clock adds
+nothing: both sides of every handover, the singular at one day, and the longest
+line this card can draw.
+
+### 40d. The rounding was held by no case
+
+`aPlaneWithNoLimitClearsTheFloorAndStays` asserted only that the line starts
+"Updated ", so the figure was never read - which is the claim corrected in four
+documents in section 39, unheld by anything. `theAnswersAgeIsRoundedToAWholeMinute()`
+holds it now, and the older case reads the whole line against a figure computed
+from the clock rather than from the line.
+
+### 40e. Mutations
+
+| mutation | first failing line |
+|---|---|
+| the hours handover at 25 | `Failed: the last line reads at the rung that figure falls on - 86400s [the age ladder's handover points]` |
+| the seconds handover at 61 | `Failed: the last line reads at the rung that figure falls on - 60s [the age ladder's handover points]` |
+| the age line buffer at 20 | `Failed: the last line reads at the rung that figure falls on - 864000s [the age ladder's handover points]` |
+| the rounding removed | `Failed: and no line dating that answer states a figure in seconds [the age of an answer, to a whole minute]` |
+| the draw no longer asking whether a plane is held | `Failed: and the card reported a plane at every draw that put one on the glass [the whole run]` |
+| `Display::showStatus` in `Graphic.cpp` | `ERROR: App/Graphic.cpp calls Display::showStatus() 1 time(s).` |
+| `positionAgeSeconds` moved to a top-level sibling | `ERROR: fetchMine()'s filter in App/Aircraft.cpp does not carry it` |
+
+`PASS: aircraft card takes no turn without a plane, 29 cases, 253 checks`.
+
+### 40f. The two screens the owner added
+
+Both inside `Display.cpp` rather than in a card, which is why the file-by-file
+gate could not have found them. Held now by the words themselves.
+
+- **"No games today"**, where the sports board's rows go. `Sports::itemCountFor()`
+  already answers zero for a board with no games and `Sports::drawCardAt()`
+  returns before the call, so the branch had no caller. **Known before the turn,
+  and already acted on** - the card was being passed over and the screen was
+  unreachable. Removed.
+- **"Cannot display code"**, with the raw payload under it where the code goes.
+  Two conditions reach it. An empty payload is what `itemCount()` already answers
+  zero for, so that half is the same unreachable race as the three guards in
+  section 38. An encode failure is **discovered inside the draw**, and needs a
+  payload longer than QR version 6 at ECC LOW holds - about 134 bytes in byte
+  mode against the 100 `Cards::kMaxQrDataLength` bounds it to - so it is
+  unreachable by arithmetic rather than by control flow. The branch stays as a
+  guard, logs, and draws nothing over the panel the function has already
+  cleared. Recorded in the code: if that bound and the encoder's capacity ever
+  cross, the card would take a blank turn every pass and would need to take
+  itself out the way the picture cards do.
+
+### 40g. Calendar, judged out of the gate and into the other rule
+
+`App/Calendar.cpp` has the same shape and a race the other three do not: its
+items expire on a clock, so an event really can age out between `cardItemCount()`
+and the draw. Its draw already answers that the way the rule asks - it falls back
+to another upcoming event, and draws nothing when there is none. There is no
+message to remove, so it does not belong on the gate's list.
+
+It also carries the token the gate greps for, in a comment recording why that
+approach was rejected there, so listing it would fail the gate on the
+documentation of its own compliance. Teaching the grep to tell a call from a
+comment makes it a parser, and a parser can be wrong quietly, which is the one
+thing a gate must not be.
+
+What it did need was section 39's rule, not section 38's. That bare return left
+the card before it on the glass under this card's chrome, because
+`drawCurrent()` does not clear beforehand. It calls `Display::clearPanel()` now.
+No case: reaching it needs a second to tick over inside one `drawCurrent()` call
+with the last upcoming event expiring on exactly that second.
+
+### 40h. Four cases that asserted less than their names said
+
+- `aPlaneWithNoLimitClearsTheFloorAndStays` read a prefix; it reads the whole
+  line now, against a figure taken from the clock on the tick the card is drawn.
+- `nothingWasEverDrawnWithoutAPlane` compared list lengths, which the stub filled
+  together. It asks the card what it held at each draw now, through a
+  `heldAtDraw()` the Display stub records, and fires under a draw that no longer
+  checks.
+- the gate's error text said `expected 2` while comparing against `"2"`, so a
+  mutation printed a contradiction. Reworded.
+- the comment over the two new filter entries still described the countdown
+  removed in `b666682`. Corrected.
+
+### 40i. One equivalent, for the record
+
+`isDrawable()`'s `||` changed to `!=` turns nothing red and is equivalent: the
+only write of `gOnCard[i] = true` is `fetch()`'s first loop, and the same
+`fetch()` reaches `releaseRam()` on every path where any entry is true, so
+both-true is unreachable. No case added.
+
+### 40j. What this does not cover
+
+- **No glass**, still, for any of it.
+- **`Graphic.cpp`, `QrText.cpp`, `Announcement.cpp` and `Sports.cpp` have no host
+  test.** For those four the gate and the arduino compile are the whole of the
+  coverage, and the gate reads names rather than behaviour.
+- **The gate names five functions.** A sixth added to `Display.cpp` and called
+  from a card would pass it.
+- **Nothing reads `Display.cpp` for new card-content messages** except the two
+  strings now named there.
+- **CI has not run it.**

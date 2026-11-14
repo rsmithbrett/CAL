@@ -67,9 +67,10 @@ under it. The display is working and the card comes back with the next plane.
 ### A card with no picture is left out, not explained - App
 
 A display was showing a blue panel reading "No picture to show / This photograph
-could not be loaded." Four cards could put a message like that on the screen in
-place of their own content: your photographs, a picture card, an announcement
-card with nothing typed into it yet, and a QR card with nothing configured yet.
+could not be loaded." Six screens could put a message like that on the display in
+place of its own content: your photographs, a picture card, an announcement card
+with nothing typed into it yet, a QR card with nothing configured yet, a QR code
+too long to draw, and a scoreboard with no games on it.
 
 None of them does now. A card with nothing to show is left out of the rotation
 and the display goes straight to the next one, the same way the aircraft card is

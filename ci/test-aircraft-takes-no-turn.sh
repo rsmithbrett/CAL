@@ -25,14 +25,21 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # takes its fallback forever, which no case here can see. These greps are what
 # stands in for that: the three keys the countdown, the age line and the fetch
 # schedule are read from have to be in the filter.
-for KEY in nextFetchSeconds positionAgeSeconds showForSeconds; do
-  if ! grep -q "\[\"$KEY\"\] = true;" App/Aircraft.cpp; then
-    echo "ERROR: fetchMine()'s filter in App/Aircraft.cpp does not whitelist $KEY." >&2
-    echo "       An un-whitelisted key never reaches the parse, and the host test" >&2
-    echo "       cannot see that because its JSON stub does not apply the filter." >&2
+# At the nesting the key actually arrives at, not just somewhere in the filter.
+# A per-aircraft key whitelisted as a top-level sibling of the array is dropped
+# from every element during deserialization and reads as absent forever, which
+# is the same failure as leaving it out - and the host stub cannot see either.
+check_filter() {
+  if ! grep -qF -- "$1" App/Aircraft.cpp; then
+    echo "ERROR: fetchMine()'s filter in App/Aircraft.cpp does not carry '$1'." >&2
+    echo "       A key whitelisted at the wrong nesting never reaches the parse, and the" >&2
+    echo "       host test cannot see that because its JSON stub does not apply the filter." >&2
     exit 1
   fi
-done
+}
+check_filter 'f["nextFetchSeconds"] = true;'
+check_filter 'f["aircraft"][0]["positionAgeSeconds"] = true;'
+check_filter 'f["aircraft"][0]["showForSeconds"] = true;'
 
 TEST_BUILD_DIR=$(mktemp -d)
 trap 'rm -rf "$TEST_BUILD_DIR"' EXIT

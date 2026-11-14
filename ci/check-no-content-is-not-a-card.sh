@@ -9,9 +9,20 @@
 # fourth and fifth are a draw path a test can reach only through the card's own
 # stubs. A text gate is what covers all five at once.
 #
+# App/Calendar.cpp is deliberately not on the list. It has the same shape and
+# its items expire on a clock rather than on a fetch, so its draw carries a
+# fallback for exactly that race - but what that fallback does is draw another
+# real event, or nothing, and never a message. It is already what this rule
+# asks for. It also contains the token this gate greps for, inside a comment
+# recording why that approach was rejected there, so listing it would fail the
+# gate on the documentation of its own compliance. Teaching a grep to tell a
+# call from a comment makes it a parser, and a parser is a thing that can be
+# wrong quietly. See README.md's "No picture means no card" for the reasoning
+# written out.
+#
 # What this cannot see: whether a card draws the right thing, or whether the
 # scheduler passes it over. README.md's "No picture means no card" section is
-# the design and TEST_PLAN.md section 38 is what the host cases cover.
+# the design and TEST_PLAN.md sections 38 and 40 are what the host cases cover.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -28,16 +39,47 @@ for FILE in "${QUIET[@]}"; do
     exit 1
   fi
   HITS=$(grep -c "showNoContent" "$FILE" || true)
-  # Any mention at all, comments included: a card file naming this function is
-  # either calling it or arguing for calling it.
+  # Any mention at all, comments included: none of these four names the function
+  # today, so a mention is a call or an argument for one.
   if [ "$HITS" != "0" ]; then
     echo "ERROR: $FILE calls Display::showNoContent() $HITS time(s)." >&2
     echo "       A card with nothing to show reports zero items and is passed over." >&2
     echo "       It does not put a screen up explaining the absence - see README.md," >&2
     echo "       \"No picture means no card\"." >&2
     FAILED=1
-  else
+  fi
+
+  # The rule is about putting a message on the glass where a card's content
+  # goes, not about one function's name. Display has four other screens that do
+  # the same thing in the same place, and a card re-introducing its message
+  # through any of them reads identically to a household.
+  for SCREEN in showStatus showFailure showForecastStatus showListingsStatus; do
+    SCREEN_HITS=$(grep -c "Display::$SCREEN" "$FILE" || true)
+    if [ "$SCREEN_HITS" != "0" ]; then
+      echo "ERROR: $FILE calls Display::$SCREEN() $SCREEN_HITS time(s)." >&2
+      echo "       That screen is a message where the card's content goes, which is the" >&2
+      echo "       thing the owner photographed. A card with nothing to show reports zero" >&2
+      echo "       items and is passed over - see README.md, \"No picture means no card\"." >&2
+      FAILED=1
+    fi
+  done
+
+  if [ "$HITS" = "0" ]; then
     echo "    $FILE draws its content or nothing"
+  fi
+done
+
+# The two the owner added after the first four. Both lived inside Display.cpp
+# rather than in a card, drawn where that card's content goes, so neither the
+# loop above nor any host test could see them. Held by the words themselves.
+for GONE in "No games today" "Cannot display code"; do
+  if grep -qF -- "$GONE" App/Display.cpp; then
+    echo "ERROR: App/Display.cpp draws \"$GONE\" where a card's content goes." >&2
+    echo "       The sports board with no games and the QR card with a payload that" >&2
+    echo "       will not encode both take no turn instead - see README.md." >&2
+    FAILED=1
+  else
+    echo "    App/Display.cpp no longer draws \"$GONE\""
   fi
 done
 
@@ -49,7 +91,8 @@ done
 # is reset there and names the function in a comment.
 KEPT=$(grep -c "Display::showNoContent(" App/CardManager.cpp || true)
 if [ "$KEPT" != "2" ]; then
-  echo "ERROR: App/CardManager.cpp calls Display::showNoContent() $KEPT time(s), expected 2." >&2
+  echo "ERROR: App/CardManager.cpp calls Display::showNoContent() $KEPT time(s)." >&2
+  echo "       Both of its two calls have to stay." >&2
   echo "       The rotation-empty screen and the no-cards-registered screen both stay:" >&2
   echo "       a panel with nothing at all to draw has to say something." >&2
   FAILED=1

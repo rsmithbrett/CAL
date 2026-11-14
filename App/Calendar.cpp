@@ -922,8 +922,17 @@ void cardDraw(uint16_t itemIndex) {
     // aged out between the count and the draw - a real race on a card whose
     // items expire on a clock rather than on a fetch - so fall back to whatever
     // is still showable rather than drawing a blank card.
+    //
+    // No message is drawn when nothing is left, which is the rule every card
+    // follows: an empty calendar is passed over rather than explained. The
+    // panel is cleared first because CardManager::drawCurrent() does not clear
+    // before a card's draw() and drawChrome() paints this card's clock and
+    // buttons afterwards - so returning without clearing would leave the card
+    // before this one on the glass under this card's chrome for a whole dwell.
+    // Same contract Assets::drawCached() keeps for the picture cards.
     slot = slotOfNthUpcoming(0);
     if (slot < 0) {
+      Display::clearPanel();
       return;
     }
   }

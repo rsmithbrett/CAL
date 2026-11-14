@@ -7872,10 +7872,28 @@ A display was photographed showing a blue panel reading "No picture to show /
 This photograph could not be loaded." The owner's rule from it: these can never
 be shown. No picture means no card.
 
-Four cards could put a message on the glass in place of content, and each of
+Six screens could put a message on the glass in place of content, and each of
 them now takes no turn instead. The pattern is the aircraft card's, above: the
 card's `itemCount()` answers zero and the scheduler passes it over, rather than
 the card explaining an absence to whoever is standing at the panel.
+
+Four of the six were in card files. The owner added the other two after a
+re-count, and both live inside `Display.cpp` rather than in a card, which is why
+neither the file-by-file reading below nor any host test could have found them:
+
+- **"No games today"**, drawn where the sports board's rows go when the board
+  holds none. `Sports::itemCountFor()` already answers zero for a board with no
+  games and `Sports::drawCardAt()` returns before the call, so the branch had no
+  caller and is removed. The card was already passed over; what is gone is the
+  screen that said so.
+- **"Cannot display code"**, drawn with the raw payload under it where a QR
+  card's code goes. Two conditions reach it and neither is live: an empty
+  payload is what `QrText::Instance<N>::itemCount()` already answers zero for,
+  and an encode failure needs a payload longer than QR version 6 at ECC LOW
+  holds - about 134 bytes in byte mode, against the 100 that
+  `Cards::kMaxQrDataLength` and the server's own `CardPolicyEditing
+  .MaxQrDataLength` bound it to. The branch stays as a guard and draws nothing,
+  over the panel the function has already cleared.
 
 **`CardManager`'s own two screens stay.** "Nothing to show yet" and "This build
 has no cards registered" are about the whole rotation having nothing rather than
@@ -7932,6 +7950,39 @@ reports items and still looks showable. Answering it properly means a new signal
 out of `Cards::DrawFn`, which every card would have to carry. The cost of not
 doing it is one dwell of background-and-clock per asset the card cannot draw,
 once, rather than every pass.
+
+
+### What the gate reads, and what the calendar card taught it
+
+The gate is `ci/check-no-content-is-not-a-card.sh`, and the first version of it
+pinned one function name. That was wrong in a way worth writing down, because an
+adversarial read found it in one pass: `Display` has four other screens -
+`showStatus()`, `showFailure()`, `showForecastStatus()`, `showListingsStatus()` -
+that put a headline and a detail in exactly the place a card's content goes. The
+owner's photographed screen was put back into the picture card's decode-failure
+path through `showStatus()` and every gate in the repository stayed green. The
+rule is about what reaches the glass, not about one symbol, so the gate now reads
+all five names in each of the four card files, and the two removed strings in
+`Display.cpp` by the words themselves.
+
+**`Calendar.cpp` is deliberately not on that list**, and the reason is the
+interesting half. It has the same shape as the three cards whose guards turned
+out to be unreachable, and its items expire on a clock rather than on a fetch -
+so unlike those three, its race is real: an event can age out between
+`cardItemCount()` and the draw. Its draw already handles that the way this rule
+asks. It falls back to another event that is still upcoming, and when none is, it
+draws nothing. There is no message to remove.
+
+It also contains the token the gate greps for, inside a comment recording why
+that approach was rejected there. Listing the file would fail the gate on the
+documentation of its own compliance. The alternative - teaching the grep to tell
+a call from a comment - makes it a parser, and a parser is a thing that can be
+wrong quietly, which is the one property a gate must not have.
+
+What the calendar card did need was the other rule. Its draw returned without
+drawing anything, and `drawCurrent()` does not clear beforehand, so that race
+left the card before it on the glass under this card's chrome - the same state
+the cleared-panel contract exists to stop. It clears now.
 
 ### What the cleared-panel contract is for
 

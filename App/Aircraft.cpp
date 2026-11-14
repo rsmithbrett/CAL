@@ -226,9 +226,10 @@ Result fetchMine() {
     f["aircraft"][0]["militaryBranch"] = true;
     f["aircraft"][0]["aircraftType"] = true;
     f["aircraft"][0]["registration"] = true;
-    // How old the position is and how much of this plane's time is left. The
-    // card counts the second one down itself between fetches and states the
-    // first one on the glass.
+    // How old the position is, and how much of this plane's time was left when
+    // the server answered. The first is stated on the glass and keeps counting
+    // for as long as the plane is held; the second is read once, to decide
+    // whether the plane is worth picking at all.
     f["aircraft"][0]["positionAgeSeconds"] = true;
     f["aircraft"][0]["showForSeconds"] = true;
     return f;

@@ -3860,12 +3860,11 @@ void showSportsBoard(const SportsBoardRow* rows, uint8_t count, const String& ag
     }
   }
 
-  if (count == 0) {
-    lcd.setFont(FontId::Sans12);
-    layoutLine("No games today", kContentCentreX(), 110, kContentWidth(), sport.muted,
-               "board.empty", Align::Centre, kTransparentText);
-  }
-
+  // No empty-board state here. Sports::itemCountFor() answers zero for a board
+  // holding no games and Sports::drawCardAt() returns before this call, so a
+  // count of zero never arrives - and a card with no games is passed over
+  // rather than told to a household, which is the rule the whole rotation
+  // follows. See README.md, "No picture means no card".
   lcd.setFont(FontId::Sans9);
 
   if (ageText.length() > 0) {
@@ -4560,21 +4559,23 @@ void showQrTextCard(const String& qrData, const String& caption) {
   static uint8_t qrBuffer[kQrBufferBytes];
   if (qrData.length() == 0 ||
       qrcode_initText(&qr, qrBuffer, kQrVersion, ECC_LOW, qrData.c_str()) != 0) {
-    // qrData.length() == 0 is only reachable if the policy changed between the
-    // scheduler's itemCount() check and this call - see Announcement::cardDraw()'s
-    // identical remark on its own equivalent guard. A non-zero qrcode_initText()
-    // return is data too long for this fixed version to encode - defensive only,
-    // since CardPolicyEditing.MaxQrDataLength already keeps an ordinary saved
-    // policy well clear of that limit - handled by a failure message rather than
-    // drawing garbage, the same choice CAL's own showQr() makes.
-    layoutLine("Cannot display code", kCardMargin, 60, bodyWidth, ink(), "qr.failure");
-    if (qrData.length() > 0) {
-      // The payload itself, which is the one thing on this card a reader could
-      // still act on. Word-broken mid-token when it has to be, because a URL
-      // has no spaces and half of one is no use to anybody.
-      const TextBox dataBox{kCardMargin, 110, bodyWidth, 18, 3, Align::Left};
-      layoutText(qrData, dataBox, muted(), "qr.failure.data");
-    }
+    // Neither half of this reaches a household. QrText::Instance<N>::itemCount()
+    // answers zero for an empty payload, so the scheduler passes the card over
+    // and `draw()` returns before this call. A non-zero qrcode_initText() is
+    // data too long for this fixed version, and version 6 at ECC LOW holds about
+    // 134 bytes in byte mode against the 100 that Cards::kMaxQrDataLength and
+    // the server's CardPolicyEditing.MaxQrDataLength bound the payload to.
+    //
+    // Nothing is drawn. The panel is already cleared to the theme background at
+    // the top of this function, so what stands is the background and the clock
+    // rather than a message where the code should be - the rule the whole
+    // rotation follows, see README.md's "No picture means no card". If the
+    // payload bound and the encoder's capacity ever cross, this card would take
+    // a turn with a blank panel on every pass, and the card would need to take
+    // itself out of the rotation the way the picture cards do on a failed
+    // decode.
+    Log::printf("[display] qr payload of %u byte(s) would not encode - nothing drawn",
+                static_cast<unsigned>(qrData.length()));
     drawClock();
     restoreDefaultTextState();
     return;
