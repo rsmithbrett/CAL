@@ -23,6 +23,31 @@ dated heading after.
 
 ## Unreleased
 
+### A card that draws nothing leaves the screen clear - App
+
+A card with nothing to show is left out of the rotation. When one of them
+reaches the screen anyway and then finds it has nothing to draw, the display now
+clears the panel first, so you see the background and the clock rather than the
+card before it.
+
+Until this release a display whose memory card stopped answering between
+fetching a picture and drawing it left the previous card on the screen for the
+whole of this card's turn, with this card's clock and buttons painted over it.
+That reads as a display that has stopped, which is worse than the message it
+replaced. Calendar had the same shape when its last upcoming event ran out
+mid-turn, and so did a picture held in memory rather than on the card.
+
+**Two more screens are gone.** A QR code too long to draw, and a scoreboard on a
+day with no games, used to put a message where the card's content goes. Both
+cards are now left out instead.
+
+**The age line reads in days.** A plane carried through a long outage reads
+"Reported 1 day ago" rather than counting hours past a day.
+
+**Nothing to do.**
+
+## v2026.11.13.0001
+
 ### The aircraft card appears only when there's a plane, and the plane is current - App
 
 The aircraft card used to take its turn on the screen whether or not anything
@@ -82,10 +107,9 @@ picture and two with that blue panel. It now takes one turn, with a picture on
 it, and works through the set as it refreshes.
 
 **A picture that won't load costs one turn, once.** If the display has the file
-but can't draw it - it won't decode, or the memory card stopped answering - that
-turn shows the background and the clock rather than a message, and the picture is
-dropped until the display fetches it again. It comes back on its own if the next
-copy loads.
+but can't decode it, that turn shows the background and the clock rather than a
+message, and the picture is dropped until the display fetches it again. It comes
+back on its own if the next copy loads.
 
 **If a display has nothing at all to show**, it still says so: "Nothing to show
 yet". That screen is about the whole rotation being empty rather than about one
